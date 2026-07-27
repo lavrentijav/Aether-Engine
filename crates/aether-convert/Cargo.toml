@@ -1,0 +1,27 @@
+[package]
+name = "aether-convert"
+description = "Aether-Convert: parallel Anvil (.mca) world migration into the Aether KV store."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+default-run = "aether-convert"
+
+[features]
+# Mirror aether-world's backend/codec features so the CLI can cfg on them.
+default = ["fjall", "zstd"]
+fjall = ["aether-world/fjall"]
+zstd = ["aether-world/zstd"]
+
+[dependencies]
+aether-world = { workspace = true, default-features = false }
+miniz_oxide = { workspace = true }
+
+[[bin]]
+name = "aether-convert"
+path = "src/bin/aether_convert.rs"
+
+[lints]
+workspace = true

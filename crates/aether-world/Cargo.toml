@@ -1,0 +1,34 @@
+[package]
+name = "aether-world"
+description = "Aether Engine world model: AVX-Cell / Sub-Chunk SoA memory layout, palette compression and the KV + Zstd storage backend."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# `fjall` gives the persistent LSM KV backend; `zstd` compresses sub-chunk
+# blobs. Both are on by default. `--no-default-features` yields a fully
+# dependency-free build (in-memory store + raw blobs) — handy for CI matrices
+# and constrained targets.
+default = ["fjall", "zstd"]
+fjall = ["dep:fjall"]
+zstd = ["dep:zstd"]
+
+[dependencies]
+aether-core = { workspace = true }
+fjall = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "storage"
+harness = false
+test = false
+
+[lints]
+workspace = true

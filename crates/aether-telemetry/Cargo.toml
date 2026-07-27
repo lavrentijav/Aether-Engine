@@ -1,0 +1,17 @@
+[package]
+name = "aether-telemetry"
+description = "Aether Engine telemetry: sub-tick timers, counters and a Prometheus text exporter."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+# Placeholder for the Tracy client integration wired in a later phase.
+tracy = []
+
+[lints]
+workspace = true
