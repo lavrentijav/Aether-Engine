@@ -10,7 +10,6 @@ authors.workspace = true
 default-run = "aether-server"
 
 [dependencies]
-aether-core = { workspace = true }
 aether-world = { workspace = true, default-features = false }
 aether-api = { workspace = true, default-features = false }
 toml = { workspace = true }

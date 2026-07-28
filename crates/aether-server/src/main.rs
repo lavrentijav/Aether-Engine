@@ -92,6 +92,11 @@ fn handle(
     cfg: &Config,
     next_eid: &AtomicI32,
 ) -> io::Result<()> {
+    // Bound the handshake/login phase so a client that connects but never
+    // sends anything can't pin a thread forever. The play loop later relaxes
+    // this to a short poll interval for keep-alive interleaving.
+    s.set_read_timeout(Some(Duration::from_secs(30)))?;
+
     // --- Handshake ---
     let hs = match read_packet(&mut s)? {
         Some(p) if p.id == 0x00 => p,
@@ -250,11 +255,32 @@ fn play_loop(s: &mut TcpStream, player: &Player) -> io::Result<()> {
 }
 
 /// Encode a block position into a 1.8 packed `i64`.
+///
+/// Layout is `X (26 bits) | Y (12 bits) | Z (26 bits)`, each a signed
+/// two's-complement field; the client sign-extends on decode. Coordinates
+/// outside the representable range would silently wrap, so we assert them in
+/// debug builds — all call sites here pass small in-range spawn coordinates.
 fn encode_position(x: i64, y: i64, z: i64) -> i64 {
+    debug_assert!(
+        (-(1 << 25)..(1 << 25)).contains(&x),
+        "x out of 26-bit range"
+    );
+    debug_assert!(
+        (-(1 << 11)..(1 << 11)).contains(&y),
+        "y out of 12-bit range"
+    );
+    debug_assert!(
+        (-(1 << 25)..(1 << 25)).contains(&z),
+        "z out of 26-bit range"
+    );
     ((x & 0x3FF_FFFF) << 38) | ((y & 0xFFF) << 26) | (z & 0x3FF_FFFF)
 }
 
 /// Minimal JSON string escaping for the MOTD.
+///
+/// Escapes the mandatory JSON characters and every C0 control byte (`< 0x20`),
+/// which would otherwise produce invalid JSON and cause the client to drop the
+/// server-list response.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -262,6 +288,11 @@ fn json_escape(s: &str) -> String {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
             _ => out.push(c),
         }
     }
@@ -287,5 +318,12 @@ mod tests {
     #[test]
     fn json_escape_handles_quotes() {
         assert_eq!(json_escape(r#"a"b\c"#), r#"a\"b\\c"#);
+    }
+
+    #[test]
+    fn json_escape_handles_control_chars() {
+        // Named escapes and the \u fallback for other C0 controls.
+        assert_eq!(json_escape("a\tb\r\n"), "a\\tb\\r\\n");
+        assert_eq!(json_escape("\u{01}\u{1f}"), "\\u0001\\u001f");
     }
 }

@@ -6,7 +6,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
-    /// Bind address.
+    /// Bind address. Defaults to loopback so the offline, unauthenticated
+    /// preview server is not exposed to the network unless you opt in.
     pub host: String,
     /// Listen port (vanilla default 25565).
     pub port: u16,
@@ -21,7 +22,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            host: "0.0.0.0".to_string(),
+            host: "127.0.0.1".to_string(),
             port: 25565,
             motd: "Aether Engine — 1.8.9 demo (full-bright flat world)".to_string(),
             max_players: 20,
@@ -42,7 +43,9 @@ pub struct Config {
 pub const SAMPLE: &str = r#"# Aether Engine server configuration (Minecraft 1.8.9 / protocol 47).
 
 [server]
-host = "0.0.0.0"
+# Loopback by default: this is an offline, unauthenticated preview server.
+# Set host = "0.0.0.0" only if you understand it will accept LAN/internet peers.
+host = "127.0.0.1"
 port = 25565
 motd = "Aether Engine — 1.8.9 demo (full-bright flat world)"
 max_players = 20
@@ -58,8 +61,10 @@ impl Config {
                 Ok((cfg, false))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let _ = std::fs::write(path, SAMPLE);
-                Ok((Config::default(), true))
+                // Report whether the sample was actually written: a failed write
+                // (e.g. a read-only directory) must not claim a file was created.
+                let wrote = std::fs::write(path, SAMPLE).is_ok();
+                Ok((Config::default(), wrote))
             }
             Err(e) => Err(format!("reading {path}: {e}")),
         }
@@ -75,5 +80,14 @@ mod tests {
         let cfg: Config = toml::from_str(SAMPLE).unwrap();
         assert_eq!(cfg.server.port, 25565);
         assert_eq!(cfg.server.view_radius, 5);
+        assert_eq!(cfg.server.host, "127.0.0.1");
+    }
+
+    #[test]
+    fn sample_matches_checked_in_toml() {
+        // Keep the embedded SAMPLE and the repo's aether-server.toml in lockstep
+        // so `cargo run` and a fresh checkout describe the same defaults.
+        let checked_in = include_str!("../../../aether-server.toml");
+        assert_eq!(SAMPLE, checked_in);
     }
 }

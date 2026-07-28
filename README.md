@@ -165,23 +165,28 @@ client**. It's deliberately minimal — it targets **Minecraft 1.8.9 (protocol
 **superflat, always-lit (full-bright) creative world** served from the engine.
 
 ```bash
-cargo run -p aether-server            # binds 0.0.0.0:25565 (see aether-server.toml)
+cargo run -p aether-server            # binds 127.0.0.1:25565 (see aether-server.toml)
 ```
 
 Then in a **Minecraft 1.8.9** client: *Multiplayer → Direct Connect →*
-`127.0.0.1` (or your host). The server list ping shows the MOTD; connecting
-spawns you standing on the flat world.
+`127.0.0.1`. The server list ping shows the MOTD; connecting spawns you standing
+on the flat world.
 
 Config ([`aether-server.toml`](aether-server.toml)):
 
 ```toml
 [server]
-host = "0.0.0.0"
+host = "127.0.0.1" # loopback only by default — see the warning below
 port = 25565
 motd = "Aether Engine — 1.8.9 demo (full-bright flat world)"
 max_players = 20
 view_radius = 5      # chunk radius sent around spawn
 ```
+
+> ⚠️ **Do not expose this to the internet.** It runs in **offline mode with no
+> authentication, encryption or compression** — anyone who can reach the port
+> can join under any name. It binds to loopback (`127.0.0.1`) by default for
+> that reason. Only change `host` to `0.0.0.0` on a trusted LAN you control.
 
 > Scope: this is a Phase-3 preview, not a compatible server yet — 1.8.9 only,
 > no gameplay beyond spawning and looking around, and lighting is the

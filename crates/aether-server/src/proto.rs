@@ -4,6 +4,7 @@
 //! or encryption, which a vanilla 1.8.9 client accepts for offline play.
 
 use std::io::{self, Read, Write};
+use std::time::{Duration, Instant};
 
 /// Builds a packet body (everything after the length prefix).
 #[derive(Default)]
@@ -165,40 +166,105 @@ impl<'a> PacketIn<'a> {
     }
 }
 
-/// Read a VarInt directly from a stream, one byte at a time.
+/// Upper bound on an inbound frame length. The client only ever sends us small
+/// packets (handshake, status, login, movement, keep-alive), so anything larger
+/// is malformed or hostile. Without this cap a single forged length prefix would
+/// make us allocate up to 2 GiB, a trivial memory-exhaustion DoS.
+const MAX_PACKET_LEN: usize = 2 * 1024 * 1024;
+
+/// Once a frame has started arriving, how long we'll wait for the *rest* of it
+/// before giving up. This bounds a client that sends a length prefix and then
+/// stalls, so a half-sent frame can't pin a connection thread indefinitely.
+const FRAME_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Read one byte, retrying past transient timeouts until `deadline`.
 ///
-/// Returns `Ok(None)` if the very first byte read hits a read timeout /
-/// `WouldBlock` — used by the play loop to interleave keep-alives.
-fn read_var_int_stream<R: Read>(r: &mut R) -> io::Result<Option<i32>> {
-    let mut result: u32 = 0;
-    for i in 0..5 {
-        let mut byte = [0u8; 1];
+/// Used once we are committed to a frame: a `WouldBlock` / `TimedOut` /
+/// `Interrupted` just means the next byte hasn't arrived yet, so we wait rather
+/// than desync the stream — but not past the deadline.
+fn read_committed_byte<R: Read>(r: &mut R, deadline: Instant) -> io::Result<u8> {
+    let mut byte = [0u8; 1];
+    loop {
         match r.read(&mut byte) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof")),
-            Ok(_) => {}
+            Ok(_) => return Ok(byte[0]),
             Err(e)
-                if i == 0
-                    && matches!(
-                        e.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    ) =>
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
             {
-                return Ok(None);
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "frame stalled"));
+                }
             }
             Err(e) => return Err(e),
         }
-        result |= ((byte[0] & 0x7f) as u32) << (7 * i);
-        if byte[0] & 0x80 == 0 {
-            return Ok(Some(result as i32));
+    }
+}
+
+/// Fill `buf` completely, retrying past transient timeouts until `deadline`.
+///
+/// Unlike [`Read::read_exact`], a read timeout mid-frame is *not* immediately
+/// fatal: once the length prefix is consumed the body is committed and the rest
+/// of the bytes are imminent, so we keep waiting instead of tearing down (and
+/// desyncing) the connection — bounded by `deadline` so a stalled sender can't
+/// pin the thread forever.
+fn read_frame_body<R: Read>(r: &mut R, buf: &mut [u8], deadline: Instant) -> io::Result<()> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match r.read(&mut buf[filled..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "eof mid-packet",
+                ))
+            }
+            Ok(n) => filled += n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "frame stalled"));
+                }
+            }
+            Err(e) => return Err(e),
         }
     }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "varint too long",
-    ))
+    Ok(())
+}
+
+/// Read one byte, returning `Ok(None)` if the read times out with nothing
+/// available (`WouldBlock` / `TimedOut`). `Interrupted` (EINTR) is retried.
+fn read_idle_byte<R: Read>(r: &mut R) -> io::Result<Option<u8>> {
+    let mut byte = [0u8; 1];
+    loop {
+        match r.read(&mut byte) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof")),
+            Ok(_) => return Ok(Some(byte[0])),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// A decoded packet: its id and payload (id VarInt already stripped).
+#[derive(Debug)]
 pub struct RawPacket {
     /// Packet id.
     pub id: i32,
@@ -208,16 +274,51 @@ pub struct RawPacket {
 
 /// Read a full packet frame from `r`.
 ///
-/// `Ok(None)` means the read timed out with no bytes available yet (the caller
-/// can send a keep-alive and retry). Any real short-read is an error.
+/// `Ok(None)` means the read timed out before any byte of a frame arrived (the
+/// caller can send a keep-alive and retry). Once the first byte is in we are
+/// committed: the length varint and body are read to completion, tolerating
+/// transient read timeouts but bounded by [`FRAME_DEADLINE`], so a partially
+/// sent frame neither desyncs the stream nor pins the thread forever.
 pub fn read_packet<R: Read>(r: &mut R) -> io::Result<Option<RawPacket>> {
-    let len = match read_var_int_stream(r)? {
-        Some(l) if l >= 0 => l as usize,
-        Some(_) => return Err(io::Error::new(io::ErrorKind::InvalidData, "neg len")),
+    // First byte of the length varint: a timeout here just means "idle".
+    let first = match read_idle_byte(r)? {
+        Some(b) => b,
         None => return Ok(None),
     };
+    let deadline = Instant::now() + FRAME_DEADLINE;
+
+    // Assemble the rest of the length varint (up to 5 bytes total).
+    let mut result = (first & 0x7f) as u32;
+    let mut complete = first & 0x80 == 0;
+    for i in 1..5 {
+        if complete {
+            break;
+        }
+        let byte = read_committed_byte(r, deadline)?;
+        result |= ((byte & 0x7f) as u32) << (7 * i);
+        complete = byte & 0x80 == 0;
+    }
+    if !complete {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "varint too long",
+        ));
+    }
+
+    let len = result as i32;
+    if len < 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "neg len"));
+    }
+    let len = len as usize;
+    if len > MAX_PACKET_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "packet too large",
+        ));
+    }
+
     let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)?;
+    read_frame_body(r, &mut buf, deadline)?;
     let mut pin = PacketIn::new(&buf);
     let id = pin.var_int()?;
     let data = buf[pin.pos..].to_vec();
@@ -229,13 +330,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn varint_round_trip_through_stream() {
-        for v in [0i32, 1, 127, 128, 25565, 2_097_151, i32::MAX, -1] {
-            let mut out = Vec::new();
-            write_var_int(&mut out, v);
-            let mut cur = std::io::Cursor::new(out);
-            assert_eq!(read_var_int_stream(&mut cur).unwrap(), Some(v));
+    fn multibyte_length_prefixes_round_trip() {
+        // Bodies whose length prefix spans one and two VarInt bytes.
+        for body_len in [0usize, 1, 127, 128, 300, 16384] {
+            let mut p = PacketOut::new(0x00);
+            p.bytes(&vec![0xABu8; body_len]);
+            let mut wire = Vec::new();
+            p.send(&mut wire).unwrap();
+
+            let mut cur = std::io::Cursor::new(wire);
+            let pkt = read_packet(&mut cur).unwrap().unwrap();
+            assert_eq!(pkt.id, 0x00);
+            assert_eq!(pkt.data, vec![0xABu8; body_len]);
         }
+    }
+
+    #[test]
+    fn idle_first_byte_returns_none() {
+        // A reader that reports WouldBlock with no data yields Ok(None).
+        struct Idle;
+        impl Read for Idle {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::WouldBlock, "idle"))
+            }
+        }
+        assert!(read_packet(&mut Idle).unwrap().is_none());
     }
 
     #[test]
@@ -252,5 +371,68 @@ mod tests {
         assert_eq!(pin.string().unwrap(), "hello");
         assert_eq!(pin.u16().unwrap(), 25565);
         assert_eq!(pin.var_int().unwrap(), 2);
+    }
+
+    #[test]
+    fn oversized_length_is_rejected_without_allocating() {
+        // A forged length prefix far beyond MAX_PACKET_LEN must error, not
+        // try to allocate gigabytes.
+        let mut wire = Vec::new();
+        write_var_int(&mut wire, (MAX_PACKET_LEN + 1) as i32);
+        let mut cur = std::io::Cursor::new(wire);
+        let err = read_packet(&mut cur).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// A reader that hands out its bytes in fixed chunks, injecting a transient
+    /// `WouldBlock` between every chunk to mimic a slow / timing-out socket.
+    struct FlakyReader {
+        data: Vec<u8>,
+        pos: usize,
+        chunk: usize,
+        block_next: bool,
+    }
+
+    impl Read for FlakyReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos >= self.data.len() {
+                return Ok(0);
+            }
+            if self.block_next {
+                self.block_next = false;
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "slow"));
+            }
+            self.block_next = true;
+            let n = self.chunk.min(buf.len()).min(self.data.len() - self.pos);
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn body_read_survives_midframe_timeouts() {
+        // Once the length prefix is consumed, transient timeouts inside the body
+        // must not desync the frame — the reader keeps waiting for the rest.
+        let mut p = PacketOut::new(0x21);
+        p.string("a fairly long payload that spans several reads")
+            .i64(1234567890);
+        let mut wire = Vec::new();
+        p.send(&mut wire).unwrap();
+
+        let mut r = FlakyReader {
+            data: wire,
+            pos: 0,
+            chunk: 3,
+            block_next: false,
+        };
+        let pkt = read_packet(&mut r).unwrap().unwrap();
+        assert_eq!(pkt.id, 0x21);
+        let mut pin = PacketIn::new(&pkt.data);
+        assert_eq!(
+            pin.string().unwrap(),
+            "a fairly long payload that spans several reads"
+        );
+        assert_eq!(pin.i64().unwrap(), 1234567890);
     }
 }
