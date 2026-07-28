@@ -1,0 +1,38 @@
+[package]
+name = "aether-demo"
+description = "Aether Engine playable demo: generate a world, drop a player, tick physics and report — a quick 'does it run' harness."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+default-run = "aether"
+
+[features]
+# `persist` turns on the on-disk Fjall + Zstd world store; without it the demo
+# runs entirely in memory (still fully functional, nothing written to disk).
+default = ["persist"]
+persist = [
+    "aether-api/fjall",
+    "aether-api/zstd",
+    "aether-world/fjall",
+    "aether-world/zstd",
+]
+
+[dependencies]
+aether-core = { workspace = true }
+aether-world = { workspace = true, default-features = false }
+aether-api = { workspace = true, default-features = false }
+aether-worldgen = { workspace = true }
+aether-physics = { workspace = true }
+aether-telemetry = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+
+[[bin]]
+name = "aether"
+path = "src/main.rs"
+
+[lints]
+workspace = true

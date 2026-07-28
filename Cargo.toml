@@ -10,6 +10,8 @@ members = [
     "crates/aether-worldgen",
     "crates/aether-baseproxy",
     "crates/aether-api",
+    "crates/aether-demo",
+    "crates/aether-server",
 ]
 
 [workspace.package]
@@ -33,11 +35,14 @@ aether-net = { path = "crates/aether-net", version = "0.1.0" }
 aether-physics = { path = "crates/aether-physics", version = "0.1.0" }
 aether-worldgen = { path = "crates/aether-worldgen", version = "0.1.0" }
 aether-baseproxy = { path = "crates/aether-baseproxy", version = "0.1.0" }
+aether-api = { path = "crates/aether-api", version = "0.1.0", default-features = false }
 # Third-party
 zstd = "0.13"
 fjall = "2"
 miniz_oxide = "0.8"
 criterion = "0.5"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
 
 # The whole engine is a hot path; optimise dependencies even in dev builds so
 # benchmarks and stress fixtures behave close to release.

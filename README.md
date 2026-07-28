@@ -4,7 +4,7 @@
 
 **A next-generation, high-performance Minecraft server engine built from scratch in Rust.**
 
-Project codename: **Aether** · Spec version: **1.1 (Production Candidate)** · Status: **Pre-alpha / design phase**
+Project codename: **Aether** · Spec version: **1.1 (Production Candidate)** · Status: **Early alpha**
 
 ---
 
@@ -79,11 +79,13 @@ The **AVX-Cell** (32 blocks × `u16` = **64 bytes**) is the atomic unit of memor
 ## Project status
 
 Aether is in **early alpha**. **Phase 0 is done** (Cargo workspace, runtime SIMD
-dispatch, telemetry, CI, Criterion benches) and the first Phase 1 subsystem —
-the **SoA world model + KV/Zstd storage** — plus the **`aether-convert`** Anvil
-migration tool have landed. Gameplay subsystems (physics, redstone, lighting,
-entities) are still ahead. See [`docs/STATUS.md`](docs/STATUS.md) for the
-authoritative feature checklist.
+dispatch, telemetry, CI, Criterion benches) and several Phase 1 subsystems have
+landed: the **SoA world model + KV/Zstd storage**, basic physics, chunk
+generation, the core API, BaseProxy and the **`aether-convert`** Anvil migration
+tool. There's a runnable demo (`aether`) and an experimental 1.8.9 join server.
+Gameplay subsystems (redstone, lighting, entities, the full physics pipeline)
+are still ahead. See [`docs/STATUS.md`](docs/STATUS.md) for the authoritative
+feature checklist.
 
 ### Build & test
 
@@ -92,6 +94,106 @@ cargo build --workspace        # build every crate
 cargo test  --workspace        # run the test suite
 cargo bench -p aether-core     # Criterion micro-benchmarks
 ```
+
+### Run the demo — *"does it work yet?"*
+
+There is no player-facing client yet, but you can watch the engine actually run.
+The `aether` binary generates a world, renders a cross-section of it, drops a
+player from the sky and ticks physics until it lands, persists the touched
+chunks, and prints telemetry:
+
+```bash
+cargo run -p aether-demo            # uses ./aether.toml (created on first run)
+cargo run -p aether-demo -- my.toml # use a specific config file
+```
+
+Example output (noise generator, in-memory store):
+
+```text
+simd path  : avx2 (mask ops)
+world      : generator=Noise, storage=Memory, seed=2024
+
+── world cross-section  (z = 0, x = -32..=32) ──
+  70 |                             ########
+  69 |                   ##########++++++++#############
+  68 |             ######+++++++++++++++++++++++++++++++##########
+  67 |#############+++++++++++++++++++++++++++++++++++++++++++++++#####
+  66 |+++++++++++++++++++++++++++++........++++++++++++++++++++++++++++
+     legend: '#'=grass '+'=dirt '.'=stone ':'=sand ';'=gravel '~'=water '_'=bedrock
+
+── physics: player drop ──
+final feet  : (0.50, 71.000, 0.50)   on_ground=true
+
+── result ──
+  [✔] SIMD dispatch selected a backend
+  [✔] world generated & rendered
+  [✔] player fell and landed on ground
+  [✔] world storage flushed
+```
+
+**Configuration** ([`aether.toml`](aether.toml)) selects the generator
+(`noise`/`flat`), the storage backend (`memory`, or `fjall` to persist under
+`storage_path`), the world seed, the spawn point, tick count and view size:
+
+```toml
+[world]
+seed = 2024
+generator = "noise"   # "noise" | "flat"
+storage = "memory"    # "memory" | "fjall"
+storage_path = "./world-data"
+
+[demo]
+center_x = 0
+center_z = 0
+view_radius = 32
+spawn_height = 120.0
+ticks = 600
+
+[telemetry]
+prometheus = true
+```
+
+To persist the world to disk, set `storage = "fjall"` and run the release build:
+
+```bash
+cargo run -p aether-demo --release
+```
+
+### Join with a Minecraft client — *"can I connect right now?"*
+
+There's an experimental server you can actually **connect to with a vanilla
+client**. It's deliberately minimal — it targets **Minecraft 1.8.9 (protocol
+47)** only, offline mode, no compression/encryption — and drops you into a
+**superflat, always-lit (full-bright) creative world** served from the engine.
+
+```bash
+cargo run -p aether-server            # binds 127.0.0.1:25565 (see aether-server.toml)
+```
+
+Then in a **Minecraft 1.8.9** client: *Multiplayer → Direct Connect →*
+`127.0.0.1`. The server list ping shows the MOTD; connecting spawns you standing
+on the flat world.
+
+Config ([`aether-server.toml`](aether-server.toml)):
+
+```toml
+[server]
+host = "127.0.0.1" # loopback only by default — see the warning below
+port = 25565
+motd = "Aether Engine — 1.8.9 demo (full-bright flat world)"
+max_players = 20
+view_radius = 5      # chunk radius sent around spawn
+```
+
+> ⚠️ **Do not expose this to the internet.** It runs in **offline mode with no
+> authentication, encryption or compression** — anyone who can reach the port
+> can join under any name. It binds to loopback (`127.0.0.1`) by default for
+> that reason. Only change `host` to `0.0.0.0` on a trusted LAN you control.
+>
+> Scope: this is a Phase-3 preview, not a compatible server yet — 1.8.9 only,
+> no gameplay beyond spawning and looking around, and lighting is the
+> `FullBright` fallback (always max). Newer client versions will be rejected at
+> the handshake.
 
 ### Migrate a Vanilla world
 
