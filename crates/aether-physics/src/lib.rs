@@ -101,14 +101,20 @@ fn clip_z(block: Aabb, e: Aabb, dz: f64) -> f64 {
     dz
 }
 
+// Defense-in-depth: cap how far a single step may sweep on any axis, so an
+// abnormally large `motion` (an upstream bug, or network-driven movement later)
+// can't turn the block scan into an effectively unbounded loop that hangs a
+// tick thread. A tick never legitimately moves this far.
+const MAX_SWEEP_BLOCKS: i32 = 256;
+
 /// Collect the solid block boxes overlapping the region swept by `aabb + motion`.
 fn solid_boxes<V: BlockView>(view: &V, swept: Aabb) -> Vec<Aabb> {
     let x0 = swept.min.x.floor() as i32;
-    let x1 = (swept.max.x - EPS).floor() as i32;
     let y0 = swept.min.y.floor() as i32;
-    let y1 = (swept.max.y - EPS).floor() as i32;
     let z0 = swept.min.z.floor() as i32;
-    let z1 = (swept.max.z - EPS).floor() as i32;
+    let x1 = ((swept.max.x - EPS).floor() as i32).min(x0.saturating_add(MAX_SWEEP_BLOCKS));
+    let y1 = ((swept.max.y - EPS).floor() as i32).min(y0.saturating_add(MAX_SWEEP_BLOCKS));
+    let z1 = ((swept.max.z - EPS).floor() as i32).min(z0.saturating_add(MAX_SWEEP_BLOCKS));
 
     let mut boxes = Vec::new();
     for y in y0..=y1 {

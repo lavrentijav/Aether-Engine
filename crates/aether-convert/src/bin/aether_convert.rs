@@ -108,6 +108,7 @@ fn main() -> ExitCode {
         let cps = report.chunks as f64 / elapsed.as_secs_f64().max(1e-9);
         println!("throughput      : {cps:.0} chunks/sec");
     }
+    let flush_failed = report.errors.iter().any(|e| e.starts_with("flush failed"));
     if !report.errors.is_empty() {
         println!("\n{} non-fatal error(s):", report.errors.len());
         for e in report.errors.iter().take(20) {
@@ -118,7 +119,14 @@ fn main() -> ExitCode {
         }
     }
 
-    ExitCode::SUCCESS
+    // Per-chunk decode errors stay non-fatal, but a failed final flush means the
+    // output may not be durable — fail so scripts/CI notice.
+    if flush_failed {
+        eprintln!("error: final flush failed; output may be incomplete");
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 #[cfg(feature = "fjall")]

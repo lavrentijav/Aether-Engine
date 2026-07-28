@@ -97,32 +97,46 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
     /// Ensure the chunk column `(cx, cz)` is present in the cache, loading it
     /// from storage or generating (and persisting) it on first touch.
     fn ensure_column(&self, cx: i32, cz: i32) {
-        if self.columns.read().unwrap().contains(&(cx, cz)) {
-            return;
-        }
-
-        // Load any persisted sections in the scan band.
-        let mut loaded_any = false;
-        for cy in SCAN_CY_MIN..=SCAN_CY_MAX {
-            let key = SubChunkKey::new(cx, cy, cz);
-            if let Ok(Some(sc)) = self.storage.load(key) {
-                self.cache.write().unwrap().insert(key, sc);
-                loaded_any = true;
+        // Atomically reserve the column so two workers can't load/generate the
+        // same `(cx, cz)` concurrently (and double-save its keys).
+        {
+            let mut columns = self.columns.write().unwrap();
+            if !columns.insert((cx, cz)) {
+                return; // already reserved by us earlier or another worker
             }
         }
 
-        // Nothing on disk -> generate and persist.
-        if !loaded_any {
+        // Load any persisted sections in the scan band. Distinguish a genuine
+        // read error from "no data": on error we must NOT regenerate, or we'd
+        // clobber existing-but-unreadable data with fresh terrain.
+        let mut loaded_any = false;
+        let mut read_error = false;
+        for cy in SCAN_CY_MIN..=SCAN_CY_MAX {
+            let key = SubChunkKey::new(cx, cy, cz);
+            match self.storage.load(key) {
+                Ok(Some(sc)) => {
+                    self.cache.write().unwrap().insert(key, sc);
+                    loaded_any = true;
+                }
+                Ok(None) => {}
+                Err(_) => read_error = true,
+            }
+        }
+
+        // Nothing on disk (and no read error) -> generate and persist. If a save
+        // fails, keep the section in the cache and mark it dirty so a later
+        // `flush` retries rather than silently losing it.
+        if !loaded_any && !read_error {
             let column = self.generator.generate_column(cx, cz);
             let mut cache = self.cache.write().unwrap();
             for (cy, sc) in column.sections {
                 let key = SubChunkKey::new(cx, cy, cz);
-                let _ = self.storage.save(key, &sc);
+                if self.storage.save(key, &sc).is_err() {
+                    self.dirty.write().unwrap().insert(key);
+                }
                 cache.insert(key, sc);
             }
         }
-
-        self.columns.write().unwrap().insert((cx, cz));
     }
 
     fn key_of(x: i32, y: i32, z: i32) -> Option<(SubChunkKey, usize, usize, usize)> {
@@ -189,8 +203,15 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
                 }
             }
         }
-        self.dirty.write().unwrap().clear();
-        self.storage.flush()
+        // Only commit the durability flush, then clear exactly the keys we
+        // saved — not the whole set — so keys dirtied concurrently survive and a
+        // failed flush leaves the dirty bookkeeping intact for a retry.
+        self.storage.flush()?;
+        let mut dirty = self.dirty.write().unwrap();
+        for key in &keys {
+            dirty.remove(key);
+        }
+        Ok(())
     }
 
     /// A cheap surface-height hint for `(x, z)`: scan down from the top of the

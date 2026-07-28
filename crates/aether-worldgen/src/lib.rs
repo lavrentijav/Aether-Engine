@@ -53,7 +53,13 @@ impl<'a> ColumnBuilder<'a> {
         if id == BlockStateId::AIR {
             return;
         }
-        let cy = world_y.div_euclid(16) as i8;
+        let cy_i32 = world_y.div_euclid(16);
+        // Guard the i8 sub-chunk index so an out-of-range layer can't wrap into
+        // an unrelated `cy` (mirrors aether-api's `key_of`).
+        if cy_i32 < i8::MIN as i32 || cy_i32 > i8::MAX as i32 {
+            return;
+        }
+        let cy = cy_i32 as i8;
         let ly = world_y.rem_euclid(16) as usize;
         let props = self.registry.props_of(id);
         self.sections

@@ -10,7 +10,8 @@ authors.workspace = true
 
 [dependencies]
 aether-core = { workspace = true }
-aether-world = { workspace = true }
+# worldgen only needs the world model types, not the storage backend.
+aether-world = { workspace = true, default-features = false }
 
 [lints]
 workspace = true

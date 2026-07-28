@@ -54,7 +54,9 @@ impl BlockRegistry {
     /// Infer properties from a block's base name (namespace stripped).
     fn infer_props(name: &str) -> BlockProperties {
         let base = name.split(':').next_back().unwrap_or(name);
-        if base.contains("air") || base == "void_air" || base == "cave_air" {
+        // Match air variants exactly: a `contains("air")` would also catch
+        // `st`+`air`+`s` and similar names.
+        if matches!(base, "air" | "void_air" | "cave_air") {
             return BlockProperties::AIR;
         }
         // Non-solid, non-colliding decoration / plants / fluids-ish. Grass
@@ -81,7 +83,6 @@ impl BlockRegistry {
             || base.contains("lever")
             || base.contains("button")
             || base.contains("pressure_plate")
-            || base.contains("_torch") && base.contains("redstone")
             || base == "target"
             || base == "lightning_rod";
         BlockProperties {
@@ -166,5 +167,8 @@ mod tests {
         // grass_block is solid terrain; tall_grass is a passable plant.
         assert!(r.intern("minecraft:grass_block").1.solid);
         assert!(!r.intern("minecraft:tall_grass").1.collision);
+        // `*_stairs` contains the substring "air" but must stay collidable.
+        assert!(r.intern("minecraft:oak_stairs").1.collision);
+        assert!(r.intern("minecraft:oak_stairs").1.solid);
     }
 }

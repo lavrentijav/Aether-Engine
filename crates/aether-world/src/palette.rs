@@ -169,8 +169,16 @@ impl Palette {
     }
 
     /// Get or insert the palette index for `(id, props)`.
+    ///
+    /// Enforces one consistent id → properties mapping: re-interning a known id
+    /// with different properties is a caller bug (masks would then diverge from
+    /// the stored palette).
     fn intern(&mut self, id: BlockStateId, props: BlockProperties) -> u16 {
         if let Some(&idx) = self.lookup.get(&id) {
+            debug_assert_eq!(
+                self.props[idx as usize], props,
+                "block id {id:?} interned with conflicting properties"
+            );
             return idx;
         }
         let idx = self.entries.len() as u16;

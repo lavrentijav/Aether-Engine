@@ -114,7 +114,9 @@ impl BlockRegistry {
     /// redstone family → redstone, otherwise a plain solid block.
     fn infer(name: &str) -> BlockProperties {
         let base = name.split(':').next_back().unwrap_or(name);
-        if base.contains("air") {
+        // Match air variants exactly: a `contains("air")` would also catch
+        // names like `oak_stairs`.
+        if matches!(base, "air" | "void_air" | "cave_air") {
             return BlockProperties::AIR;
         }
         // Note: match grass *plants* exactly so solid terrain like `grass_block`
@@ -201,13 +203,24 @@ mod tests {
     #[test]
     fn well_known_ids_are_fixed() {
         let r = BlockRegistry::new();
-        assert_eq!(r.get("minecraft:air"), Some(ids::AIR));
-        assert_eq!(r.get("minecraft:stone"), Some(ids::STONE));
-        assert_eq!(r.get("minecraft:grass_block"), Some(ids::GRASS_BLOCK));
-        assert_eq!(
-            r.name_of(ids::REDSTONE_WIRE),
-            Some("minecraft:redstone_wire")
-        );
+        // Every seeded id is part of the persisted world-storage contract, so
+        // check the whole table to catch any reordering of `SEED`.
+        for (name, id) in [
+            ("minecraft:air", ids::AIR),
+            ("minecraft:stone", ids::STONE),
+            ("minecraft:dirt", ids::DIRT),
+            ("minecraft:grass_block", ids::GRASS_BLOCK),
+            ("minecraft:bedrock", ids::BEDROCK),
+            ("minecraft:water", ids::WATER),
+            ("minecraft:sand", ids::SAND),
+            ("minecraft:gravel", ids::GRAVEL),
+            ("minecraft:oak_log", ids::OAK_LOG),
+            ("minecraft:oak_leaves", ids::OAK_LEAVES),
+            ("minecraft:redstone_wire", ids::REDSTONE_WIRE),
+        ] {
+            assert_eq!(r.get(name), Some(id), "name->id for {name}");
+            assert_eq!(r.name_of(id), Some(name), "id->name for {name}");
+        }
         assert!(!r.props_of(ids::WATER).collision);
         assert!(r.props_of(ids::STONE).solid);
     }
@@ -236,5 +249,7 @@ mod tests {
         assert!(r.intern_full("modid:grass_block_variant").1.solid);
         let gb = BlockRegistry::infer("minecraft:grass_block");
         assert!(gb.solid && gb.collision);
+        // `*_stairs` contains "air" but must stay solid/collidable.
+        assert!(BlockRegistry::infer("minecraft:oak_stairs").collision);
     }
 }

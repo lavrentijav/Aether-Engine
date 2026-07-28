@@ -116,8 +116,8 @@ pub fn find_region_files(world_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// FNV-1a of `bytes`, seeded by `seed`. Combined with XOR across sub-chunks so
-/// the world checksum is independent of write order.
+/// FNV-1a hash of `bytes`. Per-sub-chunk hashes are XORed together so the world
+/// checksum is independent of write order.
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {

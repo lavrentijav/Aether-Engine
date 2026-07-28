@@ -130,6 +130,16 @@ impl<'a> Cursor<'a> {
             9 => {
                 let elem = self.u8()?;
                 let len = self.i32()?.max(0) as usize;
+                // TAG_End elements consume no bytes; a non-empty End list is only
+                // ever a crafted amplification payload.
+                if elem == 0 && len > 0 {
+                    return Err(NbtError::Truncated);
+                }
+                // Every other element consumes >= 1 byte, so a length past the
+                // remaining buffer is malformed — reject before allocating.
+                if len > self.buf.len() - self.pos {
+                    return Err(NbtError::Truncated);
+                }
                 let mut items = Vec::with_capacity(len.min(4096));
                 for _ in 0..len {
                     items.push(self.payload(elem)?);

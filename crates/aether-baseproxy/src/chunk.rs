@@ -18,7 +18,7 @@
 
 use crate::vanilla_registry::VanillaRegistry;
 use aether_net::read_varint;
-use aether_world::SubChunk;
+use aether_world::{SubChunk, VOLUME};
 
 /// Errors from decoding a vanilla chunk section.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +116,19 @@ impl<'a> SectionReader<'a> {
             _ => return Err(ProxyError::Invalid("bits_per_entry")),
         };
 
+        // The packed word count is fully determined by `bits`; validate it
+        // before allocating so a malformed (or negative-as-u32) length can't
+        // drive a huge allocation.
+        let expected_words = if bits == 0 {
+            0
+        } else {
+            let per_long = 64 / bits as usize;
+            VOLUME.div_ceil(per_long)
+        };
         let data_len = self.varint()? as usize;
+        if data_len != expected_words {
+            return Err(ProxyError::Invalid("data word count"));
+        }
         let mut data = Vec::with_capacity(data_len);
         for _ in 0..data_len {
             data.push(self.u64()?);
@@ -139,24 +151,19 @@ impl<'a> SectionReader<'a> {
             return Ok(sc);
         }
 
-        if data_len == 0 {
-            return Err(ProxyError::Invalid("missing data array"));
-        }
-
         let per_long = 64 / bits as usize;
         let mask = (1u64 << bits) - 1;
-        for i in 0..4096usize {
+        for i in 0..VOLUME {
             let long_idx = i / per_long;
             let within = i % per_long;
-            let raw = match data.get(long_idx) {
-                Some(&w) => (w >> (within * bits as usize)) & mask,
-                None => 0,
-            } as u32;
+            // `long_idx < expected_words` holds for every `i < VOLUME`.
+            let raw = ((data[long_idx] >> (within * bits as usize)) & mask) as u32;
 
             let state_id = match &palette {
                 Some(p) => match p.get(raw as usize) {
                     Some(&s) => s,
-                    None => continue, // corrupt index -> leave air
+                    // A packed index outside the palette is corrupt data.
+                    None => return Err(ProxyError::Invalid("palette index out of range")),
                 },
                 None => raw, // direct
             };
