@@ -187,7 +187,7 @@ view_radius = 5      # chunk radius sent around spawn
 > authentication, encryption or compression** — anyone who can reach the port
 > can join under any name. It binds to loopback (`127.0.0.1`) by default for
 > that reason. Only change `host` to `0.0.0.0` on a trusted LAN you control.
-
+>
 > Scope: this is a Phase-3 preview, not a compatible server yet — 1.8.9 only,
 > no gameplay beyond spawning and looking around, and lighting is the
 > `FullBright` fallback (always max). Newer client versions will be rejected at

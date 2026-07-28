@@ -181,28 +181,12 @@ const FRAME_DEADLINE: Duration = Duration::from_secs(30);
 ///
 /// Used once we are committed to a frame: a `WouldBlock` / `TimedOut` /
 /// `Interrupted` just means the next byte hasn't arrived yet, so we wait rather
-/// than desync the stream — but not past the deadline.
+/// than desync the stream — but not past the deadline. Shares the retry loop
+/// with [`read_frame_body`] via a one-byte buffer.
 fn read_committed_byte<R: Read>(r: &mut R, deadline: Instant) -> io::Result<u8> {
     let mut byte = [0u8; 1];
-    loop {
-        match r.read(&mut byte) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof")),
-            Ok(_) => return Ok(byte[0]),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::Interrupted
-                ) =>
-            {
-                if Instant::now() >= deadline {
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "frame stalled"));
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    }
+    read_frame_body(r, &mut byte, deadline)?;
+    Ok(byte[0])
 }
 
 /// Fill `buf` completely, retrying past transient timeouts until `deadline`.
