@@ -68,6 +68,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-server"
+version = "0.1.0"
+dependencies = [
+ "aether-api",
+ "aether-core",
+ "aether-world",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "aether-telemetry"
 version = "0.1.0"
 

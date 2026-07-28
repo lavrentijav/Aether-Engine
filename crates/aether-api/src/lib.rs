@@ -37,12 +37,15 @@ use aether_world::storage::format::SubChunkKey;
 use aether_world::{KvBackend, StorageError, SubChunk, WorldStorage};
 use aether_worldgen::ChunkGenerator;
 
+pub mod player;
+
 // Public re-exports: the pieces callers most often need alongside `World`.
 pub use aether_core::math::{Aabb, Vec3 as Vector3};
 pub use aether_physics::{Body, PhysicsParams};
 pub use aether_world::registry::ids as block_ids;
-pub use aether_world::{BlockProperties, BlockStateId, MemStore};
+pub use aether_world::{BlockProperties, BlockStateId, FullBright, LightView, MemStore};
 pub use aether_worldgen::{FlatGenerator, NoiseGenerator};
+pub use player::{GameMode, Player};
 
 #[cfg(feature = "fjall")]
 pub use aether_world::FjallStore;

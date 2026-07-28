@@ -33,6 +33,8 @@ Phase 1 subsystem (world storage) plus the migration tool have landed.
 | Chunk generation: flat + value-noise terrain (`aether-worldgen`) | ✅ |
 | Core API: `World` facade over storage/generation/physics (`aether-api`) | ✅ |
 | Runnable demo: `aether` binary (worldgen + physics + storage + telemetry) with TOML config | ✅ |
+| Player entity + `FullBright` lighting fallback (always max light) | ✅ |
+| Experimental join server: `aether-server` (Minecraft 1.8.9 / protocol 47, superflat, creative) | 🚧 Preview |
 | CI (build/test/clippy/fmt) + Criterion bench harness | ✅ |
 | Redstone / lighting / entities / full staged physics | ❌ Not yet started |
 
@@ -105,6 +107,8 @@ Decisions explicitly dropped or replaced during design. Kept here so the history
 | Генерация чанков: flat + value-noise рельеф (`aether-worldgen`) | ✅ |
 | API ядра: фасад `World` над хранилищем/генерацией/физикой (`aether-api`) | ✅ |
 | Запускаемое демо: бинарник `aether` (генерация + физика + хранилище + телеметрия) с TOML-конфигом | ✅ |
+| Сущность игрока + фолбэк освещения `FullBright` (всегда макс. свет) | ✅ |
+| Экспериментальный сервер входа: `aether-server` (Minecraft 1.8.9 / протокол 47, плоский мир, креатив) | 🚧 Превью |
 | CI (сборка/тесты/clippy/fmt) + харнесс бенчей Criterion | ✅ |
 | Редстоун / освещение / сущности / полная поэтапная физика | ❌ Ещё не начато |
 

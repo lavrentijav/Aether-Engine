@@ -157,6 +157,37 @@ To persist the world to disk, set `storage = "fjall"` and run the release build:
 cargo run -p aether-demo --release
 ```
 
+### Join with a Minecraft client — *"can I connect right now?"*
+
+There's an experimental server you can actually **connect to with a vanilla
+client**. It's deliberately minimal — it targets **Minecraft 1.8.9 (protocol
+47)** only, offline mode, no compression/encryption — and drops you into a
+**superflat, always-lit (full-bright) creative world** served from the engine.
+
+```bash
+cargo run -p aether-server            # binds 0.0.0.0:25565 (see aether-server.toml)
+```
+
+Then in a **Minecraft 1.8.9** client: *Multiplayer → Direct Connect →*
+`127.0.0.1` (or your host). The server list ping shows the MOTD; connecting
+spawns you standing on the flat world.
+
+Config ([`aether-server.toml`](aether-server.toml)):
+
+```toml
+[server]
+host = "0.0.0.0"
+port = 25565
+motd = "Aether Engine — 1.8.9 demo (full-bright flat world)"
+max_players = 20
+view_radius = 5      # chunk radius sent around spawn
+```
+
+> Scope: this is a Phase-3 preview, not a compatible server yet — 1.8.9 only,
+> no gameplay beyond spawning and looking around, and lighting is the
+> `FullBright` fallback (always max). Newer client versions will be rejected at
+> the handshake.
+
 ### Migrate a Vanilla world
 
 ```bash

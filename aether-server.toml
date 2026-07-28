@@ -1,0 +1,8 @@
+# Aether Engine server configuration (Minecraft 1.8.9 / protocol 47).
+
+[server]
+host = "0.0.0.0"
+port = 25565
+motd = "Aether Engine — 1.8.9 demo (full-bright flat world)"
+max_players = 20
+view_radius = 5      # chunk radius sent around spawn
