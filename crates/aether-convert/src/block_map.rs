@@ -57,14 +57,20 @@ impl BlockRegistry {
         if base.contains("air") || base == "void_air" || base == "cave_air" {
             return BlockProperties::AIR;
         }
-        // Non-solid, non-colliding decoration / plants / fluids-ish.
+        // Non-solid, non-colliding decoration / plants / fluids-ish. Grass
+        // *plants* are matched exactly so solid `grass_block` stays collidable.
         let non_solid = base.ends_with("water")
             || base.ends_with("lava")
             || base.contains("sapling")
             || base.contains("torch")
             || base.contains("rail")
             || base == "vine"
-            || base.contains("grass")
+            || base == "grass"
+            || base == "tall_grass"
+            || base == "short_grass"
+            || base == "seagrass"
+            || base == "fern"
+            || base == "large_fern"
             || base.contains("flower")
             || base.contains("carpet");
         let redstone = base.contains("redstone")
@@ -157,5 +163,8 @@ mod tests {
         assert!(r.intern("minecraft:repeater").1.redstone);
         assert!(!r.intern("minecraft:water").1.collision);
         assert!(!r.intern("minecraft:torch").1.solid);
+        // grass_block is solid terrain; tall_grass is a passable plant.
+        assert!(r.intern("minecraft:grass_block").1.solid);
+        assert!(!r.intern("minecraft:tall_grass").1.collision);
     }
 }

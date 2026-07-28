@@ -6,6 +6,10 @@ members = [
     "crates/aether-world",
     "crates/aether-net",
     "crates/aether-convert",
+    "crates/aether-physics",
+    "crates/aether-worldgen",
+    "crates/aether-baseproxy",
+    "crates/aether-api",
 ]
 
 [workspace.package]
@@ -26,6 +30,9 @@ aether-core = { path = "crates/aether-core", version = "0.1.0" }
 aether-telemetry = { path = "crates/aether-telemetry", version = "0.1.0" }
 aether-world = { path = "crates/aether-world", version = "0.1.0", default-features = false }
 aether-net = { path = "crates/aether-net", version = "0.1.0" }
+aether-physics = { path = "crates/aether-physics", version = "0.1.0" }
+aether-worldgen = { path = "crates/aether-worldgen", version = "0.1.0" }
+aether-baseproxy = { path = "crates/aether-baseproxy", version = "0.1.0" }
 # Third-party
 zstd = "0.13"
 fjall = "2"

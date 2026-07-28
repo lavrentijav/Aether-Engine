@@ -1,0 +1,23 @@
+[package]
+name = "aether-api"
+description = "Aether Engine core API: a World facade over storage, generation and physics."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["fjall", "zstd"]
+fjall = ["aether-world/fjall"]
+zstd = ["aether-world/zstd"]
+
+[dependencies]
+aether-core = { workspace = true }
+aether-world = { workspace = true, default-features = false }
+aether-physics = { workspace = true }
+aether-worldgen = { workspace = true }
+
+[lints]
+workspace = true

@@ -13,8 +13,10 @@
 //! touched) and has **zero third-party dependencies** so it stays trivially
 //! buildable on any target during Phase 0.
 
+pub mod math;
 pub mod morton;
 pub mod simd;
 
+pub use math::{Aabb, Vec3};
 pub use morton::{morton_decode_16, morton_encode_16};
 pub use simd::{dispatch, Backend, MaskOps};

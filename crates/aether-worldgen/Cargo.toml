@@ -1,0 +1,16 @@
+[package]
+name = "aether-worldgen"
+description = "Aether Engine chunk generation: flat and value-noise terrain generators producing engine sub-chunks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aether-core = { workspace = true }
+aether-world = { workspace = true }
+
+[lints]
+workspace = true

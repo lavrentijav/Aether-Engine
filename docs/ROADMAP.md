@@ -26,7 +26,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 
 - ✅ **Memory model**: `Sub-Chunk`, `AVX-Cell` (64-byte cache line), Morton (Z-order) indexing, SoA masks.
 - 🚧 **Palette compression** (u4 / u8 → u16 auto-expand) ✅; Block-Entity arena still 📋.
-- 📋 **Physics engine**: staged pipeline, SIMD broad-phase, `Cached Environment` O(1) fast path.
+- 🚧 **Physics engine**: basic voxel AABB collision + movement/gravity shipped (`aether-physics`); staged pipeline, SIMD broad-phase and the `Cached Environment` O(1) fast path still 📋.
 - 📋 **Redstone**: compiled Directed Dependency Graph (basic components; **QC deviations allowed** — see [Known Issues](KNOWN_ISSUES.md)).
 - 📋 **Lighting**: async cell-based flood-fill with safe-point merges.
 - 📋 **Entities/AI**: ECS storage, Flow-Field navigation, cached A\*, batched spawner.

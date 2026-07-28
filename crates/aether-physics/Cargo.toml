@@ -1,0 +1,15 @@
+[package]
+name = "aether-physics"
+description = "Aether Engine basic physics: voxel AABB collision, swept movement and a gravity/friction step."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aether-core = { workspace = true }
+
+[lints]
+workspace = true

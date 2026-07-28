@@ -22,12 +22,14 @@
 pub mod block;
 pub mod cell;
 pub mod palette;
+pub mod registry;
 pub mod storage;
 pub mod subchunk;
 
 pub use block::{BlockProperties, BlockStateId};
 pub use cell::AvxCell;
 pub use palette::{PackedArray, Palette};
+pub use registry::BlockRegistry;
 pub use storage::format::{FormatError, SubChunkKey};
 pub use storage::{KvBackend, MemStore, StorageError, WorldStorage};
 pub use subchunk::{Mask, SubChunk, DIM, MASK_WORDS, VOLUME};

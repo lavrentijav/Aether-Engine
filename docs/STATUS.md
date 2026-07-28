@@ -28,8 +28,12 @@ Phase 1 subsystem (world storage) plus the migration tool have landed.
 | SoA memory model: AVX-Cell, Sub-Chunk, Morton masks, palette compression | ✅ |
 | KV world storage (Fjall + Zstandard blobs, order-preserving keys) | ✅ |
 | `aether-convert`: Anvil `.mca` → KV migration (parallel, audited) | ✅ |
+| `aether-baseproxy`: live vanilla → core translation (network chunk sections, block states) | ✅ |
+| Basic physics: voxel AABB collision, movement + gravity (`aether-physics`) | ✅ |
+| Chunk generation: flat + value-noise terrain (`aether-worldgen`) | ✅ |
+| Core API: `World` facade over storage/generation/physics (`aether-api`) | ✅ |
 | CI (build/test/clippy/fmt) + Criterion bench harness | ✅ |
-| Physics / redstone / lighting / entities | ❌ Not yet started |
+| Redstone / lighting / entities / full staged physics | ❌ Not yet started |
 
 ### 📋 What is planned
 Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
@@ -95,8 +99,12 @@ Decisions explicitly dropped or replaced during design. Kept here so the history
 | SoA-модель памяти: AVX-Cell, Sub-Chunk, Morton-маски, сжатие палитрой | ✅ |
 | KV-хранилище мира (Fjall + блобы Zstandard, порядко-сохраняющие ключи) | ✅ |
 | `aether-convert`: миграция Anvil `.mca` → KV (параллельно, с аудитом) | ✅ |
+| `aether-baseproxy`: live-трансляция vanilla → core (сетевые секции чанков, block states) | ✅ |
+| Базовая физика: воксельные AABB-коллизии, передвижение + гравитация (`aether-physics`) | ✅ |
+| Генерация чанков: flat + value-noise рельеф (`aether-worldgen`) | ✅ |
+| API ядра: фасад `World` над хранилищем/генерацией/физикой (`aether-api`) | ✅ |
 | CI (сборка/тесты/clippy/fmt) + харнесс бенчей Criterion | ✅ |
-| Физика / редстоун / освещение / сущности | ❌ Ещё не начато |
+| Редстоун / освещение / сущности / полная поэтапная физика | ❌ Ещё не начато |
 
 ### 📋 Что в планах
 Сгруппировано по фазам роадмапа (полная последовательность — в [ROADMAP.md](ROADMAP.md)).
