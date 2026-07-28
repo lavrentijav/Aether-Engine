@@ -4,7 +4,7 @@
 
 **A next-generation, high-performance Minecraft server engine built from scratch in Rust.**
 
-Project codename: **Aether** · Spec version: **1.1 (Production Candidate)** · Status: **Pre-alpha / design phase**
+Project codename: **Aether** · Spec version: **1.1 (Production Candidate)** · Status: **Early alpha**
 
 ---
 
@@ -79,11 +79,13 @@ The **AVX-Cell** (32 blocks × `u16` = **64 bytes**) is the atomic unit of memor
 ## Project status
 
 Aether is in **early alpha**. **Phase 0 is done** (Cargo workspace, runtime SIMD
-dispatch, telemetry, CI, Criterion benches) and the first Phase 1 subsystem —
-the **SoA world model + KV/Zstd storage** — plus the **`aether-convert`** Anvil
-migration tool have landed. Gameplay subsystems (physics, redstone, lighting,
-entities) are still ahead. See [`docs/STATUS.md`](docs/STATUS.md) for the
-authoritative feature checklist.
+dispatch, telemetry, CI, Criterion benches) and several Phase 1 subsystems have
+landed: the **SoA world model + KV/Zstd storage**, basic physics, chunk
+generation, the core API, BaseProxy and the **`aether-convert`** Anvil migration
+tool. There's a runnable demo (`aether`) and an experimental 1.8.9 join server.
+Gameplay subsystems (redstone, lighting, entities, the full physics pipeline)
+are still ahead. See [`docs/STATUS.md`](docs/STATUS.md) for the authoritative
+feature checklist.
 
 ### Build & test
 
