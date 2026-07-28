@@ -93,6 +93,70 @@ cargo test  --workspace        # run the test suite
 cargo bench -p aether-core     # Criterion micro-benchmarks
 ```
 
+### Run the demo — *"does it work yet?"*
+
+There is no player-facing client yet, but you can watch the engine actually run.
+The `aether` binary generates a world, renders a cross-section of it, drops a
+player from the sky and ticks physics until it lands, persists the touched
+chunks, and prints telemetry:
+
+```bash
+cargo run -p aether-demo            # uses ./aether.toml (created on first run)
+cargo run -p aether-demo -- my.toml # use a specific config file
+```
+
+Example output (noise generator, in-memory store):
+
+```text
+simd path  : avx2 (mask ops)
+world      : generator=Noise, storage=Memory, seed=2024
+
+── world cross-section  (z = 0, x = -32..=32) ──
+  70 |                             ########
+  69 |                   ##########++++++++#############
+  68 |             ######+++++++++++++++++++++++++++++++##########
+  67 |#############+++++++++++++++++++++++++++++++++++++++++++++++#####
+  66 |+++++++++++++++++++++++++++++........++++++++++++++++++++++++++++
+     legend: '#'=grass '+'=dirt '.'=stone ':'=sand ';'=gravel '~'=water '_'=bedrock
+
+── physics: player drop ──
+final feet  : (0.50, 71.000, 0.50)   on_ground=true
+
+── result ──
+  [✔] SIMD dispatch selected a backend
+  [✔] world generated & rendered
+  [✔] player fell and landed on ground
+  [✔] world storage flushed
+```
+
+**Configuration** ([`aether.toml`](aether.toml)) selects the generator
+(`noise`/`flat`), the storage backend (`memory`, or `fjall` to persist under
+`storage_path`), the world seed, the spawn point, tick count and view size:
+
+```toml
+[world]
+seed = 2024
+generator = "noise"   # "noise" | "flat"
+storage = "memory"    # "memory" | "fjall"
+storage_path = "./world-data"
+
+[demo]
+center_x = 0
+center_z = 0
+view_radius = 32
+spawn_height = 120.0
+ticks = 600
+
+[telemetry]
+prometheus = true
+```
+
+To persist the world to disk, set `storage = "fjall"` and run the release build:
+
+```bash
+cargo run -p aether-demo --release
+```
+
 ### Migrate a Vanilla world
 
 ```bash

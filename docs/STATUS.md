@@ -32,6 +32,7 @@ Phase 1 subsystem (world storage) plus the migration tool have landed.
 | Basic physics: voxel AABB collision, movement + gravity (`aether-physics`) | ✅ |
 | Chunk generation: flat + value-noise terrain (`aether-worldgen`) | ✅ |
 | Core API: `World` facade over storage/generation/physics (`aether-api`) | ✅ |
+| Runnable demo: `aether` binary (worldgen + physics + storage + telemetry) with TOML config | ✅ |
 | CI (build/test/clippy/fmt) + Criterion bench harness | ✅ |
 | Redstone / lighting / entities / full staged physics | ❌ Not yet started |
 
@@ -103,6 +104,7 @@ Decisions explicitly dropped or replaced during design. Kept here so the history
 | Базовая физика: воксельные AABB-коллизии, передвижение + гравитация (`aether-physics`) | ✅ |
 | Генерация чанков: flat + value-noise рельеф (`aether-worldgen`) | ✅ |
 | API ядра: фасад `World` над хранилищем/генерацией/физикой (`aether-api`) | ✅ |
+| Запускаемое демо: бинарник `aether` (генерация + физика + хранилище + телеметрия) с TOML-конфигом | ✅ |
 | CI (сборка/тесты/clippy/fmt) + харнесс бенчей Criterion | ✅ |
 | Редстоун / освещение / сущности / полная поэтапная физика | ❌ Ещё не начато |
 

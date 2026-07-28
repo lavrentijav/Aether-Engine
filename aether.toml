@@ -1,0 +1,17 @@
+# Aether Engine demo configuration.
+
+[world]
+seed = 2024
+generator = "noise"   # "noise" | "flat"
+storage = "memory"    # "memory" | "fjall"  (fjall persists to storage_path)
+storage_path = "./world-data"
+
+[demo]
+center_x = 0
+center_z = 0
+view_radius = 32      # half-width of the printed terrain cross-section
+spawn_height = 120.0  # height the player is dropped from
+ticks = 600           # physics ticks to simulate
+
+[telemetry]
+prometheus = true

@@ -1,0 +1,165 @@
+//! Demo configuration, loaded from a TOML file (see [`SAMPLE`]).
+
+use serde::Deserialize;
+
+/// Which terrain generator to run.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum GeneratorKind {
+    /// Superflat: bedrock / dirt / grass.
+    Flat,
+    /// Value-noise heightmap terrain.
+    Noise,
+}
+
+/// Which world storage backend to use.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageKind {
+    /// In-memory only — nothing is written to disk.
+    Memory,
+    /// Persistent Fjall + Zstandard KV store (requires the `persist` feature).
+    Fjall,
+}
+
+/// `[world]` section.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct WorldConfig {
+    /// World seed for the noise generator.
+    pub seed: u64,
+    /// Terrain generator.
+    pub generator: GeneratorKind,
+    /// Storage backend.
+    pub storage: StorageKind,
+    /// Directory for the Fjall store (when `storage = "fjall"`).
+    pub storage_path: String,
+}
+
+impl Default for WorldConfig {
+    fn default() -> Self {
+        Self {
+            seed: 2024,
+            generator: GeneratorKind::Noise,
+            storage: StorageKind::Memory,
+            storage_path: "./world-data".to_string(),
+        }
+    }
+}
+
+/// `[demo]` section.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DemoConfig {
+    /// Column X the cross-section / player are centred on.
+    pub center_x: i32,
+    /// Column Z the cross-section / player are centred on.
+    pub center_z: i32,
+    /// Half-width (in blocks) of the printed terrain cross-section.
+    pub view_radius: i32,
+    /// Height the player is dropped from.
+    pub spawn_height: f64,
+    /// Number of physics ticks to simulate.
+    pub ticks: u32,
+}
+
+impl Default for DemoConfig {
+    fn default() -> Self {
+        Self {
+            center_x: 0,
+            center_z: 0,
+            view_radius: 32,
+            spawn_height: 120.0,
+            ticks: 600,
+        }
+    }
+}
+
+/// `[telemetry]` section.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TelemetryConfig {
+    /// Print the Prometheus exposition at the end of the run.
+    pub prometheus: bool,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self { prometheus: true }
+    }
+}
+
+/// The full demo configuration.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    /// World settings.
+    pub world: WorldConfig,
+    /// Demo run settings.
+    pub demo: DemoConfig,
+    /// Telemetry settings.
+    pub telemetry: TelemetryConfig,
+}
+
+/// A commented sample configuration written when the file is missing.
+pub const SAMPLE: &str = r#"# Aether Engine demo configuration.
+
+[world]
+seed = 2024
+generator = "noise"   # "noise" | "flat"
+storage = "memory"    # "memory" | "fjall"  (fjall persists to storage_path)
+storage_path = "./world-data"
+
+[demo]
+center_x = 0
+center_z = 0
+view_radius = 32      # half-width of the printed terrain cross-section
+spawn_height = 120.0  # height the player is dropped from
+ticks = 600           # physics ticks to simulate
+
+[telemetry]
+prometheus = true
+"#;
+
+impl Config {
+    /// Load the config at `path`. If it does not exist, write [`SAMPLE`] there
+    /// and return the defaults; if it exists but fails to parse, return the
+    /// error string.
+    pub fn load_or_init(path: &str) -> Result<(Config, bool), String> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let cfg = toml::from_str(&text).map_err(|e| format!("parsing {path}: {e}"))?;
+                Ok((cfg, false))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Best-effort: write a sample so the user can tweak it next run.
+                let _ = std::fs::write(path, SAMPLE);
+                Ok((Config::default(), true))
+            }
+            Err(e) => Err(format!("reading {path}: {e}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sample_parses_into_a_config() {
+        let cfg: Config = toml::from_str(SAMPLE).expect("sample must parse");
+        assert_eq!(cfg.world.generator, GeneratorKind::Noise);
+        assert_eq!(cfg.world.storage, StorageKind::Memory);
+        assert_eq!(cfg.demo.ticks, 600);
+        assert!(cfg.telemetry.prometheus);
+    }
+
+    #[test]
+    fn partial_config_fills_defaults() {
+        let cfg: Config = toml::from_str("[world]\nseed = 7\n").unwrap();
+        assert_eq!(cfg.world.seed, 7);
+        // Untouched fields fall back to defaults.
+        assert_eq!(cfg.world.generator, GeneratorKind::Noise);
+        assert_eq!(cfg.demo.view_radius, 32);
+    }
+}
