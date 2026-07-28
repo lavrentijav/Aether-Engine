@@ -209,7 +209,11 @@ pub fn convert_regions<B: KvBackend>(
         });
     }
 
-    let _ = storage.flush();
+    // A failed final flush means writes may not be durable — surface it in the
+    // audit trail rather than silently reporting success.
+    if let Err(e) = storage.flush() {
+        errors.lock().unwrap().push(format!("flush failed: {e}"));
+    }
 
     ConversionReport {
         regions: regions.into_inner(),

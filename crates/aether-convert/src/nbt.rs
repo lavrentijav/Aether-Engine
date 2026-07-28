@@ -35,7 +35,14 @@ pub enum NbtError {
     BadString,
     /// The root tag was not a compound, as the spec requires.
     RootNotCompound,
+    /// Nesting exceeded [`MAX_NBT_DEPTH`] — likely a crafted/corrupt file.
+    TooDeep,
 }
+
+/// Maximum list/compound nesting depth accepted by [`parse`]. Vanilla chunks
+/// nest only a handful of levels; this cap turns a malicious deeply-nested file
+/// into a clean error instead of a stack overflow.
+pub const MAX_NBT_DEPTH: u32 = 512;
 
 impl std::fmt::Display for NbtError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -44,6 +51,7 @@ impl std::fmt::Display for NbtError {
             NbtError::BadTag(t) => write!(f, "unknown NBT tag id {t}"),
             NbtError::BadString => f.write_str("invalid NBT string"),
             NbtError::RootNotCompound => f.write_str("NBT root is not a compound"),
+            NbtError::TooDeep => f.write_str("NBT nesting too deep"),
         }
     }
 }
@@ -53,6 +61,7 @@ impl std::error::Error for NbtError {}
 struct Cursor<'a> {
     buf: &'a [u8],
     pos: usize,
+    depth: u32,
 }
 
 impl<'a> Cursor<'a> {
@@ -93,6 +102,18 @@ impl<'a> Cursor<'a> {
     }
 
     fn payload(&mut self, tag: u8) -> Result<Nbt, NbtError> {
+        // Guard recursion depth (List/Compound recurse through here).
+        self.depth += 1;
+        if self.depth > MAX_NBT_DEPTH {
+            self.depth -= 1;
+            return Err(NbtError::TooDeep);
+        }
+        let result = self.payload_inner(tag);
+        self.depth -= 1;
+        result
+    }
+
+    fn payload_inner(&mut self, tag: u8) -> Result<Nbt, NbtError> {
         Ok(match tag {
             0 => Nbt::End,
             1 => Nbt::Byte(self.u8()? as i8),
@@ -150,7 +171,11 @@ impl<'a> Cursor<'a> {
 
 /// Parse an uncompressed NBT buffer whose root is a named compound.
 pub fn parse(buf: &[u8]) -> Result<Nbt, NbtError> {
-    let mut c = Cursor { buf, pos: 0 };
+    let mut c = Cursor {
+        buf,
+        pos: 0,
+        depth: 0,
+    };
     let root_tag = c.u8()?;
     if root_tag != 10 {
         return Err(NbtError::RootNotCompound);
@@ -246,5 +271,22 @@ mod tests {
     fn rejects_non_compound_root_and_truncation() {
         assert_eq!(parse(&[3, 0, 0]), Err(NbtError::RootNotCompound));
         assert_eq!(parse(&[10, 0, 0, 3]), Err(NbtError::Truncated));
+    }
+
+    #[test]
+    fn rejects_pathologically_deep_nesting() {
+        let mut b = vec![10u8];
+        b.extend_from_slice(&0u16.to_be_bytes()); // root name ""
+        b.push(9); // field type = list
+        b.extend_from_slice(&1u16.to_be_bytes());
+        b.push(b'x');
+        for _ in 0..(MAX_NBT_DEPTH + 50) {
+            b.push(9); // element type = list
+            b.extend_from_slice(&1i32.to_be_bytes());
+        }
+        b.push(0); // innermost element type = end
+        b.extend_from_slice(&0i32.to_be_bytes());
+        b.push(0); // end root compound
+        assert_eq!(parse(&b), Err(NbtError::TooDeep));
     }
 }

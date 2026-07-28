@@ -11,6 +11,11 @@ use crate::nbt::{self, Nbt};
 use aether_world::SubChunk;
 use std::path::Path;
 
+/// Upper bound on a single decompressed chunk's NBT (16 MiB). Real chunks are
+/// far smaller; the cap stops a crafted region file from forcing an unbounded
+/// allocation during zlib inflation.
+const MAX_CHUNK_NBT: usize = 16 * 1024 * 1024;
+
 /// Errors from reading an Anvil region or decoding a chunk.
 #[derive(Debug)]
 pub enum AnvilError {
@@ -146,7 +151,9 @@ impl Region {
         let payload = &self.data[payload_start..payload_end];
         let raw = match compression {
             // 2 = zlib (Minecraft default), 3 = uncompressed.
-            2 => miniz_oxide::inflate::decompress_to_vec_zlib(payload)
+            // Bound the output so a crafted payload can't drive an unbounded
+            // allocation; a single chunk's NBT is comfortably under this.
+            2 => miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(payload, MAX_CHUNK_NBT)
                 .map_err(|e| AnvilError::Inflate(format!("{e:?}")))?,
             3 => payload.to_vec(),
             other => return Err(AnvilError::UnsupportedCompression(other)),
