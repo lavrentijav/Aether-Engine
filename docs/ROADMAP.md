@@ -15,22 +15,22 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 ### Phase 0 — Foundations & tooling
 *Goal: a repository anyone can build, test and profile.*
 
-- 📋 Cargo workspace skeleton (`aether-core`, `aether-world`, `aether-net`, `aether-convert`, `aether-telemetry`).
-- 📋 Runtime SIMD dispatch scaffold (`Scalar / SSE4.2 / AVX2 / AVX-512` backends behind a trait).
-- 📋 CI: build + `cargo test` + `clippy` + `rustfmt` on x86-64.
-- 📋 Benchmark harness (Criterion) and the four QA stress scenarios as fixtures.
-- 📋 Tracy + Prometheus telemetry hooks wired into an empty main loop.
+- ✅ Cargo workspace skeleton (`aether-core`, `aether-world`, `aether-net`, `aether-convert`, `aether-telemetry`).
+- ✅ Runtime SIMD dispatch scaffold (`Scalar / SSE4.2 / AVX2` real; `AVX-512` detected → AVX2 path until validated).
+- ✅ CI: build + `cargo test` + `clippy` + `rustfmt` on x86-64.
+- 🚧 Benchmark harness (Criterion) in place (mask ops, storage round-trip); the four QA stress fixtures still to add.
+- 🚧 Prometheus telemetry exporter wired; Tracy client stubbed behind a feature.
 
 ### Phase 1 — Core Engine MVP  *(Target: 70–75% Vanilla compliance)*
 *Goal: a world that ticks stably at 20 TPS with the hard performance work done.*
 
-- 📋 **Memory model**: `Sub-Chunk`, `AVX-Cell` (64-byte cache line), Morton (Z-order) indexing, SoA masks.
-- 📋 **Palette compression** (u4 / u8 → u16 auto-expand) and Block-Entity arena.
-- 📋 **Physics engine**: staged pipeline, SIMD broad-phase, `Cached Environment` O(1) fast path.
+- ✅ **Memory model**: `Sub-Chunk`, `AVX-Cell` (64-byte cache line), Morton (Z-order) indexing, SoA masks.
+- 🚧 **Palette compression** (u4 / u8 → u16 auto-expand) ✅; Block-Entity arena still 📋.
+- 🚧 **Physics engine**: basic voxel AABB collision + movement/gravity shipped (`aether-physics`); staged pipeline, SIMD broad-phase and the `Cached Environment` O(1) fast path still 📋.
 - 📋 **Redstone**: compiled Directed Dependency Graph (basic components; **QC deviations allowed** — see [Known Issues](KNOWN_ISSUES.md)).
 - 📋 **Lighting**: async cell-based flood-fill with safe-point merges.
 - 📋 **Entities/AI**: ECS storage, Flow-Field navigation, cached A\*, batched spawner.
-- 📋 **Storage**: RocksDB / Fjall KV backend, Zstandard sub-chunk blobs.
+- ✅ **Storage**: Fjall KV backend, Zstandard sub-chunk blobs, order-preserving keys (+ in-memory backend for tests).
 - 📋 **World Engine** process model (one OS process per world).
 - 📋 Work-stealing scheduler for generation / save / lighting off the main tick.
 
@@ -55,7 +55,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 *Goal: production readiness.*
 
 - 📋 **Plugin API**: Native C-ABI tier + WebAssembly (Wasmtime) sandbox + `engine.supports()` capability checks.
-- 📋 **Aether-Convert**: parallel Anvil `.mca` → KV migration with audit trail & checksums.
+- 🚧 **Aether-Convert**: parallel Anvil `.mca` → KV migration with audit trail & checksums. **Pulled forward** — an initial version shipped alongside Phase 1 storage (both as the `aether-convert` crate and the standalone [Aether-Convert](https://github.com/lavrentijav/Aether-Convert) repo); Phase 4 hardens it (full block-state mapping, gzip/LZ4 chunks, resumable runs).
 - 📋 In-game `/aether profile` visual sub-tick profiler.
 - 📋 Ops hardening: graceful restart, backups, Grafana dashboards.
 
@@ -75,22 +75,22 @@ Aether разрабатывается по модели **поэтапной п�
 ### Фаза 0 — Фундамент и инструментарий
 *Цель: репозиторий, который каждый может собрать, протестировать и профилировать.*
 
-- 📋 Каркас Cargo-воркспейса (`aether-core`, `aether-world`, `aether-net`, `aether-convert`, `aether-telemetry`).
-- 📋 Каркас runtime-диспетчеризации SIMD (бэкенды `Scalar / SSE4.2 / AVX2 / AVX-512` за трейтом).
-- 📋 CI: сборка + `cargo test` + `clippy` + `rustfmt` на x86-64.
-- 📋 Бенчмарк-харнесс (Criterion) и четыре QA-стресс-сценария как фикстуры.
-- 📋 Хуки телеметрии Tracy + Prometheus, вшитые в пустой главный цикл.
+- ✅ Каркас Cargo-воркспейса (`aether-core`, `aether-world`, `aether-net`, `aether-convert`, `aether-telemetry`).
+- ✅ Каркас runtime-диспетчеризации SIMD (`Scalar / SSE4.2 / AVX2` реально; `AVX-512` детектится → путь AVX2 до валидации).
+- ✅ CI: сборка + `cargo test` + `clippy` + `rustfmt` на x86-64.
+- 🚧 Бенчмарк-харнесс (Criterion) готов (маски, round-trip хранилища); четыре QA-фикстуры ещё предстоит добавить.
+- 🚧 Экспортер телеметрии Prometheus вшит; клиент Tracy — заглушка за фичей.
 
 ### Фаза 1 — Core Engine MVP  *(Цель: 70–75% совместимости с Vanilla)*
 *Цель: мир, который стабильно тикает на 20 TPS, с выполненной тяжёлой работой по производительности.*
 
-- 📋 **Модель памяти**: `Sub-Chunk`, `AVX-Cell` (64-байтная строка кеша), индексация Morton, SoA-маски.
-- 📋 **Сжатие палитрой** (u4 / u8 → авто-разворот в u16) и арена Block-Entity.
-- 📋 **Физический движок**: поэтапный конвейер, SIMD broad-phase, O(1) быстрый путь `Cached Environment`.
+- ✅ **Модель памяти**: `Sub-Chunk`, `AVX-Cell` (64-байтная строка кеша), индексация Morton, SoA-маски.
+- 🚧 **Сжатие палитрой** (u4 / u8 → авто-разворот в u16) ✅; арена Block-Entity ещё 📋.
+- 🚧 **Физический движок**: базовые воксельные AABB-коллизии + передвижение/гравитация реализованы (`aether-physics`); поэтапный конвейер, SIMD broad-phase и быстрый путь `Cached Environment` ещё 📋.
 - 📋 **Редстоун**: компилируемый Directed Dependency Graph (базовые компоненты; **отклонения QC допустимы** — см. [Известные проблемы](KNOWN_ISSUES.md)).
 - 📋 **Освещение**: асинхронный flood-fill по ячейкам со слиянием в safe-points.
 - 📋 **Сущности/AI**: ECS-хранилище, Flow-Field навигация, кэшируемый A\*, пакетный спавнер.
-- 📋 **Хранилище**: KV-бэкенд RocksDB / Fjall, блобы Sub-Chunk со сжатием Zstandard.
+- ✅ **Хранилище**: KV-бэкенд Fjall, блобы Sub-Chunk со сжатием Zstandard, порядко-сохраняющие ключи (+ in-memory бэкенд для тестов).
 - 📋 Процессная модель **World Engine** (один процесс ОС на мир).
 - 📋 Work-stealing планировщик для генерации / сохранения / света вне главного тика.
 
@@ -115,7 +115,7 @@ Aether разрабатывается по модели **поэтапной п�
 *Цель: готовность к продакшену.*
 
 - 📋 **Plugin API**: уровень Native C-ABI + песочница WebAssembly (Wasmtime) + проверки `engine.supports()`.
-- 📋 **Aether-Convert**: параллельная миграция Anvil `.mca` → KV с аудит-трейлом и контрольными суммами.
+- 🚧 **Aether-Convert**: параллельная миграция Anvil `.mca` → KV с аудит-трейлом и контрольными суммами. **Вынесено вперёд** — начальная версия поставлена вместе с хранилищем Фазы 1 (крейт `aether-convert` и отдельный репозиторий [Aether-Convert](https://github.com/lavrentijav/Aether-Convert)); Фаза 4 закаляет её (полный маппинг block-state, чанки gzip/LZ4, возобновляемые прогоны).
 - 📋 Внутриигровой визуальный профайлер под-тиков `/aether profile`.
 - 📋 Закалка эксплуатации: graceful restart, бэкапы, дашборды Grafana.
 

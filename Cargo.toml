@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aether-core",
+    "crates/aether-telemetry",
+    "crates/aether-world",
+    "crates/aether-net",
+    "crates/aether-convert",
+    "crates/aether-physics",
+    "crates/aether-worldgen",
+    "crates/aether-baseproxy",
+    "crates/aether-api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/lavrentijav/Aether-Engine"
+authors = ["Aether Engine contributors"]
+
+[workspace.lints.clippy]
+# Keep the SIMD / unsafe surface honest, but do not block the build on pedantic noise.
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+
+[workspace.dependencies]
+aether-core = { path = "crates/aether-core", version = "0.1.0" }
+aether-telemetry = { path = "crates/aether-telemetry", version = "0.1.0" }
+aether-world = { path = "crates/aether-world", version = "0.1.0", default-features = false }
+aether-net = { path = "crates/aether-net", version = "0.1.0" }
+aether-physics = { path = "crates/aether-physics", version = "0.1.0" }
+aether-worldgen = { path = "crates/aether-worldgen", version = "0.1.0" }
+aether-baseproxy = { path = "crates/aether-baseproxy", version = "0.1.0" }
+# Third-party
+zstd = "0.13"
+fjall = "2"
+miniz_oxide = "0.8"
+criterion = "0.5"
+
+# The whole engine is a hot path; optimise dependencies even in dev builds so
+# benchmarks and stress fixtures behave close to release.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

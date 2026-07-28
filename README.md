@@ -78,9 +78,32 @@ The **AVX-Cell** (32 blocks × `u16` = **64 bytes**) is the atomic unit of memor
 
 ## Project status
 
-Aether is currently in the **design / pre-alpha** phase. The repository holds the
-specification and planning documents; the engine crates are not yet implemented.
-See [`docs/STATUS.md`](docs/STATUS.md) for the authoritative feature checklist.
+Aether is in **early alpha**. **Phase 0 is done** (Cargo workspace, runtime SIMD
+dispatch, telemetry, CI, Criterion benches) and the first Phase 1 subsystem —
+the **SoA world model + KV/Zstd storage** — plus the **`aether-convert`** Anvil
+migration tool have landed. Gameplay subsystems (physics, redstone, lighting,
+entities) are still ahead. See [`docs/STATUS.md`](docs/STATUS.md) for the
+authoritative feature checklist.
+
+### Build & test
+
+```bash
+cargo build --workspace        # build every crate
+cargo test  --workspace        # run the test suite
+cargo bench -p aether-core     # Criterion micro-benchmarks
+```
+
+### Migrate a Vanilla world
+
+```bash
+# Anvil world (…/region/*.mca) -> Aether KV store
+cargo run -p aether-convert --release -- /path/to/world /path/to/output-kv
+cargo run -p aether-convert --release -- /path/to/world --mem   # dry run
+```
+
+The converter prints an audit report (regions, chunks, sub-chunks, a run
+checksum, throughput). A standalone build lives in the companion
+[Aether-Convert](https://github.com/lavrentijav/Aether-Convert) repository.
 
 ## Benchmark targets (QA gates)
 

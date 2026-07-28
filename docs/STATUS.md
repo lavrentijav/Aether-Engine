@@ -12,7 +12,8 @@
 ## 🇬🇧 English
 
 ### ✅ What exists today
-The project is in the **design / pre-alpha** phase. Concretely present in the repository:
+The project has left pure design: **Phase 0 is implemented** and the first
+Phase 1 subsystem (world storage) plus the migration tool have landed.
 
 | Item | State |
 |------|-------|
@@ -21,25 +22,36 @@ The project is in the **design / pre-alpha** phase. Concretely present in the re
 | Roadmap, Status, Known Issues, Contributing docs | ✅ |
 | License | ✅ |
 | `.gitignore` for a Cargo project | ✅ |
-| **Engine source code (any crate)** | ❌ Not yet started |
+| Cargo workspace + crate skeletons (`aether-core/-telemetry/-world/-net/-convert`) | ✅ |
+| Runtime SIMD dispatch (Scalar/SSE4.2/AVX2 real, AVX-512 detected) + Morton | ✅ |
+| Telemetry: counters/gauges/timers + Prometheus exporter | ✅ |
+| SoA memory model: AVX-Cell, Sub-Chunk, Morton masks, palette compression | ✅ |
+| KV world storage (Fjall + Zstandard blobs, order-preserving keys) | ✅ |
+| `aether-convert`: Anvil `.mca` → KV migration (parallel, audited) | ✅ |
+| `aether-baseproxy`: live vanilla → core translation (network chunk sections, block states) | ✅ |
+| Basic physics: voxel AABB collision, movement + gravity (`aether-physics`) | ✅ |
+| Chunk generation: flat + value-noise terrain (`aether-worldgen`) | ✅ |
+| Core API: `World` facade over storage/generation/physics (`aether-api`) | ✅ |
+| CI (build/test/clippy/fmt) + Criterion bench harness | ✅ |
+| Redstone / lighting / entities / full staged physics | ❌ Not yet started |
 
 ### 📋 What is planned
 Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 
 **Phase 0 — Foundations**
-- 📋 Cargo workspace + crate skeletons
-- 📋 Runtime SIMD dispatch trait & backends
-- 📋 CI (build, test, clippy, fmt) + Criterion benches
-- 📋 Telemetry hooks (Tracy + Prometheus)
+- ✅ Cargo workspace + crate skeletons
+- ✅ Runtime SIMD dispatch trait & backends
+- ✅ CI (build, test, clippy, fmt) + Criterion benches
+- 🚧 Telemetry hooks (Prometheus exporter ✅; Tracy client stubbed behind a feature)
 
 **Phase 1 — Core Engine MVP (70–75% Vanilla)**
-- 📋 SoA memory model: Sub-Chunk, AVX-Cell, Morton order, masks
-- 📋 Palette compression + Block-Entity arena
+- ✅ SoA memory model: Sub-Chunk, AVX-Cell, Morton order, masks
+- ✅ Palette compression (u4/u8/u16 auto-expand) — Block-Entity arena still 📋
 - 📋 Physics pipeline (SIMD broad-phase, cached environment)
 - 📋 Graph-based redstone (DDG)
 - 📋 Async lighting (cell flood-fill)
 - 📋 ECS entities + Flow-Field AI
-- 📋 KV storage (RocksDB / Fjall + Zstd)
+- ✅ KV storage (Fjall + Zstd)
 - 📋 Per-world process isolation + work-stealing scheduler
 
 **Phase 2 — Hardcore Mechanical Target (≥ 95% Vanilla)**
@@ -71,7 +83,8 @@ Decisions explicitly dropped or replaced during design. Kept here so the history
 ## 🇷🇺 Русский
 
 ### ✅ Что есть сейчас
-Проект на стадии **проектирования / pre-alpha**. Конкретно присутствует в репозитории:
+Проект вышел из чистого проектирования: **Фаза 0 реализована**, а также первая
+подсистема Фазы 1 (хранилище мира) и инструмент миграции.
 
 | Пункт | Состояние |
 |-------|-----------|
@@ -80,25 +93,36 @@ Decisions explicitly dropped or replaced during design. Kept here so the history
 | Документы Роадмап, Статус, Известные проблемы, Контрибьютинг | ✅ |
 | Лицензия | ✅ |
 | `.gitignore` для Cargo-проекта | ✅ |
-| **Исходный код движка (любой крейт)** | ❌ Ещё не начат |
+| Cargo-воркспейс + каркасы крейтов (`aether-core/-telemetry/-world/-net/-convert`) | ✅ |
+| Runtime-диспетчеризация SIMD (Scalar/SSE4.2/AVX2 реально, AVX-512 детект) + Morton | ✅ |
+| Телеметрия: счётчики/гейджи/таймеры + экспортер Prometheus | ✅ |
+| SoA-модель памяти: AVX-Cell, Sub-Chunk, Morton-маски, сжатие палитрой | ✅ |
+| KV-хранилище мира (Fjall + блобы Zstandard, порядко-сохраняющие ключи) | ✅ |
+| `aether-convert`: миграция Anvil `.mca` → KV (параллельно, с аудитом) | ✅ |
+| `aether-baseproxy`: live-трансляция vanilla → core (сетевые секции чанков, block states) | ✅ |
+| Базовая физика: воксельные AABB-коллизии, передвижение + гравитация (`aether-physics`) | ✅ |
+| Генерация чанков: flat + value-noise рельеф (`aether-worldgen`) | ✅ |
+| API ядра: фасад `World` над хранилищем/генерацией/физикой (`aether-api`) | ✅ |
+| CI (сборка/тесты/clippy/fmt) + харнесс бенчей Criterion | ✅ |
+| Редстоун / освещение / сущности / полная поэтапная физика | ❌ Ещё не начато |
 
 ### 📋 Что в планах
 Сгруппировано по фазам роадмапа (полная последовательность — в [ROADMAP.md](ROADMAP.md)).
 
 **Фаза 0 — Фундамент**
-- 📋 Cargo-воркспейс + каркасы крейтов
-- 📋 Трейт runtime-диспетчеризации SIMD и бэкенды
-- 📋 CI (сборка, тесты, clippy, fmt) + бенчи Criterion
-- 📋 Хуки телеметрии (Tracy + Prometheus)
+- ✅ Cargo-воркспейс + каркасы крейтов
+- ✅ Трейт runtime-диспетчеризации SIMD и бэкенды
+- ✅ CI (сборка, тесты, clippy, fmt) + бенчи Criterion
+- 🚧 Хуки телеметрии (экспортер Prometheus ✅; клиент Tracy — заглушка за фичей)
 
 **Фаза 1 — Core Engine MVP (70–75% Vanilla)**
-- 📋 SoA-модель памяти: Sub-Chunk, AVX-Cell, Morton order, маски
-- 📋 Сжатие палитрой + арена Block-Entity
+- ✅ SoA-модель памяти: Sub-Chunk, AVX-Cell, Morton order, маски
+- ✅ Сжатие палитрой (u4/u8/u16 авто-разворот) — арена Block-Entity ещё 📋
 - 📋 Конвейер физики (SIMD broad-phase, кэш окружения)
 - 📋 Граф-редстоун (DDG)
 - 📋 Асинхронное освещение (flood-fill по ячейкам)
 - 📋 ECS-сущности + Flow-Field AI
-- 📋 KV-хранилище (RocksDB / Fjall + Zstd)
+- ✅ KV-хранилище (Fjall + Zstd)
 - 📋 Изоляция процессов по мирам + work-stealing планировщик
 
 **Фаза 2 — Hardcore Mechanical Target (≥ 95% Vanilla)**
