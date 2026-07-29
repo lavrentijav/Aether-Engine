@@ -31,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 use aether_core::math::Vec3;
-use aether_physics::{step, BlockView};
+use aether_physics::{step, step_cached, BlockView};
 use aether_sched::Scheduler;
 use aether_world::registry::BlockRegistry;
 use aether_world::storage::format::SubChunkKey;
@@ -45,7 +45,7 @@ pub use aether_sched::Scheduler as WorkScheduler;
 
 // Public re-exports: the pieces callers most often need alongside `World`.
 pub use aether_core::math::{Aabb, Vec3 as Vector3};
-pub use aether_physics::{Body, PhysicsParams};
+pub use aether_physics::{Body, CachedEnvironment, PhysicsParams};
 pub use aether_world::registry::ids as block_ids;
 pub use aether_world::{BlockProperties, BlockStateId, FullBright, LightView, MemStore, MAX_LIGHT};
 pub use aether_worldgen::{FlatGenerator, NoiseGenerator};
@@ -245,6 +245,16 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         step(self, body, self.params);
     }
 
+    /// Advance a body using its [`CachedEnvironment`] (spec §7.3): a resting
+    /// entity that stays in its cell is stepped in O(1) with no block queries.
+    /// Returns `true` if the cached fast path was taken.
+    ///
+    /// The caller owns the cache and must call
+    /// [`CachedEnvironment::invalidate`] when a block near the entity changes.
+    pub fn step_body_cached(&self, body: &mut Body, env: &mut CachedEnvironment) -> bool {
+        step_cached(self, body, self.params, env)
+    }
+
     /// The number of sub-chunks currently resident in the cache.
     pub fn resident_sections(&self) -> usize {
         self.cache.read().unwrap().len()
@@ -362,6 +372,22 @@ mod tests {
             "feet at {}",
             body.feet().y
         );
+    }
+
+    #[test]
+    fn step_body_cached_settles_and_fast_paths() {
+        let world = World::new(MemStore::new(), FlatGenerator::classic());
+        let mut body = world.spawn_player(0.5, 40.0, 0.5);
+        let mut env = CachedEnvironment::new();
+        for _ in 0..400 {
+            world.step_body_cached(&mut body, &mut env);
+        }
+        assert!(body.on_ground, "should land");
+        assert!(env.is_valid(), "cache should be warm while resting");
+        // Once resting, the cached path takes over.
+        let fast = world.step_body_cached(&mut body, &mut env);
+        assert!(fast, "expected the cached fast path");
+        assert!((body.feet().y - 4.0).abs() < 1.0e-6);
     }
 
     #[test]
