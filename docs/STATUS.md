@@ -38,6 +38,7 @@ server a vanilla 1.8.9 client can connect to.
 | SoA entity storage (`aether-entity`): generational `EntityId`, parallel component columns, batch integrate | ✅ |
 | Flow-Field crowd navigation (`aether-ai`): shared-goal integration field + O(1) per-mob steering; cached A* still planned | ✅ |
 | Graph-based redstone (`aether-redstone`): compiled CSR Directed Dependency Graph + worklist signal solve; QC / exact delays / strict order deferred to Phase 2 | ✅ |
+| Background scheduler (`aether-sched`): dynamic shared-queue worker pool driving parallel column lighting (`World::light_region`), deterministic vs sequential | ✅ |
 | Experimental join server `aether-server` (1.8.9 / protocol 47, superflat, creative, full-bright) — protocol verified against a raw socket client, **not yet against a live client** | 🚧 Preview |
 | CI (build/test/clippy/fmt) + Criterion bench harness | ✅ |
 | Higher-level mob AI (behaviours, spawner) / full staged physics pipeline | ❌ Not yet started |
@@ -60,7 +61,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 - 🚧 Lighting (cell flood-fill): block + sky light ✅ (per-column); async safe-point merge + cross-chunk bleed 📋. `FullBright` fallback kept for the preview server
 - 🚧 ECS entities: SoA storage ✅ (`aether-entity`) + Flow-Field navigation ✅ (`aether-ai`); cached A* + batched spawner 📋
 - ✅ KV storage (Fjall + Zstd)
-- 📋 Per-world process isolation + work-stealing scheduler
+- 🚧 Background scheduler ✅ (`aether-sched` dynamic shared-queue pool + parallel `light_region`); per-world process isolation 📋
 
 **Phase 2 — Hardcore Mechanical Target (≥ 95% Vanilla)**
 - 📋 Cross-chunk Quasi-Connectivity redstone

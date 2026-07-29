@@ -30,7 +30,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - 🚧 **Entities/AI**: SoA ECS storage (`aether-entity`: generational `EntityId`, parallel component columns, batch integrate) ✅ and grid **Flow-Field navigation** (`aether-ai`: shared-goal integration field, O(1) per-mob steering) ✅. Cached single-agent A\* and the batched spawner are still 📋. A single `Player` entity also exists for the preview server.
 - ✅ **Storage**: Fjall KV backend, Zstandard sub-chunk blobs, order-preserving keys (+ in-memory backend for tests).
 - 📋 **World Engine** process model (one OS process per world).
-- 📋 Work-stealing scheduler for generation / save / lighting off the main tick.
+- 🚧 Background scheduler for generation / save / lighting off the main tick: a dynamic shared-queue worker pool (`aether-sched`) landed and drives parallel column lighting (`World::light_region`, verified deterministic vs sequential). True per-worker work-stealing deques are a later refinement.
 
 ### Phase 2 — Hardcore Mechanical Target  *(Target: ≥ 95% Vanilla compliance)*
 *Goal: close the deviation registry.*
