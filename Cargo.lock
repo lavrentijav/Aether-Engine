@@ -63,6 +63,7 @@ dependencies = [
  "aether-telemetry",
  "aether-world",
  "aether-worldgen",
+ "libc",
  "serde",
  "toml",
 ]

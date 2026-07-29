@@ -30,6 +30,11 @@ aether-telemetry = { workspace = true }
 toml = { workspace = true }
 serde = { workspace = true }
 
+# SIGINT (Ctrl+C) handling for the streaming save is Unix-only; on other
+# platforms `aether stream` simply runs to its configured radius.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "aether"
 path = "src/main.rs"
