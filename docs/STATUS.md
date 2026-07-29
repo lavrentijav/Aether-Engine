@@ -30,9 +30,9 @@ server a vanilla 1.8.9 client can connect to.
 | `aether-convert`: Anvil `.mca` → KV migration (parallel, audited) | ✅ |
 | `aether-baseproxy`: live vanilla → core translation (network chunk sections, block states) | ✅ |
 | Basic physics: voxel AABB collision, movement + gravity, and a Cached Environment O(1) fast path for resting entities (`aether-physics`) | ✅ |
-| Chunk generation: flat + value-noise terrain (`aether-worldgen`) | ✅ |
+| Chunk generation: flat + value-noise terrain, 3D-noise caves and clean-room procedural structures (dungeons/huts) (`aether-worldgen`) | ✅ |
 | Core API: `World` facade over storage/generation/physics (`aether-api`) | ✅ |
-| Runnable demo: `aether` binary (worldgen + physics + storage + telemetry) with TOML config | ✅ |
+| Runnable demo: `aether` binary (worldgen + physics + lighting + storage + telemetry) with TOML config, plus an `aether stream` mode for outward infinite generation that saves on Ctrl+C | ✅ |
 | Player entity | ✅ |
 | Lighting: flood-fill block + sky light (`compute_light` / `World::light_column`); per-column, cross-chunk bleed still deferred. `FullBright` fallback kept for the preview server | ✅ |
 | SoA entity storage (`aether-entity`): generational `EntityId`, parallel component columns, batch integrate, plus a dense projectile/item ballistic batch (§9.4) | ✅ |

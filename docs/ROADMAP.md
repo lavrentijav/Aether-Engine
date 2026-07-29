@@ -58,7 +58,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - 📋 Ops hardening: graceful restart, backups, Grafana dashboards.
 
 ### Cross-cutting / continuous
-- 🚧 Runnable demo (`aether-demo`) that exercises worldgen + physics + storage + telemetry end-to-end.
+- 🚧 Runnable demo (`aether-demo`) that exercises worldgen + physics + lighting + storage + telemetry end-to-end, plus an `aether stream` mode: outward on-demand infinite generation that persists ring by ring and saves on Ctrl+C. Worldgen now includes 3D-noise caves and clean-room procedural structures (dungeons/huts).
 - 📋 Benchmark gates enforced in CI (regressions block merge).
 - 📋 Documentation kept in sync with each shipped subsystem.
 - ❄️ Non-x86 targets (ARM/NEON, RISC-V) — deferred until after x86-64 AVX2 baseline is stable.

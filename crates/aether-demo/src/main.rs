@@ -274,6 +274,16 @@ fn glyph(id: BlockStateId) -> char {
         '|'
     } else if id == b::OAK_LEAVES {
         '*'
+    } else if id == b::COBBLESTONE {
+        'c'
+    } else if id == b::MOSSY_COBBLESTONE {
+        'm'
+    } else if id == b::OAK_PLANKS {
+        'P'
+    } else if id == b::CHEST {
+        'H'
+    } else if id == b::SPAWNER {
+        'S'
     } else {
         'X'
     }
@@ -315,7 +325,8 @@ fn run<B: KvBackend, G: ChunkGenerator>(world: World<B, G>, cfg: &Config) -> Exi
         println!("{y:4} |{line}");
     }
     println!(
-        "     legend: '#'=grass '+'=dirt '.'=stone ':'=sand ';'=gravel '~'=water '_'=bedrock\n"
+        "     legend: '#'=grass '+'=dirt '.'=stone ':'=sand ';'=gravel '~'=water '_'=bedrock \
+         'c'=cobble 'm'=mossy 'P'=planks 'H'=chest 'S'=spawner '|'=log\n"
     );
 
     // --- 2. Physics: drop a player and let gravity + collision settle it. ---
