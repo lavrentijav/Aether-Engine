@@ -39,6 +39,9 @@
 
 use aether_core::math::{Aabb, Vec3};
 
+pub mod projectile;
+pub use projectile::ProjectileStore;
+
 /// A stable handle to an entity: a slot **index** and a **generation** guard.
 ///
 /// Cheap to copy and compare. A handle stays valid until the entity is

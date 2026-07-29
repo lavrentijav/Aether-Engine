@@ -35,7 +35,7 @@ server a vanilla 1.8.9 client can connect to.
 | Runnable demo: `aether` binary (worldgen + physics + storage + telemetry) with TOML config | ✅ |
 | Player entity | ✅ |
 | Lighting: flood-fill block + sky light (`compute_light` / `World::light_column`); per-column, cross-chunk bleed still deferred. `FullBright` fallback kept for the preview server | ✅ |
-| SoA entity storage (`aether-entity`): generational `EntityId`, parallel component columns, batch integrate | ✅ |
+| SoA entity storage (`aether-entity`): generational `EntityId`, parallel component columns, batch integrate, plus a dense projectile/item ballistic batch (§9.4) | ✅ |
 | Flow-Field crowd navigation (`aether-ai`): shared-goal integration field + O(1) per-mob steering; cached A* still planned | ✅ |
 | Graph-based redstone (`aether-redstone`): compiled CSR Directed Dependency Graph + worklist signal solve; QC / exact delays / strict order deferred to Phase 2 | ✅ |
 | Background scheduler (`aether-sched`): dynamic shared-queue worker pool driving parallel column lighting (`World::light_region`), deterministic vs sequential | ✅ |
