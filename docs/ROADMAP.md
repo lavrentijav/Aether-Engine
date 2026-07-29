@@ -26,7 +26,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - 🚧 **Palette compression** (u4 / u8 → u16 auto-expand) ✅; Block-Entity arena still 📋.
 - 🚧 **Physics engine**: basic voxel AABB collision + movement/gravity shipped (`aether-physics`); staged pipeline, SIMD broad-phase and the `Cached Environment` O(1) fast path still 📋.
 - 📋 **Redstone**: compiled Directed Dependency Graph (basic components; **QC deviations allowed** — see [Known Issues](KNOWN_ISSUES.md)).
-- 📋 **Lighting**: async cell-based flood-fill with safe-point merges. A `FullBright` fallback (always max light) ships in the meantime so worlds render.
+- 🚧 **Lighting**: flood-fill block + sky light landed (`aether-world::compute_light`, wired into the core API as `World::light_column`). Computes emitter block light and top-down sky light per chunk column with a BFS spread. The async safe-point scheduling and cross-chunk horizontal bleed are still 📋; `FullBright` remains the preview server's fallback.
 - 📋 **Entities/AI**: ECS storage, Flow-Field navigation, cached A\*, batched spawner. A single `Player` entity already exists for the preview server.
 - ✅ **Storage**: Fjall KV backend, Zstandard sub-chunk blobs, order-preserving keys (+ in-memory backend for tests).
 - 📋 **World Engine** process model (one OS process per world).

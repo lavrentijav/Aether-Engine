@@ -6,7 +6,7 @@
 >
 > Legend: ✅ done · 🚧 in progress · 📋 planned · ❄️ deferred · ❌ cancelled.
 >
-> Last reviewed: 2026-07-28 · Spec: v1.1
+> Last reviewed: 2026-07-29 · Spec: v1.1
 
 ---
 
@@ -33,10 +33,11 @@ server a vanilla 1.8.9 client can connect to.
 | Chunk generation: flat + value-noise terrain (`aether-worldgen`) | ✅ |
 | Core API: `World` facade over storage/generation/physics (`aether-api`) | ✅ |
 | Runnable demo: `aether` binary (worldgen + physics + storage + telemetry) with TOML config | ✅ |
-| Player entity + `FullBright` lighting fallback (always max light) | ✅ |
+| Player entity | ✅ |
+| Lighting: flood-fill block + sky light (`compute_light` / `World::light_column`); per-column, cross-chunk bleed still deferred. `FullBright` fallback kept for the preview server | ✅ |
 | Experimental join server `aether-server` (1.8.9 / protocol 47, superflat, creative, full-bright) — protocol verified against a raw socket client, **not yet against a live client** | 🚧 Preview |
 | CI (build/test/clippy/fmt) + Criterion bench harness | ✅ |
-| Redstone / async lighting / entities / full staged physics | ❌ Not yet started |
+| Redstone / entities / full staged physics | ❌ Not yet started |
 
 ### 📋 What is planned
 Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
@@ -52,7 +53,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 - ✅ Palette compression (u4/u8/u16 auto-expand) — Block-Entity arena still 📋
 - 🚧 Physics pipeline (basic collision + gravity ✅; SIMD broad-phase, cached environment 📋)
 - 📋 Graph-based redstone (DDG)
-- 📋 Async lighting (cell flood-fill) — `FullBright` fallback ships in the meantime
+- 🚧 Lighting (cell flood-fill): block + sky light ✅ (per-column); async safe-point merge + cross-chunk bleed 📋. `FullBright` fallback kept for the preview server
 - 📋 ECS entities + Flow-Field AI
 - ✅ KV storage (Fjall + Zstd)
 - 📋 Per-world process isolation + work-stealing scheduler
