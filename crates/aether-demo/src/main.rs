@@ -7,8 +7,10 @@
 //!    cross-section so you can *see* the world.
 //! 3. **Physics** — drops a player from the sky and ticks gravity + collision
 //!    until it lands on the generated ground.
-//! 4. **Storage** — persists the touched sub-chunks (in-memory or Fjall+Zstd).
-//! 5. **Telemetry** — emits a Prometheus exposition of what happened.
+//! 4. **Lighting** — runs the flood-fill light engine over the centre column
+//!    and reports sky light at the surface plus a placed glowstone's block light.
+//! 5. **Storage** — persists the touched sub-chunks (in-memory or Fjall+Zstd).
+//! 6. **Telemetry** — emits a Prometheus exposition of what happened.
 //!
 //! Run it with `cargo run -p aether-demo` (writes/reads `aether.toml`).
 
@@ -16,7 +18,7 @@ mod config;
 
 use std::process::ExitCode;
 
-use aether_api::{block_ids, Body, World};
+use aether_api::{block_ids, Body, LightView, World, MAX_LIGHT};
 use aether_api::{FlatGenerator, MemStore, NoiseGenerator};
 use aether_core::Backend;
 use aether_telemetry::{span, Registry};
@@ -195,7 +197,34 @@ fn run<B: KvBackend, G: ChunkGenerator>(world: World<B, G>, cfg: &Config) -> Exi
     );
     println!();
 
-    // --- 3. Storage: persist everything the run touched. ---
+    // --- 3. Lighting: compute real block + sky light for the centre column. ---
+    let surface_sky = reg.gauge("aether_demo_surface_sky_light");
+    let torch_block = reg.gauge("aether_demo_glowstone_block_light");
+    // Drop a glowstone a few blocks above the surface and off to one side so it
+    // has room to radiate without shadowing the centre sky column, then light
+    // the whole column. Keep it inside the same chunk footprint (lx 0..16).
+    let glow_x = (cx & !15) + ((cx & 15) + 4).min(15);
+    let glow_y = ground + 3;
+    world.set_block(glow_x, glow_y, cz, "minecraft:glowstone");
+    let light = world.light_column(cx.div_euclid(16), cz.div_euclid(16));
+    let sky_above = light.sky_light(cx, ground + 1, cz);
+    let sky_below = light.sky_light(cx, ground.saturating_sub(2), cz);
+    let glow_here = light.block_light(glow_x, glow_y, cz);
+    let glow_near = light.block_light(glow_x + 1, glow_y, cz);
+    surface_sky.set(sky_above as i64);
+    torch_block.set(glow_here as i64);
+
+    println!("── lighting (flood-fill) ──");
+    println!(
+        "centre column       : ({}, {})",
+        cx.div_euclid(16),
+        cz.div_euclid(16)
+    );
+    println!("sky light  above/below surface : {sky_above}/{sky_below}  (max {MAX_LIGHT})");
+    println!("block light at glowstone / +1x : {glow_here}/{glow_near}");
+    println!();
+
+    // --- 4. Storage: persist everything the run touched. ---
     if let Err(e) = world.flush() {
         eprintln!("error: flushing world storage: {e}");
         return ExitCode::FAILURE;
@@ -212,6 +241,10 @@ fn run<B: KvBackend, G: ChunkGenerator>(world: World<B, G>, cfg: &Config) -> Exi
     println!(
         "  [{}] world generated & rendered",
         check(!surfaces.is_empty())
+    );
+    println!(
+        "  [{}] lighting computed (surface sky={sky_above}, glowstone block={glow_here})",
+        check(sky_above == MAX_LIGHT && glow_here == MAX_LIGHT)
     );
     println!("  [{}] player fell and landed on ground", check(landed_ok));
     println!("  [{}] world storage flushed", check(true));
