@@ -83,6 +83,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-redstone"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+]
+
+[[package]]
 name = "aether-server"
 version = "0.1.0"
 dependencies = [
