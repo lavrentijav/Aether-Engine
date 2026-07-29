@@ -67,6 +67,55 @@ impl ValueNoise {
         }
         sum / norm
     }
+
+    /// Hash a 3D lattice point to `[0, 1)`.
+    fn lattice3(&self, xi: i64, yi: i64, zi: i64) -> f64 {
+        let mut h = self
+            .seed
+            .wrapping_add((xi as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+            .wrapping_add((yi as u64).wrapping_mul(0x85eb_ca6b_13fe_a5e5))
+            .wrapping_add((zi as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f));
+        h ^= h >> 30;
+        h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        h ^= h >> 27;
+        h = h.wrapping_mul(0x94d0_49bb_1331_11eb);
+        h ^= h >> 31;
+        (h >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Sample the field at continuous `(x, y, z)` with cosine interpolation.
+    pub fn sample3(&self, x: f64, y: f64, z: f64) -> f64 {
+        let x0 = x.floor();
+        let y0 = y.floor();
+        let z0 = z.floor();
+        let (xi, yi, zi) = (x0 as i64, y0 as i64, z0 as i64);
+        let (sx, sy, sz) = (smooth(x - x0), smooth(y - y0), smooth(z - z0));
+
+        // Trilinear blend of the eight corner lattice values.
+        let c = |dx: i64, dy: i64, dz: i64| self.lattice3(xi + dx, yi + dy, zi + dz);
+        let x00 = lerp(c(0, 0, 0), c(1, 0, 0), sx);
+        let x10 = lerp(c(0, 1, 0), c(1, 1, 0), sx);
+        let x01 = lerp(c(0, 0, 1), c(1, 0, 1), sx);
+        let x11 = lerp(c(0, 1, 1), c(1, 1, 1), sx);
+        let y0b = lerp(x00, x10, sy);
+        let y1b = lerp(x01, x11, sy);
+        lerp(y0b, y1b, sz)
+    }
+
+    /// 3D fractal Brownian motion in `[0, 1]`.
+    pub fn fbm3(&self, x: f64, y: f64, z: f64, octaves: u32) -> f64 {
+        let mut freq = 1.0;
+        let mut amp = 1.0;
+        let mut sum = 0.0;
+        let mut norm = 0.0;
+        for _ in 0..octaves.max(1) {
+            sum += self.sample3(x * freq, y * freq, z * freq) * amp;
+            norm += amp;
+            freq *= 2.0;
+            amp *= 0.5;
+        }
+        sum / norm
+    }
 }
 
 #[inline]
@@ -108,5 +157,25 @@ mod tests {
         // Sampling exactly on a lattice point returns that point's value.
         let n = ValueNoise::new(7);
         assert!((n.sample(5.0, 9.0) - n.sample(5.0, 9.0)).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn fbm3_is_bounded_and_deterministic() {
+        let n = ValueNoise::new(99);
+        for i in 0..500 {
+            let (x, y, z) = (i as f64 * 0.13, i as f64 * -0.07, i as f64 * 0.21);
+            let v = n.fbm3(x, y, z, 3);
+            assert!((0.0..=1.0).contains(&v), "fbm3 out of range: {v}");
+            assert_eq!(v, ValueNoise::new(99).fbm3(x, y, z, 3), "not deterministic");
+        }
+    }
+
+    #[test]
+    fn fbm3_varies_along_y() {
+        // The 3D field must actually depend on y (not just x/z).
+        let n = ValueNoise::new(3);
+        let a = n.fbm3(1.5, 2.5, 3.5, 3);
+        let b = n.fbm3(1.5, 40.5, 3.5, 3);
+        assert_ne!(a, b);
     }
 }

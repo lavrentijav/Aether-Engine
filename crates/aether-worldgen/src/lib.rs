@@ -150,6 +150,8 @@ impl ChunkGenerator for FlatGenerator {
 pub struct NoiseGenerator {
     registry: BlockRegistry,
     noise: ValueNoise,
+    /// Independent 3D field used to carve caves.
+    cave_noise: ValueNoise,
     /// Average surface height.
     base_height: i32,
     /// Peak-to-trough amplitude added around `base_height`.
@@ -159,6 +161,8 @@ pub struct NoiseGenerator {
     /// Water fills up to this Y where terrain is lower.
     sea_level: i32,
     octaves: u32,
+    /// Whether to carve caves into the generated terrain.
+    caves: bool,
 }
 
 impl NoiseGenerator {
@@ -167,12 +171,21 @@ impl NoiseGenerator {
         Self {
             registry: BlockRegistry::new(),
             noise: ValueNoise::new(seed),
+            // Decorrelate caves from the surface with a mixed seed.
+            cave_noise: ValueNoise::new(seed ^ 0xcafe_d00d_5eed_1357),
             base_height: 64,
             amplitude: 24.0,
             scale: 1.0 / 96.0,
             sea_level: 62,
             octaves: 4,
+            caves: true,
         }
+    }
+
+    /// Enable or disable cave carving (on by default).
+    pub fn with_caves(mut self, caves: bool) -> Self {
+        self.caves = caves;
+        self
     }
 
     /// The surface height (world Y of the topmost solid block) at world column
@@ -183,6 +196,23 @@ impl NoiseGenerator {
             .fbm(wx as f64 * self.scale, wz as f64 * self.scale, self.octaves);
         // Map [0,1] -> [-amp/2, +amp/2] around base_height.
         self.base_height + ((n - 0.5) * self.amplitude).round() as i32
+    }
+
+    /// Whether block `(wx, wy, wz)` sits inside a cave (should be carved to air).
+    ///
+    /// A thin winding band of a stretched 3D noise field produces spaghetti-like
+    /// tunnels; the very bottom of the world is never carved so the bedrock
+    /// floor stays intact.
+    pub fn is_cave(&self, wx: i32, wy: i32, wz: i32) -> bool {
+        if !self.caves || wy <= 1 {
+            return false;
+        }
+        // Stretch the vertical axis so tunnels trend horizontal.
+        let s = 1.0 / 26.0;
+        let n = self
+            .cave_noise
+            .fbm3(wx as f64 * s, wy as f64 * s * 2.2, wz as f64 * s, 3);
+        (n - 0.5).abs() < 0.055
     }
 }
 
@@ -196,6 +226,11 @@ impl ChunkGenerator for NoiseGenerator {
                 let surface = self.height_at(wx, wz);
 
                 for y in 0..=surface {
+                    // Carve caves out of the interior (never the bedrock floor
+                    // or the surface block itself).
+                    if y > 0 && y < surface && self.is_cave(wx, y, wz) {
+                        continue;
+                    }
                     let block = if y == 0 {
                         ids::BEDROCK
                     } else if y == surface {
@@ -299,6 +334,73 @@ mod tests {
         for x in -50..50 {
             let h = g.height_at(x, x * 2);
             assert!((40..=90).contains(&h), "height {h} out of band at x={x}");
+        }
+    }
+
+    /// Count underground air pockets (carved caves) below the surface across a
+    /// chunk column, and confirm the bedrock floor survives.
+    fn underground_air_and_bedrock(col: &GeneratedColumn) -> (usize, bool) {
+        let mut air = 0;
+        let mut bedrock_ok = true;
+        for (lx, lz) in [(0usize, 0usize), (4, 11), (8, 8), (15, 3)] {
+            // Bedrock present at y=0.
+            let mut has_bottom = false;
+            let mut top = None;
+            for (cy, sc) in &col.sections {
+                for ly in 0..16 {
+                    let wy = *cy as i32 * 16 + ly as i32;
+                    let id = sc.get(lx, ly, lz);
+                    if wy == 0 && id == ids::BEDROCK {
+                        has_bottom = true;
+                    }
+                    if id != BlockStateId::AIR {
+                        top = Some(top.map_or(wy, |t: i32| t.max(wy)));
+                    }
+                }
+            }
+            if !has_bottom {
+                bedrock_ok = false;
+            }
+            // Count air strictly between bedrock and the surface.
+            if let Some(surface) = top {
+                for wy in 1..surface {
+                    let cy = wy.div_euclid(16) as i8;
+                    let ly = wy.rem_euclid(16) as usize;
+                    if let Some((_, sc)) = col.sections.iter().find(|(c, _)| *c == cy) {
+                        if sc.get(lx, ly, lz) == BlockStateId::AIR {
+                            air += 1;
+                        }
+                    } else {
+                        air += 1; // an empty section below the surface is carved air
+                    }
+                }
+            }
+        }
+        (air, bedrock_ok)
+    }
+
+    #[test]
+    fn caves_carve_interior_but_keep_bedrock() {
+        let g = NoiseGenerator::new(2024);
+        // Scan a few columns; caves are sparse per-column, so aggregate.
+        let mut total_air = 0;
+        for (cx, cz) in [(0, 0), (1, 0), (0, 1), (2, -1), (-1, 2)] {
+            let col = g.generate_column(cx, cz);
+            let (air, bedrock_ok) = underground_air_and_bedrock(&col);
+            assert!(bedrock_ok, "bedrock floor carved away at ({cx},{cz})");
+            total_air += air;
+        }
+        assert!(total_air > 0, "no caves were carved anywhere");
+    }
+
+    #[test]
+    fn caves_can_be_disabled() {
+        let g = NoiseGenerator::new(2024).with_caves(false);
+        for (cx, cz) in [(0, 0), (1, 0), (2, -1)] {
+            let col = g.generate_column(cx, cz);
+            let (air, bedrock_ok) = underground_air_and_bedrock(&col);
+            assert!(bedrock_ok);
+            assert_eq!(air, 0, "no interior air expected with caves off");
         }
     }
 
