@@ -10,7 +10,7 @@
 ---
 
 ### A. Current known problems (early alpha)
-1. **Gameplay subsystems unbuilt.** Storage, basic physics, worldgen, the core API and a flood-fill lighting engine (block + sky light per chunk column) exist, but redstone, ECS entities/AI and the full staged physics pipeline are not implemented yet. Lighting is computed synchronously per column — the async safe-point scheduler and cross-chunk horizontal bleed are still ahead, and the preview server still uses the `FullBright` fallback.
+1. **Gameplay subsystems unbuilt.** Storage, basic physics, worldgen, the core API, a flood-fill lighting engine (block + sky light per chunk column) and SoA entity storage (`aether-entity`) exist, but redstone, entity AI/navigation and the full staged physics pipeline are not implemented yet. Lighting is computed synchronously per column — the async safe-point scheduler and cross-chunk horizontal bleed are still ahead, and the preview server still uses the `FullBright` fallback.
 2. **SIMD parity only partially validated.** `Scalar / SSE4.2 / AVX2` paths are implemented and unit-tested; `AVX-512` is *detected* but routed to the AVX2 path — there is no native AVX-512 backend yet.
 3. **Determinism unproven.** Parallel subsystems must merge at Safe Points; the merge points are specified but not validated, and the work-stealing scheduler that would exercise them does not exist yet.
 4. **Experimental 1.8.9 server is unverified against a live client.** `aether-server` speaks protocol 47 in offline mode with no compression/encryption, and its framing is checked only against a raw socket client. A real Minecraft 1.8.9 client may still reject some packets (chunk-data format is the most likely gap). It binds to loopback by default and must not be exposed publicly.
