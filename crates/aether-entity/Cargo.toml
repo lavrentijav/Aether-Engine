@@ -1,0 +1,23 @@
+[package]
+name = "aether-entity"
+description = "Aether Engine Data-Oriented entity storage: SoA component columns with generational EntityIds and a SIMD-friendly batch integrate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aether-core = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "entities"
+harness = false
+test = false
+
+[lints]
+workspace = true

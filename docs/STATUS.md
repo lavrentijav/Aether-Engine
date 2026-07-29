@@ -6,7 +6,7 @@
 >
 > Legend: ✅ done · 🚧 in progress · 📋 planned · ❄️ deferred · ❌ cancelled.
 >
-> Last reviewed: 2026-07-28 · Spec: v1.1
+> Last reviewed: 2026-07-29 · Spec: v1.1
 
 ---
 
@@ -29,14 +29,19 @@ server a vanilla 1.8.9 client can connect to.
 | KV world storage (Fjall + Zstandard blobs, order-preserving keys) | ✅ |
 | `aether-convert`: Anvil `.mca` → KV migration (parallel, audited) | ✅ |
 | `aether-baseproxy`: live vanilla → core translation (network chunk sections, block states) | ✅ |
-| Basic physics: voxel AABB collision, movement + gravity (`aether-physics`) | ✅ |
-| Chunk generation: flat + value-noise terrain (`aether-worldgen`) | ✅ |
+| Basic physics: voxel AABB collision, movement + gravity, and a Cached Environment O(1) fast path for resting entities (`aether-physics`) | ✅ |
+| Chunk generation: flat + value-noise terrain, 3D-noise caves and clean-room procedural structures (dungeons/huts) (`aether-worldgen`) | ✅ |
 | Core API: `World` facade over storage/generation/physics (`aether-api`) | ✅ |
-| Runnable demo: `aether` binary (worldgen + physics + storage + telemetry) with TOML config | ✅ |
-| Player entity + `FullBright` lighting fallback (always max light) | ✅ |
+| Runnable demo: `aether` binary (worldgen + physics + lighting + storage + telemetry) with TOML config, plus an `aether stream` mode for outward infinite generation that saves on Ctrl+C | ✅ |
+| Player entity | ✅ |
+| Lighting: flood-fill block + sky light (`compute_light` / `World::light_column`); per-column, cross-chunk bleed still deferred. `FullBright` fallback kept for the preview server | ✅ |
+| SoA entity storage (`aether-entity`): generational `EntityId`, parallel component columns, batch integrate, plus a dense projectile/item ballistic batch (§9.4) | ✅ |
+| Flow-Field crowd navigation (`aether-ai`): shared-goal integration field + O(1) per-mob steering; cached A* still planned | ✅ |
+| Graph-based redstone (`aether-redstone`): compiled CSR Directed Dependency Graph + worklist signal solve; QC / exact delays / strict order deferred to Phase 2 | ✅ |
+| Background scheduler (`aether-sched`): dynamic shared-queue worker pool driving parallel column lighting (`World::light_region`), deterministic vs sequential | ✅ |
 | Experimental join server `aether-server` (1.8.9 / protocol 47, superflat, creative, full-bright) — protocol verified against a raw socket client, **not yet against a live client** | 🚧 Preview |
 | CI (build/test/clippy/fmt) + Criterion bench harness | ✅ |
-| Redstone / async lighting / entities / full staged physics | ❌ Not yet started |
+| Higher-level mob AI (behaviours, spawner) / full staged physics pipeline | ❌ Not yet started |
 
 ### 📋 What is planned
 Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
@@ -45,17 +50,18 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 - ✅ Cargo workspace + crate skeletons
 - ✅ Runtime SIMD dispatch trait & backends
 - ✅ CI (build, test, clippy, fmt) + Criterion benches
+- 🚧 QA stress fixtures (spec §16): Redstone Stress (100k), Entity Density (5k+AI), World Edit/Explosion (500k) ✅; Mass-Migration fixture 📋 (needs sample worlds)
 - 🚧 Telemetry hooks (Prometheus exporter ✅; Tracy client stubbed behind a feature)
 
 **Phase 1 — Core Engine MVP (70–75% Vanilla)**
 - ✅ SoA memory model: Sub-Chunk, AVX-Cell, Morton order, masks
-- ✅ Palette compression (u4/u8/u16 auto-expand) — Block-Entity arena still 📋
-- 🚧 Physics pipeline (basic collision + gravity ✅; SIMD broad-phase, cached environment 📋)
-- 📋 Graph-based redstone (DDG)
-- 📋 Async lighting (cell flood-fill) — `FullBright` fallback ships in the meantime
-- 📋 ECS entities + Flow-Field AI
+- ✅ Palette compression (u4/u8/u16 auto-expand) + Block-Entity arena (`aether-world::block_entity`)
+- 🚧 Physics pipeline (basic collision + gravity ✅; Cached Environment O(1) fast path ✅; SIMD broad-phase 📋)
+- 🚧 Graph-based redstone (DDG): compiled CSR graph + signal solve ✅ (`aether-redstone`); QC, exact delays, strict update order 📋 (Phase 2 deviations)
+- 🚧 Lighting (cell flood-fill): block + sky light ✅ (per-column); async safe-point merge + cross-chunk bleed 📋. `FullBright` fallback kept for the preview server
+- 🚧 ECS entities: SoA storage ✅ (`aether-entity`) + Flow-Field navigation ✅ (`aether-ai`); cached A* + batched spawner 📋
 - ✅ KV storage (Fjall + Zstd)
-- 📋 Per-world process isolation + work-stealing scheduler
+- 🚧 Background scheduler ✅ (`aether-sched` dynamic shared-queue pool + parallel `light_region`); per-world process isolation 📋
 
 **Phase 2 — Hardcore Mechanical Target (≥ 95% Vanilla)**
 - 📋 Cross-chunk Quasi-Connectivity redstone

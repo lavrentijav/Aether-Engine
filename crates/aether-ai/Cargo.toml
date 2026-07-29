@@ -1,0 +1,29 @@
+[package]
+name = "aether-ai"
+description = "Aether Engine crowd navigation: grid Flow-Field pathing (one integration field, O(1) per-mob steering) for the Data-Oriented entity engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { workspace = true }
+aether-entity = { workspace = true }
+aether-core = { workspace = true }
+
+[[bench]]
+name = "flowfield"
+harness = false
+test = false
+
+[[bench]]
+name = "crowd"
+harness = false
+test = false
+
+[lints]
+workspace = true

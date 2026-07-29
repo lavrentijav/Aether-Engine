@@ -248,9 +248,107 @@ pub fn step<V: BlockView>(view: &V, body: &mut Body, params: PhysicsParams) {
     body.velocity.y *= params.vertical_drag;
 }
 
+/// An event-driven cache of an entity's support state (spec §7.3).
+///
+/// Recomputing "what am I standing on?" every tick is wasted work for the many
+/// entities that are just standing still. [`CachedEnvironment`] remembers the
+/// feet cell and floor height an entity last rested on; while the entity stays
+/// in that cell and nothing nearby changes, [`step_cached`] advances it in
+/// **O(1)** with **zero** block queries.
+///
+/// The cache is invalidated automatically when the entity leaves its cell, and
+/// must be invalidated explicitly with [`CachedEnvironment::invalidate`] when a
+/// nearby block changes (a `BlockChangeEvent`) — otherwise a removed floor would
+/// go unnoticed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CachedEnvironment {
+    /// The feet block `(fx, fy, fz)` the cache is valid for, if any.
+    cell: Option<(i32, i32, i32)>,
+    /// Cached feet height while resting.
+    ground_y: f64,
+}
+
+// Below this per-axis horizontal speed an entity counts as "at rest" and is
+// eligible for the cached fast path.
+const REST_EPS: f64 = 1.0e-4;
+
+impl CachedEnvironment {
+    /// A fresh, empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Drop the cached support — call this when a block near the entity changes.
+    pub fn invalidate(&mut self) {
+        self.cell = None;
+    }
+
+    /// Whether the cache currently holds a valid support state.
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.cell.is_some()
+    }
+
+    /// The feet block an entity currently occupies.
+    #[inline]
+    fn feet_cell(body: &Body) -> (i32, i32, i32) {
+        let f = body.feet();
+        (f.x.floor() as i32, f.y.floor() as i32, f.z.floor() as i32)
+    }
+
+    #[inline]
+    fn at_rest(body: &Body) -> bool {
+        body.on_ground && body.velocity.x.abs() < REST_EPS && body.velocity.z.abs() < REST_EPS
+    }
+}
+
+/// Advance `body` one tick using the [`CachedEnvironment`] fast path when it can.
+///
+/// Returns `true` if the O(1) cached path was taken (no block queries), or
+/// `false` if it fell back to a full [`step`] (which also refreshes the cache).
+///
+/// The fast path applies only to an entity that is on the ground, essentially
+/// not moving horizontally, and still in the cell the cache was built for — the
+/// "standing or slowly shuffling" case §7.3 targets. Everything else takes the
+/// full swept-collision path.
+pub fn step_cached<V: BlockView>(
+    view: &V,
+    body: &mut Body,
+    params: PhysicsParams,
+    env: &mut CachedEnvironment,
+) -> bool {
+    let cell = CachedEnvironment::feet_cell(body);
+    if env.cell == Some(cell) && CachedEnvironment::at_rest(body) {
+        // Fast path: the entity is resting on known ground. Gravity is fully
+        // absorbed by the floor, so it stays put; only friction is applied.
+        // No `is_solid` calls at all.
+        body.velocity.y = 0.0;
+        body.velocity.x *= params.ground_friction;
+        body.velocity.z *= params.ground_friction;
+        body.on_ground = true;
+        // Keep the feet pinned to the cached surface (guards fp drift).
+        let drop = body.feet().y - env.ground_y;
+        if drop != 0.0 {
+            body.aabb = body.aabb.offset(Vec3::new(0.0, -drop, 0.0));
+        }
+        return true;
+    }
+
+    // Slow path: a full swept-collision step, then refresh the cache.
+    step(view, body, params);
+    if CachedEnvironment::at_rest(body) {
+        env.cell = Some(CachedEnvironment::feet_cell(body));
+        env.ground_y = body.feet().y;
+    } else {
+        env.invalidate();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     /// A flat solid floor at y < `floor`, air elsewhere.
     struct Floor {
@@ -338,5 +436,88 @@ mod tests {
         }
         assert!(body.on_ground);
         assert!((body.feet().y - 64.0).abs() < 1.0e-6);
+    }
+
+    /// A `BlockView` wrapper that counts `is_solid` calls.
+    struct Counting<'a, V: BlockView> {
+        inner: &'a V,
+        calls: Cell<u32>,
+    }
+    impl<'a, V: BlockView> Counting<'a, V> {
+        fn new(inner: &'a V) -> Self {
+            Self {
+                inner,
+                calls: Cell::new(0),
+            }
+        }
+    }
+    impl<V: BlockView> BlockView for Counting<'_, V> {
+        fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
+            self.calls.set(self.calls.get() + 1);
+            self.inner.is_solid(x, y, z)
+        }
+    }
+
+    #[test]
+    fn cached_environment_skips_block_queries_at_rest() {
+        let floor = Floor { floor: 64 };
+        let view = Counting::new(&floor);
+        let mut body = Body::player(Vec3::new(0.5, 70.0, 0.5));
+        let mut env = CachedEnvironment::new();
+
+        // Let it fall and settle; these steps use the slow path (block scans).
+        for _ in 0..200 {
+            step_cached(&view, &mut body, PhysicsParams::default(), &mut env);
+        }
+        assert!(body.on_ground);
+        assert!(env.is_valid());
+
+        // Now that it's resting, further steps must take the O(1) fast path with
+        // zero block queries.
+        let before = view.calls.get();
+        for _ in 0..100 {
+            let fast = step_cached(&view, &mut body, PhysicsParams::default(), &mut env);
+            assert!(fast, "expected the cached fast path while resting");
+        }
+        assert_eq!(view.calls.get(), before, "fast path queried blocks");
+        assert!((body.feet().y - 64.0).abs() < 1.0e-6);
+        assert!(body.on_ground);
+    }
+
+    #[test]
+    fn cached_step_matches_plain_step_while_falling() {
+        let floor = Floor { floor: 0 };
+        let mut a = Body::player(Vec3::new(0.5, 50.0, 0.5));
+        let mut b = a;
+        let mut env = CachedEnvironment::new();
+        // While airborne the cached step must behave exactly like the plain one.
+        for _ in 0..30 {
+            step(&floor, &mut a, PhysicsParams::default());
+            let fast = step_cached(&floor, &mut b, PhysicsParams::default(), &mut env);
+            assert!(!fast, "should not fast-path while falling");
+            assert_eq!(a.aabb, b.aabb);
+            assert_eq!(a.velocity, b.velocity);
+        }
+    }
+
+    #[test]
+    fn invalidate_forces_a_rescan() {
+        let floor = Floor { floor: 64 };
+        let view = Counting::new(&floor);
+        let mut body = Body::player(Vec3::new(0.5, 66.0, 0.5));
+        let mut env = CachedEnvironment::new();
+        for _ in 0..200 {
+            step_cached(&view, &mut body, PhysicsParams::default(), &mut env);
+        }
+        assert!(env.is_valid());
+        // A nearby block changed: the world invalidates the cache.
+        env.invalidate();
+        assert!(!env.is_valid());
+        let before = view.calls.get();
+        let fast = step_cached(&view, &mut body, PhysicsParams::default(), &mut env);
+        assert!(!fast, "invalidated cache must take the slow path");
+        assert!(view.calls.get() > before, "slow path should query blocks");
+        // ...and it re-validates once resting again.
+        assert!(env.is_valid());
     }
 }

@@ -30,5 +30,10 @@ name = "storage"
 harness = false
 test = false
 
+[[bench]]
+name = "lighting"
+harness = false
+test = false
+
 [lints]
 workspace = true

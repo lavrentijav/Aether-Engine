@@ -1,0 +1,22 @@
+[package]
+name = "aether-redstone"
+description = "Aether Engine graph-based redstone: a compiled Directed Dependency Graph in contiguous CSR memory with bounded worklist signal propagation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "redstone"
+harness = false
+test = false
+
+[lints]
+workspace = true

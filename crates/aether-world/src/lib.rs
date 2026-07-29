@@ -20,6 +20,7 @@
 //! feature) keyed by [`SubChunkKey`].
 
 pub mod block;
+pub mod block_entity;
 pub mod cell;
 pub mod light;
 pub mod palette;
@@ -28,8 +29,9 @@ pub mod storage;
 pub mod subchunk;
 
 pub use block::{BlockProperties, BlockStateId};
+pub use block_entity::{BlockEntity, BlockEntityArena};
 pub use cell::AvxCell;
-pub use light::{FullBright, LightView, MAX_LIGHT};
+pub use light::{compute_light, FullBright, LightGrid, LightMedium, LightView, MAX_LIGHT};
 pub use palette::{PackedArray, Palette};
 pub use registry::BlockRegistry;
 pub use storage::format::{FormatError, SubChunkKey};

@@ -16,21 +16,21 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - ✅ Cargo workspace skeleton (`aether-core`, `aether-world`, `aether-net`, `aether-convert`, `aether-telemetry`).
 - ✅ Runtime SIMD dispatch scaffold (`Scalar / SSE4.2 / AVX2` real; `AVX-512` detected → AVX2 path until validated).
 - ✅ CI: build + `cargo test` + `clippy` + `rustfmt` on x86-64.
-- 🚧 Benchmark harness (Criterion) in place (mask ops, storage round-trip); the four QA stress fixtures still to add.
+- 🚧 Benchmark harness (Criterion): mask ops, storage round-trip, lighting, entity integrate, flow-field and redstone benches in place. Three of the four QA stress fixtures from the spec now exist — Redstone Stress (100k ≈ 2.9 ms), Entity Density (5k + AI ≈ 34 µs), World Edit/Explosion (500k edits); the Mass-Migration fixture still needs sample worlds.
 - 🚧 Prometheus telemetry exporter wired; Tracy client stubbed behind a feature.
 
 ### Phase 1 — Core Engine MVP  *(Target: 70–75% Vanilla compliance)*
 *Goal: a world that ticks stably at 20 TPS with the hard performance work done.*
 
 - ✅ **Memory model**: `Sub-Chunk`, `AVX-Cell` (64-byte cache line), Morton (Z-order) indexing, SoA masks.
-- 🚧 **Palette compression** (u4 / u8 → u16 auto-expand) ✅; Block-Entity arena still 📋.
-- 🚧 **Physics engine**: basic voxel AABB collision + movement/gravity shipped (`aether-physics`); staged pipeline, SIMD broad-phase and the `Cached Environment` O(1) fast path still 📋.
-- 📋 **Redstone**: compiled Directed Dependency Graph (basic components; **QC deviations allowed** — see [Known Issues](KNOWN_ISSUES.md)).
-- 📋 **Lighting**: async cell-based flood-fill with safe-point merges. A `FullBright` fallback (always max light) ships in the meantime so worlds render.
-- 📋 **Entities/AI**: ECS storage, Flow-Field navigation, cached A\*, batched spawner. A single `Player` entity already exists for the preview server.
+- ✅ **Palette compression** (u4 / u8 → u16 auto-expand) and the **Block-Entity arena** (`aether-world::block_entity`: heavy per-block objects held outside the AVX-Cell in a slot arena keyed by Morton position).
+- 🚧 **Physics engine**: basic voxel AABB collision + movement/gravity ✅ and the `Cached Environment` O(1) fast path for resting entities ✅ (`aether-physics`). The full staged pipeline and the SIMD `SolidMask` broad-phase are still 📋.
+- 🚧 **Redstone**: compiled Directed Dependency Graph landed (`aether-redstone`: source/wire/repeater/lamp in contiguous CSR memory, bounded worklist signal solve). Quasi-Connectivity, exact repeater/comparator delays and strict directional update order remain **accepted Phase 1 deviations** — see [Known Issues](KNOWN_ISSUES.md).
+- 🚧 **Lighting**: flood-fill block + sky light landed (`aether-world::compute_light`, wired into the core API as `World::light_column`). Computes emitter block light and top-down sky light per chunk column with a BFS spread. The async safe-point scheduling and cross-chunk horizontal bleed are still 📋; `FullBright` remains the preview server's fallback.
+- 🚧 **Entities/AI**: SoA ECS storage (`aether-entity`: generational `EntityId`, parallel component columns, batch integrate) ✅ and grid **Flow-Field navigation** (`aether-ai`: shared-goal integration field, O(1) per-mob steering) ✅. A dense projectile/item ballistic SoA batch (§9.4) ships too. Cached single-agent A\* and the batched spawner are still 📋. A single `Player` entity also exists for the preview server.
 - ✅ **Storage**: Fjall KV backend, Zstandard sub-chunk blobs, order-preserving keys (+ in-memory backend for tests).
 - 📋 **World Engine** process model (one OS process per world).
-- 📋 Work-stealing scheduler for generation / save / lighting off the main tick.
+- 🚧 Background scheduler for generation / save / lighting off the main tick: a dynamic shared-queue worker pool (`aether-sched`) landed and drives parallel column lighting (`World::light_region`, verified deterministic vs sequential). True per-worker work-stealing deques are a later refinement.
 
 ### Phase 2 — Hardcore Mechanical Target  *(Target: ≥ 95% Vanilla compliance)*
 *Goal: close the deviation registry.*
@@ -58,7 +58,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - 📋 Ops hardening: graceful restart, backups, Grafana dashboards.
 
 ### Cross-cutting / continuous
-- 🚧 Runnable demo (`aether-demo`) that exercises worldgen + physics + storage + telemetry end-to-end.
+- 🚧 Runnable demo (`aether-demo`) that exercises worldgen + physics + lighting + storage + telemetry end-to-end, plus an `aether stream` mode: outward on-demand infinite generation that persists ring by ring and saves on Ctrl+C. Worldgen now includes 3D-noise caves and clean-room procedural structures (dungeons/huts).
 - 📋 Benchmark gates enforced in CI (regressions block merge).
 - 📋 Documentation kept in sync with each shipped subsystem.
 - ❄️ Non-x86 targets (ARM/NEON, RISC-V) — deferred until after x86-64 AVX2 baseline is stable.
