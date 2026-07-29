@@ -37,14 +37,16 @@ use aether_world::storage::format::SubChunkKey;
 use aether_world::{KvBackend, StorageError, SubChunk, WorldStorage};
 use aether_worldgen::ChunkGenerator;
 
+pub mod light;
 pub mod player;
 
 // Public re-exports: the pieces callers most often need alongside `World`.
 pub use aether_core::math::{Aabb, Vec3 as Vector3};
 pub use aether_physics::{Body, PhysicsParams};
 pub use aether_world::registry::ids as block_ids;
-pub use aether_world::{BlockProperties, BlockStateId, FullBright, LightView, MemStore};
+pub use aether_world::{BlockProperties, BlockStateId, FullBright, LightView, MemStore, MAX_LIGHT};
 pub use aether_worldgen::{FlatGenerator, NoiseGenerator};
+pub use light::ColumnLight;
 pub use player::{GameMode, Player};
 
 #[cfg(feature = "fjall")]
@@ -244,6 +246,53 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
     pub fn resident_sections(&self) -> usize {
         self.cache.read().unwrap().len()
     }
+
+    /// Compute real block + sky light for the chunk column `(cx, cz)`.
+    ///
+    /// Loads/generates the column, snapshots its opacity (opaque = solid) and
+    /// emission from the block registry, then runs the flood-fill light engine
+    /// over the full vertical band. The returned [`ColumnLight`] answers light
+    /// queries in world coordinates and replaces the [`FullBright`] fallback.
+    ///
+    /// Lighting is computed per column; horizontal bleed across chunk borders is
+    /// the registered Phase 1 deviation (closed in Phase 2).
+    pub fn light_column(&self, cx: i32, cz: i32) -> ColumnLight {
+        self.ensure_column(cx, cz);
+
+        let base_y = SCAN_CY_MIN as i32 * 16;
+        let sections = (SCAN_CY_MAX as i32 - SCAN_CY_MIN as i32 + 1) as usize;
+        let height = sections * 16;
+        let mut medium = light::ColumnMedium::new(16, height, 16);
+
+        {
+            let cache = self.cache.read().unwrap();
+            for cy in SCAN_CY_MIN..=SCAN_CY_MAX {
+                let key = SubChunkKey::new(cx, cy, cz);
+                let Some(sc) = cache.get(&key) else { continue };
+                if sc.is_empty() {
+                    continue; // all air: opaque=false, emission=0 (already default)
+                }
+                let y0 = (cy as i32 - SCAN_CY_MIN as i32) as usize * 16;
+                for ly in 0..16 {
+                    for lz in 0..16 {
+                        for lx in 0..16 {
+                            let id = sc.get(lx, ly, lz);
+                            if id == BlockStateId::AIR {
+                                continue;
+                            }
+                            let opaque = self.registry.props_of(id).solid;
+                            let emission = self.registry.emission_of(id);
+                            if opaque || emission > 0 {
+                                medium.set(lx, y0 + ly, lz, opaque, emission);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        ColumnLight::new(cx, cz, base_y, &medium)
+    }
 }
 
 /// Blocks with the `collision` property act as solid unit cubes for physics.
@@ -322,5 +371,58 @@ mod tests {
     fn height_hint_finds_surface() {
         let world = World::new(MemStore::new(), FlatGenerator::classic());
         assert_eq!(world.height_hint(0, 0), 3); // grass on top of the flat stack
+    }
+
+    #[test]
+    fn light_column_flat_world_sky() {
+        let world = World::new(MemStore::new(), FlatGenerator::classic());
+        let light = world.light_column(0, 0);
+        // Flat classic: bedrock@0, dirt@1-2, grass@3, air above.
+        // Open sky above the surface is fully lit...
+        assert_eq!(light.sky_light(0, 10, 0), MAX_LIGHT);
+        assert_eq!(light.sky_light(7, 4, 9), MAX_LIGHT);
+        // ...the opaque grass surface and everything under it is dark.
+        assert_eq!(light.sky_light(0, 3, 0), 0);
+        assert_eq!(light.sky_light(0, 1, 0), 0);
+        // No emitters -> no block light anywhere.
+        assert_eq!(light.block_light(0, 10, 0), 0);
+        assert_eq!(light.block_light(5, 4, 5), 0);
+    }
+
+    #[test]
+    fn light_column_reads_open_sky_above_band_and_outside_column() {
+        let world = World::new(MemStore::new(), FlatGenerator::classic());
+        let light = world.light_column(0, 0);
+        // Above the lit band -> open sky.
+        assert_eq!(light.sky_light(0, 100_000, 0), MAX_LIGHT);
+        // A different column's footprint is not covered -> dark for both.
+        assert_eq!(light.block_light(100, 10, 100), 0);
+        assert_eq!(light.sky_light(100, 4, 100), 0);
+        assert_eq!(light.column(), (0, 0));
+    }
+
+    #[test]
+    fn light_column_glowstone_radiates_block_light() {
+        let world = World::new(MemStore::new(), FlatGenerator::classic());
+        // Drop a glowstone into the air well above the surface.
+        world.set_block(4, 40, 4, "minecraft:glowstone").unwrap();
+        let light = world.light_column(0, 0);
+        assert_eq!(light.block_light(4, 40, 4), 15, "glowstone cell");
+        assert_eq!(light.block_light(5, 40, 4), 14, "adjacent air");
+        assert_eq!(light.block_light(4, 40, 6), 13, "two blocks away");
+        // Sky light above is unaffected.
+        assert_eq!(light.sky_light(4, 41, 4), MAX_LIGHT);
+    }
+
+    #[test]
+    fn light_column_torch_in_a_pocket() {
+        // Carve a small air pocket under the flat surface and light it with a
+        // torch: the torch cell is 14 and light falls off with distance.
+        let world = World::new(MemStore::new(), FlatGenerator::classic());
+        world.set_block(8, 40, 8, "minecraft:torch").unwrap();
+        let light = world.light_column(0, 0);
+        assert_eq!(light.block_light(8, 40, 8), 14);
+        assert_eq!(light.block_light(9, 40, 8), 13);
+        assert_eq!(light.block_light(8, 40, 10), 12);
     }
 }

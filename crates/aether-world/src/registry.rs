@@ -37,6 +37,10 @@ pub mod ids {
     pub const OAK_LEAVES: BlockStateId = BlockStateId(9);
     /// `minecraft:redstone_wire`
     pub const REDSTONE_WIRE: BlockStateId = BlockStateId(10);
+    /// `minecraft:torch` — a non-solid block-light source (emits 14).
+    pub const TORCH: BlockStateId = BlockStateId(11);
+    /// `minecraft:glowstone` — an opaque block-light source (emits 15).
+    pub const GLOWSTONE: BlockStateId = BlockStateId(12);
 }
 
 // (name, properties) in id order. Index == numeric id.
@@ -76,6 +80,17 @@ const SEED: &[(&str, BlockProperties)] = &[
             redstone: true,
         },
     ),
+    // Torch: non-solid light source (emission inferred as 14).
+    (
+        "minecraft:torch",
+        BlockProperties {
+            solid: false,
+            collision: false,
+            redstone: false,
+        },
+    ),
+    // Glowstone: full opaque cube *and* a light source (emission inferred 15).
+    ("minecraft:glowstone", BlockProperties::SOLID),
 ];
 
 /// Maps block names ⇄ dense engine ids and stores per-block properties and the
@@ -282,12 +297,19 @@ mod tests {
             ("minecraft:oak_log", ids::OAK_LOG),
             ("minecraft:oak_leaves", ids::OAK_LEAVES),
             ("minecraft:redstone_wire", ids::REDSTONE_WIRE),
+            ("minecraft:torch", ids::TORCH),
+            ("minecraft:glowstone", ids::GLOWSTONE),
         ] {
             assert_eq!(r.get(name), Some(id), "name->id for {name}");
             assert_eq!(r.name_of(id), Some(name), "id->name for {name}");
         }
         assert!(!r.props_of(ids::WATER).collision);
         assert!(r.props_of(ids::STONE).solid);
+        // Seeded emitters carry their light level.
+        assert_eq!(r.emission_of(ids::TORCH), 14);
+        assert_eq!(r.emission_of(ids::GLOWSTONE), 15);
+        assert!(!r.props_of(ids::TORCH).solid);
+        assert!(r.props_of(ids::GLOWSTONE).solid);
     }
 
     #[test]
