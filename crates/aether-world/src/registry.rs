@@ -78,11 +78,13 @@ const SEED: &[(&str, BlockProperties)] = &[
     ),
 ];
 
-/// Maps block names ⇄ dense engine ids and stores per-block properties.
+/// Maps block names ⇄ dense engine ids and stores per-block properties and the
+/// block-light level each block emits (0 for non-emitters).
 #[derive(Debug, Clone)]
 pub struct BlockRegistry {
     names: Vec<String>,
     props: Vec<BlockProperties>,
+    emission: Vec<u8>,
     lookup: HashMap<String, BlockStateId>,
 }
 
@@ -98,15 +100,71 @@ impl BlockRegistry {
         let mut r = Self {
             names: Vec::with_capacity(SEED.len()),
             props: Vec::with_capacity(SEED.len()),
+            emission: Vec::with_capacity(SEED.len()),
             lookup: HashMap::with_capacity(SEED.len()),
         };
         for (name, props) in SEED {
             let id = BlockStateId(r.names.len() as u32);
             r.names.push((*name).to_owned());
             r.props.push(*props);
+            r.emission.push(Self::infer_emission(name));
             r.lookup.insert((*name).to_owned(), id);
         }
         r
+    }
+
+    /// Infer the block-light level a block emits from its name (Vanilla-ish).
+    ///
+    /// Ordering matters: more specific families (`soul_*`, `redstone_torch`,
+    /// `sea_lantern`) are checked before the broader `torch` / `lantern` /
+    /// `fire` catches so they are not swallowed.
+    fn infer_emission(name: &str) -> u8 {
+        let base = name.split(':').next_back().unwrap_or(name);
+        // Full-strength (15) light sources.
+        if base.ends_with("lava")
+            || base == "glowstone"
+            || base == "sea_lantern"
+            || base == "jack_o_lantern"
+            || base == "shroomlight"
+            || base == "beacon"
+            || base == "conduit"
+            || base == "lantern"
+            || base == "campfire"
+            || base == "froglight"
+            || base.ends_with("_froglight")
+            || base == "lava_cauldron"
+        {
+            return 15;
+        }
+        // Soul variants burn dimmer (10) than their normal counterparts.
+        if base.starts_with("soul_") || base == "crying_obsidian" {
+            return 10;
+        }
+        // End rod.
+        if base == "end_rod" {
+            return 14;
+        }
+        // Redstone torches are weak; check before the generic torch match
+        // (covers both `redstone_torch` and `redstone_wall_torch`).
+        if base.contains("redstone") && base.contains("torch") {
+            return 7;
+        }
+        if base.contains("torch") {
+            return 14;
+        }
+        if base == "fire" {
+            return 15;
+        }
+        if base == "glow_lichen" || base == "sculk_catalyst" {
+            return 7;
+        }
+        if base == "magma_block" {
+            return 3;
+        }
+        if base == "brewing_stand" || base == "brown_mushroom" {
+            return 1;
+        }
+        0
     }
 
     /// Properties inferred for an unknown block name (same heuristic family the
@@ -157,6 +215,7 @@ impl BlockRegistry {
         let id = BlockStateId(self.names.len() as u32);
         self.names.push(name.to_owned());
         self.props.push(Self::infer(name));
+        self.emission.push(Self::infer_emission(name));
         self.lookup.insert(name.to_owned(), id);
         id
     }
@@ -183,6 +242,12 @@ impl BlockRegistry {
             .get(id.raw() as usize)
             .copied()
             .unwrap_or(BlockProperties::AIR)
+    }
+
+    /// Block-light level emitted by a block id (`0..=15`; 0 if out of range or
+    /// a non-emitter). Feeds the lighting engine's emission oracle.
+    pub fn emission_of(&self, id: BlockStateId) -> u8 {
+        self.emission.get(id.raw() as usize).copied().unwrap_or(0)
     }
 
     /// Number of registered blocks.
@@ -251,5 +316,36 @@ mod tests {
         assert!(gb.solid && gb.collision);
         // `*_stairs` contains "air" but must stay solid/collidable.
         assert!(BlockRegistry::infer("minecraft:oak_stairs").collision);
+    }
+
+    #[test]
+    fn emission_inference_matches_light_sources() {
+        let mut r = BlockRegistry::new();
+        // Seeded blocks emit nothing.
+        assert_eq!(r.emission_of(ids::STONE), 0);
+        assert_eq!(r.emission_of(ids::REDSTONE_WIRE), 0);
+        // Interned emitters get their Vanilla-ish level. `intern_full` is
+        // &mut, so intern first, then read the (&self) emission.
+        for (name, want) in [
+            ("minecraft:glowstone", 15u8),
+            ("minecraft:torch", 14),
+            ("minecraft:wall_torch", 14),
+            ("minecraft:lantern", 15),
+            ("minecraft:sea_lantern", 15),
+            ("minecraft:end_rod", 14),
+            ("minecraft:magma_block", 3),
+            ("minecraft:lava", 15),
+            ("minecraft:cobblestone", 0),
+            // More specific families win over broad matches.
+            ("minecraft:redstone_torch", 7),
+            ("minecraft:redstone_wall_torch", 7),
+            ("minecraft:soul_torch", 10),
+            ("minecraft:soul_lantern", 10),
+        ] {
+            let id = r.intern(name);
+            assert_eq!(r.emission_of(id), want, "emission for {name}");
+        }
+        // Out-of-range id is safe.
+        assert_eq!(r.emission_of(BlockStateId(9_999)), 0);
     }
 }
