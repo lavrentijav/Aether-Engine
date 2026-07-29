@@ -8,6 +8,7 @@ members = [
     "crates/aether-convert",
     "crates/aether-physics",
     "crates/aether-entity",
+    "crates/aether-ai",
     "crates/aether-worldgen",
     "crates/aether-baseproxy",
     "crates/aether-api",
@@ -35,6 +36,7 @@ aether-world = { path = "crates/aether-world", version = "0.1.0", default-featur
 aether-net = { path = "crates/aether-net", version = "0.1.0" }
 aether-physics = { path = "crates/aether-physics", version = "0.1.0" }
 aether-entity = { path = "crates/aether-entity", version = "0.1.0" }
+aether-ai = { path = "crates/aether-ai", version = "0.1.0" }
 aether-worldgen = { path = "crates/aether-worldgen", version = "0.1.0" }
 aether-baseproxy = { path = "crates/aether-baseproxy", version = "0.1.0" }
 aether-api = { path = "crates/aether-api", version = "0.1.0", default-features = false }
