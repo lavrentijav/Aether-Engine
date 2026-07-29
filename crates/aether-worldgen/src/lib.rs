@@ -68,6 +68,22 @@ impl<'a> ColumnBuilder<'a> {
             .set(lx, ly, lz, id, props);
     }
 
+    /// Force the block at local column coordinates `(lx, world_y, lz)` to air,
+    /// overwriting whatever terrain was there. Used to hollow out structures
+    /// (plain [`ColumnBuilder::set`] ignores air, so it cannot carve).
+    fn clear(&mut self, lx: usize, world_y: i32, lz: usize) {
+        let cy_i32 = world_y.div_euclid(16);
+        if cy_i32 < i8::MIN as i32 || cy_i32 > i8::MAX as i32 {
+            return;
+        }
+        let cy = cy_i32 as i8;
+        let ly = world_y.rem_euclid(16) as usize;
+        if let Some(sc) = self.sections.get_mut(&cy) {
+            sc.set(lx, ly, lz, BlockStateId::AIR, BlockProperties::AIR);
+        }
+        // A section that doesn't exist yet is already all air — nothing to do.
+    }
+
     fn finish(self) -> GeneratedColumn {
         GeneratedColumn {
             sections: self
@@ -163,6 +179,17 @@ pub struct NoiseGenerator {
     octaves: u32,
     /// Whether to carve caves into the generated terrain.
     caves: bool,
+    /// Whether to stamp clean-room procedural structures.
+    structures: bool,
+}
+
+/// A clean-room procedural structure kind (no Vanilla code or assets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Structure {
+    /// An underground cobblestone room with a spawner and chests.
+    Dungeon,
+    /// A small surface hut of planks and logs with a doorway.
+    Hut,
 }
 
 impl NoiseGenerator {
@@ -179,12 +206,19 @@ impl NoiseGenerator {
             sea_level: 62,
             octaves: 4,
             caves: true,
+            structures: true,
         }
     }
 
     /// Enable or disable cave carving (on by default).
     pub fn with_caves(mut self, caves: bool) -> Self {
         self.caves = caves;
+        self
+    }
+
+    /// Enable or disable procedural structures (on by default).
+    pub fn with_structures(mut self, structures: bool) -> Self {
+        self.structures = structures;
         self
     }
 
@@ -213,6 +247,126 @@ impl NoiseGenerator {
             .cave_noise
             .fbm3(wx as f64 * s, wy as f64 * s * 2.2, wz as f64 * s, 3);
         (n - 0.5).abs() < 0.055
+    }
+
+    /// Deterministically decide whether chunk `(cx, cz)` hosts a structure, and
+    /// where within its footprint. Returns `(kind, anchor_lx, anchor_lz)`.
+    ///
+    /// Roughly 1 chunk in 24 gets a structure; the anchor is kept clear of the
+    /// chunk border so the whole structure fits inside this column's `16×16`.
+    fn structure_at(&self, cx: i32, cz: i32) -> Option<(Structure, usize, usize)> {
+        if !self.structures {
+            return None;
+        }
+        // SplitMix64 over (cx, cz, seed).
+        let mut h = self
+            .noise
+            .seed()
+            .wrapping_add((cx as u64).wrapping_mul(0xff51_afd7_ed55_8ccd))
+            .wrapping_add((cz as u64).wrapping_mul(0xc4ce_b9fe_1a85_ec53))
+            ^ 0x5372_7563_7455_7265;
+        h ^= h >> 33;
+        h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        h ^= h >> 33;
+        if h % 24 != 0 {
+            return None;
+        }
+        // Anchor in 2..=8 so a 7-wide footprint stays within 0..16.
+        let ax = 2 + ((h >> 8) % 7) as usize;
+        let az = 2 + ((h >> 16) % 7) as usize;
+        let kind = if (h >> 24) & 1 == 0 {
+            Structure::Dungeon
+        } else {
+            Structure::Hut
+        };
+        Some((kind, ax, az))
+    }
+
+    /// Stamp this chunk's structure (if any) into the column builder.
+    fn stamp_structure(&self, cx: i32, cz: i32, b: &mut ColumnBuilder) {
+        let Some((kind, ax, az)) = self.structure_at(cx, cz) else {
+            return;
+        };
+        // Surface height at the structure's anchor block.
+        let surface = self.height_at(cx * 16 + ax as i32, cz * 16 + az as i32);
+        match kind {
+            Structure::Dungeon => self.stamp_dungeon(ax, az, surface, b),
+            Structure::Hut => self.stamp_hut(ax, az, surface, b),
+        }
+    }
+
+    /// A 7×5×7 hollow cobblestone room buried below the surface, with a spawner
+    /// and two chests on the floor.
+    fn stamp_dungeon(&self, ax: usize, az: usize, surface: i32, b: &mut ColumnBuilder) {
+        let ceiling = surface - 6;
+        let floor = ceiling - 4;
+        if floor < 2 {
+            return; // not enough room above bedrock
+        }
+        for dx in 0..7usize {
+            for dz in 0..7usize {
+                for dy in 0..5usize {
+                    let (lx, lz, wy) = (ax + dx, az + dz, floor + dy as i32);
+                    let shell = dx == 0 || dx == 6 || dz == 0 || dz == 6 || dy == 0 || dy == 4;
+                    if shell {
+                        // A patchy mix of cobblestone and mossy cobblestone.
+                        let mossy = (lx.wrapping_mul(31) ^ lz.wrapping_mul(17) ^ dy) & 3 == 0;
+                        let id = if mossy {
+                            ids::MOSSY_COBBLESTONE
+                        } else {
+                            ids::COBBLESTONE
+                        };
+                        b.set(lx, wy, lz, id);
+                    } else {
+                        b.clear(lx, wy, lz);
+                    }
+                }
+            }
+        }
+        // Spawner in the centre, chests beside it.
+        b.set(ax + 3, floor + 1, az + 3, ids::SPAWNER);
+        b.set(ax + 1, floor + 1, az + 1, ids::CHEST);
+        b.set(ax + 5, floor + 1, az + 5, ids::CHEST);
+    }
+
+    /// A small 5×5 plank hut with log corners, a plank roof and a doorway.
+    fn stamp_hut(&self, ax: usize, az: usize, surface: i32, b: &mut ColumnBuilder) {
+        let base = surface + 1;
+        // Floor.
+        for dx in 0..5usize {
+            for dz in 0..5usize {
+                b.set(ax + dx, base, az + dz, ids::OAK_PLANKS);
+            }
+        }
+        // Walls, height 3, with log corners and a doorway on the -Z face.
+        for dy in 1..4i32 {
+            for dx in 0..5usize {
+                for dz in 0..5usize {
+                    let perimeter = dx == 0 || dx == 4 || dz == 0 || dz == 4;
+                    if !perimeter {
+                        continue;
+                    }
+                    // Doorway: a 1-wide, 2-high gap in the middle of the -Z wall.
+                    let doorway = dz == 0 && dx == 2 && dy <= 2;
+                    if doorway {
+                        continue;
+                    }
+                    let corner = (dx == 0 || dx == 4) && (dz == 0 || dz == 4);
+                    let id = if corner {
+                        ids::OAK_LOG
+                    } else {
+                        ids::OAK_PLANKS
+                    };
+                    b.set(ax + dx, base + dy, az + dz, id);
+                }
+            }
+        }
+        // Flat plank roof.
+        for dx in 0..5usize {
+            for dz in 0..5usize {
+                b.set(ax + dx, base + 4, az + dz, ids::OAK_PLANKS);
+            }
+        }
     }
 }
 
@@ -254,6 +408,8 @@ impl ChunkGenerator for NoiseGenerator {
                 }
             }
         }
+        // Stamp any procedural structure last so it overrides terrain/water.
+        self.stamp_structure(cx, cz, &mut b);
         b.finish()
     }
 }
@@ -401,6 +557,69 @@ mod tests {
             let (air, bedrock_ok) = underground_air_and_bedrock(&col);
             assert!(bedrock_ok);
             assert_eq!(air, 0, "no interior air expected with caves off");
+        }
+    }
+
+    /// Distinct block ids present anywhere in a generated column.
+    fn ids_in_column(col: &GeneratedColumn) -> Vec<BlockStateId> {
+        let mut out = Vec::new();
+        for (_, sc) in &col.sections {
+            for &id in sc.palette().entries() {
+                if !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn structures_are_stamped() {
+        let g = NoiseGenerator::new(2024);
+        let mut found_dungeon = false;
+        let mut found_hut = false;
+        'outer: for cx in 0..60 {
+            for cz in -2..3 {
+                let Some((kind, _, _)) = g.structure_at(cx, cz) else {
+                    continue;
+                };
+                let present = ids_in_column(&g.generate_column(cx, cz));
+                match kind {
+                    Structure::Dungeon => {
+                        assert!(
+                            present.contains(&ids::COBBLESTONE)
+                                || present.contains(&ids::MOSSY_COBBLESTONE),
+                            "dungeon at ({cx},{cz}) has no cobblestone"
+                        );
+                        assert!(present.contains(&ids::SPAWNER), "dungeon has no spawner");
+                        assert!(present.contains(&ids::CHEST), "dungeon has no chest");
+                        found_dungeon = true;
+                    }
+                    Structure::Hut => {
+                        assert!(present.contains(&ids::OAK_PLANKS), "hut has no planks");
+                        assert!(present.contains(&ids::OAK_LOG), "hut has no log corners");
+                        found_hut = true;
+                    }
+                }
+                if found_dungeon && found_hut {
+                    break 'outer;
+                }
+            }
+        }
+        assert!(found_dungeon, "no dungeon stamped in the scanned range");
+        assert!(found_hut, "no hut stamped in the scanned range");
+    }
+
+    #[test]
+    fn structures_can_be_disabled() {
+        let g = NoiseGenerator::new(2024).with_structures(false);
+        for cx in 0..60 {
+            for cz in -2..3 {
+                let present = ids_in_column(&g.generate_column(cx, cz));
+                assert!(!present.contains(&ids::SPAWNER));
+                assert!(!present.contains(&ids::COBBLESTONE));
+                assert!(!present.contains(&ids::OAK_PLANKS));
+            }
         }
     }
 

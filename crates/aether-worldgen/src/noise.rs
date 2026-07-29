@@ -16,6 +16,12 @@ impl ValueNoise {
         Self { seed }
     }
 
+    /// The seed this field was built from.
+    #[inline]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
     /// Hash a lattice point to `[0, 1)`.
     fn lattice(&self, xi: i64, zi: i64) -> f64 {
         // SplitMix64-style avalanche over the mixed coordinates + seed.

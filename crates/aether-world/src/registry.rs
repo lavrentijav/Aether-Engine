@@ -41,6 +41,16 @@ pub mod ids {
     pub const TORCH: BlockStateId = BlockStateId(11);
     /// `minecraft:glowstone` — an opaque block-light source (emits 15).
     pub const GLOWSTONE: BlockStateId = BlockStateId(12);
+    /// `minecraft:cobblestone`
+    pub const COBBLESTONE: BlockStateId = BlockStateId(13);
+    /// `minecraft:oak_planks`
+    pub const OAK_PLANKS: BlockStateId = BlockStateId(14);
+    /// `minecraft:mossy_cobblestone`
+    pub const MOSSY_COBBLESTONE: BlockStateId = BlockStateId(15);
+    /// `minecraft:chest`
+    pub const CHEST: BlockStateId = BlockStateId(16);
+    /// `minecraft:spawner`
+    pub const SPAWNER: BlockStateId = BlockStateId(17);
 }
 
 // (name, properties) in id order. Index == numeric id.
@@ -91,6 +101,21 @@ const SEED: &[(&str, BlockProperties)] = &[
     ),
     // Glowstone: full opaque cube *and* a light source (emission inferred 15).
     ("minecraft:glowstone", BlockProperties::SOLID),
+    // Building blocks for clean-room procedural structures.
+    ("minecraft:cobblestone", BlockProperties::SOLID),
+    ("minecraft:oak_planks", BlockProperties::SOLID),
+    ("minecraft:mossy_cobblestone", BlockProperties::SOLID),
+    // Chest: collidable but not a full opaque cube.
+    (
+        "minecraft:chest",
+        BlockProperties {
+            solid: false,
+            collision: true,
+            redstone: false,
+        },
+    ),
+    // Mob spawner: a full solid block.
+    ("minecraft:spawner", BlockProperties::SOLID),
 ];
 
 /// Maps block names ⇄ dense engine ids and stores per-block properties and the
@@ -299,6 +324,11 @@ mod tests {
             ("minecraft:redstone_wire", ids::REDSTONE_WIRE),
             ("minecraft:torch", ids::TORCH),
             ("minecraft:glowstone", ids::GLOWSTONE),
+            ("minecraft:cobblestone", ids::COBBLESTONE),
+            ("minecraft:oak_planks", ids::OAK_PLANKS),
+            ("minecraft:mossy_cobblestone", ids::MOSSY_COBBLESTONE),
+            ("minecraft:chest", ids::CHEST),
+            ("minecraft:spawner", ids::SPAWNER),
         ] {
             assert_eq!(r.get(name), Some(id), "name->id for {name}");
             assert_eq!(r.name_of(id), Some(name), "id->name for {name}");
