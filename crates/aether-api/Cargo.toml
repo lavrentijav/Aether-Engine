@@ -18,6 +18,7 @@ aether-core = { workspace = true }
 aether-world = { workspace = true, default-features = false }
 aether-physics = { workspace = true }
 aether-worldgen = { workspace = true }
+aether-sched = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

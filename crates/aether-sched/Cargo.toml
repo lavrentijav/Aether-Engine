@@ -1,0 +1,22 @@
+[package]
+name = "aether-sched"
+description = "Aether Engine background scheduler: a dynamic shared-queue worker pool for running heavy work (generation, save, lighting) off the main tick."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "scheduler"
+harness = false
+test = false
+
+[lints]
+workspace = true

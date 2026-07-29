@@ -23,6 +23,7 @@ version = "0.1.0"
 dependencies = [
  "aether-core",
  "aether-physics",
+ "aether-sched",
  "aether-world",
  "aether-worldgen",
  "criterion",
@@ -87,6 +88,13 @@ dependencies = [
 
 [[package]]
 name = "aether-redstone"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+]
+
+[[package]]
+name = "aether-sched"
 version = "0.1.0"
 dependencies = [
  "criterion",

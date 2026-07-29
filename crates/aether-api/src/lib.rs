@@ -32,6 +32,7 @@ use std::sync::RwLock;
 
 use aether_core::math::Vec3;
 use aether_physics::{step, BlockView};
+use aether_sched::Scheduler;
 use aether_world::registry::BlockRegistry;
 use aether_world::storage::format::SubChunkKey;
 use aether_world::{KvBackend, StorageError, SubChunk, WorldStorage};
@@ -39,6 +40,8 @@ use aether_worldgen::ChunkGenerator;
 
 pub mod light;
 pub mod player;
+
+pub use aether_sched::Scheduler as WorkScheduler;
 
 // Public re-exports: the pieces callers most often need alongside `World`.
 pub use aether_core::math::{Aabb, Vec3 as Vector3};
@@ -293,6 +296,16 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
 
         ColumnLight::new(cx, cz, base_y, &medium)
     }
+
+    /// Light many chunk columns in parallel, off the main tick.
+    ///
+    /// Columns light independently, so the [`Scheduler`] fans them across its
+    /// worker pool and the result is identical to lighting them one by one —
+    /// the Safe-Point determinism the engine relies on. Results are returned in
+    /// the same order as `columns`.
+    pub fn light_region(&self, sched: &Scheduler, columns: &[(i32, i32)]) -> Vec<ColumnLight> {
+        sched.map(columns, |&(cx, cz)| self.light_column(cx, cz))
+    }
 }
 
 /// Blocks with the `collision` property act as solid unit cubes for physics.
@@ -412,6 +425,34 @@ mod tests {
         assert_eq!(light.block_light(4, 40, 6), 13, "two blocks away");
         // Sky light above is unaffected.
         assert_eq!(light.sky_light(4, 41, 4), MAX_LIGHT);
+    }
+
+    #[test]
+    fn light_region_parallel_matches_sequential() {
+        let world = World::new(MemStore::new(), NoiseGenerator::new(7));
+        let columns: Vec<(i32, i32)> = (-2..2)
+            .flat_map(|cx| (-2..2).map(move |cz| (cx, cz)))
+            .collect();
+        // Sequential reference.
+        let seq: Vec<_> = columns
+            .iter()
+            .map(|&(cx, cz)| world.light_column(cx, cz))
+            .collect();
+        // Parallel over the scheduler.
+        let sched = WorkScheduler::new(4);
+        let par = world.light_region(&sched, &columns);
+        assert_eq!(par.len(), seq.len());
+        for (p, s) in par.iter().zip(&seq) {
+            assert_eq!(p.column(), s.column());
+            // Compare a spread of samples across the band and footprint.
+            for &(lx, lz) in &[(0, 0), (7, 9), (15, 15)] {
+                for wy in [-32, 0, 64, 120] {
+                    let (wx, wz) = (p.column().0 * 16 + lx, p.column().1 * 16 + lz);
+                    assert_eq!(p.block_light(wx, wy, wz), s.block_light(wx, wy, wz));
+                    assert_eq!(p.sky_light(wx, wy, wz), s.sky_light(wx, wy, wz));
+                }
+            }
+        }
     }
 
     #[test]
