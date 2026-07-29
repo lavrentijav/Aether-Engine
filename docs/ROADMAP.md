@@ -27,7 +27,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - 🚧 **Physics engine**: basic voxel AABB collision + movement/gravity shipped (`aether-physics`); staged pipeline, SIMD broad-phase and the `Cached Environment` O(1) fast path still 📋.
 - 📋 **Redstone**: compiled Directed Dependency Graph (basic components; **QC deviations allowed** — see [Known Issues](KNOWN_ISSUES.md)).
 - 🚧 **Lighting**: flood-fill block + sky light landed (`aether-world::compute_light`, wired into the core API as `World::light_column`). Computes emitter block light and top-down sky light per chunk column with a BFS spread. The async safe-point scheduling and cross-chunk horizontal bleed are still 📋; `FullBright` remains the preview server's fallback.
-- 🚧 **Entities/AI**: SoA ECS storage landed (`aether-entity`: generational `EntityId`, parallel component columns, batch integrate). Flow-Field navigation, cached A\* and the batched spawner are still 📋. A single `Player` entity also exists for the preview server.
+- 🚧 **Entities/AI**: SoA ECS storage (`aether-entity`: generational `EntityId`, parallel component columns, batch integrate) ✅ and grid **Flow-Field navigation** (`aether-ai`: shared-goal integration field, O(1) per-mob steering) ✅. Cached single-agent A\* and the batched spawner are still 📋. A single `Player` entity also exists for the preview server.
 - ✅ **Storage**: Fjall KV backend, Zstandard sub-chunk blobs, order-preserving keys (+ in-memory backend for tests).
 - 📋 **World Engine** process model (one OS process per world).
 - 📋 Work-stealing scheduler for generation / save / lighting off the main tick.
