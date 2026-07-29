@@ -10,7 +10,7 @@
 ---
 
 ### A. Current known problems (early alpha)
-1. **Gameplay subsystems unbuilt.** Storage, basic physics, worldgen, the core API, a flood-fill lighting engine (block + sky light per chunk column), SoA entity storage (`aether-entity`) and Flow-Field crowd navigation (`aether-ai`) exist, but redstone, higher-level mob AI (behaviours, spawner, cached A\*) and the full staged physics pipeline are not implemented yet. Lighting is computed synchronously per column — the async safe-point scheduler and cross-chunk horizontal bleed are still ahead, and the preview server still uses the `FullBright` fallback.
+1. **Gameplay subsystems partial.** Storage, basic physics, worldgen, the core API, a flood-fill lighting engine (block + sky light per chunk column), SoA entity storage (`aether-entity`), Flow-Field crowd navigation (`aether-ai`) and a graph-based redstone engine (`aether-redstone`) exist, but higher-level mob AI (behaviours, spawner, cached A\*) and the full staged physics pipeline are not implemented yet. Redstone computes steady-state power but does not yet model QC, exact repeater/comparator delays or strict update order (see the registry below). Lighting is computed synchronously per column — the async safe-point scheduler and cross-chunk horizontal bleed are still ahead, and the preview server still uses the `FullBright` fallback.
 2. **SIMD parity only partially validated.** `Scalar / SSE4.2 / AVX2` paths are implemented and unit-tested; `AVX-512` is *detected* but routed to the AVX2 path — there is no native AVX-512 backend yet.
 3. **Determinism unproven.** Parallel subsystems must merge at Safe Points; the merge points are specified but not validated, and the work-stealing scheduler that would exercise them does not exist yet.
 4. **Experimental 1.8.9 server is unverified against a live client.** `aether-server` speaks protocol 47 in offline mode with no compression/encryption, and its framing is checked only against a raw socket client. A real Minecraft 1.8.9 client may still reject some packets (chunk-data format is the most likely gap). It binds to loopback by default and must not be exposed publicly.
@@ -20,7 +20,7 @@ These are **not bugs** in Phase 1 — they are documented, temporary compatibili
 
 | Subsystem | Phase 1 deviation | Phase 2 target |
 |-----------|-------------------|----------------|
-| **Redstone** | Quasi-Connectivity (QC) ignored across inactive chunk borders | Full dependency graph with cross-chunk QC |
+| **Redstone** | Steady-state signal only: Quasi-Connectivity ignored, no exact repeater/comparator tick delays, no strict directional update order | Full dependency graph with cross-chunk QC, tick-accurate delays and strict update order |
 | **Fluids** | Parallel simplified spread; Java tick timing not preserved | Deterministic fluid layers 1:1 with Vanilla |
 | **Update order** | Simultaneous redstone updates ordered by the parallel graph | Strict deterministic directional-priority queue |
 | **Entity spawn** | Batched async spawn every N ticks | Per-tick precise spawner |

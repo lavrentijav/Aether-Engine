@@ -37,9 +37,10 @@ server a vanilla 1.8.9 client can connect to.
 | Lighting: flood-fill block + sky light (`compute_light` / `World::light_column`); per-column, cross-chunk bleed still deferred. `FullBright` fallback kept for the preview server | ✅ |
 | SoA entity storage (`aether-entity`): generational `EntityId`, parallel component columns, batch integrate | ✅ |
 | Flow-Field crowd navigation (`aether-ai`): shared-goal integration field + O(1) per-mob steering; cached A* still planned | ✅ |
+| Graph-based redstone (`aether-redstone`): compiled CSR Directed Dependency Graph + worklist signal solve; QC / exact delays / strict order deferred to Phase 2 | ✅ |
 | Experimental join server `aether-server` (1.8.9 / protocol 47, superflat, creative, full-bright) — protocol verified against a raw socket client, **not yet against a live client** | 🚧 Preview |
 | CI (build/test/clippy/fmt) + Criterion bench harness | ✅ |
-| Redstone / entity AI & navigation / full staged physics | ❌ Not yet started |
+| Higher-level mob AI (behaviours, spawner) / full staged physics pipeline | ❌ Not yet started |
 
 ### 📋 What is planned
 Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
@@ -54,7 +55,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 - ✅ SoA memory model: Sub-Chunk, AVX-Cell, Morton order, masks
 - ✅ Palette compression (u4/u8/u16 auto-expand) — Block-Entity arena still 📋
 - 🚧 Physics pipeline (basic collision + gravity ✅; SIMD broad-phase, cached environment 📋)
-- 📋 Graph-based redstone (DDG)
+- 🚧 Graph-based redstone (DDG): compiled CSR graph + signal solve ✅ (`aether-redstone`); QC, exact delays, strict update order 📋 (Phase 2 deviations)
 - 🚧 Lighting (cell flood-fill): block + sky light ✅ (per-column); async safe-point merge + cross-chunk bleed 📋. `FullBright` fallback kept for the preview server
 - 🚧 ECS entities: SoA storage ✅ (`aether-entity`) + Flow-Field navigation ✅ (`aether-ai`); cached A* + batched spawner 📋
 - ✅ KV storage (Fjall + Zstd)

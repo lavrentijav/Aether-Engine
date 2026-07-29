@@ -25,7 +25,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - ✅ **Memory model**: `Sub-Chunk`, `AVX-Cell` (64-byte cache line), Morton (Z-order) indexing, SoA masks.
 - 🚧 **Palette compression** (u4 / u8 → u16 auto-expand) ✅; Block-Entity arena still 📋.
 - 🚧 **Physics engine**: basic voxel AABB collision + movement/gravity shipped (`aether-physics`); staged pipeline, SIMD broad-phase and the `Cached Environment` O(1) fast path still 📋.
-- 📋 **Redstone**: compiled Directed Dependency Graph (basic components; **QC deviations allowed** — see [Known Issues](KNOWN_ISSUES.md)).
+- 🚧 **Redstone**: compiled Directed Dependency Graph landed (`aether-redstone`: source/wire/repeater/lamp in contiguous CSR memory, bounded worklist signal solve). Quasi-Connectivity, exact repeater/comparator delays and strict directional update order remain **accepted Phase 1 deviations** — see [Known Issues](KNOWN_ISSUES.md).
 - 🚧 **Lighting**: flood-fill block + sky light landed (`aether-world::compute_light`, wired into the core API as `World::light_column`). Computes emitter block light and top-down sky light per chunk column with a BFS spread. The async safe-point scheduling and cross-chunk horizontal bleed are still 📋; `FullBright` remains the preview server's fallback.
 - 🚧 **Entities/AI**: SoA ECS storage (`aether-entity`: generational `EntityId`, parallel component columns, batch integrate) ✅ and grid **Flow-Field navigation** (`aether-ai`: shared-goal integration field, O(1) per-mob steering) ✅. Cached single-agent A\* and the batched spawner are still 📋. A single `Player` entity also exists for the preview server.
 - ✅ **Storage**: Fjall KV backend, Zstandard sub-chunk blobs, order-preserving keys (+ in-memory backend for tests).
