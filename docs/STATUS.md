@@ -29,7 +29,7 @@ server a vanilla 1.8.9 client can connect to.
 | KV world storage (Fjall + Zstandard blobs, order-preserving keys) | ✅ |
 | `aether-convert`: Anvil `.mca` → KV migration (parallel, audited) | ✅ |
 | `aether-baseproxy`: live vanilla → core translation (network chunk sections, block states) | ✅ |
-| Basic physics: voxel AABB collision, movement + gravity (`aether-physics`) | ✅ |
+| Basic physics: voxel AABB collision, movement + gravity, and a Cached Environment O(1) fast path for resting entities (`aether-physics`) | ✅ |
 | Chunk generation: flat + value-noise terrain (`aether-worldgen`) | ✅ |
 | Core API: `World` facade over storage/generation/physics (`aether-api`) | ✅ |
 | Runnable demo: `aether` binary (worldgen + physics + storage + telemetry) with TOML config | ✅ |
@@ -56,7 +56,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 **Phase 1 — Core Engine MVP (70–75% Vanilla)**
 - ✅ SoA memory model: Sub-Chunk, AVX-Cell, Morton order, masks
 - ✅ Palette compression (u4/u8/u16 auto-expand) — Block-Entity arena still 📋
-- 🚧 Physics pipeline (basic collision + gravity ✅; SIMD broad-phase, cached environment 📋)
+- 🚧 Physics pipeline (basic collision + gravity ✅; Cached Environment O(1) fast path ✅; SIMD broad-phase 📋)
 - 🚧 Graph-based redstone (DDG): compiled CSR graph + signal solve ✅ (`aether-redstone`); QC, exact delays, strict update order 📋 (Phase 2 deviations)
 - 🚧 Lighting (cell flood-fill): block + sky light ✅ (per-column); async safe-point merge + cross-chunk bleed 📋. `FullBright` fallback kept for the preview server
 - 🚧 ECS entities: SoA storage ✅ (`aether-entity`) + Flow-Field navigation ✅ (`aether-ai`); cached A* + batched spawner 📋
