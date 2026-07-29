@@ -57,6 +57,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-entity"
+version = "0.1.0"
+dependencies = [
+ "aether-core",
+ "criterion",
+]
+
+[[package]]
 name = "aether-net"
 version = "0.1.0"
 
