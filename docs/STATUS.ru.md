@@ -49,6 +49,7 @@
 - ✅ Cargo-воркспейс + каркасы крейтов
 - ✅ Трейт runtime-диспетчеризации SIMD и бэкенды
 - ✅ CI (сборка, тесты, clippy, fmt) + бенчи Criterion
+- 🚧 QA стресс-фикстуры (ТЗ §16): Redstone Stress (100k), Entity Density (5k+AI), World Edit/Explosion (500k) ✅; фикстура Mass-Migration 📋 (нужны образцы миров)
 - 🚧 Хуки телеметрии (экспортер Prometheus ✅; клиент Tracy — заглушка за фичей)
 
 **Фаза 1 — Core Engine MVP (70–75% Vanilla)**

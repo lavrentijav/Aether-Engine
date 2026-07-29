@@ -49,6 +49,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 - ✅ Cargo workspace + crate skeletons
 - ✅ Runtime SIMD dispatch trait & backends
 - ✅ CI (build, test, clippy, fmt) + Criterion benches
+- 🚧 QA stress fixtures (spec §16): Redstone Stress (100k), Entity Density (5k+AI), World Edit/Explosion (500k) ✅; Mass-Migration fixture 📋 (needs sample worlds)
 - 🚧 Telemetry hooks (Prometheus exporter ✅; Tracy client stubbed behind a feature)
 
 **Phase 1 — Core Engine MVP (70–75% Vanilla)**

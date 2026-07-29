@@ -16,7 +16,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - ✅ Cargo workspace skeleton (`aether-core`, `aether-world`, `aether-net`, `aether-convert`, `aether-telemetry`).
 - ✅ Runtime SIMD dispatch scaffold (`Scalar / SSE4.2 / AVX2` real; `AVX-512` detected → AVX2 path until validated).
 - ✅ CI: build + `cargo test` + `clippy` + `rustfmt` on x86-64.
-- 🚧 Benchmark harness (Criterion) in place (mask ops, storage round-trip); the four QA stress fixtures still to add.
+- 🚧 Benchmark harness (Criterion): mask ops, storage round-trip, lighting, entity integrate, flow-field and redstone benches in place. Three of the four QA stress fixtures from the spec now exist — Redstone Stress (100k ≈ 2.9 ms), Entity Density (5k + AI ≈ 34 µs), World Edit/Explosion (500k edits); the Mass-Migration fixture still needs sample worlds.
 - 🚧 Prometheus telemetry exporter wired; Tracy client stubbed behind a feature.
 
 ### Phase 1 — Core Engine MVP  *(Target: 70–75% Vanilla compliance)*

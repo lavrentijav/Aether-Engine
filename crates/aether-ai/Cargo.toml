@@ -12,9 +12,16 @@ authors.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true }
+aether-entity = { workspace = true }
+aether-core = { workspace = true }
 
 [[bench]]
 name = "flowfield"
+harness = false
+test = false
+
+[[bench]]
+name = "crowd"
 harness = false
 test = false
 

@@ -17,7 +17,7 @@ Aether разрабатывается по модели **поэтапной п�
 - ✅ Каркас Cargo-воркспейса (`aether-core`, `aether-world`, `aether-net`, `aether-convert`, `aether-telemetry`).
 - ✅ Каркас runtime-диспетчеризации SIMD (`Scalar / SSE4.2 / AVX2` реально; `AVX-512` детектится → путь AVX2 до валидации).
 - ✅ CI: сборка + `cargo test` + `clippy` + `rustfmt` на x86-64.
-- 🚧 Бенчмарк-харнесс (Criterion) готов (маски, round-trip хранилища); четыре QA-фикстуры ещё предстоит добавить.
+- 🚧 Бенчмарк-харнесс (Criterion): маски, round-trip хранилища, освещение, интеграция сущностей, flow-field и редстоун. Три из четырёх QA-фикстур из ТЗ уже есть — Redstone Stress (100k ≈ 2.9 мс), Entity Density (5k + AI ≈ 34 мкс), World Edit/Explosion (500k правок); фикстура Mass-Migration ещё требует образцов миров.
 - 🚧 Экспортер телеметрии Prometheus вшит; клиент Tracy — заглушка за фичей.
 
 ### Фаза 1 — Core Engine MVP  *(Цель: 70–75% совместимости с Vanilla)*

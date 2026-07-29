@@ -44,6 +44,16 @@ fn bench_redstone(c: &mut Criterion) {
             black_box(g.power(sources[0]))
         })
     });
+
+    // Spec §16 QA fixture 1 — Redstone Stress Test: ~100k active components,
+    // target ≤ 5 ms per re-solve.
+    let (mut big, big_sources) = grid(317); // ~100.5k nodes
+    c.bench_function("qa_redstone_stress_100k", |b| {
+        b.iter(|| {
+            big.set_source(big_sources[0], 15);
+            black_box(big.power(big_sources[0]))
+        })
+    });
 }
 
 criterion_group!(benches, bench_redstone);
