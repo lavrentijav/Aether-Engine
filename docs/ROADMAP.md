@@ -23,7 +23,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 *Goal: a world that ticks stably at 20 TPS with the hard performance work done.*
 
 - ✅ **Memory model**: `Sub-Chunk`, `AVX-Cell` (64-byte cache line), Morton (Z-order) indexing, SoA masks.
-- 🚧 **Palette compression** (u4 / u8 → u16 auto-expand) ✅; Block-Entity arena still 📋.
+- ✅ **Palette compression** (u4 / u8 → u16 auto-expand) and the **Block-Entity arena** (`aether-world::block_entity`: heavy per-block objects held outside the AVX-Cell in a slot arena keyed by Morton position).
 - 🚧 **Physics engine**: basic voxel AABB collision + movement/gravity ✅ and the `Cached Environment` O(1) fast path for resting entities ✅ (`aether-physics`). The full staged pipeline and the SIMD `SolidMask` broad-phase are still 📋.
 - 🚧 **Redstone**: compiled Directed Dependency Graph landed (`aether-redstone`: source/wire/repeater/lamp in contiguous CSR memory, bounded worklist signal solve). Quasi-Connectivity, exact repeater/comparator delays and strict directional update order remain **accepted Phase 1 deviations** — see [Known Issues](KNOWN_ISSUES.md).
 - 🚧 **Lighting**: flood-fill block + sky light landed (`aether-world::compute_light`, wired into the core API as `World::light_column`). Computes emitter block light and top-down sky light per chunk column with a BFS spread. The async safe-point scheduling and cross-chunk horizontal bleed are still 📋; `FullBright` remains the preview server's fallback.

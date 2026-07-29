@@ -55,7 +55,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 
 **Phase 1 — Core Engine MVP (70–75% Vanilla)**
 - ✅ SoA memory model: Sub-Chunk, AVX-Cell, Morton order, masks
-- ✅ Palette compression (u4/u8/u16 auto-expand) — Block-Entity arena still 📋
+- ✅ Palette compression (u4/u8/u16 auto-expand) + Block-Entity arena (`aether-world::block_entity`)
 - 🚧 Physics pipeline (basic collision + gravity ✅; Cached Environment O(1) fast path ✅; SIMD broad-phase 📋)
 - 🚧 Graph-based redstone (DDG): compiled CSR graph + signal solve ✅ (`aether-redstone`); QC, exact delays, strict update order 📋 (Phase 2 deviations)
 - 🚧 Lighting (cell flood-fill): block + sky light ✅ (per-column); async safe-point merge + cross-chunk bleed 📋. `FullBright` fallback kept for the preview server
