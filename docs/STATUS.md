@@ -61,7 +61,11 @@ server a vanilla 1.8.9 client can connect to.
 | Command tree declared at join ("Declare Commands"), so the server's commands complete and colour in a real client | ✅ |
 | Shape updates when a neighbour changes: fences, walls, panes and stair corners settle both ways, not only towards a block that already existed | ✅ |
 | The vanilla generator serves a live join — 289 columns in ~21 s cold at view radius 8, inside five seconds once cached | ✅ |
-| Vanilla surface rules interpreted from the pack: grass over dirt over stone, deepslate, a bedrock floor, sand and gravel under water (four decoration-only conditions stubbed — see [Known Issues](KNOWN_ISSUES.md)) | 🚧 Preview |
+| Vanilla surface rules interpreted from the pack, all conditions including `temperature`, `steep`, `hole` and badlands banding — 99.9998% of blocks against the game's own surface stage | ✅ |
+| Vanilla carvers (caves, canyons, extra-underground caves) — matched against the game's carver stage | ✅ |
+| Vanilla decoration from the pack's placed features: ores, trees, grass and flowers, sugar cane, kelp and seagrass, lakes, springs, corals, icebergs… — vanilla-like, 99.7% of blocks against a vanilla server world, not position-exact | 🚧 Preview |
+| Per-section biome ids (4×4×4 quart grid) exposed on `GeneratedColumn` and kept by the column cache; the overworld biome table is built in, `biome_data` optional | ✅ |
+| Biomes on the wire: the server still registers one biome and sends biome 0 — see [Known Issues A.8](KNOWN_ISSUES.md) | ❌ |
 | Disk cache for unmodified generated columns, aged out after a day and swept above a cap — never a source of truth, every entry reproducible from the seed (`/cache`) | ✅ |
 | A block is refused where it would be placed inside a player, their own or anyone else's | ✅ |
 | Mining pays by scarcity, only for generator-placed blocks — a position the journal has never seen filled — so place-and-break is not a coin press | ✅ |
@@ -87,8 +91,8 @@ server a vanilla 1.8.9 client can connect to.
 | Player inventories: full 46 slots, per-stack identity, saved to the world store on change and restored on join (`/inv`) | ✅ |
 | Economy in PostgreSQL — balances, `/pay`, listings, auction (`/sell` `/market` `/buy` `/listings` `/unlist`), operator grants (`/econ give`) | ✅ |
 | Economy integrity: every trade in one transaction, `SELECT … FOR UPDATE` on listings, `CHECK (balance >= 0)` | ✅ |
-| Vanilla terrain generation — noise stage bit-exact against the game (1,179,648/1,179,648 blocks), selectable via `worldgen_data` | 🚧 Preview |
-| …but ~10 s per column, so the server ships on the noise generator; and no surface rules yet, so it is bare stone. See [Known Issues A.8](KNOWN_ISSUES.md) | ❌ |
+| Vanilla terrain generation — noise stage bit-exact against the game (1,179,648/1,179,648 blocks); the default whenever `worldgen_data` is set, ~45 ms noise + ~170 ms per full decorated column | ✅ |
+| Structures, geodes, dungeons, fossils, dripstone and sculk are not generated. See [Known Issues A.8](KNOWN_ISSUES.md) | ❌ |
 | CI (build/test/clippy/fmt) + Criterion bench harness | ✅ |
 | Redstone / async lighting / entities / full staged physics | ❌ Not yet started |
 
