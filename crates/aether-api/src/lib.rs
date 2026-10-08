@@ -28,6 +28,7 @@
 //! physics and stream chunks — it can be shared across the tick's worker pool.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use aether_core::math::Vec3;
@@ -79,6 +80,33 @@ pub struct SnapshotPolicy {
     pub on_rebuild: Box<dyn Fn(SubChunkKey, usize) + Send + Sync>,
 }
 
+/// A column's materialization latch, and when it was last used.
+///
+/// The `bool` is "this column is in the cache"; the `Mutex` is what makes a
+/// late arrival *wait* for the thread that is still generating rather than
+/// racing ahead and reading air out of the not-yet-populated cache.
+///
+/// Holding an `Arc` of it pins the column: [`World::unload`] leaves alone
+/// every column whose latch anyone but the world itself holds, so a reader
+/// or a writer keeps its own clone until it is done with the cache.
+struct Latch {
+    materialized: Mutex<bool>,
+    /// The [`World::unload`] sweep during which the column was last touched.
+    last_used: AtomicU64,
+}
+
+/// What one [`World::unload`] sweep did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnloadStats {
+    /// Columns unloaded because no player needs them.
+    pub unneeded: usize,
+    /// Columns unloaded, least recently used first, to get back within the
+    /// budget.
+    pub over_budget: usize,
+    /// Columns resident after the sweep.
+    pub resident: usize,
+}
+
 /// A live world: block access, on-demand generation and physics over a
 /// [`KvBackend`] and a [`ChunkGenerator`].
 pub struct World<B: KvBackend, G: ChunkGenerator> {
@@ -93,12 +121,12 @@ pub struct World<B: KvBackend, G: ChunkGenerator> {
     registry: RwLock<BlockRegistry>,
     cache: RwLock<HashMap<SubChunkKey, SubChunk>>,
     dirty: RwLock<HashSet<SubChunkKey>>,
-    /// Per-column materialization latch. The `bool` is "this column is in the
-    /// cache"; the `Mutex` is what makes a late arrival *wait* for the thread
-    /// that is still generating rather than racing ahead and reading air out
-    /// of the not-yet-populated cache. Keyed per column so unrelated columns
-    /// still generate in parallel.
-    columns: RwLock<HashMap<(i32, i32), Arc<Mutex<bool>>>>,
+    /// Per-column materialization latch: see [`Latch`]. Keyed per column so
+    /// unrelated columns still generate in parallel. An entry exists exactly
+    /// while the column may be resident; [`World::unload`] removes both.
+    columns: RwLock<HashMap<(i32, i32), Arc<Latch>>>,
+    /// The current [`World::unload`] sweep, stamped on each column touched.
+    sweep: AtomicU64,
     params: PhysicsParams,
     snapshots: Option<SnapshotPolicy>,
 }
@@ -155,6 +183,7 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             cache: RwLock::new(HashMap::new()),
             dirty: RwLock::new(HashSet::new()),
             columns: RwLock::new(HashMap::new()),
+            sweep: AtomicU64::new(0),
             params: PhysicsParams::default(),
             snapshots: None,
         }
@@ -216,24 +245,38 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
     }
 
     /// Ensure the chunk column `(cx, cz)` is present in the cache, loading it
-    /// from storage or generating (and persisting) it on first touch.
-    fn ensure_column(&self, cx: i32, cz: i32) {
+    /// from storage or generating it on first touch.
+    ///
+    /// Returns the column's pin: hold it while reading or writing the cache,
+    /// so [`World::unload`] cannot take the column away in between.
+    #[must_use = "the column may be unloaded as soon as the pin is dropped"]
+    fn ensure_column(&self, cx: i32, cz: i32) -> Arc<Latch> {
         // Take this column's latch so two workers can't materialize the same
         // `(cx, cz)` concurrently. A second worker must *block* here until the
         // first has populated the cache — returning early on a
         // reserved-but-unpopulated column would hand the caller air for a
         // column that is merely still being generated.
-        let latch = {
-            let mut columns = self.columns.write().unwrap();
-            Arc::clone(
-                columns
-                    .entry((cx, cz))
-                    .or_insert_with(|| Arc::new(Mutex::new(false))),
-            )
+        let found = self.columns.read().unwrap().get(&(cx, cz)).cloned();
+        let latch = match found {
+            Some(latch) => latch,
+            None => {
+                let mut columns = self.columns.write().unwrap();
+                Arc::clone(columns.entry((cx, cz)).or_insert_with(|| {
+                    Arc::new(Latch {
+                        materialized: Mutex::new(false),
+                        last_used: AtomicU64::new(0),
+                    })
+                }))
+            }
         };
-        let mut materialized = latch.lock().unwrap();
+        let now = self.sweep.load(Ordering::Relaxed);
+        if latch.last_used.load(Ordering::Relaxed) != now {
+            latch.last_used.store(now, Ordering::Relaxed);
+        }
+        let mut materialized = latch.materialized.lock().unwrap();
         if *materialized {
-            return;
+            drop(materialized);
+            return latch;
         }
 
         // A column is *generated*, then *overlaid*. The generator is
@@ -244,8 +287,17 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         let column = self.generator.generate_column(cx, cz);
         {
             let mut cache = self.cache.write().unwrap();
-            for (cy, sc) in column.sections {
-                cache.insert(SubChunkKey::new(cx, cy, cz), sc);
+            for (cy, mut sc) in column.sections {
+                // Generators build sections block by block, so their palettes
+                // carry whatever passed through; the cache holds the minimal
+                // form, and nothing at all for a section of air.
+                sc.compact();
+                let key = SubChunkKey::new(cx, cy, cz);
+                if sc.is_empty() {
+                    cache.remove(&key);
+                } else {
+                    cache.insert(key, sc);
+                }
             }
         }
 
@@ -326,6 +378,8 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         // it holding nothing but generator output, so a later touch must retry
         // rather than be told the cache is authoritative.
         *materialized = !read_error;
+        drop(materialized);
+        latch
     }
 
     /// A stale snapshot rebuilt over the fresh generation: see
@@ -370,7 +424,7 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         let Some((key, lx, ly, lz)) = Self::key_of(x, y, z) else {
             return BlockStateId::AIR;
         };
-        self.ensure_column(key.cx, key.cz);
+        let _pin = self.ensure_column(key.cx, key.cz);
         self.cache
             .read()
             .unwrap()
@@ -387,7 +441,7 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             out.fill(BlockStateId::AIR);
             return;
         }
-        self.ensure_column(cx, cz);
+        let _pin = self.ensure_column(cx, cz);
         let cache = self.cache.read().unwrap();
         match cache.get(&SubChunkKey::new(cx, cy as i8, cz)) {
             Some(sc) => {
@@ -433,7 +487,9 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         let Some((key, lx, ly, lz)) = Self::key_of(x, y, z) else {
             return;
         };
-        self.ensure_column(key.cx, key.cz);
+        // Pinned until the section is marked dirty: a dirty column is never
+        // unloaded, and until then the pin is what keeps it.
+        let _pin = self.ensure_column(key.cx, key.cz);
         {
             let mut cache = self.cache.write().unwrap();
             cache.entry(key).or_default().set(lx, ly, lz, id, props);
@@ -609,6 +665,106 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
     pub fn resident_sections(&self) -> usize {
         self.cache.read().unwrap().len()
     }
+
+    /// The number of columns currently resident.
+    pub fn resident_columns(&self) -> usize {
+        self.columns.read().unwrap().len()
+    }
+
+    /// Bytes held by the resident sub-chunks, their keys included.
+    ///
+    /// Walks the whole cache under its read lock: for a status line, not for
+    /// every tick.
+    pub fn resident_bytes(&self) -> usize {
+        let cache = self.cache.read().unwrap();
+        let per_slot = std::mem::size_of::<(SubChunkKey, SubChunk)>() + 8;
+        cache
+            .values()
+            .map(|sc| sc.memory_bytes() - std::mem::size_of::<SubChunk>() + per_slot)
+            .sum()
+    }
+
+    /// Drop columns from memory: those `keep` does not want and that have
+    /// not been touched for `idle_sweeps` calls of this, then — while more
+    /// than `budget` columns remain resident (`0` for no limit) — the least
+    /// recently used of the rest.
+    ///
+    /// A column is only ever unloaded clean: one with an unsaved edit stays
+    /// until [`World::flush`] has written it, and one being read or written
+    /// right now (see [`World::ensure_column`]'s pin) stays too. Unloading is
+    /// therefore invisible except in time: a later touch loads the column
+    /// again exactly as it was — generator output, snapshots, then the
+    /// journal after its checkpoint.
+    ///
+    /// Each call is one sweep of the clock columns are stamped with, so
+    /// `idle_sweeps` counts calls: call it on a fixed period.
+    pub fn unload(
+        &self,
+        keep: &dyn Fn(i32, i32) -> bool,
+        budget: usize,
+        idle_sweeps: u64,
+    ) -> UnloadStats {
+        let now = self.sweep.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut columns = self.columns.write().unwrap();
+        let dirty: HashSet<(i32, i32)> = self
+            .dirty
+            .read()
+            .unwrap()
+            .iter()
+            .map(|k| (k.cx, k.cz))
+            .collect();
+
+        // Columns that could go: nobody holds them, nothing unsaved in them.
+        // A latch only the map holds cannot gain a holder while we hold the
+        // map's write lock: every clone is taken under one of its locks.
+        let mut idle: Vec<((i32, i32), u64)> = columns
+            .iter()
+            .filter(|(col, latch)| Arc::strong_count(latch) == 1 && !dirty.contains(col))
+            .map(|(&col, latch)| (col, latch.last_used.load(Ordering::Relaxed)))
+            .collect();
+
+        let mut gone = Vec::new();
+        let mut stats = UnloadStats::default();
+        idle.retain(|&((cx, cz), used)| {
+            if now.saturating_sub(used) > idle_sweeps && !keep(cx, cz) {
+                gone.push((cx, cz));
+                stats.unneeded += 1;
+                false
+            } else {
+                true
+            }
+        });
+        let resident = columns.len() - gone.len();
+        if budget > 0 && resident > budget {
+            idle.sort_by_key(|&(_, used)| used);
+            for &(col, used) in idle.iter().take(resident - budget) {
+                // Never one touched since this sweep began.
+                if used >= now {
+                    break;
+                }
+                gone.push(col);
+                stats.over_budget += 1;
+            }
+        }
+
+        if !gone.is_empty() {
+            let mut cache = self.cache.write().unwrap();
+            for &(cx, cz) in &gone {
+                columns.remove(&(cx, cz));
+                for cy in SCAN_CY_MIN..=SCAN_CY_MAX {
+                    cache.remove(&SubChunkKey::new(cx, cy, cz));
+                }
+            }
+        }
+        // Still under the map's lock: a column touched again cannot start
+        // loading — and have the generator remember it afresh — until the
+        // generator has forgotten the old one.
+        for &(cx, cz) in &gone {
+            self.generator.forget(cx, cz);
+        }
+        stats.resident = columns.len();
+        stats
+    }
 }
 
 /// Blocks with the `collision` property act as solid unit cubes for physics.
@@ -617,10 +773,10 @@ impl<B: KvBackend, G: ChunkGenerator> BlockView for World<B, G> {
         let Some((key, lx, ly, lz)) = Self::key_of(x, y, z) else {
             return false;
         };
-        self.ensure_column(key.cx, key.cz);
+        let _pin = self.ensure_column(key.cx, key.cz);
         let cache = self.cache.read().unwrap();
         match cache.get(&key) {
-            Some(sc) => sc.collision_mask().get(SubChunk::index(lx, ly, lz)),
+            Some(sc) => sc.props(lx, ly, lz).collision,
             None => false,
         }
     }
