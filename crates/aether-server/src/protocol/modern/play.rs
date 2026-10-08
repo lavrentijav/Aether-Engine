@@ -3,62 +3,28 @@
 //! Packet ids and field layouts are from `minecraft-data` `pc/1.21.11/
 //! protocol.json`, the same source as the rest of this codec.
 
-use super::{angle, encode_position, inventory, items};
+use super::version::{Gen, Version};
+use super::{angle, encode_position, inventory};
 use crate::inventory::Stack;
 use crate::proto::PacketOut;
 use crate::protocol::{GameMode, Menu, MetaValue, ServerEvent};
 
-const SPAWN_ENTITY: i32 = 0x01;
-const ANIMATION: i32 = 0x02;
-const BREAK_ANIMATION: i32 = 0x05;
-const CLOSE_WINDOW: i32 = 0x11;
-const WINDOW_ITEMS: i32 = 0x12;
-const WINDOW_PROPERTY: i32 = 0x13;
-const DAMAGE_EVENT: i32 = 0x19;
-const ENTITY_STATUS: i32 = 0x22;
-const SYNC_ENTITY_POS: i32 = 0x23;
-const EXPLOSION: i32 = 0x24;
-const GAME_STATE: i32 = 0x26;
-const WORLD_EVENT: i32 = 0x2D;
-const OPEN_WINDOW: i32 = 0x39;
-const ABILITIES: i32 = 0x3E;
-const DEATH_COMBAT: i32 = 0x42;
-const POSITION: i32 = 0x46;
-const RESPAWN: i32 = 0x50;
-const HEAD_ROTATION: i32 = 0x51;
-const ENTITY_METADATA: i32 = 0x61;
-const ENTITY_VELOCITY: i32 = 0x63;
-const ENTITY_EQUIPMENT: i32 = 0x64;
-const EXPERIENCE: i32 = 0x65;
-const UPDATE_HEALTH: i32 = 0x66;
-const HELD_ITEM: i32 = 0x67;
-const UPDATE_TIME: i32 = 0x6F;
-const SOUND_EFFECT: i32 = 0x73;
-const COLLECT: i32 = 0x7A;
-
-/// Data component `minecraft:damage`.
-const COMPONENT_DAMAGE: i32 = 3;
-
-/// Particle registry ids.
-const PARTICLE_EXPLOSION_EMITTER: i32 = 22;
-const PARTICLE_EXPLOSION: i32 = 23;
-
 /// `minecraft:menu` registry ids.
-fn menu_id(m: Menu) -> i32 {
+fn menu_id(v: &Version, m: Menu) -> i32 {
     match m {
-        Menu::Chest => 2,
-        Menu::Crafting => 12,
-        Menu::Furnace => 14,
+        Menu::Chest => v.menu_chest,
+        Menu::Crafting => v.menu_crafting,
+        Menu::Furnace => v.menu_furnace,
     }
 }
 
 /// Append a stack in this version's slot format.
-pub fn write_stack(p: &mut PacketOut, stack: Option<&Stack>) {
+pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
     let Some(s) = stack.filter(|s| s.count > 0) else {
         inventory::write_empty(p);
         return;
     };
-    let Some(id) = items::item_id(&s.item) else {
+    let Some(id) = v.item_id(&s.item) else {
         inventory::write_empty(p);
         return;
     };
@@ -66,11 +32,54 @@ pub fn write_stack(p: &mut PacketOut, stack: Option<&Stack>) {
     if s.damage > 0 {
         p.var_int(1)
             .var_int(0)
-            .var_int(COMPONENT_DAMAGE)
+            .var_int(v.component_damage)
             .var_int(s.damage as i32);
     } else {
         p.var_int(0).var_int(0);
     }
+}
+
+/// Entity Position Sync: absolute position and look. 26.3 made the
+/// position a *path* — a tagged union of one point or several steps — so
+/// the single point is tag 0 there.
+pub fn position_sync(
+    v: &Version,
+    entity_id: i32,
+    (x, y, z): (f64, f64, f64),
+    yaw: f32,
+    pitch: f32,
+    on_ground: bool,
+) -> PacketOut {
+    let mut p = PacketOut::new(v.packets.cb_entity_position_sync);
+    p.var_int(entity_id);
+    if v.gen >= Gen::V26_3 {
+        p.var_int(0).f64(x).f64(y).f64(z);
+    } else {
+        p.f64(x).f64(y).f64(z).f64(0.0).f64(0.0).f64(0.0);
+    }
+    p.f32(yaw).f32(pitch).bool(on_ground);
+    p
+}
+
+/// The previous game mode of a spawn: none. A byte of `-1` until 26.3 made
+/// it an optional VarInt, whose "none" is zero.
+pub fn write_no_previous_mode(v: &Version, p: &mut PacketOut) {
+    if v.gen >= Gen::V26_3 {
+        p.var_int(0);
+    } else {
+        p.u8(0xFF);
+    }
+}
+
+/// The wire index of an entity metadata field. Indices at or above
+/// [`crate::protocol::META_AGEABLE`] count from the end of `AgeableMob`'s
+/// own fields, which 26.1 grew by one (`age_locked`).
+fn meta_index(v: &Version, index: u8) -> u8 {
+    if index & crate::protocol::META_AGEABLE == 0 {
+        return index;
+    }
+    let base = if v.gen >= Gen::V26_1 { 18 } else { 17 };
+    base + (index & !crate::protocol::META_AGEABLE)
 }
 
 /// A `lpVec3`: the quantized velocity vector 1.21.9 introduced.
@@ -111,8 +120,8 @@ fn write_sound(p: &mut PacketOut, name: &str) {
     p.var_int(0).string(name).bool(false);
 }
 
-fn abilities(mode: GameMode) -> PacketOut {
-    let mut p = PacketOut::new(ABILITIES);
+fn abilities(v: &Version, mode: GameMode) -> PacketOut {
+    let mut p = PacketOut::new(v.packets.cb_player_abilities);
     let flags = match mode {
         GameMode::Creative => 0x01 | 0x04 | 0x08,
         GameMode::Survival => 0,
@@ -122,7 +131,8 @@ fn abilities(mode: GameMode) -> PacketOut {
 }
 
 /// Encode a gameplay event, or `None` if it is not one of these.
-pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
+pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
+    let ids = v.packets;
     Some(match ev {
         ServerEvent::SpawnEntity {
             entity_id,
@@ -136,10 +146,10 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             velocity,
             data,
         } => {
-            let Some((type_id, _, _)) = crate::game::tables::entity_type(kind) else {
+            let Some(type_id) = v.entity_type(kind) else {
                 return Some(Vec::new());
             };
-            let mut p = PacketOut::new(SPAWN_ENTITY);
+            let mut p = PacketOut::new(ids.cb_add_entity);
             p.var_int(*entity_id)
                 .uuid(*uuid)
                 .var_int(type_id)
@@ -151,15 +161,15 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
                 .u8(angle(*yaw))
                 .u8(angle(*yaw))
                 .var_int(*data);
-            let mut head = PacketOut::new(HEAD_ROTATION);
+            let mut head = PacketOut::new(ids.cb_rotate_head);
             head.var_int(*entity_id).u8(angle(*yaw));
             vec![p, head]
         }
         ServerEvent::EntityMeta { entity_id, entries } => {
-            let mut p = PacketOut::new(ENTITY_METADATA);
+            let mut p = PacketOut::new(ids.cb_set_entity_data);
             p.var_int(*entity_id);
             for (index, value) in entries {
-                p.u8(*index);
+                p.u8(meta_index(v, *index));
                 match value {
                     MetaValue::Byte(b) => {
                         p.var_int(0).u8(*b as u8);
@@ -172,7 +182,7 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
                     }
                     MetaValue::Item(s) => {
                         p.var_int(7);
-                        write_stack(&mut p, s.as_ref());
+                        write_stack(v, &mut p, s.as_ref());
                     }
                     MetaValue::Pose(v) => {
                         p.var_int(20).var_int(*v);
@@ -191,21 +201,17 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             pitch,
             on_ground,
         } => {
-            let mut p = PacketOut::new(SYNC_ENTITY_POS);
-            p.var_int(*entity_id)
-                .f64(*x)
-                .f64(*y)
-                .f64(*z)
-                .f64(0.0)
-                .f64(0.0)
-                .f64(0.0)
-                .f32(*yaw)
-                .f32(*pitch)
-                .bool(*on_ground);
-            vec![p]
+            vec![position_sync(
+                v,
+                *entity_id,
+                (*x, *y, *z),
+                *yaw,
+                *pitch,
+                *on_ground,
+            )]
         }
         ServerEvent::EntityHead { entity_id, yaw } => {
-            let mut p = PacketOut::new(HEAD_ROTATION);
+            let mut p = PacketOut::new(ids.cb_rotate_head);
             p.var_int(*entity_id).u8(angle(*yaw));
             vec![p]
         }
@@ -213,7 +219,7 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             entity_id,
             velocity,
         } => {
-            let mut p = PacketOut::new(ENTITY_VELOCITY);
+            let mut p = PacketOut::new(ids.cb_set_entity_motion);
             p.var_int(*entity_id);
             write_lp_vec3(&mut p, *velocity);
             vec![p]
@@ -222,12 +228,36 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             entity_id,
             animation,
         } => {
-            let mut p = PacketOut::new(ANIMATION);
+            // 26.3 moved arm swings to a packet of their own, carrying the
+            // hand and the swing's shape, and renumbered what was left.
+            if v.gen >= Gen::V26_3 {
+                return Some(match animation {
+                    0 | 3 => {
+                        let mut p = PacketOut::new(ids.cb_swing_animation);
+                        p.var_int(*entity_id)
+                            .var_int((*animation == 3) as i32) // hand
+                            .var_int(1) // whack
+                            .var_int(6); // ticks
+                        vec![p]
+                    }
+                    2 | 4 | 5 => {
+                        let mut p = PacketOut::new(ids.cb_animate);
+                        p.var_int(*entity_id).u8(match animation {
+                            2 => 0,
+                            4 => 1,
+                            _ => 2,
+                        });
+                        vec![p]
+                    }
+                    _ => Vec::new(),
+                });
+            }
+            let mut p = PacketOut::new(ids.cb_animate);
             p.var_int(*entity_id).u8(*animation);
             vec![p]
         }
         ServerEvent::EntityStatus { entity_id, status } => {
-            let mut p = PacketOut::new(ENTITY_STATUS);
+            let mut p = PacketOut::new(ids.cb_entity_event);
             p.i32(*entity_id).u8(*status as u8);
             vec![p]
         }
@@ -236,8 +266,8 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             source,
             attacker,
         } => {
-            let ty = super::registry::damage_type_index(source).unwrap_or(0);
-            let mut p = PacketOut::new(DAMAGE_EVENT);
+            let ty = v.damage_type(source).unwrap_or(0);
+            let mut p = PacketOut::new(ids.cb_damage_event);
             let who = attacker.map(|a| a + 1).unwrap_or(0);
             p.var_int(*entity_id)
                 .var_int(ty as i32)
@@ -251,7 +281,7 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             collector,
             count,
         } => {
-            let mut p = PacketOut::new(COLLECT);
+            let mut p = PacketOut::new(ids.cb_take_item_entity);
             p.var_int(*item).var_int(*collector).var_int(*count as i32);
             vec![p]
         }
@@ -259,12 +289,12 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             if slots.is_empty() {
                 return Some(Vec::new());
             }
-            let mut p = PacketOut::new(ENTITY_EQUIPMENT);
+            let mut p = PacketOut::new(ids.cb_set_equipment);
             p.var_int(*entity_id);
             for (i, (slot, stack)) in slots.iter().enumerate() {
                 let more = if i + 1 < slots.len() { 0x80 } else { 0 };
                 p.u8(*slot | more);
-                write_stack(&mut p, stack.as_ref());
+                write_stack(v, &mut p, stack.as_ref());
             }
             vec![p]
         }
@@ -273,18 +303,37 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             food,
             saturation,
         } => {
-            let mut p = PacketOut::new(UPDATE_HEALTH);
+            let mut p = PacketOut::new(ids.cb_set_health);
             p.f32(*health).var_int(*food).f32(*saturation);
             vec![p]
         }
         ServerEvent::Experience { bar, level, total } => {
-            let mut p = PacketOut::new(EXPERIENCE);
+            let mut p = PacketOut::new(ids.cb_set_experience);
             p.f32(*bar).var_int(*level).var_int(*total);
             vec![p]
         }
         ServerEvent::Time { age, time_of_day } => {
-            let mut p = PacketOut::new(UPDATE_TIME);
-            p.i64(*age).i64(*time_of_day).bool(true);
+            let mut p = PacketOut::new(ids.cb_set_time);
+            p.i64(*age);
+            if v.gen >= Gen::V26_1 {
+                // 26.1 replaced the time of day with world clocks: a map of
+                // clock -> (total ticks, partial tick, rate). The overworld
+                // clock is the only one a client in the overworld reads.
+                match v.synced_index("minecraft:world_clock", "minecraft:overworld") {
+                    Some(clock) => {
+                        p.var_int(1)
+                            .var_int(clock as i32)
+                            .var_long(*time_of_day)
+                            .f32(0.0)
+                            .f32(1.0);
+                    }
+                    None => {
+                        p.var_int(0);
+                    }
+                }
+            } else {
+                p.i64(*time_of_day).bool(true);
+            }
             vec![p]
         }
         ServerEvent::WindowContents {
@@ -293,14 +342,14 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             slots,
             cursor,
         } => {
-            let mut p = PacketOut::new(WINDOW_ITEMS);
+            let mut p = PacketOut::new(ids.cb_container_set_content);
             p.var_int(*window_id as i32)
                 .var_int(*state_id)
                 .var_int(slots.len() as i32);
             for s in slots {
-                write_stack(&mut p, s.as_ref());
+                write_stack(v, &mut p, s.as_ref());
             }
-            write_stack(&mut p, cursor.as_ref());
+            write_stack(v, &mut p, cursor.as_ref());
             vec![p]
         }
         ServerEvent::OpenWindow {
@@ -308,14 +357,14 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             menu,
             title,
         } => {
-            let mut p = PacketOut::new(OPEN_WINDOW);
+            let mut p = PacketOut::new(ids.cb_open_screen);
             p.var_int(*window_id as i32)
-                .var_int(menu_id(*menu))
+                .var_int(menu_id(v, *menu))
                 .bytes(&crate::protocol::nbt::string(title).to_network());
             vec![p]
         }
         ServerEvent::CloseWindow(id) => {
-            let mut p = PacketOut::new(CLOSE_WINDOW);
+            let mut p = PacketOut::new(ids.cb_container_close);
             p.var_int(*id as i32);
             vec![p]
         }
@@ -324,7 +373,7 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             property,
             value,
         } => {
-            let mut p = PacketOut::new(WINDOW_PROPERTY);
+            let mut p = PacketOut::new(ids.cb_container_set_data);
             p.var_int(*window_id as i32)
                 .u16(*property as u16)
                 .u16(*value as u16);
@@ -337,10 +386,17 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             z,
             data,
         } => {
-            let mut p = PacketOut::new(WORLD_EVENT);
+            let mut p = PacketOut::new(ids.cb_level_event);
+            // Breaking a block (2001) names the block by state id, which is
+            // the engine's until it reaches the wire.
+            let data = if *event == 2001 {
+                v.state(aether_world::BlockStateId(*data as u32)) as i32
+            } else {
+                *data
+            };
             p.i32(*event)
                 .i64(encode_position(*x as i64, *y as i64, *z as i64))
-                .i32(*data)
+                .i32(data)
                 .bool(false);
             vec![p]
         }
@@ -351,34 +407,44 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             z,
             stage,
         } => {
-            let mut p = PacketOut::new(BREAK_ANIMATION);
+            let mut p = PacketOut::new(ids.cb_block_destruction);
             p.var_int(*entity_id)
                 .i64(encode_position(*x as i64, *y as i64, *z as i64))
                 .u8(*stage as u8);
             vec![p]
         }
         ServerEvent::Respawn { game_mode } => {
-            let mut p = PacketOut::new(RESPAWN);
-            p.var_int(0) // dimension type 0
+            let mut p = PacketOut::new(ids.cb_respawn);
+            p.var_int(super::dimension_type_id(v))
                 .string(super::registry::DIMENSION_NAME)
-                .i64(0)
-                .u8(game_mode.wire())
-                .u8(0xFF)
-                .bool(false)
+                .i64(0);
+            // A byte until 26.3 and a VarInt since: the same byte for the two
+            // modes this server has.
+            p.u8(game_mode.wire());
+            write_no_previous_mode(v, &mut p);
+            p.bool(false)
                 .bool(false)
                 .bool(false) // no death location
                 .var_int(0)
                 .var_int(63)
                 .u8(0); // keep nothing
-            vec![p, abilities(*game_mode)]
+                        // Then "start waiting for level chunks", as at login. Without it a
+                        // 1.20.3+ client holds the loading screen after a respawn until
+                        // it gives up — the world never appears.
+            let mut wait = PacketOut::new(ids.cb_game_event);
+            wait.u8(13).f32(0.0);
+            vec![p, abilities(v, *game_mode), wait]
         }
         ServerEvent::GameModeChange(mode) => {
-            let mut p = PacketOut::new(GAME_STATE);
+            let mut p = PacketOut::new(ids.cb_game_event);
             p.u8(3).f32(mode.wire() as f32);
-            vec![p, abilities(*mode)]
+            vec![p, abilities(v, *mode)]
         }
         ServerEvent::SetHeldSlot(slot) => {
-            vec![inventory::held_item_packet(HELD_ITEM, *slot as i32)]
+            vec![inventory::held_item_packet(
+                ids.cb_set_held_slot,
+                *slot as i32,
+            )]
         }
         ServerEvent::Teleport {
             x,
@@ -387,7 +453,7 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             yaw,
             pitch,
         } => {
-            let mut p = PacketOut::new(POSITION);
+            let mut p = PacketOut::new(ids.cb_player_position);
             p.var_int(2)
                 .f64(*x)
                 .f64(*y)
@@ -401,7 +467,7 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             vec![p]
         }
         ServerEvent::DeathMessage { entity_id, text } => {
-            let mut p = PacketOut::new(DEATH_COMBAT);
+            let mut p = PacketOut::new(ids.cb_player_combat_kill);
             p.var_int(*entity_id)
                 .bytes(&crate::protocol::nbt::string(text).to_network());
             vec![p]
@@ -413,7 +479,7 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             radius,
             knockback,
         } => {
-            let mut p = PacketOut::new(EXPLOSION);
+            let mut p = PacketOut::new(ids.cb_explode);
             p.f64(*x).f64(*y).f64(*z).f32(*radius).i32(0);
             match knockback {
                 Some((kx, ky, kz)) => {
@@ -424,13 +490,16 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
                 }
             }
             let particle = if *radius >= 2.0 {
-                PARTICLE_EXPLOSION_EMITTER
+                v.particle_explosion_emitter
             } else {
-                PARTICLE_EXPLOSION
+                v.particle_explosion
             };
             p.var_int(particle);
             write_sound(&mut p, "minecraft:entity.generic.explode");
             p.var_int(0); // no block particles
+            if v.gen >= Gen::V26_3 {
+                p.bool(true); // play the sound
+            }
             vec![p]
         }
         ServerEvent::Sound {
@@ -442,7 +511,7 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             volume,
             pitch,
         } => {
-            let mut p = PacketOut::new(SOUND_EFFECT);
+            let mut p = PacketOut::new(ids.cb_sound);
             write_sound(&mut p, name);
             p.var_int(*category as i32)
                 .i32((x * 8.0) as i32)

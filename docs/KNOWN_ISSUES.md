@@ -10,7 +10,7 @@
 ---
 
 ### A. Current known problems (early alpha)
-1. **Gameplay runs on 1.21.11 only; engine-level subsystems are still unbuilt.** The server now has a survival game layer (`crates/aether-server/src/game`: mobs, items, combat, hunger, crafting, chests, furnaces — see item 11), but it is a server-side layer, not the ECS/Flow-Field design of the roadmap; redstone, fluid flow and the full staged physics pipeline are not implemented.
+1. **Gameplay runs on 1.21.11 and 26.1–26.3 only; engine-level subsystems are still unbuilt.** The server now has a survival game layer (`crates/aether-server/src/game`: mobs, items, combat, hunger, crafting, chests, furnaces — see item 11), but it is a server-side layer, not the ECS/Flow-Field design of the roadmap; redstone, fluid flow and the full staged physics pipeline are not implemented.
 2. **SIMD parity only partially validated.** `Scalar / SSE4.2 / AVX2` paths are implemented and unit-tested; `AVX-512` is *detected* but routed to the AVX2 path — there is no native AVX-512 backend yet.
 3. **Determinism unproven.** Parallel subsystems must merge at Safe Points; the merge points are specified but not validated, and the work-stealing scheduler that would exercise them does not exist yet.
 4. **Experimental 1.8.9 server is unverified against a live client.** `aether-server` speaks protocol 47 in offline mode with no compression/encryption, and its framing is checked only against a raw socket client. A real Minecraft 1.8.9 client may still reject some packets (chunk-data format is the most likely gap). It binds to loopback by default and must not be exposed publicly.
@@ -50,11 +50,11 @@
 
 9. ~~**A joining client's input is not acted on until its columns have finished streaming.**~~ **Fixed:** columns now stream from a per-player thread (nearest first, re-targeted as the player moves), so the connection thread keeps reading input while the horizon generates.
 
-10. **No headless-client regression suite yet.** `tools/probe` connects a real 1.21.11 client (mineflayer) and reports what the server actually sends; it found two live defects in one run — a seven-entry item→block table that placed every other block as **stone**, and a missing `set_health` that stalled every bot client before spawn. It is a set of scripts, not a test suite, and nothing runs it automatically.
+10. **No headless-client regression suite yet.** `tools/probe` connects a real 1.21.11 client (mineflayer) and reports what the server actually sends; it found two live defects in one run — a seven-entry item→block table that placed every other block as **stone**, and a missing `set_health` that stalled every bot client before spawn. It is a set of scripts, not a test suite, and nothing runs it automatically. For 26.x, `tools/wire` goes further: a client compiled against the release's own server jar decodes every packet with the game's codecs and builds the registries as the client does. On its first runs it found two defects mineflayer cannot see: 26.3's byte-array `BitSet` (every chunk's light masks misread) and cave/void air counted as blocks in each section's non-air count. It needs the release's jar and Java 25, so CI does not run it either.
 
-11. **What the survival layer does not do yet** (1.21.11; every other codec ignores the gameplay events and keeps its older, client-trusting subset — no mobs, no server-side windows):
+11. **What the survival layer does not do yet** (1.21.11 and 26.1–26.3; every older codec ignores the gameplay events and keeps its older, client-trusting subset — no mobs, no server-side windows):
     - **Mob AI is straight-line.** Mobs walk towards their goal, jump one-block steps and refuse unclimbable drops; there is no pathfinding around obstacles, no door opening, no climbing for spiders. Eight kinds exist: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider. No breeding, taming, villagers or the Nether/End mobs.
-    - **No redstone, fluid flow, crop growth, leaf decay, fire spread or falling sand/gravel.** Water and lava are placed and picked up as static blocks.
+    - **No redstone, crop growth, leaf decay, fire spread or falling sand/gravel.** Water and lava **do flow** now (`game/fluids.rs`: scheduled updates with vanilla delays, levels, falls, slope-seeking, infinite water, lava + water → obsidian/cobblestone/stone), but flowing water does not push mobs or items, waterlogged blocks do not flow, and generated water only starts moving when something next to it changes.
     - **No enchanting, brewing, anvils, smithing, villager trading, beds only set the spawn point and skip the night.** Status effects (golden apples, poison) are not applied; foods restore hunger only.
     - **No XP orbs.** Experience is credited to the killer directly; ores give none.
     - **Chests do not double**, and hoppers/droppers/dispensers have no inventory.
@@ -68,7 +68,7 @@ These are **not bugs** in Phase 1 — they are documented, temporary compatibili
 | Subsystem | Phase 1 deviation | Phase 2 target |
 |-----------|-------------------|----------------|
 | **Redstone** | Quasi-Connectivity (QC) ignored across inactive chunk borders | Full dependency graph with cross-chunk QC |
-| **Fluids** | Parallel simplified spread; Java tick timing not preserved | Deterministic fluid layers 1:1 with Vanilla |
+| **Fluids** | Scheduled-update flow with vanilla delays and levels on one queue, capped per tick; no entity push, no waterlogged flow | Deterministic fluid layers 1:1 with Vanilla |
 | **Update order** | Simultaneous redstone updates ordered by the parallel graph | Strict deterministic directional-priority queue |
 | **Entity spawn** | Batched async spawn every N ticks (every 40 ticks, per-player caps, sky/darkness test without light levels) | Per-tick precise spawner |
 | **Mob AI** | Straight-line steering with step jumps and drop avoidance | Flow-Field navigation + cached A\* |

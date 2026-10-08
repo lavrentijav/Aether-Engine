@@ -15,8 +15,8 @@ use aether_world::light::MAX_LIGHT;
 use aether_world::BlockStateId;
 
 use super::super::BlockSource;
-use super::block_state;
 use super::registry::{MIN_Y, SECTIONS};
+use super::version::{Gen, Version};
 use crate::proto::PacketOut;
 
 /// Blocks per section along each axis.
@@ -57,16 +57,16 @@ fn write_single_valued(out: &mut Vec<u8>, value: u32) {
 /// containers per section the column desynchronises — the wreckage surfaces
 /// far away as a bogus biome id, because a biome registry with one entry
 /// rejects every id but zero.
-fn write_indirect(out: &mut Vec<u8>, palette: &[u32], indices: &[u32]) {
+fn write_indirect(out: &mut Vec<u8>, fmt: &Format, palette: &[u32], indices: &[u32]) {
     // At least four bits (the format's minimum for blocks), more as the
     // palette grows; past eight the container is direct, at the width of
     // the global state registry.
     let need = (32 - (palette.len() as u32 - 1).leading_zeros()) as u8;
     let bits = need.max(BLOCK_BITS);
     if bits > 8 {
-        out.push(DIRECT_BITS);
+        out.push(fmt.direct_bits);
         let ids: Vec<u32> = indices.iter().map(|i| palette[*i as usize]).collect();
-        for l in &pack(&ids, DIRECT_BITS) {
+        for l in &pack(&ids, fmt.direct_bits) {
             out.extend_from_slice(&l.to_be_bytes());
         }
         return;
@@ -81,8 +81,76 @@ fn write_indirect(out: &mut Vec<u8>, palette: &[u32], indices: &[u32]) {
     }
 }
 
-/// Bits per entry of a direct block container: `ceil(log2(29,671 states))`.
-const DIRECT_BITS: u8 = 15;
+/// What a version's chunk sections look like.
+pub(super) struct Format {
+    /// Bits per entry of a direct block container: `ceil(log2(states))` —
+    /// 15 for 1.21.11's 29,671, 16 once 26.3 passed 32,768.
+    direct_bits: u8,
+    /// Bits per entry of a direct biome container.
+    biome_bits: u8,
+    /// The biome a section without generator biomes is filled with.
+    plains: u32,
+    /// 26.1 put a fluid count after the non-air count: the client's entity
+    /// physics skips sections whose count is zero, so a wrong zero is water
+    /// nobody can swim in.
+    fluid_count: bool,
+    /// 26.3 sends a `BitSet` as its little-endian bytes, trailing zeros
+    /// trimmed, where every earlier release sent its 64-bit words.
+    byte_bitsets: bool,
+}
+
+impl Format {
+    pub(super) fn of(v: &Version) -> Format {
+        Format {
+            direct_bits: v.direct_bits(),
+            biome_bits: (32 - (v.biome_count() - 1).leading_zeros()) as u8,
+            plains: v.biome("minecraft:plains"),
+            fluid_count: v.gen >= Gen::V26_1,
+            byte_bitsets: v.gen >= Gen::V26_3,
+        }
+    }
+}
+
+/// [`kind`] bit: the state is one of the three airs, which a section's
+/// non-air count leaves out.
+const AIR: u8 = 1;
+/// [`kind`] bit: the state holds a fluid — water, lava, anything
+/// waterlogged, and the blocks that are water by nature (kelp, seagrass,
+/// bubble columns).
+const FLUID: u8 = 2;
+
+/// What a section's two counts need to know about an engine block state.
+/// Computed once from the state names.
+fn kind(id: BlockStateId) -> u8 {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<Vec<u8>> = OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        (0..aether_world::registry::blocks::STATE_COUNT as u32)
+            .map(|raw| {
+                let Some(name) = aether_world::registry::props::state_name(raw) else {
+                    return 0;
+                };
+                let block = name.split('[').next().unwrap_or("");
+                let air = matches!(
+                    block,
+                    "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+                );
+                let fluid = matches!(
+                    block,
+                    "minecraft:water"
+                        | "minecraft:lava"
+                        | "minecraft:bubble_column"
+                        | "minecraft:kelp"
+                        | "minecraft:kelp_plant"
+                        | "minecraft:seagrass"
+                        | "minecraft:tall_seagrass"
+                ) || name.contains("waterlogged=true");
+                (air as u8 * AIR) | (fluid as u8 * FLUID)
+            })
+            .collect()
+    });
+    table.get(id.raw() as usize).copied().unwrap_or(0)
+}
 
 fn write_varint(out: &mut Vec<u8>, mut v: i32) {
     let mut u = v as u32;
@@ -98,10 +166,18 @@ fn write_varint(out: &mut Vec<u8>, mut v: i32) {
     }
 }
 
-/// Encode one section's block container, returning the non-air block count.
-fn write_section(out: &mut Vec<u8>, states: &[u32; ENTRIES], biomes: Option<&[u32; 64]>) -> i16 {
-    let non_air = states.iter().filter(|s| **s != 0).count() as i16;
-
+/// Encode one section: its counts, then its block and biome containers.
+///
+/// `non_air` must leave out cave and void air as well as air: the client
+/// takes the count as given, and a section it believes non-empty is meshed
+/// and collided with for nothing.
+fn write_section(
+    out: &mut Vec<u8>,
+    fmt: &Format,
+    states: &[u32; ENTRIES],
+    (non_air, fluids): (i16, i16),
+    biomes: Option<&[u32; 64]>,
+) {
     // Build the palette in first-seen order.
     let mut palette: Vec<u32> = Vec::new();
     let mut indices = Vec::with_capacity(ENTRIES);
@@ -117,24 +193,26 @@ fn write_section(out: &mut Vec<u8>, states: &[u32; ENTRIES], biomes: Option<&[u3
     }
 
     out.extend_from_slice(&non_air.to_be_bytes());
+    if fmt.fluid_count {
+        out.extend_from_slice(&fluids.to_be_bytes());
+    }
     if palette.len() == 1 {
         write_single_valued(out, palette[0]);
     } else {
-        write_indirect(out, &palette, &indices);
+        write_indirect(out, fmt, &palette, &indices);
     }
     // Biomes: registry indices, 4×4×4 per section in `(y*4+z)*4+x` order.
     match biomes {
-        Some(b) => write_biomes(out, b),
-        None => write_single_valued(out, super::registry::biome_index("minecraft:plains")),
+        Some(b) => write_biomes(out, fmt, b),
+        None => write_single_valued(out, fmt.plains),
     }
-    non_air
 }
 
 /// Write a section's biome container: single-valued when uniform, otherwise
 /// an indirect palette at the fewest bits that hold it (biome containers go
 /// direct above 3 bits, which 64 cells never need more than 6 of — the
 /// direct form is used then, at the registry's own width).
-fn write_biomes(out: &mut Vec<u8>, ids: &[u32; 64]) {
+fn write_biomes(out: &mut Vec<u8>, fmt: &Format, ids: &[u32; 64]) {
     let mut palette: Vec<u32> = Vec::new();
     let mut idx = [0u32; 64];
     for (i, id) in ids.iter().enumerate() {
@@ -162,7 +240,7 @@ fn write_biomes(out: &mut Vec<u8>, ids: &[u32; 64]) {
         }
     } else {
         // Direct: ceil(log2(registry size)) bits per entry.
-        let direct = (32 - (BIOME_REGISTRY_SIZE - 1).leading_zeros()) as u8;
+        let direct = fmt.biome_bits;
         out.push(direct);
         for l in &pack(ids, direct) {
             out.extend_from_slice(&l.to_be_bytes());
@@ -170,22 +248,28 @@ fn write_biomes(out: &mut Vec<u8>, ids: &[u32; 64]) {
     }
 }
 
-/// Entries in the biome registry this codec sends.
-const BIOME_REGISTRY_SIZE: u32 = 65;
+/// Entries in the biome registry the 1.21.11 codec sends.
+pub const BIOME_REGISTRY_SIZE: u32 = 65;
 
 /// Build the Chunk Data and Update Light packet (`0x2C`) for column
 /// `(cx, cz)`.
-pub fn chunk_data_packet(id: i32, cx: i32, cz: i32, world: &dyn BlockSource) -> PacketOut {
+pub fn chunk_data_packet(v: &Version, cx: i32, cz: i32, world: &dyn BlockSource) -> PacketOut {
+    let fmt = Format::of(v);
     let mut column = Vec::new();
     let col_biomes = world.column_biomes(cx, cz);
     for sy in 0..SECTIONS {
         let mut states = [0u32; ENTRIES];
+        let (mut non_air, mut fluids) = (0i16, 0i16);
         for (i, slot) in states.iter_mut().enumerate() {
             let x = (i & 15) as i32;
             let z = ((i >> 4) & 15) as i32;
             let y = ((i >> 8) & 15) as i32;
             let wy = MIN_Y + sy * AXIS + y;
-            *slot = block_state(world.block_at(cx * AXIS + x, wy, cz * AXIS + z));
+            let id = world.block_at(cx * AXIS + x, wy, cz * AXIS + z);
+            let k = kind(id);
+            non_air += (k & AIR == 0) as i16;
+            fluids += (k & FLUID != 0) as i16;
+            *slot = v.state(id);
         }
         // Generated before the blocks were read, so the biomes are known by
         // now for any column the generator produced.
@@ -196,18 +280,14 @@ pub fn chunk_data_packet(id: i32, cx: i32, cz: i32, world: &dyn BlockSource) -> 
             let sec = b.sections.get(usize::try_from(i).ok()?)?;
             let mut out = [0u32; 64];
             for (o, e) in out.iter_mut().zip(sec.iter()) {
-                *o = b
-                    .palette
-                    .get(*e as usize)
-                    .map(|n| super::registry::biome_index(n))
-                    .unwrap_or(0);
+                *o = b.palette.get(*e as usize).map(|n| v.biome(n)).unwrap_or(0);
             }
             Some(out)
         });
-        write_section(&mut column, &states, ids.as_ref());
+        write_section(&mut column, &fmt, &states, (non_air, fluids), ids.as_ref());
     }
 
-    let mut p = PacketOut::new(id);
+    let mut p = PacketOut::new(v.packets.cb_level_chunk_with_light);
     p.i32(cx).i32(cz);
 
     // Heightmaps: an empty set. The client uses them for particle and spawn
@@ -217,7 +297,7 @@ pub fn chunk_data_packet(id: i32, cx: i32, cz: i32, world: &dyn BlockSource) -> 
     p.var_int(column.len() as i32).bytes(&column);
     p.var_int(0); // no block entities
 
-    write_light(&mut p, cx, cz, world);
+    write_light(&mut p, &fmt, cx, cz, world);
     p
 }
 
@@ -233,7 +313,7 @@ pub fn chunk_data_packet(id: i32, cx: i32, cz: i32, world: &dyn BlockSource) -> 
 /// The four bitsets come in a fixed order — sky present, block present, sky
 /// empty, block empty — and only then the payloads, each array holding one
 /// entry per bit set in its *present* mask, bottom section first.
-fn write_light(p: &mut PacketOut, cx: i32, cz: i32, world: &dyn BlockSource) {
+fn write_light(p: &mut PacketOut, fmt: &Format, cx: i32, cz: i32, world: &dyn BlockSource) {
     // Each bitset is written as a single 64-bit word, so the column plus its
     // two void sections has to fit in one. At 448 blocks that is 30 of 64.
     const _: () = assert!(SECTIONS as usize + 2 <= 64);
@@ -267,10 +347,9 @@ fn write_light(p: &mut PacketOut, cx: i32, cz: i32, world: &dyn BlockSource) {
     let (sky_present, sky_empty) = masks(&sky);
     let (block_present, block_empty) = masks(&block);
 
-    p.var_int(1).i64(sky_present);
-    p.var_int(1).i64(block_present);
-    p.var_int(1).i64(sky_empty);
-    p.var_int(1).i64(block_empty);
+    for mask in [sky_present, block_present, sky_empty, block_empty] {
+        write_bitset(p, fmt, mask);
+    }
 
     for (sections, present) in [(&sky, sky_present), (&block, block_present)] {
         p.var_int(present.count_ones() as i32);
@@ -279,6 +358,17 @@ fn write_light(p: &mut PacketOut, cx: i32, cz: i32, world: &dyn BlockSource) {
                 p.var_int(PACKED_BYTES as i32).bytes(&s.packed());
             }
         }
+    }
+}
+
+/// Append a `BitSet` of at most 64 bits in the version's form.
+fn write_bitset(p: &mut PacketOut, fmt: &Format, mask: i64) {
+    if fmt.byte_bitsets {
+        let bytes = mask.to_le_bytes();
+        let len = 8 - (mask as u64).leading_zeros() as usize / 8;
+        p.var_int(len as i32).bytes(&bytes[..len]);
+    } else {
+        p.var_int(1).i64(mask);
     }
 }
 
@@ -338,6 +428,18 @@ mod tests {
     use super::*;
     use aether_api::block_ids as b;
     use aether_world::BlockStateId;
+
+    use super::super::version::{V1_21_11, V26_1};
+
+    fn block_state(id: BlockStateId) -> u32 {
+        V1_21_11.state(id)
+    }
+
+    fn fmt() -> Format {
+        Format::of(&V1_21_11)
+    }
+
+    const DIRECT_BITS: u8 = 15;
 
     struct Flat;
     impl BlockSource for Flat {
@@ -418,7 +520,8 @@ mod tests {
             *slot = block_state(world.block_at(x, y + 16, z));
         }
         let mut buf = Vec::new();
-        let count = write_section(&mut buf, &states, None);
+        let count = states.iter().filter(|s| **s != 0).count() as i16;
+        write_section(&mut buf, &fmt(), &states, (count, 0), None);
 
         let mut pos = 0usize;
         let got_count = i16::from_be_bytes([buf[0], buf[1]]);
@@ -464,7 +567,7 @@ mod tests {
                 *s = 1 + (i as u32 % distinct);
             }
             let mut buf = Vec::new();
-            write_section(&mut buf, &states, None);
+            write_section(&mut buf, &fmt(), &states, (ENTRIES as i16, 0), None);
             let mut pos = 2;
             let decoded = read_any(&buf, &mut pos, ENTRIES, 9, DIRECT_BITS);
             assert_eq!(decoded, states.to_vec(), "{distinct} states");
@@ -478,7 +581,7 @@ mod tests {
             *v = [3, 17, 40][i % 3];
         }
         let mut buf = Vec::new();
-        write_biomes(&mut buf, &ids);
+        write_biomes(&mut buf, &fmt(), &ids);
         assert_eq!(buf[0], 2, "three biomes fit in two bits");
         let mut pos = 1;
         let read_varint = |b: &[u8], pos: &mut usize| {
@@ -509,7 +612,7 @@ mod tests {
             *v = i as u32 % 9;
         }
         let mut buf = Vec::new();
-        write_biomes(&mut buf, &ids);
+        write_biomes(&mut buf, &fmt(), &ids);
         let mut pos = 0;
         let decoded = read_any(&buf, &mut pos, 64, 4, 7);
         assert_eq!(decoded, ids.to_vec());
@@ -520,11 +623,8 @@ mod tests {
         // An all-air section must not pay for a palette or a data array.
         let states = [0u32; ENTRIES];
         let mut buf = Vec::new();
-        assert_eq!(
-            write_section(&mut buf, &states, None),
-            0,
-            "no non-air blocks"
-        );
+        write_section(&mut buf, &fmt(), &states, (0, 0), None);
+        assert_eq!(&buf[..2], &[0, 0], "no non-air blocks");
         assert_eq!(buf[2], 0, "bits per entry must be 0");
     }
 
@@ -549,7 +649,7 @@ mod tests {
         // section, and long stretches of one block state — so it deflates
         // enormously. This is the number the join burst is made of: at a view
         // radius of 8 the client is sent (2*8+1)^2 = 289 of these.
-        let pkt = chunk_data_packet(0x2C, 0, 0, &Ocean);
+        let pkt = chunk_data_packet(&V1_21_11, 0, 0, &Ocean);
 
         let mut plain = Vec::new();
         pkt.write_to(&mut plain, None).unwrap();
@@ -581,7 +681,7 @@ mod tests {
         // whole column the way a client parses it and check the state at each
         // y, rather than trusting the encoder's own view of what it wrote.
         let mut wire = Vec::new();
-        chunk_data_packet(0x2C, 0, 0, &Ocean)
+        chunk_data_packet(&V1_21_11, 0, 0, &Ocean)
             .write_to(&mut wire, None)
             .unwrap();
 
@@ -629,6 +729,116 @@ mod tests {
             }
         }
         assert_eq!(p, data.len(), "the column must be consumed exactly");
+    }
+
+    #[test]
+    fn cave_and_void_air_are_not_counted_as_blocks() {
+        struct Cave;
+        impl BlockSource for Cave {
+            fn block_at(&self, x: i32, _y: i32, _z: i32) -> BlockStateId {
+                let name = match x {
+                    0 => "minecraft:cave_air",
+                    1 => "minecraft:void_air",
+                    2 => "minecraft:air",
+                    _ => "minecraft:stone",
+                };
+                aether_world::registry::blocks::default_state(name).unwrap()
+            }
+        }
+        let mut wire = Vec::new();
+        chunk_data_packet(&V1_21_11, 0, 0, &Cave)
+            .write_to(&mut wire, None)
+            .unwrap();
+        // Walk to the first section: frame length, packet id, x, z, the
+        // empty heightmaps, the data length.
+        let mut pos = 0usize;
+        let varint = |b: &[u8], pos: &mut usize| -> i32 {
+            let mut v = 0i32;
+            for i in 0..5 {
+                let byte = b[*pos];
+                *pos += 1;
+                v |= ((byte & 0x7f) as i32) << (7 * i);
+                if byte & 0x80 == 0 {
+                    break;
+                }
+            }
+            v
+        };
+        varint(&wire, &mut pos);
+        varint(&wire, &mut pos);
+        pos += 8;
+        varint(&wire, &mut pos);
+        varint(&wire, &mut pos);
+        assert_eq!(
+            i16::from_be_bytes([wire[pos], wire[pos + 1]]),
+            13 * 16 * 16,
+            "three columns of airs out of sixteen"
+        );
+    }
+
+    #[test]
+    fn from_26_1_sections_count_their_fluids() {
+        let mut wire = Vec::new();
+        chunk_data_packet(&V26_1, 0, 0, &Ocean)
+            .write_to(&mut wire, None)
+            .unwrap();
+        // Walk the column like a client, reading both counts per section.
+        let mut pos = 0usize;
+        let varint = |b: &[u8], pos: &mut usize| -> i32 {
+            let mut v = 0i32;
+            for i in 0..5 {
+                let byte = b[*pos];
+                *pos += 1;
+                v |= ((byte & 0x7f) as i32) << (7 * i);
+                if byte & 0x80 == 0 {
+                    break;
+                }
+            }
+            v
+        };
+        varint(&wire, &mut pos);
+        varint(&wire, &mut pos);
+        pos += 8;
+        varint(&wire, &mut pos);
+        let len = varint(&wire, &mut pos) as usize;
+        let data = &wire[pos..pos + len];
+        let mut p = 0usize;
+        let biome_bits = Format::of(&V26_1).biome_bits;
+        let state_bits = V26_1.direct_bits();
+        for sy in 0..SECTIONS {
+            let non_air = i16::from_be_bytes([data[p], data[p + 1]]);
+            let fluid = i16::from_be_bytes([data[p + 2], data[p + 3]]);
+            p += 4;
+            let base = MIN_Y + sy * AXIS;
+            if base == 48 {
+                assert_eq!((non_air, fluid), (4096, 4096), "all water");
+            }
+            if base >= 64 || base + 16 <= 41 {
+                assert_eq!(fluid, 0, "section at {base}");
+            }
+            read_any(data, &mut p, ENTRIES, 9, state_bits);
+            read_any(data, &mut p, 64, 4, biome_bits);
+        }
+        assert_eq!(p, data.len());
+    }
+
+    #[test]
+    fn bitsets_are_words_until_26_3_and_bytes_from_it() {
+        let words = |mask| {
+            let mut p = PacketOut::new(0);
+            write_bitset(&mut p, &fmt(), mask);
+            p.body()[1..].to_vec()
+        };
+        let bytes = |mask| {
+            let mut p = PacketOut::new(0);
+            write_bitset(&mut p, &Format::of(&super::super::version::V26_3), mask);
+            p.body()[1..].to_vec()
+        };
+        assert_eq!(words(0x1_0001), [1, 0, 0, 0, 0, 0, 1, 0, 1]);
+        // java.util.BitSet.toByteArray: little-endian, no trailing zeros.
+        assert_eq!(bytes(0x1_0001), [3, 1, 0, 1]);
+        assert_eq!(bytes(0), [0]);
+        assert_eq!(bytes(-1), [8, 255, 255, 255, 255, 255, 255, 255, 255]);
     }
 
     #[test]

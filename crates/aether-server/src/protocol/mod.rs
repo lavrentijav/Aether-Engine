@@ -18,6 +18,7 @@ use crate::players::{PlayerHandle, PosLook};
 use crate::proto::{Conn, PacketOut, RawPacket};
 
 pub mod commands;
+pub mod modern;
 pub mod nbt;
 pub mod v47;
 pub mod v755;
@@ -39,13 +40,24 @@ pub mod v770;
 pub mod v771;
 pub mod v772;
 pub mod v773;
-pub mod v774;
 
 /// A read-only view of the world, so a codec can render chunk columns without
 /// depending on the concrete `World` type (and so tests can feed a fake one).
 pub trait BlockSource: Sync {
     /// Engine block id at absolute world coordinates, air when out of range.
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId;
+
+    /// Copy section `(cx, cy, cz)` into `out`, indexed `x | z << 4 | y << 8`.
+    /// The default asks block by block; a world that can do better should.
+    fn copy_section(&self, cx: i32, cy: i32, cz: i32, out: &mut [BlockStateId; 4096]) {
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = self.block_at(
+                cx * 16 + (i & 15) as i32,
+                cy * 16 + (i >> 8) as i32,
+                cz * 16 + ((i >> 4) & 15) as i32,
+            );
+        }
+    }
 
     /// The biomes of column `(cx, cz)`, when the generator produced any.
     fn column_biomes(
@@ -54,6 +66,60 @@ pub trait BlockSource: Sync {
         _cz: i32,
     ) -> Option<std::sync::Arc<aether_worldgen::ColumnBiomes>> {
         None
+    }
+}
+
+/// A view of one column that reads each section from the world once.
+///
+/// Chunk encoders ask for every block of a column, and their light pass asks
+/// again; through the world that is a quarter of a million lookups, each
+/// taking the world's locks — slower than generating the column was. This
+/// copies a section the first time any block in it is asked for and answers
+/// everything after from the copy. Anything outside the column goes to the
+/// world as before.
+pub struct ColumnView<'a> {
+    inner: &'a dyn BlockSource,
+    cx: i32,
+    cz: i32,
+    sections: std::sync::Mutex<std::collections::HashMap<i32, Box<[BlockStateId; 4096]>>>,
+}
+
+impl<'a> ColumnView<'a> {
+    pub fn new(inner: &'a dyn BlockSource, cx: i32, cz: i32) -> Self {
+        Self {
+            inner,
+            cx,
+            cz,
+            sections: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl BlockSource for ColumnView<'_> {
+    fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+        if x >> 4 != self.cx || z >> 4 != self.cz {
+            return self.inner.block_at(x, y, z);
+        }
+        let cy = y >> 4;
+        let mut sections = self.sections.lock().unwrap();
+        let sec = sections.entry(cy).or_insert_with(|| {
+            let mut out = Box::new([BlockStateId::AIR; 4096]);
+            self.inner.copy_section(self.cx, cy, self.cz, &mut out);
+            out
+        });
+        sec[((y & 15) << 8 | (z & 15) << 4 | (x & 15)) as usize]
+    }
+
+    fn copy_section(&self, cx: i32, cy: i32, cz: i32, out: &mut [BlockStateId; 4096]) {
+        self.inner.copy_section(cx, cy, cz, out)
+    }
+
+    fn column_biomes(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Option<std::sync::Arc<aether_worldgen::ColumnBiomes>> {
+        self.inner.column_biomes(cx, cz)
     }
 }
 
@@ -422,6 +488,12 @@ pub enum Menu {
     Furnace,
 }
 
+/// Flag on an [`ServerEvent::EntityMeta`] index: the field belongs to a
+/// subclass of `AgeableMob` and its index counts from the end of that
+/// class's fields, which moved between versions. `META_AGEABLE | 0` is a
+/// sheep's wool, say. Every other index is absolute.
+pub const META_AGEABLE: u8 = 0x40;
+
 /// One entity-metadata value, in neutral terms.
 #[derive(Debug, Clone)]
 pub enum MetaValue {
@@ -514,6 +586,8 @@ pub enum ClientEvent {
         button: i8,
         mode: i32,
     },
+    /// The game-mode switcher (F3+F4) asked for a mode.
+    ChangeGameMode(GameMode),
     /// Middle-click on a block (creative pick).
     PickBlock { x: i32, y: i32, z: i32 },
     /// Anything this server does not act on (keep-alive replies, animations,
@@ -671,7 +745,10 @@ pub trait ProtocolCodec: Sync + Send {
 /// Every codec this build can speak, newest protocol first.
 pub fn codecs() -> &'static [&'static dyn ProtocolCodec] {
     static V47: v47::Codec = v47::Codec;
-    static V774: v774::Codec = v774::Codec;
+    static V777: modern::Codec = modern::Codec(&modern::version::V26_3);
+    static V776: modern::Codec = modern::Codec(&modern::version::V26_2);
+    static V775: modern::Codec = modern::Codec(&modern::version::V26_1);
+    static V774: modern::Codec = modern::Codec(&modern::version::V1_21_11);
     static V755: v755::Codec = v755::Codec;
     static V756: v756::Codec = v756::Codec;
     static V757: v757::Codec = v757::Codec;
@@ -692,9 +769,9 @@ pub fn codecs() -> &'static [&'static dyn ProtocolCodec] {
     // Newest first. 764 and 765 are absent on purpose: before 1.20.5 the whole
     // registry set travels as one NBT compound rather than a packet per
     // registry, which is a separate code path still to be written.
-    static ALL: [&dyn ProtocolCodec; 19] = [
-        &V774, &V773, &V772, &V771, &V770, &V769, &V768, &V767, &V766, &V763, &V762, &V761, &V760,
-        &V759, &V758, &V757, &V756, &V755, &V47,
+    static ALL: [&dyn ProtocolCodec; 22] = [
+        &V777, &V776, &V775, &V774, &V773, &V772, &V771, &V770, &V769, &V768, &V767, &V766, &V763,
+        &V762, &V761, &V760, &V759, &V758, &V757, &V756, &V755, &V47,
     ];
     &ALL
 }
@@ -762,6 +839,9 @@ mod tests {
     fn dispatch_maps_ids_to_codecs() {
         assert_eq!(codec_for(47).unwrap().version_name(), "1.8.9");
         assert_eq!(codec_for(774).unwrap().version_name(), "1.21.11");
+        assert_eq!(codec_for(775).unwrap().version_name(), "26.1.x");
+        assert_eq!(codec_for(776).unwrap().version_name(), "26.2");
+        assert_eq!(codec_for(777).unwrap().version_name(), "26.3");
         assert!(codec_for(1).is_none(), "unknown protocol must not resolve");
     }
 }

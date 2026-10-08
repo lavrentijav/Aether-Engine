@@ -292,6 +292,26 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             .unwrap_or(BlockStateId::AIR)
     }
 
+    /// Copy a whole section's block ids into `out`, indexed `x | z << 4 |
+    /// y << 8`, under a single lock — what a chunk encoder wants instead of
+    /// 4096 separate [`World::get_block`] calls, each taking it again.
+    pub fn copy_section(&self, cx: i32, cy: i32, cz: i32, out: &mut [BlockStateId; 4096]) {
+        if cy < i8::MIN as i32 || cy > i8::MAX as i32 {
+            out.fill(BlockStateId::AIR);
+            return;
+        }
+        self.ensure_column(cx, cz);
+        let cache = self.cache.read().unwrap();
+        match cache.get(&SubChunkKey::new(cx, cy as i8, cz)) {
+            Some(sc) => {
+                for (i, slot) in out.iter_mut().enumerate() {
+                    *slot = sc.get(i & 15, i >> 8, (i >> 4) & 15);
+                }
+            }
+            None => out.fill(BlockStateId::AIR),
+        }
+    }
+
     /// The full state name of a block id — properties and all.
     pub fn block_name_of(&self, id: BlockStateId) -> Option<String> {
         self.registry.read().unwrap().name_of(id)
@@ -473,6 +493,13 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
     /// Advance a physical body one tick against this world's blocks.
     pub fn step_body(&self, body: &mut Body) {
         step(self, body, self.params);
+    }
+
+    /// Advance a body one tick with its own physics constants — an item
+    /// falls at half a player's gravity, and a client simulating it with
+    /// vanilla's numbers drifts from a server using any others.
+    pub fn step_body_with(&self, body: &mut Body, params: PhysicsParams) {
+        step(self, body, params);
     }
 
     /// The number of sub-chunks currently resident in the cache.

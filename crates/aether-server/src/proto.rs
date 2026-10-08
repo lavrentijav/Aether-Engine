@@ -35,6 +35,19 @@ impl PacketOut {
         self
     }
 
+    /// Append a VarLong.
+    pub fn var_long(&mut self, value: i64) -> &mut Self {
+        let mut u = value as u64;
+        loop {
+            if u & !0x7f == 0 {
+                self.buf.push(u as u8);
+                return self;
+            }
+            self.buf.push(((u & 0x7f) | 0x80) as u8);
+            u >>= 7;
+        }
+    }
+
     /// Append a length-prefixed UTF-8 string.
     pub fn string(&mut self, s: &str) -> &mut Self {
         self.var_int(s.len() as i32);

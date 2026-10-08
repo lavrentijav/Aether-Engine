@@ -11,6 +11,7 @@ pub mod containers;
 #[rustfmt::skip]
 pub mod data;
 pub mod entities;
+pub mod fluids;
 pub mod interact;
 pub mod mobs;
 pub mod player;

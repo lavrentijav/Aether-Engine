@@ -106,15 +106,17 @@ pub fn dispatch(
                     .iter()
                     .map(|d| d.kind.trim_start_matches("minecraft:"))
                     .collect();
-                return Some(vec![format!("/summon <{}>", names.join("|"))]);
+                return Some(vec![format!("/summon <{}> [x y z]", names.join("|"))]);
             };
             let p = handle.pos();
-            let (yaw, pitch) = (p.yaw.to_radians() as f64, 0.0f64);
-            let at = Vector3::new(
-                p.x - yaw.sin() * 3.0 * pitch.cos(),
-                p.y,
-                p.z + yaw.cos() * 3.0,
-            );
+            let coords: Vec<f64> = args[1..].iter().filter_map(|a| a.parse().ok()).collect();
+            let at = match coords[..] {
+                [x, y, z] => Vector3::new(x, y, z),
+                _ => {
+                    let yaw = p.yaw.to_radians() as f64;
+                    Vector3::new(p.x - yaw.sin() * 3.0, p.y, p.z + yaw.cos() * 3.0)
+                }
+            };
             entities::spawn_mob(def, at, p.yaw + 180.0);
             vec![format!("Summoned {}", def.kind)]
         }

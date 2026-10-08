@@ -1,9 +1,11 @@
-//! Minecraft 1.21.11 (protocol 774) codec.
+//! The modern codec: Minecraft 1.21.11 (protocol 774) and the releases
+//! after it — 26.1.x (775), 26.2 (776) and 26.3 (777).
 //!
-//! Protocol id and every packet id, block-state id and entity-type id below
-//! come from PrismarineJS `minecraft-data` for **pc/1.21.11** — that
-//! distribution carries its own protocol definition for this exact release,
-//! so none of it is inferred from a neighbouring version.
+//! One codec, parameterized by a [`version::Version`]: every packet id,
+//! block-state, item and entity-type id comes from that version's tables,
+//! generated from the game's own `--reports` dump (`tools/gen/versions.py`).
+//! Where a packet's *layout* changed between releases, the code branches on
+//! [`version::Gen`] with the release that changed it named alongside.
 //!
 //! Structurally this shares nothing with 1.8 but the frame header. Login is
 //! followed by a **configuration phase** (added in 1.20.2) in which the server
@@ -16,10 +18,13 @@
 //! tests and the notes on [`Codec::decode`] for the known gaps.
 
 pub mod chunk;
+#[allow(clippy::all)]
+pub mod gen;
 pub mod inventory;
 pub mod items;
 pub mod play;
 pub mod registry;
+pub mod version;
 
 use std::io;
 
@@ -28,30 +33,8 @@ use aether_world::BlockStateId;
 use super::{BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::players::PosLook;
 use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
+use version::{Gen, Registries};
 
-// --- Packet ids (1.21.11) ---
-const LOGIN_SUCCESS: i32 = 0x02;
-const LOGIN_ACKNOWLEDGED: i32 = 0x03;
-const CFG_FINISH: i32 = 0x03;
-const CFG_REGISTRY_DATA: i32 = 0x07;
-const CFG_ADD_RESOURCE_PACK: i32 = 0x09;
-const CFG_FINISH_ACK: i32 = 0x03;
-const PLAY_LOGIN: i32 = 0x30;
-const PLAY_CHUNK: i32 = 0x2C;
-/// Play: move the centre of the client's loaded-column window. Columns
-/// arriving outside it are discarded on receipt.
-const PLAY_SET_CENTER_CHUNK: i32 = 0x5c;
-const PLAY_UNLOAD_CHUNK: i32 = 0x25;
-const PLAY_BLOCK_CHANGE: i32 = 0x08;
-/// Play: release the client's block prediction up to a sequence.
-///
-/// Four below Block Update: the clientbound ids are registered in
-/// alphabetical order and `block_changed_ack`, `block_destruction`,
-/// `block_entity_data`, `block_event` and `block_update` are
-/// contiguous in every release that has them.
-const PLAY_BLOCK_CHANGED_ACK: i32 = 0x04;
-const PLAY_PLAYER_INFO: i32 = 0x44;
-const PLAY_PLAYER_REMOVE: i32 = 0x43;
 /// A spawn packet's velocity, at rest.
 ///
 /// 1.21.9 changed this field twice over: it moved from the end of the packet
@@ -69,86 +52,10 @@ const PLAY_PLAYER_REMOVE: i32 = 0x43;
 /// is the only one needed, and the quantized encoding is not implemented.
 const ZERO_VELOCITY: [u8; 1] = [0x00];
 
-const PLAY_SPAWN_ENTITY: i32 = 0x01;
-const PLAY_SYNC_ENTITY_POS: i32 = 0x23;
-const PLAY_HEAD_ROTATION: i32 = 0x51;
-const PLAY_DESTROY_ENTITIES: i32 = 0x4B;
-const PLAY_KEEP_ALIVE: i32 = 0x2B;
-const PLAY_POSITION: i32 = 0x46;
-const PLAY_SYSTEM_CHAT: i32 = 0x77;
-const PLAY_GAME_EVENT: i32 = 0x26;
-const PLAY_ABILITIES: i32 = 0x3E;
-const PLAY_WINDOW_ITEMS: i32 = 0x12;
-/// Play: open a container screen. Ids in this block are from `minecraft-data`
-/// `pc/1.21.11/protocol.json` and cross-check against every other id already
-/// in this file.
-const PLAY_OPEN_WINDOW: i32 = 0x39;
-/// The `minecraft:menu` registry id of `generic_9x6` — a double chest.
-///
-/// The generic_9xN menus have occupied 0..=5 since containers were registered,
-/// and this server only ever opens the largest, so one constant covers it.
-const MENU_GENERIC_9X6: i32 = 5;
 /// The window this server opens its own containers under. Never 0, which is
 /// the player's own inventory and must not be replaced.
 const STASH_WINDOW: i32 = 1;
-const PLAY_HELD_ITEM: i32 = 0x67;
-/// Play: the player's health, hunger and saturation.
-///
-/// A vanilla client tolerates never receiving this and shows its defaults, so
-/// it went unnoticed. Two things do not tolerate it: survival mode, where the
-/// HUD is meaningless without it, and every headless client library, which
-/// waits on it as the "you are really in the world now" signal — mineflayer
-/// will not emit `spawn` until it arrives.
-const PLAY_UPDATE_HEALTH: i32 = 0x66;
 
-// Serverbound play.
-/// "Declare Commands": the server's command grammar.
-const PLAY_COMMANDS: i32 = 0x10;
-const SB_CHAT: i32 = 0x08;
-/// A slash command. Since 1.19 the client sends these on their own packet
-/// instead of as a chat message, so a server that only decodes chat never
-/// sees a single command — which is exactly what happened here.
-const SB_CHAT_COMMAND: i32 = 0x06;
-/// The same command, carrying the signatures of the arguments it quotes.
-/// The command itself is still the first field, so both decode alike.
-const SB_CHAT_COMMAND_SIGNED: i32 = 0x07;
-const SB_POSITION: i32 = 0x1D;
-const SB_POSITION_LOOK: i32 = 0x1E;
-const SB_LOOK: i32 = 0x1F;
-const SB_FLYING: i32 = 0x20;
-/// Serverbound: the player selected a different hotbar slot.
-const SB_HELD_ITEM: i32 = 0x34;
-/// Serverbound: in creative the client fills a slot from its own menu and
-/// tells the server what it put there.
-const SB_CREATIVE_SLOT: i32 = 0x37;
-const SB_BLOCK_DIG: i32 = 0x28;
-const SB_BLOCK_PLACE: i32 = 0x3F;
-/// Serverbound: a click inside an open container.
-const SB_WINDOW_CLICK: i32 = 0x11;
-/// Serverbound: respawn / statistics request.
-const SB_CLIENT_COMMAND: i32 = 0x0B;
-/// Serverbound: attack or use an entity.
-const SB_USE_ENTITY: i32 = 0x19;
-/// Serverbound: creative middle-click on a block.
-const SB_PICK_BLOCK: i32 = 0x23;
-/// Serverbound: sprinting and friends.
-const SB_ENTITY_ACTION: i32 = 0x29;
-/// Serverbound: the movement keys, sneaking among them since 1.21.6.
-const SB_PLAYER_INPUT: i32 = 0x2A;
-/// Serverbound: arm swing.
-const SB_ARM_ANIMATION: i32 = 0x3C;
-/// Serverbound: right-click with an item in the air.
-const SB_USE_ITEM: i32 = 0x40;
-/// Serverbound: the player closed a container.
-const SB_CLOSE_WINDOW: i32 = 0x12;
-
-/// Entity type id for `minecraft:player` in 1.21.11.
-const PLAYER_ENTITY_TYPE: i32 = 155;
-/// Entity type id for `minecraft:item`.
-const ITEM_ENTITY_TYPE: i32 = 71;
-/// Play: entity metadata. A dropped item is an entity that carries no item
-/// until this arrives, so the spawn packet alone renders nothing.
-const PLAY_ENTITY_METADATA: i32 = 0x61;
 /// Metadata index of `ItemEntity`'s stack.
 ///
 /// `Entity` itself defines 0..=7 (shared flags, air, custom name and its
@@ -164,10 +71,13 @@ const META_END: u8 = 0xFF;
 /// offer from a new one across reconnects.
 const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_0000_0000_0001;
 
-/// The 1.21.11 codec.
-pub struct Codec;
+/// The codec of one modern protocol version; see [`version`].
+pub struct Codec(pub &'static version::Version);
 
-/// Engine block id -> 1.21.11 block-state id.
+/// Engine block id -> 1.21.11 block-state id. Other versions translate
+/// through [`version::Version::state`]; this is the reference the tests hold
+/// the 1.21.11 table to.
+#[cfg(test)]
 ///
 /// A table lookup, not a chain of comparisons: the engine's block ids *are*
 /// this version's block ids (see `aether_world::registry::blocks`), so the
@@ -188,11 +98,11 @@ pub fn block_state(id: BlockStateId) -> u32 {
 
 impl ProtocolCodec for Codec {
     fn version_name(&self) -> &'static str {
-        "1.21.11"
+        self.0.name
     }
 
     fn protocol_id(&self) -> i32 {
-        774
+        self.0.protocol
     }
 
     fn read_login_start(&self, s: &mut Conn) -> io::Result<Option<String>> {
@@ -201,7 +111,7 @@ impl ProtocolCodec for Codec {
         let Some(p) = read_packet(s)? else {
             return Ok(None);
         };
-        if p.id != 0x00 {
+        if p.id != self.0.packets.login_sb_hello {
             return Ok(None);
         }
         Ok(Some(PacketIn::new(&p.data).string()?))
@@ -210,33 +120,48 @@ impl ProtocolCodec for Codec {
     fn complete_login(&self, s: &mut Conn, p: &JoinParams) -> io::Result<()> {
         // Login Success: UUID as 16 raw bytes here (1.8 wanted a hyphenated
         // string in the same packet), username, then an empty property list.
-        PacketOut::new(LOGIN_SUCCESS)
-            .uuid(p.uuid)
-            .string(&p.name)
-            .var_int(0)
-            .send(s)?;
+        let v = self.0;
+        let mut finished = PacketOut::new(v.packets.login_cb_login_finished);
+        finished.uuid(p.uuid).string(&p.name).var_int(0);
+        if v.gen >= Gen::V26_2 {
+            // 26.2: a session id, which the client attaches to its reports.
+            // Any UUID will do for an offline server; the player's own is
+            // as good as another.
+            finished.uuid(p.uuid);
+        }
+        finished.send(s)?;
 
         // The client acknowledges and moves itself into the configuration
         // state; nothing may be sent in between.
-        wait_for(s, LOGIN_ACKNOWLEDGED)?;
+        wait_for(s, v.packets.login_sb_login_acknowledged)?;
 
         // Configuration: hand over the registries the client builds its world
         // from. Without these it disconnects before ever reaching play.
-        for (id, entries) in registry::registries() {
-            let mut pkt = PacketOut::new(CFG_REGISTRY_DATA);
-            pkt.string(id).var_int(entries.len() as i32);
-            for (key, value) in entries {
-                pkt.string(&key)
-                    .bool(true) // this entry carries data
-                    .bytes(&value.to_network());
+        match &v.registries {
+            Registries::Explicit => {
+                for (id, entries) in registry::registries() {
+                    let mut pkt = PacketOut::new(v.packets.cfg_cb_registry_data);
+                    pkt.string(id).var_int(entries.len() as i32);
+                    for (key, value) in entries {
+                        pkt.string(&key)
+                            .bool(true) // this entry carries data
+                            .bytes(&value.to_network());
+                    }
+                    pkt.send(s)?;
+                }
             }
-            pkt.send(s)?;
+            Registries::KnownPacks {
+                core,
+                synced,
+                overworld,
+                data,
+            } => send_known_registries(s, v, core, synced, *overworld, data)?,
         }
 
         // Add Resource Pack, offered while still in configuration so the
         // client downloads before the world appears.
         if p.resource_pack.enabled() {
-            PacketOut::new(CFG_ADD_RESOURCE_PACK)
+            PacketOut::new(v.packets.cfg_cb_resource_pack_push)
                 .uuid(RESOURCE_PACK_ID)
                 .string(&p.resource_pack.url)
                 .string(&p.resource_pack.hash)
@@ -245,11 +170,18 @@ impl ProtocolCodec for Codec {
                 .send(s)?;
         }
 
-        PacketOut::new(CFG_FINISH).send(s)?;
-        wait_for(s, CFG_FINISH_ACK)?;
+        // Tags. Not decoration: the client decides what water *is* by the
+        // `minecraft:water` fluid tag — swimming, the underwater view and
+        // drowning all ask it — and without one every water block behaves as
+        // air. Climbing asks `climbable`; a pickaxe's speed asks the
+        // `mineable/*` block tags.
+        tags_packet(v).send(s)?;
+
+        PacketOut::new(v.packets.cfg_cb_finish_configuration).send(s)?;
+        wait_for(s, v.packets.cfg_sb_finish_configuration)?;
 
         // Play Login.
-        let mut login = PacketOut::new(PLAY_LOGIN);
+        let mut login = PacketOut::new(v.packets.cb_login);
         login
             .i32(p.entity_id)
             .bool(false) // not hardcore
@@ -262,28 +194,35 @@ impl ProtocolCodec for Codec {
             .bool(true) // enable respawn screen
             .bool(false) // limited crafting
             // SpawnInfo:
-            .var_int(0) // dimension type: index 0 in the registry above
+            .var_int(dimension_type_id(v))
             .string(registry::DIMENSION_NAME)
             .i64(0) // hashed seed
-            .u8(p.game_mode.wire()) // survival 0 / creative 1
-            .u8(0xFF) // previous game mode: none
+            .u8(p.game_mode.wire()); // survival 0 / creative 1 (a VarInt from 26.3: same byte)
+        play::write_no_previous_mode(v, &mut login);
+        login
             .bool(false) // not a debug world
             .bool(false) // not superflat
             .bool(false) // no death location
             .var_int(0) // portal cooldown
-            .var_int(63) // sea level
-            .bool(false); // does not enforce secure chat
+            .var_int(63); // sea level
+        if v.gen >= Gen::V26_2 {
+            login.bool(false); // 26.2: not in online mode
+        }
+        login.bool(false); // does not enforce secure chat
         login.send(s)?;
 
         // Tell the client to start waiting for chunks rather than rendering
         // an empty void while the first batch is in flight.
-        PacketOut::new(PLAY_GAME_EVENT).u8(13).f32(0.0).send(s)
+        PacketOut::new(self.0.packets.cb_game_event)
+            .u8(13)
+            .f32(0.0)
+            .send(s)
     }
 
     fn finish_join(&self, s: &mut Conn, p: &JoinParams) -> io::Result<()> {
         // Synchronize Player Position. Deltas are zero and `flags` is 0, so
         // every value is absolute.
-        PacketOut::new(PLAY_POSITION)
+        PacketOut::new(self.0.packets.cb_player_position)
             .var_int(1) // teleport id
             .f64(p.spawn.0)
             .f64(p.spawn.1)
@@ -308,7 +247,7 @@ impl ProtocolCodec for Codec {
             super::GameMode::Creative => 0x01 | 0x04 | 0x08, // invulnerable | allow flying | creative
             super::GameMode::Survival => 0,
         };
-        PacketOut::new(PLAY_ABILITIES)
+        PacketOut::new(self.0.packets.cb_player_abilities)
             .u8(flags)
             .f32(0.05) // flying speed
             .f32(0.10) // walking speed
@@ -317,12 +256,12 @@ impl ProtocolCodec for Codec {
         // The inventory itself follows from the session, which owns it: the
         // server's copy is authoritative and is sent whole once the player
         // is registered.
-        inventory::held_item_packet(PLAY_HELD_ITEM, 0).send(s)?;
+        inventory::held_item_packet(self.0.packets.cb_set_held_slot, 0).send(s)?;
 
         // Full health and food. This server models neither, so the values are
         // constant — but sending them is not optional: see the constant's
         // comment.
-        PacketOut::new(PLAY_UPDATE_HEALTH)
+        PacketOut::new(self.0.packets.cb_set_health)
             .f32(20.0)
             .var_int(20)
             .f32(5.0)
@@ -333,18 +272,22 @@ impl ProtocolCodec for Codec {
     fn encode(&self, ev: &ServerEvent, world: &dyn BlockSource) -> Vec<PacketOut> {
         match ev {
             ServerEvent::KeepAlive(id) => {
-                let mut p = PacketOut::new(PLAY_KEEP_ALIVE);
+                let mut p = PacketOut::new(self.0.packets.cb_keep_alive);
                 p.i64(*id); // a long here, a varint in 1.8
                 vec![p]
             }
             ServerEvent::ChunkColumn { cx, cz } => {
-                vec![chunk::chunk_data_packet(PLAY_CHUNK, *cx, *cz, world)]
+                vec![chunk::chunk_data_packet(self.0, *cx, *cz, world)]
             }
             ServerEvent::UnloadColumn { cx, cz } => {
-                vec![chunk::unload_chunk_packet(PLAY_UNLOAD_CHUNK, *cx, *cz)]
+                vec![chunk::unload_chunk_packet(
+                    self.0.packets.cb_forget_level_chunk,
+                    *cx,
+                    *cz,
+                )]
             }
             ServerEvent::TabListAdd(h) => {
-                let mut p = PacketOut::new(PLAY_PLAYER_INFO);
+                let mut p = PacketOut::new(self.0.packets.cb_player_info_update);
                 p.u8(0x01 | 0x08) // add_player | update_listed
                     .var_int(1) // one entry
                     .uuid(h.uuid)
@@ -354,16 +297,16 @@ impl ProtocolCodec for Codec {
                 vec![p]
             }
             ServerEvent::TabListRemove(uuid) => {
-                let mut p = PacketOut::new(PLAY_PLAYER_REMOVE);
+                let mut p = PacketOut::new(self.0.packets.cb_player_info_remove);
                 p.var_int(1).uuid(*uuid);
                 vec![p]
             }
             ServerEvent::SpawnPlayer(h) => {
                 let pos = h.pos();
-                let mut p = PacketOut::new(PLAY_SPAWN_ENTITY);
+                let mut p = PacketOut::new(self.0.packets.cb_add_entity);
                 p.var_int(h.entity_id)
                     .uuid(h.uuid)
-                    .var_int(PLAYER_ENTITY_TYPE)
+                    .var_int(self.0.entity_type("minecraft:player").unwrap_or(0))
                     .f64(pos.x)
                     .f64(pos.y)
                     .f64(pos.z)
@@ -387,13 +330,13 @@ impl ProtocolCodec for Codec {
                 // and the metadata says what it is holding. A spawn on its own
                 // renders as nothing at all, which looks exactly like the drop
                 // having failed.
-                let mut spawn = PacketOut::new(PLAY_SPAWN_ENTITY);
+                let mut spawn = PacketOut::new(self.0.packets.cb_add_entity);
                 spawn
                     .var_int(*entity_id)
                     // Derived from the entity id so a re-send names the same
                     // entity; nothing here needs it to be unguessable.
                     .uuid(0x1000_0000_0000_4000_8000_0000_0000_0000u128 | *entity_id as u128)
-                    .var_int(ITEM_ENTITY_TYPE)
+                    .var_int(self.0.entity_type("minecraft:item").unwrap_or(0))
                     .f64(*x)
                     .f64(*y)
                     .f64(*z)
@@ -403,61 +346,52 @@ impl ProtocolCodec for Codec {
                     .u8(0)
                     .var_int(0);
 
-                let mut meta = PacketOut::new(PLAY_ENTITY_METADATA);
+                let mut meta = PacketOut::new(self.0.packets.cb_set_entity_data);
                 meta.var_int(*entity_id)
                     .u8(ITEM_DATA_INDEX)
                     .var_int(META_ITEM_STACK);
-                match items::item_id(item) {
+                match self.0.item_id(item) {
                     Some(id) => inventory::write_item(&mut meta, id, *count as i32),
                     None => inventory::write_empty(&mut meta),
                 }
                 meta.u8(META_END);
                 vec![spawn, meta]
             }
-            ServerEvent::MoveEntity { entity_id, x, y, z } => {
-                let mut p = PacketOut::new(PLAY_SYNC_ENTITY_POS);
-                p.var_int(*entity_id)
-                    .f64(*x)
-                    .f64(*y)
-                    .f64(*z)
-                    .f64(0.0)
-                    .f64(0.0)
-                    .f64(0.0)
-                    .f32(0.0)
-                    .f32(0.0)
-                    .bool(true);
-                vec![p]
-            }
+            ServerEvent::MoveEntity { entity_id, x, y, z } => vec![play::position_sync(
+                self.0,
+                *entity_id,
+                (*x, *y, *z),
+                0.0,
+                0.0,
+                true,
+            )],
             ServerEvent::EntityMove(h) => {
                 let pos = h.pos();
-                let mut tp = PacketOut::new(PLAY_SYNC_ENTITY_POS);
-                tp.var_int(h.entity_id)
-                    .f64(pos.x)
-                    .f64(pos.y)
-                    .f64(pos.z)
-                    .f64(0.0)
-                    .f64(0.0)
-                    .f64(0.0)
-                    .f32(pos.yaw)
-                    .f32(pos.pitch)
-                    .bool(pos.on_ground);
-                let mut head = PacketOut::new(PLAY_HEAD_ROTATION);
+                let tp = play::position_sync(
+                    self.0,
+                    h.entity_id,
+                    (pos.x, pos.y, pos.z),
+                    pos.yaw,
+                    pos.pitch,
+                    pos.on_ground,
+                );
+                let mut head = PacketOut::new(self.0.packets.cb_rotate_head);
                 head.var_int(h.entity_id).u8(angle(pos.yaw));
                 vec![tp, head]
             }
             ServerEvent::DespawnEntity(eid) => {
-                let mut p = PacketOut::new(PLAY_DESTROY_ENTITIES);
+                let mut p = PacketOut::new(self.0.packets.cb_remove_entities);
                 p.var_int(1).var_int(*eid);
                 vec![p]
             }
             ServerEvent::BlockChange { x, y, z, block } => {
-                let mut p = PacketOut::new(PLAY_BLOCK_CHANGE);
+                let mut p = PacketOut::new(self.0.packets.cb_block_update);
                 p.i64(encode_position(*x as i64, *y as i64, *z as i64))
-                    .var_int(block_state(*block) as i32);
+                    .var_int(self.0.state(*block) as i32);
                 vec![p]
             }
             ServerEvent::AckBlockChange(seq) => {
-                let mut p = PacketOut::new(PLAY_BLOCK_CHANGED_ACK);
+                let mut p = PacketOut::new(self.0.packets.cb_block_changed_ack);
                 p.var_int(*seq);
                 vec![p]
             }
@@ -466,31 +400,31 @@ impl ProtocolCodec for Codec {
                 // receives contents for a window it has not opened discards
                 // them, and the window then shows as empty with no error
                 // anywhere.
-                let mut open = PacketOut::new(PLAY_OPEN_WINDOW);
+                let mut open = PacketOut::new(self.0.packets.cb_open_screen);
                 open.var_int(STASH_WINDOW)
-                    .var_int(MENU_GENERIC_9X6)
+                    .var_int(self.0.menu_double_chest)
                     // The title is an *anonymous* NBT component, the same
                     // shape System Chat uses in this generation.
                     .bytes(&super::nbt::string(title).to_network());
 
-                let mut items = PacketOut::new(PLAY_WINDOW_ITEMS);
+                let mut items = PacketOut::new(self.0.packets.cb_container_set_content);
                 items
                     .var_int(STASH_WINDOW)
                     .var_int(1) // state id
                     .var_int(slots.len() as i32);
                 for slot in slots {
-                    write_container_slot(&mut items, slot);
+                    write_container_slot(self.0, &mut items, slot);
                 }
                 inventory::write_empty(&mut items); // nothing on the cursor
                 vec![open, items]
             }
             ServerEvent::SetCenterChunk { cx, cz } => {
-                let mut p = PacketOut::new(PLAY_SET_CENTER_CHUNK);
+                let mut p = PacketOut::new(self.0.packets.cb_set_chunk_cache_center);
                 p.var_int(*cx).var_int(*cz);
                 vec![p]
             }
             ServerEvent::CommandTree => {
-                let mut p = PacketOut::new(PLAY_COMMANDS);
+                let mut p = PacketOut::new(self.0.packets.cb_commands);
                 // From 1.19 on a parser is an index into the registry.
                 super::commands::write_tree(&mut p, super::commands::Parsers::ById);
                 vec![p]
@@ -499,11 +433,11 @@ impl ProtocolCodec for Codec {
                 // System Chat carries an *anonymous* NBT text component here —
                 // a bare tag with no name — where 1.8 sent a JSON string. A
                 // plain string tag is a valid component on its own.
-                let mut p = PacketOut::new(PLAY_SYSTEM_CHAT);
+                let mut p = PacketOut::new(self.0.packets.cb_system_chat);
                 p.bytes(&super::nbt::string(text).to_network()).bool(false); // not an action-bar overlay
                 vec![p]
             }
-            other => play::encode(other).unwrap_or_default(),
+            other => play::encode(self.0, other).unwrap_or_default(),
         }
     }
 
@@ -553,12 +487,13 @@ impl ProtocolCodec for Codec {
         // server's view of the block. It is read from the end because the
         // fields in front of it differ between releases.
         let seq = super::trailing_var_int(&pkt.data);
+        let p = self.0.packets;
         match pkt.id {
-            SB_HELD_ITEM => match pin.u16() {
+            id if id == p.sb_set_carried_item => match pin.u16() {
                 Ok(slot) => ClientEvent::HeldSlot(slot as u8),
                 Err(_) => ClientEvent::Ignored,
             },
-            SB_CREATIVE_SLOT => {
+            id if id == p.sb_set_creative_mode_slot => {
                 // Only the head of the stack is read: the count tells us
                 // whether anything is there, the id says what. The component
                 // arrays that follow are the client's business, and the rest
@@ -571,7 +506,7 @@ impl ProtocolCodec for Codec {
                     Ok(n) => (
                         pin.var_int()
                             .ok()
-                            .and_then(items::name_of)
+                            .and_then(|id| self.0.item_name(id))
                             .map(str::to_owned),
                         n.clamp(0, u8::MAX as i32) as u8,
                     ),
@@ -582,7 +517,7 @@ impl ProtocolCodec for Codec {
                     count,
                 }
             }
-            SB_POSITION => match (pin.f64(), pin.f64(), pin.f64(), pin.u8()) {
+            id if id == p.sb_move_player_pos => match (pin.f64(), pin.f64(), pin.f64(), pin.u8()) {
                 (Ok(x), Ok(y), Ok(z), Ok(flags)) => ClientEvent::Move(PosLook {
                     x,
                     y,
@@ -592,7 +527,7 @@ impl ProtocolCodec for Codec {
                 }),
                 _ => ClientEvent::Ignored,
             },
-            SB_POSITION_LOOK => {
+            id if id == p.sb_move_player_pos_rot => {
                 match (
                     pin.f64(),
                     pin.f64(),
@@ -614,7 +549,7 @@ impl ProtocolCodec for Codec {
                     _ => ClientEvent::Ignored,
                 }
             }
-            SB_LOOK => match (pin.f32(), pin.f32(), pin.u8()) {
+            id if id == p.sb_move_player_rot => match (pin.f32(), pin.f32(), pin.u8()) {
                 (Ok(yaw), Ok(pitch), Ok(flags)) => ClientEvent::Move(PosLook {
                     yaw,
                     pitch,
@@ -623,14 +558,14 @@ impl ProtocolCodec for Codec {
                 }),
                 _ => ClientEvent::Ignored,
             },
-            SB_FLYING => match pin.u8() {
+            id if id == p.sb_move_player_status_only => match pin.u8() {
                 Ok(flags) => ClientEvent::Move(PosLook {
                     on_ground: flags & 1 != 0,
                     ..prev
                 }),
                 Err(_) => ClientEvent::Ignored,
             },
-            SB_BLOCK_DIG => {
+            id if id == p.sb_player_action => {
                 let Ok(status) = pin.var_int() else {
                     return ClientEvent::Ignored;
                 };
@@ -649,11 +584,32 @@ impl ProtocolCodec for Codec {
                     _ => ClientEvent::Ignored,
                 }
             }
-            SB_CLIENT_COMMAND => match pin.var_int() {
+            id if id == p.sb_change_game_mode => match pin.var_int() {
+                Ok(0) => ClientEvent::ChangeGameMode(super::GameMode::Survival),
+                Ok(1) => ClientEvent::ChangeGameMode(super::GameMode::Creative),
+                _ => ClientEvent::Ignored,
+            },
+            id if id == p.sb_client_command => match pin.var_int() {
                 Ok(0) => ClientEvent::Respawn,
                 _ => ClientEvent::Ignored,
             },
-            SB_USE_ENTITY => {
+            // 26.1 split attacking out of `interact` into a packet of its
+            // own; what is left is always a use, with hand and location.
+            id if id == p.sb_attack => match pin.var_int() {
+                Ok(target) => ClientEvent::Interact {
+                    target,
+                    attack: true,
+                },
+                Err(_) => ClientEvent::Ignored,
+            },
+            id if id == p.sb_interact && self.0.gen >= Gen::V26_1 => match pin.var_int() {
+                Ok(target) => ClientEvent::Interact {
+                    target,
+                    attack: false,
+                },
+                Err(_) => ClientEvent::Ignored,
+            },
+            id if id == p.sb_interact => {
                 let (Ok(target), Ok(mouse)) = (pin.var_int(), pin.var_int()) else {
                     return ClientEvent::Ignored;
                 };
@@ -665,14 +621,14 @@ impl ProtocolCodec for Codec {
                     attack: mouse == 1,
                 }
             }
-            SB_PICK_BLOCK => match pin.i64() {
+            id if id == p.sb_pick_item_from_block => match pin.i64() {
                 Ok(packed) => {
                     let (x, y, z) = decode_position(packed);
                     ClientEvent::PickBlock { x, y, z }
                 }
                 Err(_) => ClientEvent::Ignored,
             },
-            SB_ENTITY_ACTION => {
+            id if id == p.sb_player_command => {
                 let _ = pin.var_int();
                 match pin.var_int() {
                     Ok(1) => ClientEvent::Sprint(true),
@@ -680,21 +636,24 @@ impl ProtocolCodec for Codec {
                     _ => ClientEvent::Ignored,
                 }
             }
-            SB_PLAYER_INPUT => match pin.u8() {
+            id if id == p.sb_player_input => match pin.u8() {
                 Ok(flags) => ClientEvent::Input {
                     sneak: flags & 0x20 != 0,
                 },
                 Err(_) => ClientEvent::Ignored,
             },
-            SB_ARM_ANIMATION => ClientEvent::Swing {
+            id if id == p.sb_swing => ClientEvent::Swing {
                 hand: pin.var_int().unwrap_or(0) as u8,
             },
-            SB_USE_ITEM => {
+            // 26.3: an empty-handed swing at nothing — the arm swing the
+            // swing packet used to report.
+            id if id == p.sb_punch => ClientEvent::Swing { hand: 0 },
+            id if id == p.sb_use_item => {
                 let hand = pin.var_int().unwrap_or(0) as u8;
                 let seq = pin.var_int().unwrap_or(0);
                 ClientEvent::UseItem { hand, seq }
             }
-            SB_BLOCK_PLACE => {
+            id if id == p.sb_use_item_on => {
                 let Ok(_hand) = pin.var_int() else {
                     return ClientEvent::Ignored;
                 };
@@ -736,7 +695,7 @@ impl ProtocolCodec for Codec {
                     cursor,
                 }
             }
-            SB_WINDOW_CLICK => {
+            id if id == p.sb_container_click => {
                 // windowId, stateId, slot, button, mode. The client's own
                 // view of what changed (hashed slots) is deliberately
                 // dropped: the server computes the click itself and sends the
@@ -757,14 +716,14 @@ impl ProtocolCodec for Codec {
                     mode,
                 }
             }
-            SB_CLOSE_WINDOW => ClientEvent::ContainerClose,
-            SB_CHAT_COMMAND | SB_CHAT_COMMAND_SIGNED => match pin.string() {
+            id if id == p.sb_container_close => ClientEvent::ContainerClose,
+            id if id == p.sb_chat_command || id == p.sb_chat_command_signed => match pin.string() {
                 // The command arrives without its slash; the
                 // dispatcher keys on one, so it is put back.
                 Ok(text) => ClientEvent::Chat(format!("/{text}")),
                 Err(_) => ClientEvent::Ignored,
             },
-            SB_CHAT => match pin.string() {
+            id if id == p.sb_chat => match pin.string() {
                 Ok(text) => ClientEvent::Chat(text),
                 Err(_) => ClientEvent::Ignored,
             },
@@ -779,20 +738,153 @@ impl ProtocolCodec for Codec {
 /// skipped: a hole in the window would silently shift every later slot and
 /// break the layout, while a barrier is visibly "something is here that I
 /// cannot show you".
-fn write_container_slot(p: &mut PacketOut, slot: &super::ContainerSlot) {
+fn write_container_slot(v: &version::Version, p: &mut PacketOut, slot: &super::ContainerSlot) {
     if slot.is_empty() {
         inventory::write_empty(p);
         return;
     }
-    let id = items::item_for_block(&slot.item)
-        .or_else(|| items::item_id("minecraft:barrier"))
+    let id = v
+        .item_id(&slot.item)
+        .or_else(|| v.item_id("minecraft:barrier"))
         .unwrap_or(0);
     // The badge shows `wire_count`, which is one for anything past a stack;
     // the real number rides in the name. The wire could carry 4000 — the count
     // is a VarInt since 1.20.5 — but the client renders that badge into the
     // corner of a 16-pixel icon and four digits do not fit there. A label
     // reading `Cobblestone (x4000)` is legible; a smear of pixels is not.
-    inventory::write_named_item(p, id, slot.wire_count() as i32, &slot.label);
+    inventory::write_named_item(
+        p,
+        v.component_custom_name,
+        id,
+        slot.wire_count() as i32,
+        &slot.label,
+    );
+}
+
+/// The dimension type the overworld uses, as an index into the registry.
+fn dimension_type_id(v: &version::Version) -> i32 {
+    v.synced_index("minecraft:dimension_type", registry::DIMENSION_NAME)
+        .unwrap_or(0) as i32
+}
+
+/// The registries of a version whose client carries them itself.
+///
+/// The server offers the vanilla `minecraft:core` pack of each release that
+/// shares this protocol; the client answers with the ones it has. With the
+/// pack, each registry goes by name only — the client fills every entry from
+/// its own copy — except the overworld dimension type, which is sent with
+/// data: this server's world is taller than vanilla's. Without it (a bot
+/// library has no game data) every entry carries its data, as a vanilla
+/// server does.
+fn send_known_registries(
+    s: &mut Conn,
+    v: &version::Version,
+    core: &[&str],
+    synced: &[(&str, &[&str])],
+    overworld: fn() -> super::nbt::Nbt,
+    data: &[u8],
+) -> io::Result<()> {
+    let mut offer = PacketOut::new(v.packets.cfg_cb_select_known_packs);
+    offer.var_int(core.len() as i32);
+    for version in core {
+        offer.string("minecraft").string("core").string(version);
+    }
+    offer.send(s)?;
+
+    let known = loop_until(s, v.packets.cfg_sb_select_known_packs)?;
+    let mut pin = PacketIn::new(&known.data);
+    let mut has_core = false;
+    for _ in 0..pin.var_int().unwrap_or(0).clamp(0, 64) {
+        match (pin.string(), pin.string(), pin.string()) {
+            (Ok(ns), Ok(id), Ok(ver)) => {
+                has_core |= ns == "minecraft" && id == "core" && core.contains(&ver.as_str())
+            }
+            _ => break,
+        }
+    }
+    let full = if has_core {
+        Vec::new()
+    } else {
+        miniz_oxide::inflate::decompress_to_vec_zlib(data).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "corrupt built-in registry data")
+        })?
+    };
+    let mut at = 0usize;
+    let mut next_entry = || -> &[u8] {
+        let len = full
+            .get(at..at + 4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+            .unwrap_or(0);
+        let entry = full.get(at + 4..at + 4 + len).unwrap_or(&[]);
+        at += 4 + len;
+        entry
+    };
+
+    for (id, entries) in synced {
+        let mut pkt = PacketOut::new(v.packets.cfg_cb_registry_data);
+        pkt.string(id).var_int(entries.len() as i32);
+        for key in entries.iter() {
+            pkt.string(key);
+            let entry = if has_core { &[][..] } else { next_entry() };
+            if *id == "minecraft:dimension_type" && *key == registry::DIMENSION_NAME {
+                pkt.bool(true)
+                    .bytes(&tall_overworld(overworld()).to_network());
+            } else if has_core {
+                pkt.bool(false);
+            } else {
+                pkt.bool(true).bytes(entry);
+            }
+        }
+        pkt.send(s)?;
+    }
+    Ok(())
+}
+
+/// A version's own overworld dimension type, at this server's height.
+fn tall_overworld(vanilla: super::nbt::Nbt) -> super::nbt::Nbt {
+    use super::nbt::Nbt;
+    let Nbt::Compound(mut fields) = vanilla else {
+        return vanilla;
+    };
+    for (key, value) in fields.iter_mut() {
+        match key.as_str() {
+            "min_y" => *value = Nbt::Int(registry::MIN_Y),
+            "height" | "logical_height" => *value = Nbt::Int(registry::HEIGHT),
+            _ => {}
+        }
+    }
+    Nbt::Compound(fields)
+}
+
+/// The "Update Tags" packet for every static registry.
+fn tags_packet(v: &version::Version) -> PacketOut {
+    let mut p = PacketOut::new(v.packets.cfg_cb_update_tags);
+    p.var_int(v.tags.len() as i32);
+    for (registry, entries) in v.tags {
+        p.string(registry).var_int(entries.len() as i32);
+        for (name, ids) in entries.iter() {
+            p.string(name).var_int(ids.len() as i32);
+            for id in ids.iter() {
+                p.var_int(*id as i32);
+            }
+        }
+    }
+    p
+}
+
+/// Read packets until one with `id` arrives and return it.
+fn loop_until(s: &mut Conn, id: i32) -> io::Result<RawPacket> {
+    for _ in 0..64 {
+        if let Some(p) = read_packet(s)? {
+            if p.id == id {
+                return Ok(p);
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "client never sent the expected handshake packet",
+    ))
 }
 
 /// Read packets until one with `id` arrives, ignoring the rest.
@@ -801,17 +893,7 @@ fn write_container_slot(p: &mut PacketOut, slot: &super::ContainerSlot) {
 /// plugin channels) with the handshake steps the server waits on, so skipping
 /// is required rather than treating them as protocol errors.
 fn wait_for(s: &mut Conn, id: i32) -> io::Result<()> {
-    for _ in 0..64 {
-        match read_packet(s)? {
-            Some(p) if p.id == id => return Ok(()),
-            Some(_) => continue,
-            None => continue,
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "client never sent the expected handshake packet",
-    ))
+    loop_until(s, id).map(|_| ())
 }
 
 /// Degrees -> the protocol's angle byte (256ths of a full turn).
@@ -839,7 +921,39 @@ fn decode_position(v: i64) -> (i32, i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const C: Codec = Codec(&version::V1_21_11);
     use aether_api::block_ids as b;
+
+    #[test]
+    fn the_tags_make_water_water_and_ladders_climbable() {
+        let find = |reg: &str, tag: &str| {
+            version::V1_21_11
+                .tags
+                .iter()
+                .find(|(r, _)| *r == reg)
+                .and_then(|(_, t)| t.iter().find(|(n, _)| *n == tag))
+                .map(|(_, ids)| ids.to_vec())
+        };
+        // flowing_water = 1, water = 2 in the fluid registry.
+        assert_eq!(find("minecraft:fluid", "minecraft:water"), Some(vec![1, 2]));
+        assert_eq!(find("minecraft:fluid", "minecraft:lava"), Some(vec![3, 4]));
+        let ladder =
+            aether_world::registry::blocks::block_id_of("minecraft:ladder").unwrap() as u32;
+        assert!(find("minecraft:block", "minecraft:climbable")
+            .unwrap()
+            .contains(&ladder));
+        let stone = aether_world::registry::blocks::block_id_of("minecraft:stone").unwrap() as u32;
+        assert!(find("minecraft:block", "minecraft:mineable/pickaxe")
+            .unwrap()
+            .contains(&stone));
+        // And the packet carries all of it.
+        let mut wire = Vec::new();
+        tags_packet(&version::V1_21_11)
+            .write_to(&mut wire, None)
+            .unwrap();
+        assert!(wire.len() > 10_000);
+    }
 
     #[test]
     fn position_layout_differs_from_1_8() {
@@ -886,19 +1000,19 @@ mod tests {
         // 1.8 sends a varint here; getting this wrong desynchronises the
         // stream on the very first keep-alive.
         let world = chunk::tests_support::Empty;
-        let pkts = Codec.encode(&ServerEvent::KeepAlive(1), &world);
+        let pkts = C.encode(&ServerEvent::KeepAlive(1), &world);
         let mut wire = Vec::new();
         pkts[0].write_to(&mut wire, None).unwrap();
         // frame len, id, then 8 bytes of payload
         assert_eq!(wire[0] as usize, wire.len() - 1);
-        assert_eq!(wire[1] as i32, PLAY_KEEP_ALIVE);
+        assert_eq!(wire[1] as i32, version::V1_21_11.packets.cb_keep_alive);
         assert_eq!(wire.len(), 1 + 1 + 8);
     }
 
     #[test]
     fn block_change_carries_a_state_id_not_id_shifted_by_four() {
         let world = chunk::tests_support::Empty;
-        let pkts = Codec.encode(
+        let pkts = C.encode(
             &ServerEvent::BlockChange {
                 x: 1,
                 y: 2,
@@ -931,7 +1045,7 @@ mod tests {
                 BlockStateId::AIR
             }
         }
-        let pkts = Codec.encode(
+        let pkts = C.encode(
             &ServerEvent::DropItem {
                 entity_id: 7,
                 x: 1.0,
@@ -946,7 +1060,10 @@ mod tests {
         pkts[0].write_to(&mut wire, None).unwrap();
         let mut pin = crate::proto::PacketIn::new(&wire);
         let len = pin.var_int().unwrap() as usize;
-        assert_eq!(pin.var_int().unwrap(), PLAY_SPAWN_ENTITY);
+        assert_eq!(
+            pin.var_int().unwrap(),
+            version::V1_21_11.packets.cb_add_entity
+        );
         // varint id (1) + uuid (16) + varint type (1) + 3 x f64 (24)
         // + velocity (1) + pitch/yaw/head (3) + varint object data (1)
         let body = len - 1; // the packet id inside the length
@@ -975,11 +1092,11 @@ mod tests {
         // name. Decode per the spec: tag byte, then a length-prefixed string,
         // then the action-bar flag, and nothing left over.
         let world = chunk::tests_support::Empty;
-        let pkts = Codec.encode(&ServerEvent::Chat("hi there".into()), &world);
+        let pkts = C.encode(&ServerEvent::Chat("hi there".into()), &world);
         let mut wire = Vec::new();
         pkts[0].write_to(&mut wire, None).unwrap();
 
-        assert_eq!(wire[1] as i32, PLAY_SYSTEM_CHAT);
+        assert_eq!(wire[1] as i32, version::V1_21_11.packets.cb_system_chat);
         let body = &wire[2..];
         assert_eq!(body[0], 0x08, "TAG_String, and no name follows it");
         let len = u16::from_be_bytes([body[1], body[2]]) as usize;
@@ -1001,7 +1118,7 @@ mod tests {
         body.extend_from_slice(&0i64.to_be_bytes()); // salt
         body.push(0); // no signature
         let pkt = RawPacket {
-            id: SB_CHAT,
+            id: version::V1_21_11.packets.sb_chat,
             data: body,
         };
         let prev = PosLook {
@@ -1012,7 +1129,7 @@ mod tests {
             pitch: 0.0,
             on_ground: true,
         };
-        match Codec.decode(&pkt, prev) {
+        match C.decode(&pkt, prev) {
             ClientEvent::Chat(text) => assert_eq!(text, "hello"),
             _ => panic!("a chat packet must decode as chat"),
         }
@@ -1033,10 +1150,10 @@ mod tests {
     #[test]
     fn a_selected_slot_decodes_as_held_slot() {
         let pkt = RawPacket {
-            id: SB_HELD_ITEM,
+            id: version::V1_21_11.packets.sb_set_carried_item,
             data: 3u16.to_be_bytes().to_vec(),
         };
-        match Codec.decode(&pkt, any_pos()) {
+        match C.decode(&pkt, any_pos()) {
             ClientEvent::HeldSlot(slot) => assert_eq!(slot, 3),
             _ => panic!("a held-item packet must decode as a slot selection"),
         }
@@ -1049,10 +1166,10 @@ mod tests {
         let mut data = 36u16.to_be_bytes().to_vec();
         data.extend_from_slice(&[1, 1, 0, 0]);
         let pkt = RawPacket {
-            id: SB_CREATIVE_SLOT,
+            id: version::V1_21_11.packets.sb_set_creative_mode_slot,
             data,
         };
-        match Codec.decode(&pkt, any_pos()) {
+        match C.decode(&pkt, any_pos()) {
             ClientEvent::CreativeSlot { slot, item, count } => {
                 assert_eq!(slot, 36);
                 assert_eq!(item.as_deref(), Some("minecraft:stone"));
@@ -1069,10 +1186,10 @@ mod tests {
         let mut data = 36u16.to_be_bytes().to_vec();
         data.push(0);
         let pkt = RawPacket {
-            id: SB_CREATIVE_SLOT,
+            id: version::V1_21_11.packets.sb_set_creative_mode_slot,
             data,
         };
-        match Codec.decode(&pkt, any_pos()) {
+        match C.decode(&pkt, any_pos()) {
             ClientEvent::CreativeSlot { item, .. } => assert_eq!(item, None),
             _ => panic!("an emptied creative slot must still decode"),
         }
@@ -1085,12 +1202,12 @@ mod tests {
         // from — otherwise selecting a slot silently places something else.
         for (block, item) in inventory::HOTBAR {
             let name = items::name_of(item).expect("hotbar item is in this version");
-            assert_eq!(Codec.block_for_item(name), Some(block), "item {name}");
+            assert_eq!(C.block_for_item(name), Some(block), "item {name}");
         }
         // Named, and every name resolves: a hotbar entry whose item this
         // version does not have would be dropped by the filter and the player
         // would silently join holding one thing fewer.
-        assert_eq!(Codec.initial_hotbar().len(), inventory::HOTBAR.len());
+        assert_eq!(C.initial_hotbar().len(), inventory::HOTBAR.len());
     }
 
     #[test]
@@ -1111,7 +1228,10 @@ mod tests {
         // Two independent claims, because getting either wrong is silent: the
         // client would either drop the packet as malformed or read an ack as
         // some other block packet.
-        assert_eq!(PLAY_BLOCK_CHANGED_ACK + 4, PLAY_BLOCK_CHANGE);
+        assert_eq!(
+            version::V1_21_11.packets.cb_block_changed_ack + 4,
+            version::V1_21_11.packets.cb_block_update
+        );
         // A block source is required by the signature but never consulted:
         // the ack names no block.
         struct Empty;
@@ -1120,12 +1240,20 @@ mod tests {
                 BlockStateId::AIR
             }
         }
-        let pkts = Codec.encode(&ServerEvent::AckBlockChange(300), &Empty);
+        let pkts = C.encode(&ServerEvent::AckBlockChange(300), &Empty);
         assert_eq!(pkts.len(), 1);
         let mut wire = Vec::new();
         pkts[0].write_to(&mut wire, None).unwrap();
         // length, id, then 300 as a VarInt: 0b10101100, 0b00000010.
-        assert_eq!(wire, vec![3, PLAY_BLOCK_CHANGED_ACK as u8, 0xAC, 0x02]);
+        assert_eq!(
+            wire,
+            vec![
+                3,
+                version::V1_21_11.packets.cb_block_changed_ack as u8,
+                0xAC,
+                0x02
+            ]
+        );
     }
 
     #[test]
@@ -1146,7 +1274,7 @@ mod tests {
         assert_eq!(slot.wire_count(), 1);
         assert_eq!(slot.label, "cobblestone (x4000)");
 
-        let pkts = Codec.encode(
+        let pkts = C.encode(
             &ServerEvent::OpenContainer {
                 title: "t".into(),
                 slots: vec![slot],
@@ -1172,7 +1300,11 @@ mod tests {
                 shift += 7;
             }
         };
-        assert_eq!(varint(body, &mut at), PLAY_WINDOW_ITEMS as i64, "packet id");
+        assert_eq!(
+            varint(body, &mut at),
+            version::V1_21_11.packets.cb_container_set_content as i64,
+            "packet id"
+        );
         assert_eq!(varint(body, &mut at), STASH_WINDOW as i64, "window");
         assert_eq!(varint(body, &mut at), 1, "state id");
         assert_eq!(varint(body, &mut at), 1, "one slot");
@@ -1209,7 +1341,7 @@ mod tests {
                 BlockStateId::AIR
             }
         }
-        let pkts = Codec.encode(
+        let pkts = C.encode(
             &ServerEvent::DropItem {
                 entity_id: -1234,
                 x: 1.0,
@@ -1223,10 +1355,10 @@ mod tests {
         assert_eq!(pkts.len(), 2);
         let mut wire = Vec::new();
         pkts[0].write_to(&mut wire, None).unwrap();
-        assert_eq!(wire[1] as i32, PLAY_SPAWN_ENTITY);
+        assert_eq!(wire[1] as i32, version::V1_21_11.packets.cb_add_entity);
         let mut wire = Vec::new();
         pkts[1].write_to(&mut wire, None).unwrap();
-        assert_eq!(wire[1] as i32, PLAY_ENTITY_METADATA);
+        assert_eq!(wire[1] as i32, version::V1_21_11.packets.cb_set_entity_data);
         // ...and the metadata list is terminated, or the client reads the next
         // packet as more metadata.
         assert_eq!(*wire.last().unwrap(), META_END);
@@ -1290,7 +1422,7 @@ mod tests {
                 continue; // a block with no item — a door's upper half, water
             }
             assert_eq!(
-                Codec.block_for_item(row.0),
+                C.block_for_item(row.0),
                 Some(BlockStateId(BLOCKS_DEFAULT[i])),
                 "{} resolved wrong",
                 row.0
@@ -1307,7 +1439,7 @@ mod tests {
             ("minecraft:water_bucket", "minecraft:water"),
             ("minecraft:wheat_seeds", "minecraft:wheat"),
         ] {
-            let got = Codec.block_for_item(item).expect(item);
+            let got = C.block_for_item(item).expect(item);
             // The id is a *state*, so the block it belongs to is one lookup
             // away — indexing `BLOCKS` with it would read a random row.
             assert_eq!(
@@ -1320,7 +1452,7 @@ mod tests {
     #[test]
     fn a_non_block_item_places_nothing() {
         // A sword must not become a block, however the chain falls through.
-        assert_eq!(Codec.block_for_item("minecraft:diamond_sword"), None);
-        assert_eq!(Codec.block_for_item("minecraft:stick"), None);
+        assert_eq!(C.block_for_item("minecraft:diamond_sword"), None);
+        assert_eq!(C.block_for_item("minecraft:stick"), None);
     }
 }

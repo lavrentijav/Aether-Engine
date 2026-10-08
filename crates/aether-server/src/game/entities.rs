@@ -24,6 +24,21 @@ use crate::session::DemoWorld;
 pub const TRACK_RANGE: f64 = 72.0;
 /// Ticks an item lies on the ground before it disappears (vanilla's 5 min).
 pub const ITEM_LIFETIME: u32 = 6000;
+/// `ItemEntity`'s own physics: gravity 0.04, drag 0.98, and ground
+/// friction of a block's 0.6 slipperiness × 0.98. The client simulates a
+/// thrown item with exactly these, so the server has to as well.
+const ITEM_PHYSICS: aether_api::PhysicsParams = aether_api::PhysicsParams {
+    gravity: 0.04,
+    vertical_drag: 0.98,
+    ground_friction: 0.588,
+    air_friction: 0.98,
+};
+
+/// Ticks between position syncs for items and arrows, which the client
+/// simulates itself from their velocity (vanilla's tracking interval for
+/// items is 20).
+const PROJECTILE_SYNC: u64 = 20;
+
 /// Ticks an arrow stuck in a block lasts.
 const ARROW_LIFETIME: u32 = 1200;
 
@@ -69,6 +84,8 @@ pub struct Entity {
     sent: (f64, f64, f64, f32),
     /// Removed at the end of this tick.
     pub dead: bool,
+    /// At rest as of the last tick, so coming to rest is noticed once.
+    rested: bool,
 }
 
 impl Entity {
@@ -170,6 +187,7 @@ fn push(body: Body, yaw: f32, kind: Kind) -> i32 {
         kind,
         sent: (p.x, p.y, p.z, yaw),
         dead: false,
+        rested: false,
     });
     id
 }
@@ -551,10 +569,16 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                         e.dead = true;
                         continue;
                     }
-                    if in_water(world, pos) {
-                        e.body.velocity.y = 0.1;
+                    // Items bob at the waterline, as vanilla's do: lifted
+                    // while their centre is under, left to settle once it is
+                    // not — never held above the surface.
+                    if in_water(world, Vector3::new(pos.x, pos.y + 0.05, pos.z)) {
+                        let v = &mut e.body.velocity;
+                        v.x *= 0.95;
+                        v.z *= 0.95;
+                        v.y = (v.y * 0.9 + 0.09).min(0.06);
                     }
-                    world.step_body(&mut e.body);
+                    world.step_body_with(&mut e.body, ITEM_PHYSICS);
                     if it.pickup_delay > 0 {
                         it.pickup_delay -= 1;
                     }
@@ -615,12 +639,27 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
             if e.body.feet().y < -128.0 {
                 e.dead = true;
             }
-            // Position updates: every other tick, and only on change.
-            if !e.dead && now % 2 == 0 {
+            // Position updates. Mobs every other tick, as their steering
+            // changes direction at will. Items and arrows follow ballistic
+            // paths the client simulates from their velocity, so they get a
+            // sync — position *and* velocity — only every second, or the
+            // moment they stop; positions alone every other tick made a
+            // thrown item stutter through interpolation steps that fought
+            // the client's own simulation.
+            if !e.dead {
                 let p = e.pos();
                 let (sx, sy, sz, syaw) = e.sent;
                 let moved = (p.x - sx).abs() + (p.y - sy).abs() + (p.z - sz).abs();
-                if moved > 0.01 || (e.yaw - syaw).abs() > 2.0 {
+                let is_mob = matches!(e.kind, Kind::Mob(_));
+                let v = e.body.velocity;
+                let resting = v.x.abs() + v.y.abs() + v.z.abs() < 1e-3;
+                let due = if is_mob {
+                    now % 2 == 0 && (moved > 0.01 || (e.yaw - syaw).abs() > 2.0)
+                } else {
+                    moved > 0.01 && (e.age as u64 % PROJECTILE_SYNC == 0 || (resting && !e.rested))
+                };
+                e.rested = resting;
+                if due {
                     e.sent = (p.x, p.y, p.z, e.yaw);
                     actions.push(Action::Tracked(
                         id,
@@ -634,12 +673,20 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                             on_ground: e.body.on_ground,
                         },
                     ));
-                    if matches!(e.kind, Kind::Mob(_)) {
+                    if is_mob {
                         actions.push(Action::Tracked(
                             id,
                             ServerEvent::EntityHead {
                                 entity_id: id,
                                 yaw: e.yaw,
+                            },
+                        ));
+                    } else {
+                        actions.push(Action::Tracked(
+                            id,
+                            ServerEvent::EntityVelocity {
+                                entity_id: id,
+                                velocity: (v.x, v.y, v.z),
                             },
                         ));
                     }

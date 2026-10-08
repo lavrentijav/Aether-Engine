@@ -43,6 +43,14 @@ impl BlockSource for DemoWorld {
         }
     }
 
+    fn copy_section(&self, cx: i32, cy: i32, cz: i32, out: &mut [BlockStateId; 4096]) {
+        if !(WORLD_BOTTOM >> 4..WORLD_TOP >> 4).contains(&cy) {
+            out.fill(block_ids::AIR);
+            return;
+        }
+        World::copy_section(self, cx, cy, cz, out)
+    }
+
     fn column_biomes(
         &self,
         cx: i32,
@@ -83,7 +91,7 @@ pub fn serve(
     let next_state = pin.var_int()?;
 
     match next_state {
-        1 => status(&mut s, cfg, registry),
+        1 => status(&mut s, protocol_id, cfg, registry),
         2 => match protocol::codec_for(protocol_id) {
             Some(codec) => login_and_play(&mut s, codec, world, cfg, next_eid, registry),
             None => protocol::kick_unsupported(&mut s, protocol_id),
@@ -93,16 +101,19 @@ pub fn serve(
 }
 
 /// Answer a server-list ping.
-fn status(s: &mut Conn, cfg: &Config, registry: &SharedRegistry) -> io::Result<()> {
+fn status(s: &mut Conn, asked: i32, cfg: &Config, registry: &SharedRegistry) -> io::Result<()> {
     match read_packet(s)? {
         Some(p) if p.id == 0x00 => {}
         _ => return Ok(()),
     }
 
-    // Report the newest protocol this build speaks. A client of any other
-    // supported version still connects fine — the version block only drives
-    // the "outdated client/server" label in the list.
-    let newest = protocol::codecs()[0];
+    // Echo the client's own protocol when this build speaks it, so no
+    // supported client is labelled outdated; otherwise report the newest.
+    // The version block only drives that label — joining is decided by the
+    // handshake, not by this.
+    let shown = protocol::codec_for(asked)
+        .map(|_| asked)
+        .unwrap_or_else(|| protocol::codecs()[0].protocol_id());
     let names: Vec<&str> = protocol::codecs()
         .iter()
         .map(|c| c.version_name())
@@ -112,7 +123,7 @@ fn status(s: &mut Conn, cfg: &Config, registry: &SharedRegistry) -> io::Result<(
          \"players\":{{\"max\":{},\"online\":{},\"sample\":[]}},\
          \"description\":{{\"text\":\"{}\"}}}}",
         protocol::json_escape(&names.join(" / ")),
-        newest.protocol_id(),
+        shown,
         cfg.server.max_players,
         registry.snapshot().len(),
         protocol::json_escape(&cfg.server.motd),
@@ -218,9 +229,28 @@ fn login_and_play(
     ) {
         pkt.send(s)?;
     }
+    // Generate the ground under the spawn in parallel first; sending it is
+    // then only encoding.
+    let ground: Vec<(i32, i32)> = (spawn_cz - initial..=spawn_cz + initial)
+        .flat_map(|cz| (spawn_cx - initial..=spawn_cx + initial).map(move |cx| (cx, cz)))
+        .collect();
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..gen_workers().min(ground.len()) {
+            scope.spawn(|| loop {
+                let i = cursor.fetch_add(1, Ordering::Relaxed);
+                let Some(&(cx, cz)) = ground.get(i) else {
+                    break;
+                };
+                let _permit = GenPermit::acquire();
+                let _ = world.get_block(cx * 16, 0, cz * 16);
+            });
+        }
+    });
     for cz in spawn_cz - initial..=spawn_cz + initial {
         for cx in spawn_cx - initial..=spawn_cx + initial {
-            for pkt in codec.encode(&ServerEvent::ChunkColumn { cx, cz }, world) {
+            let view = crate::protocol::ColumnView::new(world, cx, cz);
+            for pkt in codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view) {
                 pkt.send(s)?;
             }
             loaded.insert((cx, cz));
@@ -679,6 +709,15 @@ fn play_loop(
                 interact::set_stance(handle, registry, world, Some(sneak), None)
             }
             ClientEvent::PickBlock { x, y, z } => interact::pick_block(handle, world, x, y, z),
+            ClientEvent::ChangeGameMode(mode) => {
+                // The switcher is the client asking; only an operator is
+                // answered, the way vanilla gates it on permission level 2.
+                if crate::is_operator(&handle.name) {
+                    interact::set_mode(handle, world, mode);
+                } else {
+                    handle.emit(&ServerEvent::Chat("You are not an operator.".into()), world);
+                }
+            }
             ClientEvent::Ignored => {}
         }
     }
@@ -851,6 +890,21 @@ fn after_spawn(
         world,
     );
     handle.emit(&crate::game::time_event(), world);
+    // Permission level, as an entity event on the player's own entity: 24
+    // is level 0, 28 level 4. Without it the client treats an operator as
+    // anyone else — the F3+F4 switcher and F3+N refuse to open.
+    let level = if crate::is_operator(&handle.name) {
+        4
+    } else {
+        0
+    };
+    handle.emit(
+        &ServerEvent::EntityStatus {
+            entity_id: handle.entity_id,
+            status: 24 + level,
+        },
+        world,
+    );
     let held = handle.inventory().held_slot();
     handle.emit(&ServerEvent::SetHeldSlot(held), world);
     handle.sync_inventory(world);
@@ -881,6 +935,48 @@ pub(crate) fn save_player(handle: &crate::players::PlayerHandle, world: &DemoWor
         &crate::game::player::key(handle.uuid),
         &crate::game::player::encode(&saved),
     );
+}
+
+/// How many columns are generated at once, across every player: one per
+/// core, so several players streaming at once share the machine rather than
+/// each claiming all of it.
+fn gen_workers() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(1, 16)
+    })
+}
+
+/// A slot in the server-wide generation budget of [`gen_workers`].
+struct GenPermit;
+
+fn gen_slots() -> &'static (std::sync::Mutex<usize>, std::sync::Condvar) {
+    static S: std::sync::OnceLock<(std::sync::Mutex<usize>, std::sync::Condvar)> =
+        std::sync::OnceLock::new();
+    S.get_or_init(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()))
+}
+
+impl GenPermit {
+    fn acquire() -> Self {
+        let (lock, cv) = gen_slots();
+        let mut busy = lock.lock().unwrap();
+        while *busy >= gen_workers() {
+            busy = cv.wait(busy).unwrap();
+        }
+        *busy += 1;
+        GenPermit
+    }
+}
+
+impl Drop for GenPermit {
+    fn drop(&mut self) {
+        let (lock, cv) = gen_slots();
+        *lock.lock().unwrap() -= 1;
+        cv.notify_one();
+    }
 }
 
 /// Streams columns to one player on a thread of its own.
@@ -936,7 +1032,11 @@ impl Streamer {
                         .filter(|c| !loaded.contains(c))
                         .collect();
                     missing.sort_by_key(|(cx, cz)| (cx - ccx).pow(2) + (cz - ccz).pow(2));
-                    for (cx, cz) in missing {
+                    // Nearest first, a batch at a time, each batch generated
+                    // and encoded in parallel on the shared workers and sent
+                    // as each column finishes; between batches, a new centre
+                    // re-targets the rest.
+                    for batch in missing.chunks(gen_workers() * 2) {
                         match rx.try_recv() {
                             Ok(m) => {
                                 next = Some(m);
@@ -945,8 +1045,18 @@ impl Streamer {
                             Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
                             Err(std::sync::mpsc::TryRecvError::Empty) => {}
                         }
-                        handle.emit(&ServerEvent::ChunkColumn { cx, cz }, world);
-                        loaded.insert((cx, cz));
+                        let cursor = std::sync::atomic::AtomicUsize::new(0);
+                        std::thread::scope(|scope| {
+                            for _ in 0..gen_workers().min(batch.len()) {
+                                scope.spawn(|| loop {
+                                    let i = cursor.fetch_add(1, Ordering::Relaxed);
+                                    let Some(&(cx, cz)) = batch.get(i) else { break };
+                                    let _permit = GenPermit::acquire();
+                                    handle.emit(&ServerEvent::ChunkColumn { cx, cz }, world);
+                                });
+                            }
+                        });
+                        loaded.extend(batch.iter().copied());
                     }
                 }
             })
@@ -1030,6 +1140,8 @@ pub(crate) fn set_and_broadcast(
     let ev = ServerEvent::BlockChange { x, y, z, block };
     handle.emit(&ev, world);
     registry.broadcast_except(handle.entity_id, &ev, world);
+    // Water and lava next to the change get to react to it.
+    crate::game::fluids::notify(world, x, y, z);
 }
 
 /// Re-settle the shapes around a block that just changed.

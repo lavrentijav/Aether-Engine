@@ -494,6 +494,7 @@ pub fn explode(pos: Vector3, radius: f32, registry: &SharedRegistry, world: &Dem
             block_ids::AIR,
             world.props_of(block_ids::AIR),
         );
+        super::fluids::notify(world, *x, *y, *z);
         registry.broadcast(
             &ServerEvent::BlockChange {
                 x: *x,

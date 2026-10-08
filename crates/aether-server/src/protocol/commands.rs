@@ -59,6 +59,19 @@ pub const COMMANDS: &[Command] = &[
     c("listings", false),
     c("unlist", true),
     c("econ", true),
+    // crate::game::commands
+    c("gamemode", true),
+    c("gm", true),
+    c("time", true),
+    c("give", true),
+    c("summon", true),
+    c("killall", false),
+    c("kill", false),
+    c("spawn", false),
+    c("tp", true),
+    c("block", true),
+    c("food", true),
+    c("heal", false),
 ];
 
 /// `brigadier:string`'s id in the parser registry.
@@ -231,6 +244,7 @@ mod tests {
         let src = concat!(
             include_str!("../commands/mod.rs"),
             include_str!("../economy/commands.rs"),
+            include_str!("../game/commands.rs"),
         );
         for cmd in COMMANDS {
             let quoted = format!("\"{}\"", cmd.name);
