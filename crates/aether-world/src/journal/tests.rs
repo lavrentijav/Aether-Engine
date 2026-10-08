@@ -178,7 +178,12 @@ fn column_events_come_back_in_the_order_they_happened() {
     for i in 0..300u64 {
         j.append(alice(), set(1, i as i32, 1, DIRT, STONE)).unwrap();
     }
-    let seqs: Vec<u64> = j.column_events(0, 0).unwrap().iter().map(|e| e.seq).collect();
+    let seqs: Vec<u64> = j
+        .column_events(0, 0)
+        .unwrap()
+        .iter()
+        .map(|e| e.seq)
+        .collect();
     let mut sorted = seqs.clone();
     sorted.sort_unstable();
     // 300 crosses the single-byte boundary in the key's sequence suffix, which
@@ -199,7 +204,10 @@ fn rolling_back_two_edits_to_one_block_restores_the_original() {
 
     let plan = j.plan_rollback(&Filter::everything()).unwrap();
     assert_eq!(plan.len(), 1, "one block, one restoration");
-    assert_eq!(plan[0].block, DIRT, "must restore the state before the first edit");
+    assert_eq!(
+        plan[0].block, DIRT,
+        "must restore the state before the first edit"
+    );
 }
 
 #[test]
@@ -237,8 +245,10 @@ fn a_radius_rollback_is_a_horizontal_cylinder() {
 fn a_time_limited_rollback_stops_at_the_cutoff() {
     let store = MemStore::new();
     let j = Journal::open(&store).unwrap();
-    j.append_at(alice(), set(0, 64, 0, DIRT, STONE), 1_000).unwrap();
-    j.append_at(alice(), set(1, 64, 0, DIRT, STONE), 5_000).unwrap();
+    j.append_at(alice(), set(0, 64, 0, DIRT, STONE), 1_000)
+        .unwrap();
+    j.append_at(alice(), set(1, 64, 0, DIRT, STONE), 5_000)
+        .unwrap();
 
     let plan = j
         .plan_rollback(&Filter::everything().since_time(4_000))
@@ -501,7 +511,10 @@ fn a_collapsed_restoration_takes_its_two_halves_from_opposite_ends() {
 
     let plan = j.plan_rollback(&Filter::everything()).unwrap();
     assert_eq!(plan.len(), 1);
-    assert_eq!(plan[0].block, DIRT, "restore the state before the first edit");
+    assert_eq!(
+        plan[0].block, DIRT,
+        "restore the state before the first edit"
+    );
     assert_eq!(plan[0].removed, DIAMOND, "recover what is actually removed");
 }
 
@@ -516,12 +529,13 @@ fn recovery_credits_the_rolled_back_player_and_not_whoever_built_on_top() {
     j.append(alice(), set(0, 64, 0, DIRT, STONE)).unwrap();
     j.append(bob(), set(0, 64, 0, STONE, DIAMOND)).unwrap();
 
-    let plan = j
-        .plan_rollback(&Filter::everything().by(alice()))
-        .unwrap();
+    let plan = j.plan_rollback(&Filter::everything().by(alice())).unwrap();
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].block, DIRT);
-    assert_eq!(plan[0].removed, STONE, "what Alice placed, not what stands there");
+    assert_eq!(
+        plan[0].removed, STONE,
+        "what Alice placed, not what stands there"
+    );
 }
 
 #[test]

@@ -43,16 +43,28 @@ pub const BIOME_NAME: &str = "minecraft:plains";
 /// self-describing.
 pub fn registries() -> Vec<(&'static str, Vec<(String, Nbt)>)> {
     vec![
-        ("minecraft:dimension_type", vec![(DIMENSION_NAME.into(), dimension_type())]),
-        ("minecraft:worldgen/biome", vec![(BIOME_NAME.into(), plains())]),
+        (
+            "minecraft:dimension_type",
+            vec![(DIMENSION_NAME.into(), dimension_type())],
+        ),
+        (
+            "minecraft:worldgen/biome",
+            vec![(BIOME_NAME.into(), plains())],
+        ),
         ("minecraft:damage_type", damage_types()),
         // Registries the client validates the *presence* of even though this
         // server spawns none of the corresponding content. Each must carry at
         // least one entry: the client rejects an empty one outright ("Registry
         // must be non-empty") and stays stuck in configuration. One entry each
         // is enough — none of these mobs exist here.
-        ("minecraft:painting_variant", vec![("minecraft:kebab".into(), painting())]),
-        ("minecraft:wolf_variant", vec![("minecraft:pale".into(), wolf_variant())]),
+        (
+            "minecraft:painting_variant",
+            vec![("minecraft:kebab".into(), painting())],
+        ),
+        (
+            "minecraft:wolf_variant",
+            vec![("minecraft:pale".into(), wolf_variant())],
+        ),
         (
             "minecraft:wolf_sound_variant",
             vec![("minecraft:classic".into(), wolf_sound_variant())],

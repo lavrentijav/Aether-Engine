@@ -35,9 +35,9 @@
 // nobody notices breaking.
 #![cfg_attr(not(feature = "postgres"), allow(dead_code))]
 
-use aether_world::journal::{Event, EventBody, Place};
 #[cfg(feature = "postgres")]
 use aether_world::journal::EventSink;
+use aether_world::journal::{Event, EventBody, Place};
 
 /// The schema. Applied on connect, so a fresh database needs no setup step.
 ///
@@ -521,7 +521,11 @@ mod tests {
         .map(place_text)
         .collect();
         let unique: std::collections::HashSet<&String> = rendered.iter().collect();
-        assert_eq!(unique.len(), 4, "two places rendered the same: {rendered:?}");
+        assert_eq!(
+            unique.len(),
+            4,
+            "two places rendered the same: {rendered:?}"
+        );
     }
 
     #[test]
@@ -558,7 +562,10 @@ mod tests {
         assert!(sql.contains("$5::text::integer"), "x");
         assert!(sql.contains("$16::text::text"), "place_to");
         for n in 1..=NCOLS {
-            assert!(sql.contains(&format!("${n}::text::")), "placeholder ${n} is not pinned to text");
+            assert!(
+                sql.contains(&format!("${n}::text::")),
+                "placeholder ${n} is not pinned to text"
+            );
         }
     }
 

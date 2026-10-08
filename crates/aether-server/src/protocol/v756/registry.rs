@@ -138,6 +138,19 @@ fn plains() -> Nbt {
     ])
 }
 
+/// How much to add to an engine Y to get one this version's client can hold.
+///
+/// The engine's world runs `-64..=319`, the modern range. This version's client
+/// has no concept of a negative Y — its world is `0..=255` — so the whole
+/// column is shifted up by 64 on the way out and back down on the way in. A
+/// player standing on bedrock sees `y = 0`, which is what they expect, and the
+/// server still knows they are at `-64`.
+///
+/// Nothing is lost: 1.17 took its world height from the dimension type, so this
+/// client is told the column is 448 tall and the whole engine range `-64..=383`
+/// arrives as `0..=447`.
+pub const Y_OFFSET: i32 = 64;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,7 +201,10 @@ mod tests {
         let Nbt::Compound(fields) = dimension_type() else {
             panic!("compound");
         };
-        for absent in ["monster_spawn_light_level", "monster_spawn_block_light_limit"] {
+        for absent in [
+            "monster_spawn_light_level",
+            "monster_spawn_block_light_limit",
+        ] {
             assert!(
                 !fields.iter().any(|(n, _)| n == absent),
                 "{absent} does not exist in 1.18"
@@ -203,7 +219,10 @@ mod tests {
         let Nbt::Compound(fields) = dimension_type() else {
             panic!("compound");
         };
-        let v = fields.iter().find(|(n, _)| n == "infiniburn").map(|(_, v)| v);
+        let v = fields
+            .iter()
+            .find(|(n, _)| n == "infiniburn")
+            .map(|(_, v)| v);
         assert_eq!(v, Some(&string("minecraft:infiniburn_overworld")));
     }
 
@@ -245,22 +264,12 @@ mod tests {
                 panic!("entry compound");
             };
             assert_eq!(
-                first.iter().find(|(n, _)| n == "id").map(|(_, v)| v.clone()),
+                first
+                    .iter()
+                    .find(|(n, _)| n == "id")
+                    .map(|(_, v)| v.clone()),
                 Some(Nbt::Int(0))
             );
         }
     }
 }
-
-/// How much to add to an engine Y to get one this version's client can hold.
-///
-/// The engine's world runs `-64..=319`, the modern range. This version's client
-/// has no concept of a negative Y — its world is `0..=255` — so the whole
-/// column is shifted up by 64 on the way out and back down on the way in. A
-/// player standing on bedrock sees `y = 0`, which is what they expect, and the
-/// server still knows they are at `-64`.
-///
-/// Nothing is lost: 1.17 took its world height from the dimension type, so this
-/// client is told the column is 448 tall and the whole engine range `-64..=383`
-/// arrives as `0..=447`.
-pub const Y_OFFSET: i32 = 64;

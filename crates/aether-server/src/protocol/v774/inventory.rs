@@ -15,7 +15,6 @@ use aether_world::BlockStateId;
 
 use crate::proto::PacketOut;
 
-
 /// What every player is handed to build with, as `(engine block, item id)`.
 ///
 /// Kept to blocks the engine can actually store, so anything placed from the
@@ -95,6 +94,10 @@ mod tests {
     fn hotbar_slots_map_back_to_engine_blocks() {
         assert_eq!(block_in_hotbar_slot(0), Some(b::STONE));
         assert_eq!(block_in_hotbar_slot(6), Some(b::OAK_LEAVES));
-        assert_eq!(block_in_hotbar_slot(7), None, "slot past the table is empty");
+        assert_eq!(
+            block_in_hotbar_slot(7),
+            None,
+            "slot past the table is empty"
+        );
     }
 }

@@ -953,9 +953,6 @@ impl Streamer {
     }
 }
 
-/// Write one block into the shared world and push the result to every client,
-/// the actor included so a refused edit is reverted rather than left
-
 /// Half the width of a player's collision box, in blocks.
 ///
 /// A player is 0.6 wide and 1.8 tall, centred on its position.
@@ -1005,6 +1002,8 @@ fn stands_in_block(pos: crate::players::PosLook, x: i32, y: i32, z: i32) -> bool
         && pos.y + PLAYER_HEIGHT > by
         && pos.y < by + 1.0
 }
+/// Write one block into the shared world and push the result to every client,
+/// the actor included so a refused edit is reverted rather than left
 /// mispredicted on their screen.
 pub(crate) fn set_and_broadcast(
     world: &DemoWorld,
@@ -1184,15 +1183,17 @@ fn on_block_broken(
         return;
     };
     let value = crate::rewards::block_value(&name);
-    match econ.mint(
-        aether_world::journal::ActorId(handle.uuid),
-        value,
-        &format!("mined {name}"),
-    ) {
-        Ok(()) => handle.emit(&ServerEvent::Chat(format!("+{value} for {name}")), world),
-        // Silent: a player who cannot be paid should not be told about the
-        // database on every swing of a pickaxe.
-        Err(_) => {}
+    // Silent on failure: a player who cannot be paid should not be told
+    // about the database on every swing of a pickaxe.
+    if econ
+        .mint(
+            aether_world::journal::ActorId(handle.uuid),
+            value,
+            &format!("mined {name}"),
+        )
+        .is_ok()
+    {
+        handle.emit(&ServerEvent::Chat(format!("+{value} for {name}")), world);
     }
 }
 

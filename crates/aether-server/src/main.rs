@@ -14,13 +14,13 @@
 //! logic every version shares.
 
 mod commands;
+mod config;
 mod db;
 mod economy;
 mod game;
 mod gencache;
 mod ground;
 mod inventory;
-mod config;
 mod placement;
 mod players;
 mod proto;
@@ -161,7 +161,9 @@ fn main() -> std::process::ExitCode {
 /// Every failure path here returns `None` and prints why. A server whose audit
 /// database is unreachable must still start: the journal on disk is the source
 /// of truth and it is unaffected.
-fn open_history_mirror(cfg: &config::DatabaseConfig) -> Option<aether_world::journal::BatchingSink> {
+fn open_history_mirror(
+    cfg: &config::DatabaseConfig,
+) -> Option<aether_world::journal::BatchingSink> {
     let url = cfg.connection_url();
     if url.is_empty() {
         return None;

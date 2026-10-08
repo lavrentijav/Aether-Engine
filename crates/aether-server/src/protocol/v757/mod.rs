@@ -29,7 +29,7 @@ use aether_world::BlockStateId;
 
 use super::{json_escape, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::players::PosLook;
-use crate::proto::{Conn, read_packet, PacketIn, PacketOut, RawPacket};
+use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 
 // --- Clientbound packet ids (1.18 / 1.18.2; the two tables are identical) ---
 const LOGIN_SUCCESS: i32 = 0x02;
@@ -548,7 +548,8 @@ mod tests {
     /// `PlayerHandle` owns a `TcpStream` and has no public constructor.
     fn loopback_player() -> std::sync::Arc<crate::players::PlayerHandle> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = Conn::new(std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        let client =
+            Conn::new(std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap());
         let _server_side = listener.accept().unwrap();
         crate::players::Registry::default()
             .join(

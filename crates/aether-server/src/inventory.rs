@@ -137,10 +137,7 @@ impl Inventory {
         let before = self.slots[slot].clone();
         let after = match item {
             None => None,
-            Some((name, count)) if count == 0 => {
-                let _ = name;
-                None
-            }
+            Some((_, 0)) => None,
             Some((name, count)) => match &before {
                 Some(s) if s.item == name && s.count == count => Some(s.clone()),
                 _ => Some(Stack::new(name, count)),

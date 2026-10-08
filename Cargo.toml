@@ -26,6 +26,12 @@ authors = ["Aether Engine contributors"]
 # Keep the SIMD / unsafe surface honest, but do not block the build on pedantic noise.
 all = { level = "warn", priority = -1 }
 undocumented_unsafe_blocks = "warn"
+# Generated registry tables are large `const` arrays by design, and the
+# protocol/game layers pass many plain values around; these two are noise
+# here rather than findings.
+large_const_arrays = "allow"
+type_complexity = "allow"
+too_many_arguments = "allow"
 
 [workspace.dependencies]
 aether-core = { path = "crates/aether-core", version = "0.1.0" }

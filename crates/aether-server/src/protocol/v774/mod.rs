@@ -27,7 +27,7 @@ use aether_world::BlockStateId;
 
 use super::{BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::players::PosLook;
-use crate::proto::{Conn, read_packet, PacketIn, PacketOut, RawPacket};
+use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 
 // --- Packet ids (1.21.11) ---
 const LOGIN_SUCCESS: i32 = 0x02;
@@ -162,7 +162,7 @@ const META_END: u8 = 0xFF;
 
 /// Stable id for the pack this server offers, so a client can tell a repeat
 /// offer from a new one across reconnects.
-const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_000000000001;
+const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_0000_0000_0001;
 
 /// The 1.21.11 codec.
 pub struct Codec;
@@ -500,8 +500,7 @@ impl ProtocolCodec for Codec {
                 // a bare tag with no name — where 1.8 sent a JSON string. A
                 // plain string tag is a valid component on its own.
                 let mut p = PacketOut::new(PLAY_SYSTEM_CHAT);
-                p.bytes(&super::nbt::string(text).to_network())
-                    .bool(false); // not an action-bar overlay
+                p.bytes(&super::nbt::string(text).to_network()).bool(false); // not an action-bar overlay
                 vec![p]
             }
             other => play::encode(other).unwrap_or_default(),
@@ -851,7 +850,11 @@ mod tests {
         }
         // And the two encodings really are different, so a mix-up would show.
         let modern = encode_position(1, 2, 3);
-        assert_ne!(modern, ((1i64) << 38) | (2 << 26) | 3, "must not be 1.8 order");
+        assert_ne!(
+            modern,
+            ((1i64) << 38) | (2 << 26) | 3,
+            "must not be 1.8 order"
+        );
     }
 
     #[test]
@@ -959,7 +962,11 @@ mod tests {
         for _ in 0..3 {
             rest.f64().unwrap();
         }
-        assert_eq!(rest.u8().unwrap(), 0x00, "velocity at rest is one zero byte");
+        assert_eq!(
+            rest.u8().unwrap(),
+            0x00,
+            "velocity at rest is one zero byte"
+        );
     }
 
     #[test]
@@ -1133,8 +1140,9 @@ mod tests {
                 BlockStateId::AIR
             }
         }
-        let slot = crate::protocol::ContainerSlot::block("minecraft:cobblestone", 4000, "cobblestone")
-            .with_quantity();
+        let slot =
+            crate::protocol::ContainerSlot::block("minecraft:cobblestone", 4000, "cobblestone")
+                .with_quantity();
         assert_eq!(slot.wire_count(), 1);
         assert_eq!(slot.label, "cobblestone (x4000)");
 
@@ -1251,7 +1259,11 @@ mod tests {
         let mut seen: HashSet<u32> = HashSet::new();
         for (i, row) in blocks::BLOCKS.iter().enumerate() {
             let state = block_state(BlockStateId(blocks::DEFAULT_STATE[i]));
-            assert!(seen.insert(state), "{} shares a state with another block", row.0);
+            assert!(
+                seen.insert(state),
+                "{} shares a state with another block",
+                row.0
+            );
         }
     }
 
@@ -1259,7 +1271,10 @@ mod tests {
     fn a_block_beyond_the_table_substitutes_rather_than_escaping_the_registry() {
         // Only reachable for a modded block. Handing the client an id outside
         // its own registry disconnects it.
-        assert_eq!(block_state(BlockStateId(999_999)), aether_world::registry::ids::STONE.raw());
+        assert_eq!(
+            block_state(BlockStateId(999_999)),
+            aether_world::registry::ids::STONE.raw()
+        );
     }
 
     #[test]

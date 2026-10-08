@@ -11,8 +11,8 @@
 //! [`ServerEvent::SpawnPlayer`] is encoded separately for a 1.8 viewer and a
 //! 1.21 viewer, from the same source of truth.
 
-use std::io;
 use aether_world::BlockStateId;
+use std::io;
 
 use crate::players::{PlayerHandle, PosLook};
 use crate::proto::{Conn, PacketOut, RawPacket};
@@ -74,7 +74,9 @@ impl ServerEvent<'_> {
     /// for the few that have an older equivalent.
     pub fn legacy(&self) -> Option<ServerEvent<'static>> {
         match self {
-            ServerEvent::EntityPos { entity_id, x, y, z, .. } => Some(ServerEvent::MoveEntity {
+            ServerEvent::EntityPos {
+                entity_id, x, y, z, ..
+            } => Some(ServerEvent::MoveEntity {
                 entity_id: *entity_id,
                 x: *x,
                 y: *y,
@@ -99,7 +101,11 @@ impl ContainerSlot {
         Self {
             item: "minecraft:arrow".into(),
             count: 1,
-            label: if next { "Next page".into() } else { "Previous page".into() },
+            label: if next {
+                "Next page".into()
+            } else {
+                "Previous page".into()
+            },
         }
     }
     /// A control: a named item standing in for an action.
@@ -198,7 +204,12 @@ pub enum ServerEvent<'a> {
     /// Distinct from [`ServerEvent::EntityMove`], which takes a player handle
     /// and reads its look angles: a dropped item has no look, and giving it
     /// one would make it spin as it fell.
-    MoveEntity { entity_id: i32, x: f64, y: f64, z: f64 },
+    MoveEntity {
+        entity_id: i32,
+        x: f64,
+        y: f64,
+        z: f64,
+    },
     /// A stack lying on the ground.
     ///
     /// What happens to items a player has been given but cannot hold. The
@@ -262,7 +273,10 @@ pub enum ServerEvent<'a> {
         data: i32,
     },
     /// Entity metadata entries.
-    EntityMeta { entity_id: i32, entries: Vec<(u8, MetaValue)> },
+    EntityMeta {
+        entity_id: i32,
+        entries: Vec<(u8, MetaValue)>,
+    },
     /// Absolute position and look of any entity.
     EntityPos {
         entity_id: i32,
@@ -276,7 +290,10 @@ pub enum ServerEvent<'a> {
     /// Which way an entity's head points.
     EntityHead { entity_id: i32, yaw: f32 },
     /// Set an entity's velocity — for the player it describes, a knockback.
-    EntityVelocity { entity_id: i32, velocity: (f64, f64, f64) },
+    EntityVelocity {
+        entity_id: i32,
+        velocity: (f64, f64, f64),
+    },
     /// Arm swing (0 main hand, 3 offhand), critical hit (4), ...
     EntityAnimation { entity_id: i32, animation: u8 },
     /// Entity status byte: 3 death, 9 finished eating, ...
@@ -289,7 +306,11 @@ pub enum ServerEvent<'a> {
         attacker: Option<i32>,
     },
     /// An item entity flew into `collector`.
-    Collect { item: i32, collector: i32, count: u8 },
+    Collect {
+        item: i32,
+        collector: i32,
+        count: u8,
+    },
     /// What an entity is holding and wearing: `(slot, stack)` where slot is
     /// 0 main hand, 1 offhand, 2 boots, 3 leggings, 4 chestplate, 5 helmet.
     Equipment {
@@ -297,7 +318,11 @@ pub enum ServerEvent<'a> {
         slots: Vec<(u8, Option<crate::inventory::Stack>)>,
     },
     /// The player's own health and hunger.
-    Health { health: f32, food: i32, saturation: f32 },
+    Health {
+        health: f32,
+        food: i32,
+        saturation: f32,
+    },
     /// The player's own experience bar.
     Experience { bar: f32, level: i32, total: i32 },
     /// World age and time of day, in ticks.
@@ -310,16 +335,36 @@ pub enum ServerEvent<'a> {
         cursor: Option<crate::inventory::Stack>,
     },
     /// Open a game window (crafting table, chest, furnace).
-    OpenWindow { window_id: u8, menu: Menu, title: String },
+    OpenWindow {
+        window_id: u8,
+        menu: Menu,
+        title: String,
+    },
     /// Close a window from the server's side.
     CloseWindow(u8),
     /// A window property — a furnace's flame and arrow.
-    WindowProperty { window_id: u8, property: i16, value: i16 },
+    WindowProperty {
+        window_id: u8,
+        property: i16,
+        value: i16,
+    },
     /// A level event: 2001 is block-break particles and sound for `data`
     /// (a block state).
-    WorldEvent { event: i32, x: i32, y: i32, z: i32, data: i32 },
+    WorldEvent {
+        event: i32,
+        x: i32,
+        y: i32,
+        z: i32,
+        data: i32,
+    },
     /// Cracks on a block somebody is mining, `0..=9`, anything else clears.
-    BreakAnimation { entity_id: i32, x: i32, y: i32, z: i32, stage: i8 },
+    BreakAnimation {
+        entity_id: i32,
+        x: i32,
+        y: i32,
+        z: i32,
+        stage: i8,
+    },
     /// Bring a dead player back.
     Respawn { game_mode: GameMode },
     /// Switch the player's game mode (and the abilities that come with it).
@@ -327,14 +372,34 @@ pub enum ServerEvent<'a> {
     /// Select a hotbar slot on the client.
     SetHeldSlot(u8),
     /// Move the player themselves.
-    Teleport { x: f64, y: f64, z: f64, yaw: f32, pitch: f32 },
+    Teleport {
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+        pitch: f32,
+    },
     /// The death screen's message.
     DeathMessage { entity_id: i32, text: String },
     /// An explosion: sound, particles, and a push for the player it is sent
     /// to.
-    Explosion { x: f64, y: f64, z: f64, radius: f32, knockback: Option<(f64, f64, f64)> },
+    Explosion {
+        x: f64,
+        y: f64,
+        z: f64,
+        radius: f32,
+        knockback: Option<(f64, f64, f64)>,
+    },
     /// A sound at a position, by its `minecraft:` sound event name.
-    Sound { name: &'static str, category: u8, x: f64, y: f64, z: f64, volume: f32, pitch: f32 },
+    Sound {
+        name: &'static str,
+        category: u8,
+        x: f64,
+        y: f64,
+        z: f64,
+        volume: f32,
+        pitch: f32,
+    },
 }
 
 /// A game window's kind.
@@ -434,7 +499,12 @@ pub enum ClientEvent {
     /// The respawn button on the death screen.
     Respawn,
     /// A click in a window, as the protocol describes it.
-    WindowClick { window: u8, slot: i16, button: i8, mode: i32 },
+    WindowClick {
+        window: u8,
+        slot: i16,
+        button: i8,
+        mode: i32,
+    },
     /// Middle-click on a block (creative pick).
     PickBlock { x: i32, y: i32, z: i32 },
     /// Anything this server does not act on (keep-alive replies, animations,
@@ -686,7 +756,6 @@ mod tests {
         assert!(codec_for(1).is_none(), "unknown protocol must not resolve");
     }
 }
-
 
 /// Decode the VarInt that ends `body`.
 ///

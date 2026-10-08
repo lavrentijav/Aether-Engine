@@ -320,7 +320,10 @@ fn spawn_sweeper(dir: PathBuf, max_entries: usize, ttl: Duration, stats: Arc<Cac
         let n = sweep(&dir, max_entries, ttl);
         if n > 0 {
             stats.evicted.fetch_add(n as u64, Ordering::Relaxed);
-            println!("column cache: swept {n} stale entr{}", if n == 1 { "y" } else { "ies" });
+            println!(
+                "column cache: swept {n} stale entr{}",
+                if n == 1 { "y" } else { "ies" }
+            );
         }
         std::thread::sleep(Duration::from_secs(3600));
     });
@@ -390,7 +393,11 @@ mod tests {
         a.generate_column(0, 0);
         let b = Cached::new(Counting(AtomicUsize::new(0)), 2, &cfg(root.clone()));
         b.generate_column(0, 0);
-        assert_eq!(b.stats.hits.load(Ordering::Relaxed), 0, "seed 2 starts cold");
+        assert_eq!(
+            b.stats.hits.load(Ordering::Relaxed),
+            0,
+            "seed 2 starts cold"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

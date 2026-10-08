@@ -44,7 +44,10 @@ pub fn registries() -> Vec<(&'static str, Vec<(String, Nbt)>)> {
             "minecraft:dimension_type",
             vec![(DIMENSION_NAME.into(), dimension_type())],
         ),
-        ("minecraft:worldgen/biome", vec![(BIOME_NAME.into(), plains())]),
+        (
+            "minecraft:worldgen/biome",
+            vec![(BIOME_NAME.into(), plains())],
+        ),
         ("minecraft:damage_type", damage_types()),
         // Present from 1.21 onward; the client rejects an empty registry
         // outright, and one entry is enough since no painting exists here.
@@ -226,7 +229,8 @@ mod tests {
                 "minecraft:dimension_type",
                 "minecraft:worldgen/biome",
                 "minecraft:damage_type",
-                "minecraft:painting_variant", "minecraft:wolf_variant"
+                "minecraft:painting_variant",
+                "minecraft:wolf_variant"
             ]
         );
     }

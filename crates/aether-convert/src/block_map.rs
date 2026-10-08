@@ -205,7 +205,11 @@ mod tests {
         assert!(!r.intern("minecraft:tall_grass").1.collision);
 
         // Collidable, and *not* a full cube.
-        for partial in ["minecraft:oak_stairs", "minecraft:oak_slab", "minecraft:oak_fence"] {
+        for partial in [
+            "minecraft:oak_stairs",
+            "minecraft:oak_slab",
+            "minecraft:oak_fence",
+        ] {
             let p = r.intern(partial).1;
             assert!(p.collision, "{partial} must collide");
             assert!(!p.solid, "{partial} is not a full opaque cube");

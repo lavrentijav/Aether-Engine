@@ -322,15 +322,17 @@ mod tests {
     /// live server, not here.
     #[test]
     fn the_sample_puts_the_operator_list_where_toml_will_read_it() {
-        let cfg: super::Config = toml::from_str(
-            &super::SAMPLE.replace("operators = []", r#"operators = ["root"]"#),
-        )
-        .expect("the sample must parse");
+        let cfg: super::Config =
+            toml::from_str(&super::SAMPLE.replace("operators = []", r#"operators = ["root"]"#))
+                .expect("the sample must parse");
         assert_eq!(cfg.operators, vec!["root".to_string()]);
 
         // And the shape that caused it must still be wrong, or the test is
         // asserting nothing.
-        let broken = format!("{}\noperators = [\"root\"]\n", super::SAMPLE.replace("operators = []\n", ""));
+        let broken = format!(
+            "{}\noperators = [\"root\"]\n",
+            super::SAMPLE.replace("operators = []\n", "")
+        );
         let cfg: super::Config = toml::from_str(&broken).expect("parses, wrongly");
         assert!(
             cfg.operators.is_empty(),
@@ -364,15 +366,23 @@ mod tests {
         // SAFETY: single-threaded test, and the variable is read only here.
         unsafe { std::env::remove_var(DATABASE_URL_ENV) };
         assert_eq!(cfg.connection_url(), "host=from-file");
+        // SAFETY: as above.
         unsafe { std::env::set_var(DATABASE_URL_ENV, "   ") };
-        assert_eq!(cfg.connection_url(), "host=from-file", "blank is not an override");
+        assert_eq!(
+            cfg.connection_url(),
+            "host=from-file",
+            "blank is not an override"
+        );
+        // SAFETY: as above.
         unsafe { std::env::set_var(DATABASE_URL_ENV, "host=from-env") };
         assert_eq!(cfg.connection_url(), "host=from-env");
+        // SAFETY: as above.
         unsafe { std::env::remove_var(DATABASE_URL_ENV) };
     }
 
     #[test]
     fn mirroring_is_off_unless_it_is_configured() {
+        // SAFETY: single-threaded test, and the variable is read only here.
         unsafe { std::env::remove_var(DATABASE_URL_ENV) };
         assert!(DatabaseConfig::default().connection_url().is_empty());
     }

@@ -15,8 +15,8 @@ use aether_world::light::MAX_LIGHT;
 use aether_world::BlockStateId;
 
 use super::super::BlockSource;
-use super::registry::{MIN_Y, SECTIONS};
 use super::block_state;
+use super::registry::{MIN_Y, SECTIONS};
 use crate::proto::PacketOut;
 
 /// Blocks per section along each axis.
@@ -115,12 +115,7 @@ fn write_section(out: &mut Vec<u8>, states: &[u32; ENTRIES]) -> i16 {
 
 /// Build the Chunk Data and Update Light packet (`0x2C`) for column
 /// `(cx, cz)`.
-pub fn chunk_data_packet(
-    id: i32,
-    cx: i32,
-    cz: i32,
-    world: &dyn BlockSource,
-) -> PacketOut {
+pub fn chunk_data_packet(id: i32, cx: i32, cz: i32, world: &dyn BlockSource) -> PacketOut {
     let mut column = Vec::new();
     for sy in 0..SECTIONS {
         let mut states = [0u32; ENTRIES];
@@ -417,7 +412,9 @@ mod tests {
         // whole column the way a client parses it and check the state at each
         // y, rather than trusting the encoder's own view of what it wrote.
         let mut wire = Vec::new();
-        chunk_data_packet(0x2C, 0, 0, &Ocean).write_to(&mut wire, None).unwrap();
+        chunk_data_packet(0x2C, 0, 0, &Ocean)
+            .write_to(&mut wire, None)
+            .unwrap();
 
         // Skip the frame length varint, the packet id, x, z, and the (empty)
         // heightmap array, then take the chunk-data byte array.
@@ -464,7 +461,9 @@ mod tests {
     #[test]
     fn unload_packet_puts_z_before_x() {
         let mut wire = Vec::new();
-        unload_chunk_packet(0x25, 3, -5).write_to(&mut wire, None).unwrap();
+        unload_chunk_packet(0x25, 3, -5)
+            .write_to(&mut wire, None)
+            .unwrap();
         // frame len, packet id, then z, then x
         let body = &wire[2..];
         assert_eq!(i32::from_be_bytes(body[0..4].try_into().unwrap()), -5);

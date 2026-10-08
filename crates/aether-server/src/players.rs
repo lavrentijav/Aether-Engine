@@ -166,7 +166,7 @@ impl PlayerHandle {
         let packets = self.codec.encode(legacy.as_ref().unwrap_or(ev), world);
         if let Ok(mut w) = self.writer.lock() {
             for p in &packets {
-                if p.send(&mut *w).is_err() {
+                if p.send(&mut w).is_err() {
                     break;
                 }
             }

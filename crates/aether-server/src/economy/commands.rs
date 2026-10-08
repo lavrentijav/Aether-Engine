@@ -249,7 +249,9 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
         Err(e) => {
             // The listing failed, so the stack goes back. Without this a
             // database hiccup eats the seller's items.
-            handle.inventory().give(&item, count.min(u8::MAX as u64) as u8);
+            handle
+                .inventory()
+                .give(&item, count.min(u8::MAX as u64) as u8);
             handle.sync_inventory(world);
             err(e)
         }
@@ -258,14 +260,7 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
 
 /// Record an item leaving or arriving somewhere, so the ledger keeps up with
 /// trades as well as with slot edits.
-fn journal_move(
-    world: &DemoWorld,
-    actor: ActorId,
-    item: &str,
-    count: u64,
-    from: Place,
-    to: Place,
-) {
+fn journal_move(world: &DemoWorld, actor: ActorId, item: &str, count: u64, from: Place, to: Place) {
     let _ = world.journal().append(
         actor,
         EventBody::ItemMove {
@@ -321,8 +316,10 @@ fn market(
     match econ.market(&filter) {
         Ok(rows) => {
             let now = now_ms();
-            let lines: Vec<String> =
-                rows.iter().map(|l| format!("  {}", l.describe(now))).collect();
+            let lines: Vec<String> = rows
+                .iter()
+                .map(|l| format!("  {}", l.describe(now)))
+                .collect();
             let mut s = handle.session();
             s.pager.set("Market", lines);
             Reply(s.pager.render())
@@ -370,7 +367,10 @@ fn buy(
                 &p.item,
                 p.count,
                 Place::Nowhere,
-                Place::Inventory { owner: me, slot: -1 },
+                Place::Inventory {
+                    owner: me,
+                    slot: -1,
+                },
             );
             let mut lines = vec![format!("bought {}x {} for {}", p.count, p.item, p.paid)];
             if dropped > 0 {
@@ -387,8 +387,10 @@ fn listings(handle: &PlayerHandle, econ: &dyn Economy) -> Reply {
         Ok(rows) if rows.is_empty() => Reply(vec!["you have no open listings".into()]),
         Ok(rows) => {
             let now = now_ms();
-            let lines: Vec<String> =
-                rows.iter().map(|l| format!("  {}", l.describe(now))).collect();
+            let lines: Vec<String> = rows
+                .iter()
+                .map(|l| format!("  {}", l.describe(now)))
+                .collect();
             let mut s = handle.session();
             s.pager.set("Your listings", lines);
             Reply(s.pager.render())
@@ -421,7 +423,10 @@ fn unlist(
                 &l.item,
                 l.count,
                 Place::Nowhere,
-                Place::Inventory { owner: me, slot: -1 },
+                Place::Inventory {
+                    owner: me,
+                    slot: -1,
+                },
             );
             let mut lines = vec![format!("withdrew #{id}: {}x {}", l.count, l.item)];
             if dropped > 0 {

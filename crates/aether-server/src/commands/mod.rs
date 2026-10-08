@@ -23,7 +23,7 @@ pub mod pager;
 pub mod query;
 
 use aether_api::{JournalActor, Ledger};
-use aether_world::journal::{now_ms, EventBody, Event};
+use aether_world::journal::{now_ms, Event, EventBody};
 use aether_world::BlockStateId;
 
 use crate::players::{PlayerHandle, SharedRegistry};
@@ -90,9 +90,14 @@ pub fn dispatch(
     if let Some(lines) = crate::game::commands::dispatch(cmd, &args, handle, registry, world) {
         return Some(Reply(lines));
     }
-    if let Some(reply) =
-        crate::economy::commands::dispatch(cmd, &args, handle, registry, world, crate::economy::get())
-    {
+    if let Some(reply) = crate::economy::commands::dispatch(
+        cmd,
+        &args,
+        handle,
+        registry,
+        world,
+        crate::economy::get(),
+    ) {
         return Some(reply);
     }
     Some(match cmd {
@@ -168,10 +173,9 @@ fn describe(e: &Event, world: &DemoWorld, actor_name: &dyn Fn(u128) -> String) -
             uid.0,
             e.seq
         )),
-        EventBody::ItemDestroy { uid, .. } => Some(format!(
-            "  {ago} item {:032x} destroyed  #{}",
-            uid.0, e.seq
-        )),
+        EventBody::ItemDestroy { uid, .. } => {
+            Some(format!("  {ago} item {:032x} destroyed  #{}", uid.0, e.seq))
+        }
     }
 }
 
@@ -346,12 +350,10 @@ fn inventory(handle: &PlayerHandle) -> Reply {
     if inv.is_empty() {
         return Reply::one("the server has you carrying nothing");
     }
-    let mut lines = vec![format!(
-        "Inventory (holding slot {}):",
-        inv.held_slot() + 1
-    )];
+    let mut lines = vec![format!("Inventory (holding slot {}):", inv.held_slot() + 1)];
     for (slot, stack) in inv.occupied() {
-        let where_ = if slot >= crate::inventory::FIRST_HOTBAR && slot < crate::inventory::OFFHAND {
+        let where_ = if (crate::inventory::FIRST_HOTBAR..crate::inventory::OFFHAND).contains(&slot)
+        {
             format!("hotbar {}", slot - crate::inventory::FIRST_HOTBAR + 1)
         } else if slot == crate::inventory::OFFHAND {
             "offhand".to_string()
@@ -484,7 +486,13 @@ mod tests {
     #[test]
     fn an_empty_query_is_recognised_as_unrestricted() {
         assert!(Query::parse(&[], &ctx()).unwrap().is_unrestricted());
-        for one in ["player:steve", "time:5m", "radius:10", "block:stone", "action:place"] {
+        for one in [
+            "player:steve",
+            "time:5m",
+            "radius:10",
+            "block:stone",
+            "action:place",
+        ] {
             assert!(
                 !Query::parse(&[one], &ctx()).unwrap().is_unrestricted(),
                 "{one} should restrict the query"

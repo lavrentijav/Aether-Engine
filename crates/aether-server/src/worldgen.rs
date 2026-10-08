@@ -24,6 +24,7 @@
 use aether_worldgen::{ChunkGenerator, GeneratedColumn, NoiseGenerator};
 
 /// The world's terrain source.
+#[allow(clippy::large_enum_variant)]
 pub enum Generator {
     /// Vanilla's own terrain, from the operator's copy of the game data.
     Vanilla(Box<aether_worldgen::vanilla::generator::VanillaGenerator>),

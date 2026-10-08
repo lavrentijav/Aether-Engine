@@ -297,7 +297,9 @@ mod tests {
         // presence is checked by length against a packet built without it.
         let world = tests_support::Empty;
         let mut wire = Vec::new();
-        chunk_data_packet(0x24, 0, 0, &world).write_to(&mut wire, None).unwrap();
+        chunk_data_packet(0x24, 0, 0, &world)
+            .write_to(&mut wire, None)
+            .unwrap();
         // Rebuild the same column minus the flag to compare lengths.
         let mut without = Vec::new();
         {

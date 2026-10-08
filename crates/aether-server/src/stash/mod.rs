@@ -114,7 +114,9 @@ pub fn deposit(handle: &PlayerHandle, world: &DemoWorld, plan: &[Restore]) -> us
 pub fn open_command(handle: &PlayerHandle, world: &DemoWorld) -> Reply {
     let all = stashes().lock().unwrap();
     let Some(stash) = all.get(&handle.uuid) else {
-        return Reply(vec!["your stash is empty — nothing has been rolled back".into()]);
+        return Reply(vec![
+            "your stash is empty — nothing has been rolled back".into()
+        ]);
     };
     if stash.is_empty() {
         return Reply(vec!["your stash is empty".into()]);
@@ -214,9 +216,7 @@ fn ask_window(stash: &Stash, ask: Ask) -> (String, Vec<crate::protocol::Containe
                 &format!("Take {} of {}", ask.amount, entry.count),
             )
             .with_quantity(),
-            model::AskCell::Cancel => {
-                ContainerSlot::button("minecraft:barrier", 1, "Cancel")
-            }
+            model::AskCell::Cancel => ContainerSlot::button("minecraft:barrier", 1, "Cancel"),
             model::AskCell::Confirm => ContainerSlot::button(
                 "minecraft:lime_concrete",
                 1,

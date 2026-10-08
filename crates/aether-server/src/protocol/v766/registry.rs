@@ -44,7 +44,10 @@ pub fn registries() -> Vec<(&'static str, Vec<(String, Nbt)>)> {
             "minecraft:dimension_type",
             vec![(DIMENSION_NAME.into(), dimension_type())],
         ),
-        ("minecraft:worldgen/biome", vec![(BIOME_NAME.into(), plains())]),
+        (
+            "minecraft:worldgen/biome",
+            vec![(BIOME_NAME.into(), plains())],
+        ),
         ("minecraft:damage_type", damage_types()),
         (
             "minecraft:wolf_variant",

@@ -393,12 +393,17 @@ mod tests {
         // x, z, bitMap, heightmaps, biomes, chunkData, blockEntities — with no
         // light and no trustEdges anywhere in it.
         let mut wire = Vec::new();
-        chunk_data_packet(0x22, 3, -5, &Flat).write_to(&mut wire, None).unwrap();
+        chunk_data_packet(0x22, 3, -5, &Flat)
+            .write_to(&mut wire, None)
+            .unwrap();
 
         let mut pos = 0usize;
         let _frame = read_varint(&wire, &mut pos);
         assert_eq!(read_varint(&wire, &mut pos), 0x22);
-        assert_eq!(i32::from_be_bytes(wire[pos..pos + 4].try_into().unwrap()), 3);
+        assert_eq!(
+            i32::from_be_bytes(wire[pos..pos + 4].try_into().unwrap()),
+            3
+        );
         pos += 4;
         assert_eq!(
             i32::from_be_bytes(wire[pos..pos + 4].try_into().unwrap()),
@@ -445,10 +450,10 @@ mod tests {
                 let z = ((i >> 4) & 15) as i32;
                 let y = ((i >> 8) & 15) as i32;
                 // The client's column starts at zero; the engine's at -64. This
-            // is the *data* half of the shift — the coordinate packets were
-            // already shifted, and leaving this one out puts the terrain 64
-            // blocks above where the player is standing.
-            let wy = MIN_Y + sy * AXIS + y - Y_OFFSET;
+                // is the *data* half of the shift — the coordinate packets were
+                // already shifted, and leaving this one out puts the terrain 64
+                // blocks above where the player is standing.
+                let wy = MIN_Y + sy * AXIS + y - Y_OFFSET;
                 let want = block_state(Flat.block_at(3 * AXIS + x, wy, -5 * AXIS + z));
                 assert_eq!(*got, want, "block at section {sy} index {i}");
             }
@@ -463,7 +468,9 @@ mod tests {
         // 1.18 folded light into the chunk packet and widened these to i32.
         // Writing them that way here shifts the whole packet.
         let mut wire = Vec::new();
-        update_light_packet(0x25, 3, -5).write_to(&mut wire, None).unwrap();
+        update_light_packet(0x25, 3, -5)
+            .write_to(&mut wire, None)
+            .unwrap();
         let mut pos = 0usize;
         let _frame = read_varint(&wire, &mut pos);
         assert_eq!(read_varint(&wire, &mut pos), 0x25);
@@ -476,7 +483,9 @@ mod tests {
     fn unload_packet_puts_x_before_z() {
         // 1.21 reversed this; copying the newer codec would swap the column.
         let mut wire = Vec::new();
-        unload_chunk_packet(0x1D, 3, -5).write_to(&mut wire, None).unwrap();
+        unload_chunk_packet(0x1D, 3, -5)
+            .write_to(&mut wire, None)
+            .unwrap();
         let body = &wire[2..];
         assert_eq!(i32::from_be_bytes(body[0..4].try_into().unwrap()), 3);
         assert_eq!(i32::from_be_bytes(body[4..8].try_into().unwrap()), -5);
