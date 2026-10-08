@@ -169,9 +169,11 @@ pub fn can_survive(lv: &Level, t: &CommonTags, s: BlockStateId, p: Pos) -> bool 
         "dead_bush" | "short_dry_grass" => t.dry_vegetation_may_place_on.contains(below),
         "tall_dry_grass" => t.dry_vegetation_may_place_on.contains(below),
         "brown_mushroom" | "red_mushroom" => {
-            // Decoration runs before lighting, so the brightness check
-            // always passes.
-            t.mushroom_grow_block.contains(below) || solid_render(below)
+            // `getRawBrightness(pos, 0) < 13`. Decoration runs before the
+            // chunk is lit; the sky light it sees is estimated from the
+            // column above: an opaque block shades fully, each leaf or water
+            // block takes one level off.
+            t.mushroom_grow_block.contains(below) || (sky_light(lv, p) < 13 && solid_render(below))
         }
         "cactus" => {
             for d in Dir::HORIZONTAL {
@@ -272,6 +274,23 @@ pub fn can_survive(lv: &Level, t: &CommonTags, s: BlockStateId, p: Pos) -> bool 
         }
         _ => true,
     }
+}
+
+/// Estimated sky light at a position (see the mushroom rule above).
+fn sky_light(lv: &Level, p: Pos) -> i32 {
+    let mut light = 15;
+    let mut y = p.y + 1;
+    while y < lv.max_y() && light >= 13 {
+        let s = lv.get(Pos::new(p.x, y, p.z));
+        if solid_render(s) {
+            return 0;
+        }
+        if blockinfo::is_leaves(s) || blockinfo::has_water(s) {
+            light -= 1;
+        }
+        y += 1;
+    }
+    light
 }
 
 /// `RuleTest`, for ore targets.

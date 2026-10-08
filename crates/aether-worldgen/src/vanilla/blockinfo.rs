@@ -48,11 +48,12 @@ fn table() -> &'static [u8] {
             let p = blocks::props_of_state(state).unwrap_or_default();
             // `blocksMotion()`: a collision shape, except the two blocks the
             // game singles out.
-            if p.collision
+            if (p.collision
                 && short != "cobweb"
                 && short != "bamboo_sapling"
                 && f & (WATER | LAVA) == 0
-                || (p.collision && full.contains("waterlogged=true"))
+                || (p.collision && full.contains("waterlogged=true")))
+                && legacy_solid_shape(short, &full)
             {
                 f |= MOTION;
             }
@@ -192,4 +193,39 @@ mod tests {
         assert_eq!(prop(log, "axis"), Some("x"));
         assert_eq!(prop(with_prop(log, "axis", "z"), "axis"), Some("z"));
     }
+}
+
+/// Whether a block with a collision shape is also "solid" in the legacy
+/// sense `blocksMotion` uses: the game counts a shape solid when its bounding
+/// box averages at least 0.729 of a block per axis, or is a full block tall.
+/// The thin shapes that fail that test, by name — lily pads above all, whose
+/// pads would otherwise lift every swamp tree's heightmap by one.
+fn legacy_solid_shape(short: &str, full: &str) -> bool {
+    if short == "snow" {
+        return !(full.contains("layers=1]")
+            || full.contains("layers=1,")
+            || full.contains("layers=2"));
+    }
+    !(short == "lily_pad"
+        || short.ends_with("_carpet")
+        || short == "cocoa"
+        || short == "sea_pickle"
+        || short == "turtle_egg"
+        || short.starts_with("potted_")
+        || short == "flower_pot"
+        || short.ends_with("candle")
+        || short.ends_with("_candle_cake")
+        || short == "cake"
+        || short == "lantern"
+        || short == "soul_lantern"
+        || short.ends_with("_button")
+        || short.ends_with("_head")
+        || short.ends_with("_skull")
+        || short.ends_with("amethyst_bud")
+        || short == "small_dripleaf"
+        || short == "repeater"
+        || short == "comparator"
+        || short == "daylight_detector"
+        || short == "end_rod"
+        || short == "conduit")
 }

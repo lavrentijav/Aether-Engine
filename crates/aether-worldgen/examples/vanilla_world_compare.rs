@@ -244,6 +244,21 @@ fn main() {
         }
         out
     };
+    if let Ok(dc) = std::env::var("DEBUG_COL") {
+        let v: Vec<i32> = dc.split(',').map(|s| s.parse().unwrap()).collect();
+        let key = (v[0].div_euclid(16), v[1].div_euclid(16));
+        if let (Some(w), Some(g)) = (chunks.get(&key), ours.get(&key)) {
+            let (lx, lz) = (v[0].rem_euclid(16) as usize, v[1].rem_euclid(16) as usize);
+            for y in (v[2]..=v[3]).rev() {
+                let i = (((y + 64) as usize) * 16 + lz) * 16 + lx;
+                println!(
+                    "  y={y:4} vanilla {:<44} ours {}",
+                    props::state_name(w[i].0).unwrap_or_default(),
+                    props::state_name(g[i].0).unwrap_or_default()
+                );
+            }
+        }
+    }
     let (ov, oo) = (ores(&chunks), ores(&ours));
     println!(
         "ore blocks: vanilla {} ours {} common {}",
@@ -260,10 +275,10 @@ fn main() {
         common
     );
     if std::env::var_os("LIST_BASES").is_some() {
-        for b in bv.iter().take(40) {
+        for b in bv.iter().filter(|b| !bo.contains(b)).take(60) {
             println!("  v {:?} {}", b, if bo.contains(b) { "=" } else { "" });
         }
-        for b in bo.iter().take(40) {
+        for b in bo.iter().filter(|b| !bv.contains(b)).take(60) {
             println!("  o {:?} {}", b, if bv.contains(b) { "=" } else { "" });
         }
     }
@@ -280,7 +295,12 @@ fn main() {
     let mut d: Vec<_> = diffs.into_iter().collect();
     d.sort_by_key(|e| std::cmp::Reverse(e.1));
     println!("most common differences (vanilla -> ours):");
-    for ((w, g), n) in d.into_iter().take(25) {
+    for ((w, g), n) in d.into_iter().take(
+        std::env::var("NDIFF")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(25),
+    ) {
         println!("  {n:>7}  {w} -> {g}");
     }
     if a.len() >= 5 {

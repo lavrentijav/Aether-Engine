@@ -503,20 +503,65 @@ impl VanillaGenerator {
     /// eight neighbours, in a fixed order (west to east, north to south).
     fn decoration_around(&self, cx: i32, cz: i32) -> Vec<(i32, i32, i32, BlockStateId)> {
         let (x0, z0) = (cx * 16, cz * 16);
-        let mut out = Vec::new();
+        // Each neighbour decorated against undecorated terrain, so two of
+        // them can claim the same cell — a tree trunk from one, the grass the
+        // other saw room for. In the game whichever chunk decorates later
+        // sees the earlier one's blocks and gives way, so a trunk is never
+        // overwritten by grass; but an ore blob does land on another's
+        // granite. Merge by what the game would end up with: trees over
+        // leaves over other solids over plants, and between equals the later
+        // decoration in a fixed north-to-south, west-to-east order.
+        let rank = |s: BlockStateId| -> u8 {
+            let n = super::blockinfo::name(s);
+            if n.ends_with("_log")
+                || n.ends_with("_wood")
+                || n.ends_with("mushroom_block")
+                || n == "minecraft:mushroom_stem"
+            {
+                4
+            } else if super::blockinfo::is_leaves(s) {
+                3
+            } else if super::blockinfo::blocks_motion(s) {
+                2
+            } else {
+                1
+            }
+        };
+        let mut claimed: super::FxHashMap<(i32, i32, i32), BlockStateId> = Default::default();
+        let mut order: Vec<(i32, i32, i32)> = Vec::new();
         for dz in -1..=1 {
             for dx in -1..=1 {
                 let d = self.decoration_of(cx + dx, cz + dz);
-                out.extend(
-                    d.iter()
-                        .filter(|(x, _, z, _)| {
-                            (x0..x0 + 16).contains(x) && (z0..z0 + 16).contains(z)
-                        })
-                        .copied(),
-                );
+                let mut mine: super::FxHashMap<(i32, i32, i32), BlockStateId> = Default::default();
+                let mut mine_order = Vec::new();
+                for &(x, y, z, s) in d.iter() {
+                    if (x0..x0 + 16).contains(&x)
+                        && (z0..z0 + 16).contains(&z)
+                        && mine.insert((x, y, z), s).is_none()
+                    {
+                        mine_order.push((x, y, z));
+                    }
+                }
+                for k in mine_order {
+                    let s = mine[&k];
+                    match claimed.entry(k) {
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(s);
+                            order.push(k);
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                            if rank(s) >= rank(*e.get()) {
+                                e.insert(s);
+                            }
+                        }
+                    }
+                }
             }
         }
-        out
+        order
+            .into_iter()
+            .map(|k| (k.0, k.1, k.2, claimed[&k]))
+            .collect()
     }
 
     /// Per-section biomes for the column, as the client wants them.
