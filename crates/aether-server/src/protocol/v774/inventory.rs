@@ -15,10 +15,6 @@ use aether_world::BlockStateId;
 
 use crate::proto::PacketOut;
 
-/// Slots in the player's own inventory window, hotbar included.
-pub const INVENTORY_SLOTS: usize = 46;
-/// Index of the first hotbar slot within that window.
-pub const FIRST_HOTBAR_SLOT: usize = 36;
 
 /// What every player is handed to build with, as `(engine block, item id)`.
 ///
@@ -84,25 +80,6 @@ pub(super) fn write_named_item(p: &mut PacketOut, item_id: i32, count: i32, name
     p.bytes(&crate::protocol::nbt::string(name).to_network());
 }
 
-/// Set Container Content for the player's own inventory, hotbar filled.
-pub fn window_items_packet(id: i32) -> PacketOut {
-    let mut p = PacketOut::new(id);
-    p.var_int(0) // window 0: the player's own inventory
-        .var_int(1) // state id
-        .var_int(INVENTORY_SLOTS as i32);
-    for slot in 0..INVENTORY_SLOTS {
-        match slot
-            .checked_sub(FIRST_HOTBAR_SLOT)
-            .and_then(|i| HOTBAR.get(i))
-        {
-            Some((_, item)) => write_item(&mut p, *item, 1),
-            None => write_empty(&mut p),
-        }
-    }
-    write_empty(&mut p); // nothing on the cursor
-    p
-}
-
 /// Set Held Item: which hotbar slot the client should have selected.
 pub fn held_item_packet(id: i32, slot: i32) -> PacketOut {
     let mut p = PacketOut::new(id);
@@ -113,64 +90,6 @@ pub fn held_item_packet(id: i32, slot: i32) -> PacketOut {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Read the packet body back the way a client does, returning one entry
-    /// per slot: `None` for empty, `Some(item_id)` otherwise.
-    fn decode_window_items(wire: &[u8]) -> Vec<Option<i32>> {
-        let mut pos = 0usize;
-        let varint = |w: &[u8], pos: &mut usize| -> i32 {
-            let mut v = 0i32;
-            for i in 0..5 {
-                let byte = w[*pos];
-                *pos += 1;
-                v |= ((byte & 0x7f) as i32) << (7 * i);
-                if byte & 0x80 == 0 {
-                    break;
-                }
-            }
-            v
-        };
-        varint(wire, &mut pos); // frame length
-        varint(wire, &mut pos); // packet id
-        assert_eq!(varint(wire, &mut pos), 0, "window 0");
-        varint(wire, &mut pos); // state id
-        let count = varint(wire, &mut pos);
-        let mut out = Vec::new();
-        for _ in 0..count {
-            let n = varint(wire, &mut pos);
-            if n == 0 {
-                out.push(None);
-                continue;
-            }
-            let id = varint(wire, &mut pos);
-            let added = varint(wire, &mut pos);
-            let removed = varint(wire, &mut pos);
-            assert_eq!((added, removed), (0, 0), "plain blocks carry no components");
-            out.push(Some(id));
-        }
-        // The carried item closes the packet, and nothing may follow it.
-        assert_eq!(varint(wire, &mut pos), 0, "empty cursor");
-        assert_eq!(pos, wire.len(), "packet must be consumed exactly");
-        out
-    }
-
-    #[test]
-    fn hotbar_lands_in_the_hotbar_slots_and_nowhere_else() {
-        // Decoded per the 1.21.11 Slot spec rather than by mirroring the
-        // writer: a stack is count, id, added-components, removed-components,
-        // and getting the two component counts wrong shifts every later slot.
-        let mut wire = Vec::new();
-        window_items_packet(0x12).write_to(&mut wire, None).unwrap();
-        let slots = decode_window_items(&wire);
-
-        assert_eq!(slots.len(), INVENTORY_SLOTS);
-        for (i, slot) in slots.iter().enumerate() {
-            match i.checked_sub(FIRST_HOTBAR_SLOT).and_then(|h| HOTBAR.get(h)) {
-                Some((_, item)) => assert_eq!(*slot, Some(*item), "slot {i}"),
-                None => assert_eq!(*slot, None, "slot {i} must be empty"),
-            }
-        }
-    }
 
     #[test]
     fn hotbar_slots_map_back_to_engine_blocks() {

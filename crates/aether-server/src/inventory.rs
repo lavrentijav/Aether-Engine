@@ -52,6 +52,43 @@ pub struct Stack {
     pub count: u8,
     /// This instance's identity, stable across every move it makes.
     pub uid: ItemUid,
+    /// Wear on a tool or armour piece, `0` for new (and for anything that
+    /// does not wear). The `minecraft:damage` data component on the wire.
+    pub damage: u16,
+}
+
+impl Stack {
+    /// A fresh stack with its own identity.
+    pub fn new(item: &str, count: u8) -> Self {
+        Self {
+            item: item.to_owned(),
+            count,
+            uid: mint_uid(),
+            damage: 0,
+        }
+    }
+
+    /// The most of this item one slot may hold.
+    pub fn max_stack(&self) -> u8 {
+        crate::game::tables::max_stack(&self.item)
+    }
+
+    /// Whether `other` could merge into this stack: same item, same wear.
+    pub fn stacks_with(&self, other: &Stack) -> bool {
+        self.item == other.item && self.damage == other.damage && self.max_stack() > 1
+    }
+
+    /// Split `n` off this stack into a new instance, leaving the rest here.
+    pub fn split(&mut self, n: u8) -> Stack {
+        let n = n.min(self.count);
+        self.count -= n;
+        Stack {
+            item: self.item.clone(),
+            count: n,
+            uid: mint_uid(),
+            damage: self.damage,
+        }
+    }
 }
 
 /// A player's inventory.
@@ -106,11 +143,7 @@ impl Inventory {
             }
             Some((name, count)) => match &before {
                 Some(s) if s.item == name && s.count == count => Some(s.clone()),
-                _ => Some(Stack {
-                    item: name.to_owned(),
-                    count,
-                    uid: mint_uid(),
-                }),
+                _ => Some(Stack::new(name, count)),
             },
         };
         let unchanged = before == after;
@@ -149,12 +182,87 @@ impl Inventory {
         self.ensure();
         let order = (FIRST_HOTBAR..OFFHAND).chain(9..FIRST_HOTBAR);
         let slot = order.into_iter().find(|s| self.slots[*s].is_none())?;
-        self.slots[slot] = Some(Stack {
-            item: item.to_owned(),
-            count,
-            uid: mint_uid(),
-        });
+        self.slots[slot] = Some(Stack::new(item, count));
         Some(slot)
+    }
+
+    /// Raw access to one slot, for the window logic that moves stacks
+    /// around. Out-of-range indices read as empty.
+    pub fn slot(&self, slot: usize) -> Option<&Stack> {
+        self.get(slot)
+    }
+
+    /// Take whatever is in `slot`, leaving it empty.
+    pub fn take_slot(&mut self, slot: usize) -> Option<Stack> {
+        self.ensure();
+        self.slots.get_mut(slot).and_then(Option::take)
+    }
+
+    /// Put `stack` into `slot`, returning what was there.
+    pub fn put_slot(&mut self, slot: usize, stack: Option<Stack>) -> Option<Stack> {
+        self.ensure();
+        match self.slots.get_mut(slot) {
+            Some(s) => std::mem::replace(s, stack.filter(|s| s.count > 0)),
+            None => stack,
+        }
+    }
+
+    /// Mutable access to one slot.
+    pub fn slot_mut(&mut self, slot: usize) -> Option<&mut Option<Stack>> {
+        self.ensure();
+        self.slots.get_mut(slot)
+    }
+
+    /// Merge `stack` into the inventory: topping up matching stacks first,
+    /// then empty slots, hotbar first as vanilla does. Returns what did not
+    /// fit.
+    ///
+    /// Merging keeps the *destination's* uid and the arriving instance's uid
+    /// ends there. That loses one hop of provenance per merge, which is the
+    /// price of stacks behaving the way every player expects them to.
+    pub fn insert(&mut self, mut stack: Stack) -> Option<Stack> {
+        self.ensure();
+        let order: Vec<usize> = (FIRST_HOTBAR..OFFHAND).chain(9..FIRST_HOTBAR).collect();
+        let max = stack.max_stack();
+        for &i in &order {
+            if stack.count == 0 {
+                return None;
+            }
+            if let Some(s) = &mut self.slots[i] {
+                if s.stacks_with(&stack) && s.count < max {
+                    let n = (max - s.count).min(stack.count);
+                    s.count += n;
+                    stack.count -= n;
+                }
+            }
+        }
+        for &i in &order {
+            if stack.count == 0 {
+                return None;
+            }
+            if self.slots[i].is_none() {
+                let n = stack.count.min(max);
+                self.slots[i] = Some(stack.split(n));
+            }
+        }
+        (stack.count > 0).then_some(stack)
+    }
+
+    /// The selected hotbar slot's window index.
+    pub fn held_index(&self) -> usize {
+        FIRST_HOTBAR + self.held as usize
+    }
+
+    /// Remove one item from the held stack. Returns it.
+    pub fn consume_held(&mut self) -> Option<Stack> {
+        let i = self.held_index();
+        let slot = self.slot_mut(i)?;
+        let s = slot.as_mut()?;
+        let one = s.split(1);
+        if s.count == 0 {
+            *slot = None;
+        }
+        Some(one)
     }
 
     /// Add `count` of `item`, splitting it across as many slots as it takes.
@@ -171,12 +279,16 @@ impl Inventory {
     /// rather than being discarded here.
     pub fn give_many(&mut self, item: &str, count: u64) -> u64 {
         let mut left = count;
+        let max = crate::game::tables::max_stack(item).min(STACK) as u64;
         while left > 0 {
-            let chunk = left.min(STACK as u64) as u8;
-            if self.give(item, chunk).is_none() {
-                break;
+            let chunk = left.min(max) as u8;
+            match self.insert(Stack::new(item, chunk)) {
+                None => left -= chunk as u64,
+                Some(rest) => {
+                    left -= (chunk - rest.count) as u64;
+                    break;
+                }
             }
-            left -= chunk as u64;
         }
         left
     }
@@ -252,7 +364,7 @@ impl SlotChange {
 /// Bumped whenever the layout below changes. A blob that does not start with
 /// this is refused rather than guessed at: a misread inventory would hand a
 /// player somebody else's items.
-pub const FORMAT_VERSION: u8 = 1;
+pub const FORMAT_VERSION: u8 = 2;
 
 /// Serialize for the KV store.
 pub fn encode(inv: &Inventory) -> Vec<u8> {
@@ -263,6 +375,7 @@ pub fn encode(inv: &Inventory) -> Vec<u8> {
         out.push(slot as u8);
         out.push(s.count);
         out.extend_from_slice(&s.uid.0.to_be_bytes());
+        out.extend_from_slice(&s.damage.to_be_bytes());
         out.extend_from_slice(&(s.item.len() as u16).to_be_bytes());
         out.extend_from_slice(s.item.as_bytes());
     }
@@ -280,7 +393,9 @@ pub fn decode(blob: &[u8]) -> Option<Inventory> {
         c = end;
         Some(s)
     };
-    if take(1)?[0] != FORMAT_VERSION {
+    // Version 1 is version 2 without the wear field.
+    let version = take(1)?[0];
+    if version != FORMAT_VERSION && version != 1 {
         return None;
     }
     let held = take(1)?[0];
@@ -291,6 +406,11 @@ pub fn decode(blob: &[u8]) -> Option<Inventory> {
         let slot = take(1)?[0] as usize;
         let count = take(1)?[0];
         let uid = u128::from_be_bytes(take(16)?.try_into().ok()?);
+        let damage = if version >= 2 {
+            u16::from_be_bytes(take(2)?.try_into().ok()?)
+        } else {
+            0
+        };
         let len = u16::from_be_bytes(take(2)?.try_into().ok()?) as usize;
         let item = std::str::from_utf8(take(len)?).ok()?.to_owned();
         if slot < SLOTS && count > 0 {
@@ -298,6 +418,7 @@ pub fn decode(blob: &[u8]) -> Option<Inventory> {
                 item,
                 count,
                 uid: ItemUid(uid),
+                damage,
             });
         }
     }
@@ -423,7 +544,11 @@ mod tests {
         assert_eq!(inv.give_many("minecraft:stone", 200), 0, "all of it fitted");
         assert_eq!(inv.count_of("minecraft:stone"), 200);
         let counts: Vec<u8> = inv.occupied().map(|(_, s)| s.count).collect();
-        assert_eq!(counts, vec![64, 64, 64, 8], "full stacks, then the remainder");
+        assert_eq!(
+            counts,
+            vec![64, 64, 64, 8],
+            "full stacks, then the remainder"
+        );
     }
 
     #[test]
@@ -497,6 +622,8 @@ mod tests {
     fn a_blob_from_another_version_is_refused() {
         let mut b = encode(&Inventory::new());
         b[0] = FORMAT_VERSION.wrapping_add(1);
+        assert_eq!(decode(&b), None);
+        b[0] = 0;
         assert_eq!(decode(&b), None);
     }
 

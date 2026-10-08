@@ -354,6 +354,8 @@ impl ProtocolCodec for Codec {
                 p.bytes(&super::nbt::string(text).to_network()).bool(false);
                 vec![p]
             }
+            // Gameplay events this version does not render.
+            _ => Vec::new(),
         }
     }
 

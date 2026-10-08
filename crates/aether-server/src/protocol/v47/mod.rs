@@ -156,6 +156,8 @@ impl ProtocolCodec for Codec {
                     .u8(0); // position: normal chat
                 vec![p]
             }
+            // Gameplay events this version does not render.
+            _ => Vec::new(),
         }
     }
 

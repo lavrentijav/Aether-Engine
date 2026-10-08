@@ -314,6 +314,8 @@ impl ProtocolCodec for Codec {
                     .uuid(0);
                 vec![p]
             }
+            // Gameplay events this version does not render.
+            _ => Vec::new(),
         }
     }
 

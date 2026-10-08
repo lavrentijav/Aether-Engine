@@ -227,6 +227,7 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
     // Taken from the inventory *before* the listing exists. The other order
     // leaves a window in which the same stack backs two offers.
     handle.inventory().take(&item, count);
+    handle.sync_inventory(world);
 
     match econ.list(ActorId(handle.uuid), &item, count, price, expires) {
         Ok(id) => {
@@ -249,6 +250,7 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
             // The listing failed, so the stack goes back. Without this a
             // database hiccup eats the seller's items.
             handle.inventory().give(&item, count.min(u8::MAX as u64) as u8);
+            handle.sync_inventory(world);
             err(e)
         }
     }

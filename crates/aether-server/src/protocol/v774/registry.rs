@@ -209,6 +209,13 @@ const DAMAGE_TYPES: [(&str, &str, &str, f32); 50] = [
     ("wither_skull", "witherSkull", ALIVE, 0.1),
 ];
 
+/// The registry index of a damage type, as the client numbers it: the order
+/// the entries were sent in.
+pub fn damage_type_index(name: &str) -> Option<usize> {
+    let short = name.strip_prefix("minecraft:").unwrap_or(name);
+    DAMAGE_TYPES.iter().position(|(n, ..)| *n == short)
+}
+
 /// Damage types the client resolves by name for its death screen. Nothing here
 /// can actually kill a player on this server, but the registry must exist and
 /// be complete.

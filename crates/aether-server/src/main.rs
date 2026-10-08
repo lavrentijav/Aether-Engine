@@ -16,6 +16,7 @@
 mod commands;
 mod db;
 mod economy;
+mod game;
 mod gencache;
 mod ground;
 mod inventory;
@@ -101,9 +102,9 @@ fn main() -> std::process::ExitCode {
     let cfg = Arc::new(cfg);
     let next_eid = Arc::new(AtomicI32::new(1));
     let registry: SharedRegistry = Arc::new(Registry::default());
-    // Items on the floor fall and expire on their own thread, independently of
-    // whether anyone is connected.
-    ground::spawn_ticker(Arc::clone(&registry), Arc::clone(&world));
+    // The world ticks on its own thread, independently of whether anyone is
+    // connected: time, mobs, items on the floor, furnaces.
+    game::tick::start(Arc::clone(&registry), Arc::clone(&world));
 
     let addr = format!("{}:{}", cfg.server.host, cfg.server.port);
     let listener = match TcpListener::bind(&addr) {
