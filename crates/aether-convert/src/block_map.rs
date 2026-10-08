@@ -51,8 +51,35 @@ impl BlockRegistry {
         r
     }
 
-    /// Infer properties from a block's base name (namespace stripped).
+    /// Properties for a block name.
+    ///
+    /// The vanilla table first — it is the real data, and it covers every
+    /// block a vanilla world can contain, which is all this tool ever reads.
+    /// The name heuristic below it survives only for modded blocks, where
+    /// there is nothing else to go on.
+    ///
+    /// This used to be a heuristic for *everything*, duplicated from the
+    /// engine registry's own. Two independent guesses at the same question
+    /// disagree eventually, and the disagreement shows up as a converted world
+    /// whose collision differs from a generated one.
     fn infer_props(name: &str) -> BlockProperties {
+        // A vanilla name may carry state properties; the table is keyed by the
+        // block, not the state.
+        let bare = name.split_once('[').map_or(name, |(n, _)| n);
+        // A vanilla name — bare or fully qualified — is answered by the state
+        // table. Anvil stores fully-qualified states, so the qualified form is
+        // the common case here, not the exception.
+        use aether_world::registry::blocks;
+        if let Some(state) = blocks::default_state(name).or_else(|| blocks::default_state(bare)) {
+            if let Some(p) = blocks::props_of_state(state) {
+                return p;
+            }
+        }
+        Self::guess_props(bare)
+    }
+
+    /// Last-resort properties for a name no table contains — a modded block.
+    fn guess_props(name: &str) -> BlockProperties {
         let base = name.split(':').next_back().unwrap_or(name);
         // Match air variants exactly: a `contains("air")` would also catch
         // `st`+`air`+`s` and similar names.
@@ -89,6 +116,11 @@ impl BlockRegistry {
             solid: !non_solid,
             collision: !non_solid,
             redstone,
+            light_emission: 0,
+            // An unknown block blocks light rather than leaking it: one that
+            // turns out to be a lamp is a cosmetic error, one that turns out
+            // to be a wall is a hole in every light calculation around it.
+            light_opacity: if non_solid { 0 } else { 15 },
         }
     }
 
@@ -157,18 +189,39 @@ mod tests {
     }
 
     #[test]
-    fn property_inference() {
+    fn vanilla_blocks_take_their_real_properties() {
+        // These come from the block table now, not from a guess at the name.
+        // Two of them changed answer when it switched over, and both were
+        // *wrong* before: a stair and a slab are collidable but are not full
+        // opaque cubes, so calling them `solid` made them occlude light and
+        // hide the faces of whatever is behind them.
         let mut r = BlockRegistry::new();
         assert!(r.intern("minecraft:stone").1.solid);
         assert!(r.intern("minecraft:redstone_wire").1.redstone);
         assert!(r.intern("minecraft:repeater").1.redstone);
         assert!(!r.intern("minecraft:water").1.collision);
         assert!(!r.intern("minecraft:torch").1.solid);
-        // grass_block is solid terrain; tall_grass is a passable plant.
         assert!(r.intern("minecraft:grass_block").1.solid);
         assert!(!r.intern("minecraft:tall_grass").1.collision);
-        // `*_stairs` contains the substring "air" but must stay collidable.
-        assert!(r.intern("minecraft:oak_stairs").1.collision);
-        assert!(r.intern("minecraft:oak_stairs").1.solid);
+
+        // Collidable, and *not* a full cube.
+        for partial in ["minecraft:oak_stairs", "minecraft:oak_slab", "minecraft:oak_fence"] {
+            let p = r.intern(partial).1;
+            assert!(p.collision, "{partial} must collide");
+            assert!(!p.solid, "{partial} is not a full opaque cube");
+        }
+
+        // And the light data the table brought with it.
+        assert_eq!(r.intern("minecraft:glowstone").1.light_emission, 15);
+        assert_eq!(r.intern("minecraft:water").1.light_opacity, 1);
+    }
+
+    #[test]
+    fn a_modded_name_still_falls_back_to_the_guess() {
+        // The heuristic is not gone, it is demoted: it now only runs for names
+        // no vanilla table contains.
+        let mut r = BlockRegistry::new();
+        assert!(r.intern("modid:fancy_block").1.solid);
+        assert!(!r.intern("modid:fancy_torch").1.collision);
     }
 }

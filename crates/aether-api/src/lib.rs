@@ -28,12 +28,13 @@
 //! physics and stream chunks — it can be shared across the tick's worker pool.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 
 use aether_core::math::Vec3;
 use aether_physics::{step, BlockView};
 use aether_world::registry::BlockRegistry;
 use aether_world::storage::format::SubChunkKey;
+use aether_world::journal::{ActorId, EventBody, Filter, Journal, Restore};
 use aether_world::{KvBackend, StorageError, SubChunk, WorldStorage};
 use aether_worldgen::ChunkGenerator;
 
@@ -43,6 +44,9 @@ pub mod player;
 pub use aether_core::math::{Aabb, Vec3 as Vector3};
 pub use aether_physics::{Body, PhysicsParams};
 pub use aether_world::registry::ids as block_ids;
+pub use aether_world::journal::{
+    ActorId as JournalActor, Anomaly, Event, ItemUid, Ledger, Place,
+};
 pub use aether_world::{BlockProperties, BlockStateId, FullBright, LightView, MemStore};
 pub use aether_worldgen::{FlatGenerator, NoiseGenerator};
 pub use player::{GameMode, Player};
@@ -50,9 +54,10 @@ pub use player::{GameMode, Player};
 #[cfg(feature = "fjall")]
 pub use aether_world::FjallStore;
 
-// Vertical band of sub-chunks scanned when loading a column from storage.
+// Vertical band of sub-chunks scanned when loading a column from storage:
+// sections -4..=23, which is the engine's `-64..=383`.
 const SCAN_CY_MIN: i8 = -4;
-const SCAN_CY_MAX: i8 = 19;
+const SCAN_CY_MAX: i8 = 23;
 
 /// Split a world coordinate into `(chunk-or-section index, local 0..16)`.
 #[inline]
@@ -63,27 +68,90 @@ fn split(v: i32) -> (i32, usize) {
 /// A live world: block access, on-demand generation and physics over a
 /// [`KvBackend`] and a [`ChunkGenerator`].
 pub struct World<B: KvBackend, G: ChunkGenerator> {
-    storage: WorldStorage<B>,
+    storage: WorldStorage<Arc<B>>,
+    /// Every change anyone has made, and the rollback over it. Shares the
+    /// backend with `storage` under a disjoint key prefix.
+    journal: Journal<Arc<B>>,
     generator: G,
-    registry: BlockRegistry,
+    /// Behind a lock because a block name can be met for the first time at
+    /// runtime — a player placing something the generator never emits — and
+    /// interning it needs to mutate the table through a shared `&World`.
+    registry: RwLock<BlockRegistry>,
     cache: RwLock<HashMap<SubChunkKey, SubChunk>>,
     dirty: RwLock<HashSet<SubChunkKey>>,
-    columns: RwLock<HashSet<(i32, i32)>>,
+    /// Per-column materialization latch. The `bool` is "this column is in the
+    /// cache"; the `Mutex` is what makes a late arrival *wait* for the thread
+    /// that is still generating rather than racing ahead and reading air out
+    /// of the not-yet-populated cache. Keyed per column so unrelated columns
+    /// still generate in parallel.
+    columns: RwLock<HashMap<(i32, i32), Arc<Mutex<bool>>>>,
     params: PhysicsParams,
 }
 
 impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
+    /// The generator this world is built on.
+    ///
+    /// Exposed so a caller can ask it about itself — a cache wrapper reporting
+    /// its hit rate, say. Read-only: swapping the generator under a world that
+    /// has already latched columns would make its baseline disagree with the
+    /// one the journal was recorded against.
+    pub fn generator(&self) -> &G {
+        &self.generator
+    }
+
     /// Create a world from a storage backend and a chunk generator.
     pub fn new(backend: B, generator: G) -> Self {
+        let backend = Arc::new(backend);
+        let journal = Journal::open(Arc::clone(&backend))
+            .expect("journal head unreadable; refusing to renumber history");
+        let storage = WorldStorage::new(backend);
+        // A world that has been saved before carries the name table its stored
+        // ids refer to. Restoring it is what keeps those ids meaning the same
+        // block across restarts; a world without one has only ever used the
+        // seeded blocks, whose ids are fixed anyway.
+        // A saved table that cannot be restored is *not* something to shrug
+        // at. `BlockRegistry::restore` returns `None` exactly when the save was
+        // written by an incompatible build — and falling back to a fresh
+        // registry then reinterprets every stored id as a different block,
+        // which is the corruption that check exists to prevent. It used to do
+        // precisely that.
+        let registry = match storage.load_registry() {
+            Ok(None) => BlockRegistry::default(),
+            Ok(Some(table)) => match BlockRegistry::restore(&table) {
+                Some(r) => r,
+                None => panic!(
+                    "world at this path was written by an incompatible build: its block \
+                     table does not start with this build's ({} names stored). Opening it \
+                     would silently reinterpret every stored block id. Move the world \
+                     directory aside, or restore a build whose block table matches.",
+                    table.len()
+                ),
+            },
+            // A read error is not the same as "no table": it might be there and
+            // unreadable, and generating fresh ids over it would do the same
+            // damage.
+            Err(e) => panic!("world block table is unreadable: {e}"),
+        };
         Self {
-            storage: WorldStorage::new(backend),
+            storage,
+            journal,
             generator,
-            registry: BlockRegistry::new(),
+            registry: RwLock::new(registry),
             cache: RwLock::new(HashMap::new()),
             dirty: RwLock::new(HashSet::new()),
-            columns: RwLock::new(HashSet::new()),
+            columns: RwLock::new(HashMap::new()),
             params: PhysicsParams::default(),
         }
+    }
+
+    /// Mirror every recorded change into `sink` as well as the journal.
+    ///
+    /// Builder-style and consuming, so a world either has a mirror from the
+    /// moment it exists or never does — attaching one to a running world would
+    /// leave a gap at the front that nothing records.
+    pub fn with_journal_sink(mut self, sink: aether_world::journal::BatchingSink) -> Self {
+        self.journal = self.journal.with_sink(sink);
+        self
     }
 
     /// Override the physics tuning used by [`World::step_body`].
@@ -92,54 +160,114 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         self
     }
 
-    /// The canonical block registry (name ⇄ id ⇄ properties).
-    pub fn registry(&self) -> &BlockRegistry {
-        &self.registry
+    /// The properties of a block id.
+    pub fn props_of(&self, id: BlockStateId) -> BlockProperties {
+        self.registry.read().unwrap().props_of(id)
+    }
+
+    /// The id of `name`, if the registry already knows it.
+    pub fn block_id(&self, name: &str) -> Option<BlockStateId> {
+        self.registry.read().unwrap().get(name)
+    }
+
+    /// The id of `name`, assigning a fresh one if this is the first sighting.
+    ///
+    /// New ids are appended, never renumbered, and the whole table is written
+    /// out by [`World::flush`], so a saved world always reads back with the
+    /// same ids it was written with.
+    pub fn intern_block(&self, name: &str) -> (BlockStateId, BlockProperties) {
+        self.registry.write().unwrap().intern_full(name)
+    }
+
+    /// Every block name the registry holds, in id order.
+    pub fn block_names(&self) -> Vec<String> {
+        self.registry.read().unwrap().names().to_vec()
     }
 
     /// Ensure the chunk column `(cx, cz)` is present in the cache, loading it
     /// from storage or generating (and persisting) it on first touch.
     fn ensure_column(&self, cx: i32, cz: i32) {
-        // Atomically reserve the column so two workers can't load/generate the
-        // same `(cx, cz)` concurrently (and double-save its keys).
-        {
+        // Take this column's latch so two workers can't materialize the same
+        // `(cx, cz)` concurrently. A second worker must *block* here until the
+        // first has populated the cache — returning early on a
+        // reserved-but-unpopulated column would hand the caller air for a
+        // column that is merely still being generated.
+        let latch = {
             let mut columns = self.columns.write().unwrap();
-            if !columns.insert((cx, cz)) {
-                return; // already reserved by us earlier or another worker
+            Arc::clone(
+                columns
+                    .entry((cx, cz))
+                    .or_insert_with(|| Arc::new(Mutex::new(false))),
+            )
+        };
+        let mut materialized = latch.lock().unwrap();
+        if *materialized {
+            return;
+        }
+
+        // A column is *generated*, then *overlaid*. The generator is
+        // deterministic, so its output is a baseline that costs nothing to
+        // store and is never written down; only the differences are. A column
+        // nobody has touched therefore occupies zero bytes on disk however
+        // many players have walked across it.
+        let column = self.generator.generate_column(cx, cz);
+        {
+            let mut cache = self.cache.write().unwrap();
+            for (cy, sc) in column.sections {
+                cache.insert(SubChunkKey::new(cx, cy, cz), sc);
             }
         }
 
-        // Load any persisted sections in the scan band. Distinguish a genuine
-        // read error from "no data": on error we must NOT regenerate, or we'd
-        // clobber existing-but-unreadable data with fresh terrain.
-        let mut loaded_any = false;
+        // Distinguish a genuine read error from "nothing stored": on error the
+        // column must NOT be latched, or the bare generator output would look
+        // authoritative and the next edit would be recorded against the wrong
+        // `from` state.
         let mut read_error = false;
+
+        // The overlay, in two layers. First the snapshots: sub-chunks that
+        // have been edited are written out whole, which is the "last state"
+        // half of the model and makes loading O(1) in history length.
         for cy in SCAN_CY_MIN..=SCAN_CY_MAX {
             let key = SubChunkKey::new(cx, cy, cz);
             match self.storage.load(key) {
                 Ok(Some(sc)) => {
                     self.cache.write().unwrap().insert(key, sc);
-                    loaded_any = true;
                 }
                 Ok(None) => {}
                 Err(_) => read_error = true,
             }
         }
 
-        // Nothing on disk (and no read error) -> generate and persist. If a save
-        // fails, keep the section in the cache and mark it dirty so a later
-        // `flush` retries rather than silently losing it.
-        if !loaded_any && !read_error {
-            let column = self.generator.generate_column(cx, cz);
-            let mut cache = self.cache.write().unwrap();
-            for (cy, sc) in column.sections {
-                let key = SubChunkKey::new(cx, cy, cz);
-                if self.storage.save(key, &sc).is_err() {
-                    self.dirty.write().unwrap().insert(key);
+        // Then the journal, replayed forwards over the top. Snapshots and
+        // journal agree in the normal case and this is a no-op; they disagree
+        // exactly when a crash landed between an edit and the next flush, and
+        // there the journal is the one that was written synchronously. Replay
+        // is what turns "we lost the last thirty seconds" into "we lost
+        // nothing".
+        match self.journal.column_events(cx, cz) {
+            Ok(events) => {
+                for e in events {
+                    if let EventBody::BlockSet { x, y, z, to, .. } = e.body {
+                        let Some((key, lx, ly, lz)) = Self::key_of(x, y, z) else {
+                            continue;
+                        };
+                        let props = self.props_of(to);
+                        self.cache
+                            .write()
+                            .unwrap()
+                            .entry(key)
+                            .or_default()
+                            .set(lx, ly, lz, to, props);
+                    }
                 }
-                cache.insert(key, sc);
             }
+            Err(_) => read_error = true,
         }
+
+        // Only latch the column as done once it really is. A read error left
+        // it holding nothing but generator output, so a later touch must retry
+        // rather than be told the cache is authoritative.
+        *materialized = !read_error;
     }
 
     fn key_of(x: i32, y: i32, z: i32) -> Option<(SubChunkKey, usize, usize, usize)> {
@@ -166,23 +294,36 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             .unwrap_or(BlockStateId::AIR)
     }
 
+    /// The full state name of a block id — properties and all.
+    pub fn block_name_of(&self, id: BlockStateId) -> Option<String> {
+        self.registry.read().unwrap().name_of(id)
+    }
+
     /// The block name at `(x, y, z)`, if known to the registry.
     pub fn get_block_name(&self, x: i32, y: i32, z: i32) -> Option<String> {
         self.registry
+            .read()
+            .unwrap()
             .name_of(self.get_block(x, y, z))
-            .map(str::to_owned)
     }
 
     /// Set the block at `(x, y, z)` to a registry block `name`, generating the
     /// column first if needed. Returns the assigned block id.
+    /// A name the registry has not seen before is interned rather than
+    /// refused, so a player can place any block the client offers.
     pub fn set_block(&self, x: i32, y: i32, z: i32, name: &str) -> Option<BlockStateId> {
-        let id = self.registry.get(name)?;
-        let props = self.registry.props_of(id);
+        let (id, props) = self.intern_block(name);
         self.set_block_id(x, y, z, id, props);
         Some(id)
     }
 
-    /// Set the block at `(x, y, z)` to an explicit id + properties.
+    /// Set the block at `(x, y, z)` to an explicit id + properties, with no
+    /// entry in the history.
+    ///
+    /// For changes that have no author and must not be undoable — replaying
+    /// the journal itself, or a test fixture. Everything a player does should
+    /// go through [`World::set_block_by`] instead, or it cannot be rolled
+    /// back and will not appear in any audit.
     pub fn set_block_id(&self, x: i32, y: i32, z: i32, id: BlockStateId, props: BlockProperties) {
         let Some((key, lx, ly, lz)) = Self::key_of(x, y, z) else {
             return;
@@ -193,6 +334,97 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             cache.entry(key).or_default().set(lx, ly, lz, id, props);
         }
         self.dirty.write().unwrap().insert(key);
+    }
+
+    /// Set the block at `(x, y, z)` and record who did it.
+    ///
+    /// The block that was there is read *before* the write and stored in the
+    /// event, which is what makes the change undoable without replaying the
+    /// world from the beginning. Returns the sequence number of the recorded
+    /// event, or `None` when the write was a no-op or out of range.
+    ///
+    /// Writing a block to the state it already holds records nothing: a
+    /// no-op event would still be a real entry in someone's history and would
+    /// be undone by a rollback, quietly reverting a *later* edit by someone
+    /// else to the same block.
+    pub fn set_block_by(
+        &self,
+        actor: ActorId,
+        x: i32,
+        y: i32,
+        z: i32,
+        id: BlockStateId,
+        props: BlockProperties,
+    ) -> Option<u64> {
+        let from = self.get_block(x, y, z);
+        if from == id {
+            return None;
+        }
+        self.set_block_id(x, y, z, id, props);
+        self.journal
+            .append(
+                actor,
+                EventBody::BlockSet {
+                    x,
+                    y,
+                    z,
+                    from,
+                    to: id,
+                },
+            )
+            .ok()
+    }
+
+    /// Borrow the world's history.
+    pub fn journal(&self) -> &Journal<Arc<B>> {
+        &self.journal
+    }
+
+    /// Undo everything `filter` selects, attributing the undo to `by`.
+    ///
+    /// Returns the blocks that changed, in the order they were applied. The
+    /// undo is itself appended to the history rather than erasing what it
+    /// undoes: a rollback that deleted its own evidence could not be
+    /// reviewed, could not be undone, and would let a rollback command become
+    /// the tidiest way to hide an exploit.
+    pub fn rollback(&self, by: ActorId, filter: &Filter) -> Result<Vec<Restore>, StorageError> {
+        self.rollback_where(by, filter, &|_| true)
+    }
+
+    /// [`World::rollback`] with an extra predicate the journal's own filter
+    /// cannot express — a block name, a direction of change.
+    ///
+    /// Kept as a second entry point rather than folded into [`Filter`] because
+    /// the journal must stay able to narrow a scan using its indices, and a
+    /// caller-supplied closure is opaque to any index.
+    pub fn rollback_where(
+        &self,
+        by: ActorId,
+        filter: &Filter,
+        accept: &dyn Fn(&aether_world::journal::Event) -> bool,
+    ) -> Result<Vec<Restore>, StorageError> {
+        let plan = self.journal.plan_rollback_where(filter, accept)?;
+        for r in &plan {
+            let props = self.props_of(r.block);
+            self.set_block_by(by, r.x, r.y, r.z, r.block, props);
+        }
+        Ok(plan)
+    }
+
+    /// Store a server-level blob alongside the world.
+    ///
+    /// The world's backend is a plain key/value store shared by the sub-chunks,
+    /// the journal and its two indexes, each under its own leading byte. This
+    /// lets the layers above — player inventories, for one — use it too. The
+    /// caller owns its key space and must not collide with `C`, `E`, `X`, `P`,
+    /// `H`, `REG`, or a nine-byte sub-chunk key.
+    pub fn put_meta(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.storage.backend().put(key, value)
+    }
+
+    /// Read back a blob stored by [`World::put_meta`].
+    pub fn get_meta(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.storage.backend().get(key)
     }
 
     /// Persist every sub-chunk modified since the last flush.
@@ -206,6 +438,11 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
                 }
             }
         }
+        // The name table goes out with the sections, and before the durability
+        // flush: the ids just written are meaningless without it.
+        self.storage
+            .save_registry(self.registry.read().unwrap().names())?;
+
         // Only commit the durability flush, then clear exactly the keys we
         // saved — not the whole set — so keys dirtied concurrently survive and a
         // failed flush leaves the dirty bookkeeping intact for a retry.
@@ -265,6 +502,207 @@ impl<B: KvBackend, G: ChunkGenerator> BlockView for World<B, G> {
 mod tests {
     use super::*;
     use aether_worldgen::{FlatGenerator, NoiseGenerator};
+
+    /// A scratch directory unique to this test binary and `tag`.
+    #[cfg(feature = "fjall")]
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "aether-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[cfg(feature = "fjall")]
+    #[test]
+    fn an_interned_block_keeps_its_identity_across_a_restart() {
+        // Ids past the seeded set are handed out in first-seen order, and the
+        // save stores those ids raw. Reopening interns in whatever order the
+        // new session touches names, so without the persisted table the same
+        // id would name a different block. Two names, interned in a known
+        // order, then read back through the *names* rather than the ids.
+        let dir = scratch_dir("registry");
+        {
+            let world = World::new(FjallStore::open(&dir).unwrap(), FlatGenerator::classic());
+            world.set_block(1, 20, 1, "minecraft:diamond_block").unwrap();
+            world.set_block(2, 20, 2, "minecraft:oak_planks").unwrap();
+            world.flush().unwrap();
+        }
+        {
+            let world = World::new(FjallStore::open(&dir).unwrap(), FlatGenerator::classic());
+            // Touch the second name first: a fresh registry would give it the
+            // id the first one holds on disk.
+            let _ = world.intern_block("minecraft:oak_planks");
+            assert_eq!(
+                world.get_block_name(1, 20, 1).as_deref(),
+                Some("minecraft:diamond_block")
+            );
+            assert_eq!(
+                world.get_block_name(2, 20, 2).as_deref(),
+                Some("minecraft:oak_planks")
+            );
+        }
+    }
+
+    #[test]
+    fn every_vanilla_block_is_known_without_being_placed_first() {
+        // The registry seeds the whole vanilla set, so a player can be handed
+        // any block and the world already knows what it is — no first-sighting
+        // interning, and no properties guessed from the name.
+        let world = World::new(MemStore::new(), FlatGenerator::classic());
+        for name in [
+            "minecraft:diamond_block",
+            "minecraft:glass",
+            "minecraft:oak_slab",
+            "minecraft:glowstone",
+        ] {
+            assert!(world.block_id(name).is_some(), "{name} should be known");
+        }
+        // ...and it knows the real properties, not a guess from the name.
+        let glass = world.props_of(world.block_id("minecraft:glass").unwrap());
+        assert!(glass.collision && !glass.solid);
+        let glow = world.props_of(world.block_id("minecraft:glowstone").unwrap());
+        assert_eq!(glow.light_emission, 15);
+    }
+
+    #[test]
+    fn a_name_outside_the_vanilla_set_is_interned_rather_than_refused() {
+        // A modded client can still offer something this build has never
+        // heard of, and refusing it would be worse than assuming it is a
+        // block.
+        let world = World::new(MemStore::new(), FlatGenerator::classic());
+        assert!(world.block_id("modid:fancy_block").is_none());
+        let id = world.set_block(0, 20, 0, "modid:fancy_block");
+        assert!(id.is_some(), "an unseen name must not be refused");
+        assert_eq!(
+            world.get_block_name(0, 20, 0).as_deref(),
+            Some("modid:fancy_block")
+        );
+    }
+
+    #[cfg(feature = "fjall")]
+    #[test]
+    fn edits_survive_a_restart() {
+        // The point of a persistent backend: what a player builds is still
+        // there next time the server starts.
+        let dir = scratch_dir("restart");
+        {
+            let world = World::new(
+                FjallStore::open(&dir).unwrap(),
+                FlatGenerator::classic(),
+            );
+            assert_eq!(world.get_block(3, 3, 3), block_ids::GRASS_BLOCK);
+            world.set_block(3, 20, 3, "minecraft:stone").unwrap();
+            // Dig out a generated block too: a removal has to persist just as
+            // a placement does.
+            world.set_block(3, 3, 3, "minecraft:air").unwrap();
+            world.flush().unwrap();
+        }
+        {
+            let world = World::new(
+                FjallStore::open(&dir).unwrap(),
+                FlatGenerator::classic(),
+            );
+            assert_eq!(
+                world.get_block(3, 20, 3),
+                block_ids::STONE,
+                "a placed block must survive a restart"
+            );
+            assert_eq!(
+                world.get_block(3, 3, 3),
+                BlockStateId::AIR,
+                "a dug block must not grow back"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "fjall")]
+    #[test]
+    fn a_half_written_column_is_completed_not_left_holed() {
+        // Regression: completion used to be inferred from "did any section come
+        // back from storage". A column whose first save was interrupted then
+        // counted as finished, so the sections that never made it to disk were
+        // never generated either — holes in the world. Simulate exactly that:
+        // seed one mid-column section and nothing else, with no marker.
+        use aether_world::{BlockProperties, SubChunk, SubChunkKey, WorldStorage};
+
+        let dir = scratch_dir("partial");
+        let marker = BlockStateId(9_999);
+        {
+            let storage = WorldStorage::new(FjallStore::open(&dir).unwrap());
+            let mut sc = SubChunk::new();
+            sc.set(1, 2, 3, marker, BlockProperties::SOLID);
+            storage.save(SubChunkKey::new(0, 3, 0), &sc).unwrap();
+            storage.flush().unwrap();
+        }
+
+        let world = World::new(FjallStore::open(&dir).unwrap(), NoiseGenerator::new(42));
+        assert_eq!(
+            world.get_block(0, 0, 0),
+            block_ids::BEDROCK,
+            "the rest of the column must be generated, not left as air"
+        );
+        assert_eq!(
+            world.get_block(1, 3 * 16 + 2, 3),
+            marker,
+            "the section that did reach disk must not be overwritten"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generation_is_unbounded_horizontally() {
+        // Terrain must exist as far out as the coordinate space goes, in every
+        // quadrant — nothing about the world itself stops at a boundary.
+        let world = World::new(MemStore::new(), NoiseGenerator::new(42));
+        for (x, z) in [
+            (0, 0),
+            (5_000, 5_000),
+            (-5_000, -5_000),
+            (1_000_000, -1_000_000),
+            (-30_000_000, 30_000_000),
+        ] {
+            assert_eq!(
+                world.get_block(x, 0, z),
+                block_ids::BEDROCK,
+                "no bedrock at ({x}, {z})"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_first_touch_never_reads_air() {
+        // Regression: `ensure_column` used to reserve a column and return, so a
+        // second thread touching the same column while the first was still
+        // generating read straight out of the not-yet-populated cache and got
+        // air — whole chunks reached clients empty. Every column has bedrock at
+        // y=0, so a concurrent hammer must never see anything else there.
+        let world = Arc::new(World::new(MemStore::new(), FlatGenerator::classic()));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let world = Arc::clone(&world);
+                std::thread::spawn(move || {
+                    for cx in 0..16 {
+                        for cz in 0..16 {
+                            assert_eq!(
+                                world.get_block(cx * 16, 0, cz * 16),
+                                block_ids::BEDROCK,
+                                "column ({cx}, {cz}) read as air mid-generation"
+                            );
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+    }
 
     #[test]
     fn flat_world_reads_generated_blocks() {

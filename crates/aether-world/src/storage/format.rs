@@ -21,13 +21,25 @@ use crate::palette::{PackedArray, Palette};
 use crate::subchunk::{SubChunk, VOLUME};
 
 /// Magic prefix identifying an Aether Sub-Chunk blob, version 1.
-pub const MAGIC: [u8; 4] = *b"ASC1";
+pub const MAGIC: [u8; 4] = *b"ASC2";
+
+/// The previous magic, which held no light data.
+///
+/// Kept named rather than forgotten so the error a reader gets is "this is an
+/// older sub-chunk", not "this is not a sub-chunk".
+pub const MAGIC_V1: [u8; 4] = *b"ASC1";
 
 /// Errors from (de)serializing a sub-chunk blob.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FormatError {
     /// The blob did not start with the expected [`MAGIC`].
     BadMagic,
+    /// The blob is an older sub-chunk format this build cannot read.
+    ///
+    /// Distinct from [`FormatError::BadMagic`] on purpose: "your world is from
+    /// an older build" is a thing an operator can act on, and "this is not a
+    /// sub-chunk at all" is a thing they should worry about.
+    OldFormat,
     /// The blob ended before all declared fields were read.
     Truncated,
     /// A field held a value outside its valid range.
@@ -38,6 +50,10 @@ impl std::fmt::Display for FormatError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FormatError::BadMagic => f.write_str("not an Aether sub-chunk blob (bad magic)"),
+            FormatError::OldFormat => f.write_str(
+                "sub-chunk written by an older build (no light data); the world must be \
+                 regenerated or converted",
+            ),
             FormatError::Truncated => f.write_str("sub-chunk blob is truncated"),
             FormatError::Invalid(what) => write!(f, "invalid sub-chunk blob field: {what}"),
         }
@@ -50,11 +66,23 @@ fn flags_of(p: BlockProperties) -> u8 {
     (p.solid as u8) | ((p.collision as u8) << 1) | ((p.redstone as u8) << 2)
 }
 
-fn props_of(flags: u8) -> BlockProperties {
+/// Light packed into one byte: emission in the high nibble, opacity in the low.
+///
+/// Both are `0..=15` by definition, so a nibble each is exact rather than a
+/// compression. Stored alongside the flags — and therefore duplicated from the
+/// registry, which is the authority — so that a blob can be read back without
+/// one. `aether-convert` and every format test depend on that being true.
+fn light_of(p: BlockProperties) -> u8 {
+    (p.light_emission.min(15) << 4) | p.light_opacity.min(15)
+}
+
+fn props_of(flags: u8, light: u8) -> BlockProperties {
     BlockProperties {
         solid: flags & 1 != 0,
         collision: flags & 2 != 0,
         redstone: flags & 4 != 0,
+        light_emission: light >> 4,
+        light_opacity: light & 0x0F,
     }
 }
 
@@ -65,7 +93,7 @@ pub fn serialize_subchunk(sc: &SubChunk) -> Vec<u8> {
     let props = palette.entry_props();
     let indices = palette.indices();
 
-    let mut out = Vec::with_capacity(4 + 2 + entries.len() * 5 + 4 + indices.words().len() * 8);
+    let mut out = Vec::with_capacity(4 + 2 + entries.len() * 6 + 4 + indices.words().len() * 8);
     out.extend_from_slice(&MAGIC);
     out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     for id in entries {
@@ -73,6 +101,7 @@ pub fn serialize_subchunk(sc: &SubChunk) -> Vec<u8> {
     }
     for p in props {
         out.push(flags_of(*p));
+        out.push(light_of(*p));
     }
     out.push(indices.bits_per_entry());
     out.extend_from_slice(&(indices.words().len() as u16).to_le_bytes());
@@ -111,7 +140,11 @@ impl<'a> Reader<'a> {
 /// Deserialize a raw (uncompressed) blob back into a sub-chunk.
 pub fn deserialize_subchunk(buf: &[u8]) -> Result<SubChunk, FormatError> {
     let mut r = Reader { buf, pos: 0 };
-    if r.take(4)? != MAGIC {
+    let magic = r.take(4)?;
+    if magic == MAGIC_V1 {
+        return Err(FormatError::OldFormat);
+    }
+    if magic != MAGIC {
         return Err(FormatError::BadMagic);
     }
     let entry_count = r.u16()? as usize;
@@ -124,7 +157,8 @@ pub fn deserialize_subchunk(buf: &[u8]) -> Result<SubChunk, FormatError> {
     }
     let mut props = Vec::with_capacity(entry_count);
     for _ in 0..entry_count {
-        props.push(props_of(r.u8()?));
+        let flags = r.u8()?;
+        props.push(props_of(flags, r.u8()?));
     }
     let bits = r.u8()?;
     if !matches!(bits, 4 | 8 | 16) {
@@ -204,6 +238,8 @@ mod tests {
                 solid: false,
                 collision: false,
                 redstone: true,
+                light_emission: 0,
+                light_opacity: 15,
             },
         );
         let blob = serialize_subchunk(&sc);
@@ -220,8 +256,14 @@ mod tests {
             deserialize_subchunk(b"XXXX").unwrap_err(),
             FormatError::BadMagic
         );
+        // An older sub-chunk is named as such rather than as garbage: the two
+        // call for very different reactions from whoever reads the error.
         assert_eq!(
             deserialize_subchunk(b"ASC1").unwrap_err(),
+            FormatError::OldFormat
+        );
+        assert_eq!(
+            deserialize_subchunk(b"ASC2").unwrap_err(),
             FormatError::Truncated
         );
     }

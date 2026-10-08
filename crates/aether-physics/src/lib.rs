@@ -210,6 +210,20 @@ impl Body {
         }
     }
 
+    /// A body with an arbitrary box, `width` square and `height` tall, whose
+    /// base centre is at `feet`.
+    ///
+    /// A dropped item is 0.25 on a side, not 0.6 by 1.8, and the difference
+    /// shows: a player-sized box around an item cannot fall into a one-block
+    /// hole.
+    pub fn sized(feet: Vec3, width: f64, height: f64) -> Self {
+        Self {
+            aabb: Aabb::from_base(feet, width, height),
+            velocity: Vec3::ZERO,
+            on_ground: false,
+        }
+    }
+
     /// The world position of the box's base centre (the entity's "feet").
     pub fn feet(&self) -> Vec3 {
         Vec3::new(

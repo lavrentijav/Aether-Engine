@@ -1,0 +1,10 @@
+const mineflayer = require('mineflayer')
+const bot = mineflayer.createBot({ host:'127.0.0.1', port:25565, username:'_alpha_01', version:'1.21.11', auth:'offline' })
+bot.on('messagestr', m => console.log('<<', m))
+bot.on('error', e=>console.log('ERR', e.message))
+bot.once('spawn', async () => {
+  await new Promise(r=>setTimeout(r,20000))
+  bot._client.write('chat_command', { command: 'cache' })
+  setTimeout(()=>process.exit(0), 1500)
+})
+setTimeout(()=>{console.log('TIMEOUT');process.exit(1)},60000)

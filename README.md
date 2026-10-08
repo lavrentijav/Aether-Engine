@@ -164,15 +164,17 @@ cargo run -p aether-demo --release
 There's an experimental server you can actually **connect to with a vanilla
 client**. It's deliberately minimal — it targets **Minecraft 1.8.9 (protocol
 47)** only, offline mode, no compression/encryption — and drops you into a
-**superflat, always-lit (full-bright) creative world** served from the engine.
+**noise-generated, always-lit (full-bright) creative world** served from the
+engine. Connect more than one client and you'll see each other spawn, move
+and disconnect.
 
 ```bash
 cargo run -p aether-server            # binds 127.0.0.1:25565 (see aether-server.toml)
 ```
 
 Then in a **Minecraft 1.8.9** client: *Multiplayer → Direct Connect →*
-`127.0.0.1`. The server list ping shows the MOTD; connecting spawns you standing
-on the flat world.
+`127.0.0.1`. The server list ping shows the MOTD; connecting spawns you on
+the generated terrain.
 
 Config ([`aether-server.toml`](aether-server.toml)):
 
@@ -180,9 +182,10 @@ Config ([`aether-server.toml`](aether-server.toml)):
 [server]
 host = "127.0.0.1" # loopback only by default — see the warning below
 port = 25565
-motd = "Aether Engine — 1.8.9 demo (full-bright flat world)"
+motd = "Aether Engine — 1.8.9 demo (full-bright noise terrain)"
 max_players = 20
 view_radius = 5      # chunk radius sent around spawn
+seed = 42             # world seed for the noise terrain generator
 ```
 
 > ⚠️ **Do not expose this to the internet.** It runs in **offline mode with no
@@ -191,9 +194,10 @@ view_radius = 5      # chunk radius sent around spawn
 > that reason. Only change `host` to `0.0.0.0` on a trusted LAN you control.
 >
 > Scope: this is a Phase-3 preview, not a compatible server yet — 1.8.9 only,
-> no gameplay beyond spawning and looking around, and lighting is the
-> `FullBright` fallback (always max). Newer client versions will be rejected at
-> the handshake.
+> no gameplay beyond spawning, looking around and seeing other players (no tab
+> list / real skins yet — see [Known Issues](docs/KNOWN_ISSUES.md)), and
+> lighting is the `FullBright` fallback (always max). Newer client versions
+> will be rejected at the handshake.
 
 ### Migrate a Vanilla world
 

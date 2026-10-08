@@ -39,6 +39,14 @@ pub struct BlockProperties {
     pub collision: bool,
     /// Can carry or interact with redstone power.
     pub redstone: bool,
+    /// Light this block gives off, `0..=15`.
+    pub light_emission: u8,
+    /// Light this block removes from what passes through it, `0..=15`.
+    ///
+    /// Separate from `solid` because they disagree for the blocks that matter
+    /// most to lighting: glass is a full cube that blocks nothing, water is
+    /// not a cube and blocks one level, leaves are a cube and block one.
+    pub light_opacity: u8,
 }
 
 impl BlockProperties {
@@ -47,6 +55,8 @@ impl BlockProperties {
         solid: false,
         collision: false,
         redstone: false,
+        light_emission: 0,
+        light_opacity: 0,
     };
 
     /// A plain full opaque, collidable, redstone-inert block (stone-like).
@@ -54,5 +64,7 @@ impl BlockProperties {
         solid: true,
         collision: true,
         redstone: false,
+        light_emission: 0,
+        light_opacity: 15,
     };
 }

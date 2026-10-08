@@ -87,7 +87,7 @@ mod tests {
         let mut r = VanillaRegistry::new();
         r.register(1, "minecraft:stone");
         let (id, props) = r.resolve(1);
-        assert_eq!(r.blocks().name_of(id), Some("minecraft:stone"));
+        assert_eq!(r.blocks().block_name_of(id), Some("minecraft:stone"));
         assert!(props.solid);
     }
 

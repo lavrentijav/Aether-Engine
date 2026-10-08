@@ -13,5 +13,12 @@ aether-core = { workspace = true }
 # worldgen only needs the world model types, not the storage backend.
 aether-world = { workspace = true, default-features = false }
 
+[dev-dependencies]
+# The parity oracle reads vanilla's own region files: NBT from the converter,
+# zlib from the same codec the converter uses. Dev-only — the generator itself
+# stays dependency-free.
+aether-convert = { path = "../aether-convert", version = "0.1.0", default-features = false }
+miniz_oxide = { workspace = true }
+
 [lints]
 workspace = true

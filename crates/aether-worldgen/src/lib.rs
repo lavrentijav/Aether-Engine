@@ -3,19 +3,23 @@
 //! Chunk generation producing engine [`SubChunk`]s. Two generators ship:
 //!
 //! * [`FlatGenerator`] — configurable superflat layers (bedrock/dirt/grass).
-//! * [`NoiseGenerator`] — a value-noise heightmap with stone/dirt/grass strata,
-//!   bedrock floor and sea-level water fill.
+//! * [`NoiseGenerator`] — a Beta/1.8-era-shaped 3D density terrain (see
+//!   [`beta`]): stone/dirt/grass strata following the density surface
+//!   (including overhangs and caves), bedrock floor and sea-level water fill.
 //!
 //! A generator returns a [`GeneratedColumn`]: the non-empty vertical sub-chunks
 //! for one `(cx, cz)` chunk column, ready to hand to `WorldStorage` or the
 //! engine's chunk cache.
 
+pub mod beta;
 pub mod noise;
+pub mod vanilla;
 
 use aether_world::registry::{ids, BlockRegistry};
 use aether_world::{BlockProperties, BlockStateId, SubChunk};
 use std::collections::BTreeMap;
 
+pub use beta::BetaTerrain;
 pub use noise::ValueNoise;
 
 /// The generated sub-chunks for one chunk column, keyed by sub-chunk `Y`.
@@ -147,76 +151,131 @@ impl ChunkGenerator for FlatGenerator {
 }
 
 /// Terrain generator driven by a [`ValueNoise`] heightmap.
+/// Terrain generator shaped like the classic Minecraft Beta/1.8 world: a real
+/// 3D density field (see [`beta`]) rather than a 2D heightmap, so overhangs
+/// and caves emerge from the same noise that shapes the hills — not bolted on
+/// separately. See [`beta::terrain`] for exactly what is and isn't faithful
+/// to the original algorithm.
 pub struct NoiseGenerator {
     registry: BlockRegistry,
-    noise: ValueNoise,
-    /// Average surface height.
-    base_height: i32,
-    /// Peak-to-trough amplitude added around `base_height`.
-    amplitude: f64,
-    /// Horizontal scale of the noise (smaller = smoother).
-    scale: f64,
-    /// Water fills up to this Y where terrain is lower.
+    terrain: BetaTerrain,
+    /// Water fills air up to and including this Y.
     sea_level: i32,
-    octaves: u32,
 }
+
+/// Horizontal step of the coarse density grid, in blocks — matches vanilla's
+/// `4` (a chunk's 16 blocks become 5 grid columns: `0, 4, 8, 12, 16`, the last
+/// shared with the neighboring chunk so interpolation is seamless).
+const GRID_XZ_STEP: i32 = 4;
+/// Vertical step of the coarse density grid, in blocks — vanilla's `8`.
+const GRID_Y_STEP: i32 = 8;
+const GRID_XZ_POINTS: usize = 16 / GRID_XZ_STEP as usize + 1; // 5
+const GRID_Y_POINTS: usize = beta::WORLD_HEIGHT as usize / GRID_Y_STEP as usize + 1; // 17
 
 impl NoiseGenerator {
     /// A generator with sensible overworld-ish defaults for `seed`.
     pub fn new(seed: u64) -> Self {
         Self {
             registry: BlockRegistry::new(),
-            noise: ValueNoise::new(seed),
-            base_height: 64,
-            amplitude: 24.0,
-            scale: 1.0 / 96.0,
-            sea_level: 62,
-            octaves: 4,
+            terrain: BetaTerrain::new(seed),
+            sea_level: 63,
         }
     }
 
-    /// The surface height (world Y of the topmost solid block) at world column
-    /// `(wx, wz)`.
-    pub fn height_at(&self, wx: i32, wz: i32) -> i32 {
-        let n = self
-            .noise
-            .fbm(wx as f64 * self.scale, wz as f64 * self.scale, self.octaves);
-        // Map [0,1] -> [-amp/2, +amp/2] around base_height.
-        self.base_height + ((n - 0.5) * self.amplitude).round() as i32
+    /// Water fills air up to and including this Y.
+    pub fn sea_level(&self) -> i32 {
+        self.sea_level
+    }
+
+    /// Blocks generated per column, from bedrock upwards.
+    pub fn world_height(&self) -> i32 {
+        beta::WORLD_HEIGHT
+    }
+
+    /// Sample density on the coarse grid for one chunk column, trilinearly
+    /// interpolated to full block resolution. Evaluating the noise stacks at
+    /// grid resolution (5×17×5 = 425 points) rather than every block
+    /// (16×128×16 ≈ 33k) is what actually makes this affordable per chunk.
+    fn density_grid(&self, cx: i32, cz: i32) -> [[[f64; GRID_XZ_POINTS]; GRID_Y_POINTS]; GRID_XZ_POINTS] {
+        let mut grid = [[[0.0; GRID_XZ_POINTS]; GRID_Y_POINTS]; GRID_XZ_POINTS];
+        for gx in 0..GRID_XZ_POINTS {
+            let wx = cx * 16 + gx as i32 * GRID_XZ_STEP;
+            for gz in 0..GRID_XZ_POINTS {
+                let wz = cz * 16 + gz as i32 * GRID_XZ_STEP;
+                let control = self.terrain.column_control(wx, wz);
+                for gy in 0..GRID_Y_POINTS {
+                    let wy = gy as i32 * GRID_Y_STEP;
+                    grid[gx][gy][gz] = self.terrain.density(wx, wy, wz, control);
+                }
+            }
+        }
+        grid
+    }
+
+    /// Trilinear interpolation of `grid` at local column `(lx, lz)` and world
+    /// `wy`, all in `0..16` / `0..WORLD_HEIGHT`.
+    fn interpolate(
+        grid: &[[[f64; GRID_XZ_POINTS]; GRID_Y_POINTS]; GRID_XZ_POINTS],
+        lx: i32,
+        wy: i32,
+        lz: i32,
+    ) -> f64 {
+        let gx0 = (lx / GRID_XZ_STEP) as usize;
+        let gz0 = (lz / GRID_XZ_STEP) as usize;
+        let gy0 = (wy / GRID_Y_STEP) as usize;
+        let fx = (lx % GRID_XZ_STEP) as f64 / GRID_XZ_STEP as f64;
+        let fz = (lz % GRID_XZ_STEP) as f64 / GRID_XZ_STEP as f64;
+        let fy = (wy % GRID_Y_STEP) as f64 / GRID_Y_STEP as f64;
+
+        let at = |dx: usize, dy: usize, dz: usize| grid[gx0 + dx][gy0 + dy][gz0 + dz];
+        let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
+
+        let x00 = lerp(at(0, 0, 0), at(1, 0, 0), fx);
+        let x10 = lerp(at(0, 1, 0), at(1, 1, 0), fx);
+        let x01 = lerp(at(0, 0, 1), at(1, 0, 1), fx);
+        let x11 = lerp(at(0, 1, 1), at(1, 1, 1), fx);
+        let y0 = lerp(x00, x10, fy);
+        let y1 = lerp(x01, x11, fy);
+        lerp(y0, y1, fz)
     }
 }
 
 impl ChunkGenerator for NoiseGenerator {
     fn generate_column(&self, cx: i32, cz: i32) -> GeneratedColumn {
         let mut b = ColumnBuilder::new(&self.registry);
-        for lz in 0..16usize {
-            for lx in 0..16usize {
-                let wx = cx * 16 + lx as i32;
-                let wz = cz * 16 + lz as i32;
-                let surface = self.height_at(wx, wz);
+        let grid = self.density_grid(cx, cz);
 
-                for y in 0..=surface {
-                    let block = if y == 0 {
-                        ids::BEDROCK
-                    } else if y == surface {
-                        // Grass on land, sand just underwater.
-                        if surface < self.sea_level {
-                            ids::SAND
-                        } else {
-                            ids::GRASS_BLOCK
+        for lz in 0..16i32 {
+            for lx in 0..16i32 {
+                // How many consecutive solid blocks we've descended through
+                // since the last exposed surface (air or water above);
+                // resets on every air gap, so overhangs and cave ceilings
+                // each get their own grass/dirt skin instead of just the
+                // column's topmost run.
+                let mut depth_below_surface: i32 = -1;
+
+                for wy in (0..beta::WORLD_HEIGHT).rev() {
+                    let solid = Self::interpolate(&grid, lx, wy, lz) > 0.0;
+                    if !solid {
+                        depth_below_surface = -1;
+                        if wy <= self.sea_level {
+                            b.set(lx as usize, wy, lz as usize, ids::WATER);
                         }
-                    } else if y >= surface - 3 {
-                        ids::DIRT
-                    } else {
-                        ids::STONE
+                        continue;
+                    }
+                    depth_below_surface += 1;
+                    let block = match depth_below_surface {
+                        0 if wy < self.sea_level => ids::SAND,
+                        0 => ids::GRASS_BLOCK,
+                        1..=3 => ids::DIRT,
+                        _ => ids::STONE,
                     };
-                    b.set(lx, y, lz, block);
+                    b.set(lx as usize, wy, lz as usize, block);
                 }
-
-                // Fill water from just above the surface up to sea level.
-                for y in (surface + 1)..=self.sea_level {
-                    b.set(lx, y, lz, ids::WATER);
-                }
+                // Flat bedrock floor — vanilla's is itself noise-perturbed,
+                // but that's cosmetic at y=0 and not worth another octave
+                // stack.
+                b.set(lx as usize, 0, lz as usize, ids::BEDROCK);
             }
         }
         b.finish()
@@ -294,12 +353,59 @@ mod tests {
     }
 
     #[test]
-    fn height_within_expected_band() {
+    fn terrain_height_varies_across_columns() {
+        // Sample several chunk columns and confirm the surface height isn't
+        // flat everywhere — a real sign the noise is actually shaping terrain,
+        // not just producing a uniform slab.
         let g = NoiseGenerator::new(99);
-        for x in -50..50 {
-            let h = g.height_at(x, x * 2);
-            assert!((40..=90).contains(&h), "height {h} out of band at x={x}");
+        let mut heights = Vec::new();
+        for cx in -5..5 {
+            let col = g.generate_column(cx, 0);
+            if let Some((y, _)) = top_block_of_column(&col, 0, 0) {
+                heights.push(y);
+            }
         }
+        let min = *heights.iter().min().unwrap();
+        let max = *heights.iter().max().unwrap();
+        assert!(max > min, "terrain is perfectly flat across columns: {heights:?}");
+        for &h in &heights {
+            assert!(
+                (0..beta::WORLD_HEIGHT).contains(&h),
+                "height {h} out of the world band"
+            );
+        }
+    }
+
+    #[test]
+    fn density_field_is_not_a_simple_heightmap() {
+        // Real 3D density (unlike a 2D heightmap) can flip solid/air more
+        // than once along a vertical line — the signature of a cave or an
+        // overhang. A plain heightmap can never do this.
+        let t = BetaTerrain::new(2024);
+        let mut found = false;
+        'search: for wx in (-128..128).step_by(4) {
+            for wz in (-128..128).step_by(4) {
+                let control = t.column_control(wx, wz);
+                let mut prev_solid = true; // the bedrock floor is always solid
+                let mut transitions = 0;
+                for wy in (1..beta::WORLD_HEIGHT).step_by(2) {
+                    let solid = t.density(wx, wy, wz, control) > 0.0;
+                    if solid && !prev_solid {
+                        transitions += 1;
+                    }
+                    prev_solid = solid;
+                }
+                if transitions >= 2 {
+                    found = true;
+                    break 'search;
+                }
+            }
+        }
+        assert!(
+            found,
+            "density field never re-entered solid after air in the sampled area \
+             — no overhangs/caves found"
+        );
     }
 
     #[test]

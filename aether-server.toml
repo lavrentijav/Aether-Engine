@@ -1,10 +1,54 @@
 # Aether Engine server configuration (Minecraft 1.8.9 / protocol 47).
 
+# Names allowed to run administrative commands (/econ give). Empty by default:
+# this server is offline-mode, so a username is a claim and not an identity.
+operators = ["_alpha_01"]
+
 [server]
 # Loopback by default: this is an offline, unauthenticated preview server.
 # Set host = "0.0.0.0" only if you understand it will accept LAN/internet peers.
-host = "127.0.0.1"
+host = "0.0.0.0"
 port = 25565
-motd = "Aether Engine — 1.8.9 demo (full-bright flat world)"
+motd = "Aether Engine — 1.8.9 demo (full-bright noise terrain)"
 max_players = 20
-view_radius = 5      # chunk radius sent around spawn
+view_radius = 8       # chunk radius kept loaded around each player
+compression_threshold = 256  # deflate packets this size or larger; -1 disables
+game_mode = "survival"  # survival: blocks drop and pay; creative: build freely
+# The game's own worldgen data, read at run time. Empty uses the built-in
+# noise terrain. Surface rules are not implemented yet, so vanilla terrain
+# arrives as bare stone: right shape, no soil and no bedrock.
+worldgen_data = "/tmp/vg"
+# The game's reports/biome_parameters/minecraft/overworld.json, from the same
+# copy. Not part of the data pack: the biome table is code, not data, and the
+# surface rules need it to know which biome a column is in.
+biome_data = "/tmp/vanilla-ref/generated/reports/biome_parameters/minecraft/overworld.json"
+seed = 42             # world seed for the noise terrain generator
+world_dir = "world"   # persistent world directory, created on first run
+autosave_secs = 30    # how often block edits are flushed to disk
+
+[resource_pack]
+# Offered on join so older clients can render blocks their version lacks.
+# Leave url empty to offer nothing. The server only points at the pack.
+url = ""
+hash = ""
+required = false
+
+[database]
+# Mirror the world history into PostgreSQL for querying (needs
+# `--features postgres`). Leave url empty to disable. The mirror is derived
+# from the on-disk journal, so losing it never risks the world.
+#
+# A connection string contains a password and this file is in version control,
+# so prefer the AETHER_DATABASE_URL environment variable, which overrides this.
+url = ""
+batch_size = 500        # write as soon as this many events are waiting
+batch_delay_ms = 1000   # ...or this long after the first one arrived
+queue_depth = 100000    # events that may wait before submissions are dropped
+
+[cache]
+# Unmodified generated columns are cached on disk so the generator does not
+# recompute the same terrain on every restart. Pure speed: every entry is
+# reproducible from the seed, so deleting this directory loses nothing.
+dir = "world-cache"     # empty disables the cache
+ttl_hours = 24          # entries older than this are regenerated
+max_entries = 20000     # above this the oldest are swept away, hourly

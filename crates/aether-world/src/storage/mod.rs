@@ -58,9 +58,57 @@ pub trait KvBackend: Send + Sync {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
     /// Remove `key` (no error if absent).
     fn delete(&self, key: &[u8]) -> Result<(), StorageError>;
+    /// Every entry whose key starts with `prefix`, in ascending key order.
+    ///
+    /// The journal leans on the ordering: its keys are built so that
+    /// big-endian sequence numbers sort chronologically, which is what lets a
+    /// rollback walk a player's edits backwards without holding the whole
+    /// world's history in memory.
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
     /// Flush any buffered writes to durable storage.
     fn flush(&self) -> Result<(), StorageError> {
         Ok(())
+    }
+}
+
+/// A shared reference is itself a backend.
+///
+/// The journal and the sub-chunk store are two views of one keyspace — they
+/// use disjoint key prefixes precisely so they can be — and this is what lets
+/// both hold the same opened database without an `Arc` in between.
+impl<B: KvBackend + ?Sized> KvBackend for std::sync::Arc<B> {
+    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        (**self).put(key, value)
+    }
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        (**self).get(key)
+    }
+    fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+        (**self).delete(key)
+    }
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        (**self).scan_prefix(prefix)
+    }
+    fn flush(&self) -> Result<(), StorageError> {
+        (**self).flush()
+    }
+}
+
+impl<B: KvBackend + ?Sized> KvBackend for &B {
+    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        (**self).put(key, value)
+    }
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        (**self).get(key)
+    }
+    fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+        (**self).delete(key)
+    }
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        (**self).scan_prefix(prefix)
+    }
+    fn flush(&self) -> Result<(), StorageError> {
+        (**self).flush()
     }
 }
 
@@ -104,6 +152,18 @@ impl KvBackend for MemStore {
     fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
         self.map.write().expect("memstore poisoned").remove(key);
         Ok(())
+    }
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        // `range(prefix..)` then stop at the first key that no longer matches:
+        // a BTreeMap's order is byte order, so matching keys are contiguous.
+        Ok(self
+            .map
+            .read()
+            .expect("memstore poisoned")
+            .range(prefix.to_vec()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
     }
 }
 
@@ -152,6 +212,15 @@ mod fjall_backend {
                 .remove(key)
                 .map_err(|e| StorageError::Backend(e.to_string()))
         }
+        fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+            self.partition
+                .prefix(prefix)
+                .map(|r| {
+                    r.map(|(k, v)| (k.to_vec(), v.to_vec()))
+                        .map_err(|e| StorageError::Backend(e.to_string()))
+                })
+                .collect()
+        }
         fn flush(&self) -> Result<(), StorageError> {
             self.partition
                 .rotate_memtable_and_wait()
@@ -186,6 +255,29 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>, StorageError> {
     {
         Ok(data.to_vec())
     }
+}
+
+/// Value written under a column marker; bumping it invalidates old markers if
+/// the meaning of "generated" ever changes.
+const MARKER_VERSION: u8 = 1;
+
+/// Key holding the world's block-name table.
+///
+/// Three bytes, where sub-chunk keys are nine and column markers ten, so it
+/// cannot collide with either.
+const REGISTRY_KEY: &[u8] = b"REG";
+const REGISTRY_VERSION: u8 = 1;
+
+/// Key for a column-generated marker.
+///
+/// Ten bytes, where sub-chunk keys are nine, so a marker can never collide
+/// with a section however far out the column sits.
+fn column_marker_key(cx: i32, cz: i32) -> [u8; 10] {
+    let mut k = [0u8; 10];
+    k[0] = b'C';
+    k[1..5].copy_from_slice(&cx.to_be_bytes());
+    k[5..9].copy_from_slice(&cz.to_be_bytes());
+    k
 }
 
 /// High-level world storage: sub-chunk `save` / `load` over a [`KvBackend`],
@@ -228,6 +320,74 @@ impl<B: KvBackend> WorldStorage<B> {
         self.backend.delete(&key.encode())
     }
 
+    /// Record that column `(cx, cz)` has been generated in full.
+    ///
+    /// Presence of *some* sub-chunks cannot answer "has this column been
+    /// generated?": a column's all-air sections are never stored, and a column
+    /// whose first save was interrupted looks the same as a complete one. A
+    /// caller that guesses from section presence regenerates half-written
+    /// columns and leaves holes in the world, so completion is recorded
+    /// explicitly instead.
+    pub fn mark_column_generated(&self, cx: i32, cz: i32) -> Result<(), StorageError> {
+        self.backend.put(&column_marker_key(cx, cz), &[MARKER_VERSION])
+    }
+
+    /// Whether [`Self::mark_column_generated`] has been called for `(cx, cz)`.
+    pub fn column_generated(&self, cx: i32, cz: i32) -> Result<bool, StorageError> {
+        Ok(self.backend.get(&column_marker_key(cx, cz))?.is_some())
+    }
+
+    /// Store the block-name table whose indices the saved sub-chunks use.
+    ///
+    /// Sub-chunks persist engine block ids, and ids past the seeded set are
+    /// handed out in the order names were first interned. Without the table a
+    /// reopened world would read those ids against whatever order the new
+    /// session happened to intern in, silently turning one block into another.
+    pub fn save_registry(&self, names: &[String]) -> Result<(), StorageError> {
+        let mut blob = vec![REGISTRY_VERSION];
+        blob.extend_from_slice(&(names.len() as u32).to_be_bytes());
+        for name in names {
+            blob.extend_from_slice(&(name.len() as u32).to_be_bytes());
+            blob.extend_from_slice(name.as_bytes());
+        }
+        self.backend.put(REGISTRY_KEY, &blob)
+    }
+
+    /// Read back the table written by [`Self::save_registry`].
+    ///
+    /// `Ok(None)` means this world has none yet — either it predates the table
+    /// or nothing has been saved. A blob that is truncated or of an unknown
+    /// version also reads as `None`: the caller then keeps its default
+    /// registry, which is right for a world that only ever used seeded blocks
+    /// and no worse than guessing for one that did not.
+    pub fn load_registry(&self) -> Result<Option<Vec<String>>, StorageError> {
+        let Some(blob) = self.backend.get(REGISTRY_KEY)? else {
+            return Ok(None);
+        };
+        if blob.first() != Some(&REGISTRY_VERSION) || blob.len() < 5 {
+            return Ok(None);
+        }
+        let count = u32::from_be_bytes(blob[1..5].try_into().unwrap()) as usize;
+        let mut names = Vec::with_capacity(count);
+        let mut pos = 5usize;
+        for _ in 0..count {
+            if pos + 4 > blob.len() {
+                return Ok(None);
+            }
+            let len = u32::from_be_bytes(blob[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            let Some(bytes) = blob.get(pos..pos + len) else {
+                return Ok(None);
+            };
+            let Ok(name) = std::str::from_utf8(bytes) else {
+                return Ok(None);
+            };
+            names.push(name.to_owned());
+            pos += len;
+        }
+        Ok(Some(names))
+    }
+
     /// Flush buffered writes.
     pub fn flush(&self) -> Result<(), StorageError> {
         self.backend.flush()
@@ -238,6 +398,29 @@ impl<B: KvBackend> WorldStorage<B> {
 mod tests {
     use super::*;
     use crate::block::{BlockProperties, BlockStateId};
+
+    #[test]
+    fn column_markers_round_trip_and_never_collide_with_sections() {
+        let storage = WorldStorage::new(MemStore::new());
+        assert!(!storage.column_generated(4, -7).unwrap());
+        storage.mark_column_generated(4, -7).unwrap();
+        assert!(storage.column_generated(4, -7).unwrap());
+        // Neighbours are unaffected.
+        assert!(!storage.column_generated(5, -7).unwrap());
+        assert!(!storage.column_generated(4, -6).unwrap());
+
+        // A marker is ten bytes where a sub-chunk key is nine, so no column —
+        // however far out — can have a section key equal to any marker key.
+        let marker = column_marker_key(i32::MAX, i32::MIN);
+        for cy in [i8::MIN, -1, 0, 1, i8::MAX] {
+            for (cx, cz) in [(i32::MAX, i32::MIN), (0, 0), (4, -7)] {
+                assert_ne!(
+                    marker.as_slice(),
+                    SubChunkKey::new(cx, cy, cz).encode().as_slice()
+                );
+            }
+        }
+    }
 
     fn sample_subchunk() -> SubChunk {
         let mut sc = SubChunk::new();
@@ -253,6 +436,8 @@ mod tests {
                 solid: false,
                 collision: false,
                 redstone: true,
+                light_emission: 0,
+                light_opacity: 15,
             },
         );
         sc

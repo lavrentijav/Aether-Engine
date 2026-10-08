@@ -198,6 +198,8 @@ mod tests {
             solid: false,
             collision: false,
             redstone: true,
+            light_emission: 0,
+            light_opacity: 15,
         };
         sc.set(0, 0, 0, wire, props);
         let m = SubChunk::index(0, 0, 0);

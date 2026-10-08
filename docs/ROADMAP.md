@@ -22,13 +22,13 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 ### Phase 1 — Core Engine MVP  *(Target: 70–75% Vanilla compliance)*
 *Goal: a world that ticks stably at 20 TPS with the hard performance work done.*
 
-- ✅ **Memory model**: `Sub-Chunk`, `AVX-Cell` (64-byte cache line), Morton (Z-order) indexing, SoA masks.
+- ✅ **Memory model**: `Sub-Chunk`, `AVX-Cell` (64-byte cache line), Morton (Z-order) indexing, SoA masks. See [Design Notes §1](DESIGN_NOTES.md#1-unified-vector-cell-format-across-simd-tiers) for the planned compiler-emulated AVX2 fallback (one `u16x32` source, no hand-duplicated branch) and [§7](DESIGN_NOTES.md#7-tiered-block-property-cache--range-encoded-property-classes) for range-encoded block properties + a tiered hot/full property cache.
 - 🚧 **Palette compression** (u4 / u8 → u16 auto-expand) ✅; Block-Entity arena still 📋.
 - 🚧 **Physics engine**: basic voxel AABB collision + movement/gravity shipped (`aether-physics`); staged pipeline, SIMD broad-phase and the `Cached Environment` O(1) fast path still 📋.
 - 📋 **Redstone**: compiled Directed Dependency Graph (basic components; **QC deviations allowed** — see [Known Issues](KNOWN_ISSUES.md)).
 - 📋 **Lighting**: async cell-based flood-fill with safe-point merges. A `FullBright` fallback (always max light) ships in the meantime so worlds render.
 - 📋 **Entities/AI**: ECS storage, Flow-Field navigation, cached A\*, batched spawner. A single `Player` entity already exists for the preview server.
-- ✅ **Storage**: Fjall KV backend, Zstandard sub-chunk blobs, order-preserving keys (+ in-memory backend for tests).
+- ✅ **Storage**: Fjall KV backend, Zstandard sub-chunk blobs, order-preserving keys (+ in-memory backend for tests). [Design Notes §5](DESIGN_NOTES.md#5-git-like-immutable-chunk-storage-instant-save--rollback) sketches a Git-like immutable/CoW write path (instant save & rollback) on top of this backend — not yet a committed plan, needs a design spike first.
 - 📋 **World Engine** process model (one OS process per world).
 - 📋 Work-stealing scheduler for generation / save / lighting off the main tick.
 
@@ -47,7 +47,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - 📋 **Network Gateway** (Elixir/OTP or C++/Rust `epoll`/`io_uring`): TLS handshake, DDoS/rate-limit, packet sanitation.
 - 📋 Internal Binary Protocol between Gateway and World Engines.
 - 📋 Stateless seamless world hand-off (TCP stays open, route switches).
-- 🚧 Vanilla client protocol compatibility layer. **Pulled forward** as an early preview: `aether-server` lets a **Minecraft 1.8.9 (protocol 47)** client connect and spawn in a full-bright flat world (offline, no compression/encryption). Its framing is verified against a raw socket client; a live-client pass and newer protocol versions are still ahead.
+- 🚧 Vanilla client protocol compatibility layer. **Pulled forward** as an early preview: `aether-server` lets a **Minecraft 1.8.9 (protocol 47)** client connect and spawn into noise-generated terrain (offline, no compression/encryption). Connected players see each other spawn, move and disconnect (Spawn Player / Entity Teleport / Entity Head Look / Destroy Entities), though without a tab list yet — see [Known Issues](KNOWN_ISSUES.md). Framing is verified against a raw socket client; a live-client pass and newer protocol versions are still ahead. [Design Notes §3–4](DESIGN_NOTES.md#3-render-distance-lod-ladder-vs-ultra-full-mode) sketch the longer-range LOD ladder / Ultra-Full mode and a separate Surface API for LOD mods — both unstarted.
 
 ### Phase 4 — Extensibility, migration & ops
 *Goal: production readiness.*

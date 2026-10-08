@@ -13,6 +13,12 @@
 //!   SoA bit [`Mask`]s (`solid`, `collision`, `redstone`), all Morton-indexed.
 //! * [`Palette`] — `u4 → u8 → u16` auto-expanding index compression.
 //!
+//! ## History
+//!
+//! [`journal`] is the append-only log of every change, and the rollback built
+//! on it. It is also what makes the store small: the deterministic generator
+//! is the baseline, so an unedited column is never written down at all.
+//!
 //! ## Storage
 //!
 //! [`storage`] persists sub-chunks as Zstandard-compressed blobs in a KV store
@@ -21,6 +27,7 @@
 
 pub mod block;
 pub mod cell;
+pub mod journal;
 pub mod light;
 pub mod palette;
 pub mod registry;
@@ -29,6 +36,7 @@ pub mod subchunk;
 
 pub use block::{BlockProperties, BlockStateId};
 pub use cell::AvxCell;
+pub use journal::{ActorId, Event, EventBody, Filter, ItemUid, Journal, Ledger, Place};
 pub use light::{FullBright, LightView, MAX_LIGHT};
 pub use palette::{PackedArray, Palette};
 pub use registry::BlockRegistry;

@@ -5,6 +5,10 @@
 //! reports **maximum light everywhere** — the world is always fully lit — so the
 //! rest of the stack (and a connecting client) has a valid light source to read.
 
+pub mod column;
+pub mod compute;
+pub mod mask;
+
 /// Maximum Minecraft light level.
 pub const MAX_LIGHT: u8 = 15;
 

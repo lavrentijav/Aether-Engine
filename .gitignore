@@ -22,3 +22,14 @@ target
 
 # Aether demo runtime output
 /world-data/
+.env.aether
+world-cache/
+world/
+world.*/
+
+# local runtime / tooling
+node_modules/
+logs/
+*.log
+nohup.out
+.claude/
