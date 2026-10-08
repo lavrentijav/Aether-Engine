@@ -66,6 +66,12 @@
 
 13. **Item provenance has known blind spots.** A stack that merges into one already in a slot ends there (its uid is destroyed and the other's count grows), so that hop has no *derived from* edge; events are per click, not per operation, until revisions group them; the economy still journals its own moves with uids of their own beside the real ones; items in inventories from before this change were never minted, so their first event reads as an anomaly in `/audit`; fights and trades between players are not recorded yet.
 
+14. **Memory at a large view radius: what is left.** Columns now leave memory and each player gets only their own view distance, so memory follows the players, not the server's age. Measured at radius 64 with one vanilla-terrain client: ~250 MiB RSS at 5 000 columns where it was ~660 MiB, and back down once the player leaves. Still open:
+    - **A vanilla column is ~22 KiB, not the 10–20 hoped for.** Generated sections are genuinely mixed (stone, deepslate, ores, dirt, water, air), so most need 4-bit indices; going lower means narrower-than-4-bit encodings per run, or not keeping columns at all once sent.
+    - **The generator keeps ~50 MiB of caches** (1 024 carved chunks and 1 024 chunks' decoration writes); at radius 64 the working set is larger than that, so some chunks are carved and decorated twice. A smaller cap is less memory and more CPU.
+    - **The budget is in columns, not bytes.** `max_resident_columns` × ~22 KiB is the estimate; the status line shows the real figure.
+    - **The client's view distance is trusted** up to the server's `view_radius`; a client claiming 64 on a 64 server gets 64.
+
 ### B. Known Deviations Registry (Phase 1 — accepted on purpose)
 These are **not bugs** in Phase 1 — they are documented, temporary compatibility gaps that must be recorded in the engine config and closed in Phase 2.
 
@@ -79,7 +85,7 @@ These are **not bugs** in Phase 1 — they are documented, temporary compatibili
 | **Lighting** | `FullBright` fallback — every block is fully lit | Async cell-based flood-fill with safe-point merges |
 
 ### C. Engineering risks & trade-offs
-- **RAM overhead: +15–25%.** SoA masks, Morton order, and redstone graphs cost more memory than classic structures. Accepted for cache-locality and SIMD wins.
+- **RAM overhead: +15–25%.** SoA masks, Morton order, and redstone graphs cost more memory than classic structures. Accepted for cache-locality and SIMD wins. Sub-chunk masks are now derived from the palette on request rather than stored, which took 1.5 KiB off every resident sub-chunk.
 - **x86-64 first.** The first version targets x86-64 with AVX2; other ISAs are deferred. Users on ARM/RISC-V are unsupported until later.
 - **Determinism vs. parallelism.** Aggressive parallelism increases the risk of non-deterministic results if Safe-Point merges are wrong — needs strong test coverage.
 - **Compatibility ceiling in Phase 1.** 70–75% Vanilla compliance means some contraptions (QC-dependent redstone, tick-perfect fluids) will behave differently until Phase 2.

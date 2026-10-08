@@ -57,9 +57,24 @@ pub struct PlayerHandle {
     game: Mutex<crate::game::player::PlayerState>,
     /// Entities (not players) this client currently has spawned.
     tracked: Mutex<std::collections::HashSet<i32>>,
+    /// The chunk radius streamed to this client: the server's, narrowed to
+    /// the client's own view distance once it says what that is.
+    view_radius: std::sync::atomic::AtomicI32,
 }
 
 impl PlayerHandle {
+    /// The chunk radius streamed to this client.
+    pub fn view_radius(&self) -> i32 {
+        self.view_radius.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Change the chunk radius streamed to this client; whether it changed.
+    pub fn set_view_radius(&self, r: i32) -> bool {
+        self.view_radius
+            .swap(r, std::sync::atomic::Ordering::Relaxed)
+            != r
+    }
+
     /// Current position/look.
     pub fn pos(&self) -> PosLook {
         *self.pos.lock().unwrap()
@@ -250,6 +265,7 @@ impl Registry {
                 crate::server_game_mode(),
             )),
             tracked: Mutex::new(std::collections::HashSet::new()),
+            view_radius: std::sync::atomic::AtomicI32::new(crate::view_radius_for(None)),
         });
         self.players
             .write()

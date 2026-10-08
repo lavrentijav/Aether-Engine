@@ -220,7 +220,7 @@ fn login_and_play(
         yaw: player.yaw,
         pitch: player.pitch,
         max_players: cfg.server.max_players,
-        view_radius: cfg.server.view_radius.clamp(1, 12),
+        view_radius: cfg.server.view_radius(),
         resource_pack: cfg.resource_pack.clone(),
     };
 
@@ -242,7 +242,9 @@ fn login_and_play(
     // once the player is live, through the same streaming path that keeps up
     // with them as they walk.
     let (spawn_cx, spawn_cz) = (spawn.x.floor() as i32 >> 4, spawn.z.floor() as i32 >> 4);
-    let r = params.view_radius;
+    // A client from 1.20.2 on has said its view distance during
+    // configuration; an older one says it in play, and is narrowed then.
+    let r = cfg.server.radius_for(s.view_distance());
     let initial = r.min(2);
     let mut loaded: HashSet<(i32, i32)> = HashSet::new();
     for pkt in codec.encode(
@@ -296,6 +298,7 @@ fn login_and_play(
         on_ground: false,
     };
     let handle = registry.join(eid, player.uuid, player.name.clone(), ip, codec, &*s, pos)?;
+    handle.set_view_radius(r);
     // A returning player gets what they had; a new one gets the starter
     // hotbar. Seeding over a restored inventory would overwrite the first nine
     // slots of it, which is the whole hotbar.
@@ -348,7 +351,7 @@ fn login_and_play(
     // Now fill out the rest of the view radius. The player is placed and
     // playable by this point, so the remaining columns arrive as scenery
     // rather than as a wall the join has to get through first.
-    let streamer = Streamer::start(std::sync::Arc::clone(&handle), loaded, r);
+    let streamer = Streamer::start(std::sync::Arc::clone(&handle), loaded);
     streamer.center((spawn_cx, spawn_cz), false);
     after_spawn(&handle, registry, world);
 
@@ -517,6 +520,14 @@ fn play_loop(
                         world,
                     );
                     streamer.center(chunk, false);
+                }
+            }
+            ClientEvent::ViewDistance(d) => {
+                // Sent at join and again whenever the player changes the
+                // setting: re-centre on the same column to stream the new
+                // ring, or unload the one no longer drawn.
+                if handle.set_view_radius(crate::view_radius_for(Some(d))) {
+                    streamer.center(last_chunk, false);
                 }
             }
             ClientEvent::Respawn => {
@@ -1073,7 +1084,6 @@ impl Streamer {
     fn start(
         handle: std::sync::Arc<crate::players::PlayerHandle>,
         mut loaded: HashSet<(i32, i32)>,
-        r: i32,
     ) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<((i32, i32), bool)>();
         let world = crate::game::world().expect("the game starts before anyone can connect");
@@ -1093,6 +1103,7 @@ impl Streamer {
                         msg = (m.0, msg.1 || m.1);
                     }
                     let ((ccx, ccz), reset) = msg;
+                    let r = handle.view_radius();
                     if reset {
                         loaded.clear();
                     }

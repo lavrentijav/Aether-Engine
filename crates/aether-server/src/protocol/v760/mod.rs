@@ -31,6 +31,8 @@ use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 pub const PROTOCOL: i32 = 760;
 
 // Clientbound play packet ids.
+/// Client Information (`settings`), play state: carries the view distance.
+const SB_CLIENT_INFORMATION: i32 = 0x08;
 const IDS_LOGIN: i32 = 0x25;
 const IDS_MAP_CHUNK: i32 = 0x21;
 /// Play: move the centre of the client's loaded-column window. Columns
@@ -320,6 +322,12 @@ impl ProtocolCodec for Codec {
     /// never echoes player chat as signed chat, so nothing depends on them.
     fn decode(&self, pkt: &RawPacket, prev: PosLook) -> ClientEvent {
         let mut pin = PacketIn::new(&pkt.data);
+        if pkt.id == SB_CLIENT_INFORMATION {
+            return match crate::proto::view_distance_of(&pkt.data) {
+                Some(d) => ClientEvent::ViewDistance(d),
+                None => ClientEvent::Ignored,
+            };
+        }
         // Both block packets end with the client's prediction sequence, which
         // has to travel back in an ack or the client never applies the
         // server's view of the block. It is read from the end because the

@@ -32,6 +32,8 @@ use crate::players::PosLook;
 use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 
 // --- Clientbound packet ids (1.18 / 1.18.2; the two tables are identical) ---
+/// Client Information (`settings`), play state: carries the view distance.
+const SB_CLIENT_INFORMATION: i32 = 0x05;
 const LOGIN_SUCCESS: i32 = 0x02;
 const PLAY_SPAWN_PLAYER: i32 = 0x04;
 const PLAY_BLOCK_CHANGE: i32 = 0x0C;
@@ -328,6 +330,10 @@ impl ProtocolCodec for Codec {
     fn decode(&self, pkt: &RawPacket, prev: PosLook) -> ClientEvent {
         let mut pin = PacketIn::new(&pkt.data);
         match pkt.id {
+            SB_CLIENT_INFORMATION => match crate::proto::view_distance_of(&pkt.data) {
+                Some(d) => ClientEvent::ViewDistance(d),
+                None => ClientEvent::Ignored,
+            },
             SB_POSITION => match (pin.f64(), pin.f64(), pin.f64(), pin.bool()) {
                 (Ok(x), Ok(y), Ok(z), Ok(on_ground)) => ClientEvent::Move(PosLook {
                     x,

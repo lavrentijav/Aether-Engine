@@ -65,6 +65,7 @@ sb_move_player_rot
 sb_move_player_status_only
 sb_change_game_mode
 sb_keep_alive
+sb_client_information
 cfg_cb_finish_configuration
 cfg_cb_registry_data
 cfg_cb_resource_pack_push
@@ -72,6 +73,7 @@ cfg_cb_select_known_packs
 cfg_cb_update_tags
 cfg_sb_finish_configuration
 cfg_sb_select_known_packs
+cfg_sb_client_information
 login_cb_login_finished
 login_sb_hello
 login_sb_login_acknowledged

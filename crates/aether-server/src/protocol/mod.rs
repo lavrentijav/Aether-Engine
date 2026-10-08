@@ -590,6 +590,8 @@ pub enum ClientEvent {
     ChangeGameMode(GameMode),
     /// Middle-click on a block (creative pick).
     PickBlock { x: i32, y: i32, z: i32 },
+    /// The client's view distance setting, in chunks (Client Information).
+    ViewDistance(u8),
     /// Anything this server does not act on (keep-alive replies, animations,
     /// ...).
     Ignored,

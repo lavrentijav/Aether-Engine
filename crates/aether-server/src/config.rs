@@ -15,8 +15,22 @@ pub struct ServerConfig {
     pub motd: String,
     /// Reported max player slots.
     pub max_players: u32,
-    /// Chunk radius kept loaded around each player (a `(2r+1)²` grid).
+    /// The largest chunk radius streamed to any player (a `(2r+1)²` grid).
+    ///
+    /// Each player gets the smaller of this and their client's own view
+    /// distance (plus one ring, which the client needs to draw its edge): a
+    /// client set to 12 is never sent 64. Read through
+    /// [`ServerConfig::radius_for`], which keeps it within `2..=`
+    /// [`MAX_VIEW_RADIUS`].
     pub view_radius: i32,
+    /// How many chunk columns may stay in memory at once; past it, the least
+    /// recently used of those no player needs go first, then the least
+    /// recently used of the rest. `0` sets no limit: columns still leave
+    /// memory once no player is near them.
+    ///
+    /// A column is a few to a few tens of kilobytes depending on the terrain;
+    /// the startup log prints an estimate for `view_radius`.
+    pub max_resident_columns: usize,
     /// Body size, in bytes, at or above which a packet is deflated.
     ///
     /// Negative disables compression entirely, matching vanilla's
@@ -67,6 +81,7 @@ impl Default for ServerConfig {
             motd: "Aether Engine — 1.8.9 demo (full-bright noise terrain)".to_string(),
             max_players: 20,
             view_radius: 8,
+            max_resident_columns: 0,
             compression_threshold: 256,
             game_mode: crate::protocol::GameMode::Creative,
             worldgen_data: String::new(),
@@ -80,7 +95,27 @@ impl Default for ServerConfig {
     }
 }
 
+/// The largest view radius the server accepts. Vanilla clients draw at most
+/// 32; this leaves room for the ones that draw further.
+pub const MAX_VIEW_RADIUS: i32 = 128;
+
 impl ServerConfig {
+    /// The configured view radius, within `2..=MAX_VIEW_RADIUS`.
+    pub fn view_radius(&self) -> i32 {
+        self.view_radius.clamp(2, MAX_VIEW_RADIUS)
+    }
+
+    /// The radius to stream to a client whose own view distance is `client`
+    /// (`None` until it says): never more than the server's, and one ring
+    /// past the client's, which it needs in order to draw its outermost one.
+    pub fn radius_for(&self, client: Option<u8>) -> i32 {
+        let server = self.view_radius();
+        match client {
+            Some(c) => (c as i32 + 1).clamp(2, server),
+            None => server,
+        }
+    }
+
     /// The compression threshold as the wire layer wants it: `None` when
     /// compression is switched off.
     pub fn compression(&self) -> Option<usize> {
@@ -344,7 +379,8 @@ host = "127.0.0.1"
 port = 25565
 motd = "Aether Engine — 1.8.9 demo (full-bright noise terrain)"
 max_players = 20
-view_radius = 8       # chunk radius kept loaded around each player
+view_radius = 8       # largest chunk radius sent to a player (each gets min(this, their own + 1))
+max_resident_columns = 0  # columns kept in memory at most, least recently used go first; 0 = no limit
 compression_threshold = 256  # deflate packets this size or larger; -1 disables
 game_mode = "creative"  # survival: blocks drop and pay; creative: build freely
 # The directory holding the game's data pack (it contains data/minecraft/),
@@ -446,6 +482,7 @@ mod tests {
         let cfg: Config = toml::from_str(SAMPLE).unwrap();
         assert_eq!(cfg.server.port, 25565);
         assert_eq!(cfg.server.view_radius, 8);
+        assert_eq!(cfg.server.max_resident_columns, 0);
         assert_eq!(cfg.server.host, "127.0.0.1");
         assert_eq!(cfg.server.world_dir, "world");
         assert_eq!(cfg.server.autosave_secs, 30);
@@ -554,5 +591,21 @@ mod tests {
         }
         // Both must still parse into the same shape.
         toml::from_str::<Config>(checked_in).expect("checked-in config must parse");
+    }
+
+    #[test]
+    fn a_client_gets_the_smaller_radius_plus_its_edge_ring() {
+        let mut cfg = Config::default();
+        cfg.server.view_radius = 64;
+        assert_eq!(cfg.server.radius_for(None), 64, "until the client says");
+        assert_eq!(cfg.server.radius_for(Some(12)), 13);
+        assert_eq!(
+            cfg.server.radius_for(Some(127)),
+            64,
+            "never past the server's"
+        );
+        assert_eq!(cfg.server.radius_for(Some(0)), 2);
+        cfg.server.view_radius = 1_000;
+        assert_eq!(cfg.server.view_radius(), MAX_VIEW_RADIUS);
     }
 }

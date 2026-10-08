@@ -23,6 +23,10 @@ use crate::players::PosLook;
 use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 
 /// Login state ids.
+/// Client Information (`settings`), play state: carries the view distance.
+const SB_CLIENT_INFORMATION: i32 = 0x0C;
+/// Client Information, configuration state.
+const CFG_SB_CLIENT_INFORMATION: i32 = 0x00;
 const LOGIN_SUCCESS: i32 = 0x02;
 const LOGIN_ACKNOWLEDGED: i32 = 0x03;
 
@@ -184,7 +188,7 @@ impl ProtocolCodec for Codec {
         }
 
         PacketOut::new(CFG_FINISH).send(s)?;
-        wait_for(s, CFG_FINISH_ACK)?;
+        crate::proto::await_config(s, CFG_FINISH_ACK, CFG_SB_CLIENT_INFORMATION)?;
 
         let mut login = PacketOut::new(PLAY_LOGIN);
         login
@@ -350,6 +354,12 @@ impl ProtocolCodec for Codec {
     /// item), and chat signatures are not verified.
     fn decode(&self, pkt: &RawPacket, prev: PosLook) -> ClientEvent {
         let mut pin = PacketIn::new(&pkt.data);
+        if pkt.id == SB_CLIENT_INFORMATION {
+            return match crate::proto::view_distance_of(&pkt.data) {
+                Some(d) => ClientEvent::ViewDistance(d),
+                None => ClientEvent::Ignored,
+            };
+        }
         // Both block packets end with the client's prediction sequence, which
         // has to travel back in an ack or the client never applies the
         // server's view of the block. It is read from the end because the

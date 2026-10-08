@@ -178,7 +178,11 @@ impl ProtocolCodec for Codec {
         tags_packet(v).send(s)?;
 
         PacketOut::new(v.packets.cfg_cb_finish_configuration).send(s)?;
-        wait_for(s, v.packets.cfg_sb_finish_configuration)?;
+        crate::proto::await_config(
+            s,
+            v.packets.cfg_sb_finish_configuration,
+            v.packets.cfg_sb_client_information,
+        )?;
 
         // Play Login.
         let mut login = PacketOut::new(v.packets.cb_login);
@@ -489,6 +493,12 @@ impl ProtocolCodec for Codec {
         let seq = super::trailing_var_int(&pkt.data);
         let p = self.0.packets;
         match pkt.id {
+            id if id == p.sb_client_information => {
+                match crate::proto::view_distance_of(&pkt.data) {
+                    Some(d) => ClientEvent::ViewDistance(d),
+                    None => ClientEvent::Ignored,
+                }
+            }
             id if id == p.sb_set_carried_item => match pin.u16() {
                 Ok(slot) => ClientEvent::HeldSlot(slot as u8),
                 Err(_) => ClientEvent::Ignored,
@@ -791,7 +801,11 @@ fn send_known_registries(
     }
     offer.send(s)?;
 
-    let known = loop_until(s, v.packets.cfg_sb_select_known_packs)?;
+    let known = crate::proto::await_config(
+        s,
+        v.packets.cfg_sb_select_known_packs,
+        v.packets.cfg_sb_client_information,
+    )?;
     let mut pin = PacketIn::new(&known.data);
     let mut has_core = false;
     for _ in 0..pin.var_int().unwrap_or(0).clamp(0, 64) {

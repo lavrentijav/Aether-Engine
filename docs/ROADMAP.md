@@ -23,7 +23,8 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 *Goal: a world that ticks stably at 20 TPS with the hard performance work done.*
 
 - ✅ **Memory model**: `Sub-Chunk`, `AVX-Cell` (64-byte cache line), Morton (Z-order) indexing, SoA masks. See [Design Notes §1](DESIGN_NOTES.md#1-unified-vector-cell-format-across-simd-tiers) for the planned compiler-emulated AVX2 fallback (one `u16x32` source, no hand-duplicated branch) and [§7](DESIGN_NOTES.md#7-tiered-block-property-cache--range-encoded-property-classes) for range-encoded block properties + a tiered hot/full property cache.
-- 🚧 **Palette compression** (u4 / u8 → u16 auto-expand) ✅; Block-Entity arena still 📋.
+- 🚧 **Palette compression** (u0 / u1 / u2 / u4 / u8 → u16 auto-expand, compacted on load) ✅; Block-Entity arena still 📋.
+- ✅ **Bounded world memory**: columns unload once no player needs them, under an optional `max_resident_columns` budget (LRU); each player is streamed at most their own view distance plus one ring.
 - 🚧 **Physics engine**: basic voxel AABB collision + movement/gravity shipped (`aether-physics`); staged pipeline, SIMD broad-phase and the `Cached Environment` O(1) fast path still 📋.
 - 📋 **Redstone**: compiled Directed Dependency Graph (basic components; **QC deviations allowed** — see [Known Issues](KNOWN_ISSUES.md)).
 - 📋 **Lighting**: async cell-based flood-fill with safe-point merges. A `FullBright` fallback (always max light) ships in the meantime so worlds render.
