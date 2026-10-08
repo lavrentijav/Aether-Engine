@@ -141,7 +141,7 @@ pub fn on_broken(
             x,
             y,
             z,
-            data: crate::protocol::v774::block_state(broken) as i32,
+            data: crate::protocol::modern::block_state(broken) as i32,
         },
         world,
     );
@@ -487,8 +487,8 @@ pub fn swap_hands(handle: &PlayerHandle, world: &DemoWorld) {
 /// Middle-click on a block.
 pub fn pick_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i32) {
     let name = block_name(world, x, y, z);
-    let item = crate::protocol::v774::items::item_for_block(&name)
-        .and_then(crate::protocol::v774::items::name_of)
+    let item = crate::protocol::modern::items::item_for_block(&name)
+        .and_then(crate::protocol::modern::items::name_of)
         .map(str::to_owned);
     let Some(item) = item else { return };
     let creative = !handle.game().survival();

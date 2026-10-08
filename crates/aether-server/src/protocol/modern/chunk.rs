@@ -171,7 +171,7 @@ fn write_biomes(out: &mut Vec<u8>, ids: &[u32; 64]) {
 }
 
 /// Entries in the biome registry this codec sends.
-const BIOME_REGISTRY_SIZE: u32 = 65;
+pub const BIOME_REGISTRY_SIZE: u32 = 65;
 
 /// Build the Chunk Data and Update Light packet (`0x2C`) for column
 /// `(cx, cz)`.

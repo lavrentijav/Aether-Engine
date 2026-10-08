@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "minecraft-data": "^3.117.0",
     "mineflayer": "^4.39.0"
   }
 }

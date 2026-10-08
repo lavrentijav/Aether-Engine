@@ -18,6 +18,7 @@ use crate::players::{PlayerHandle, PosLook};
 use crate::proto::{Conn, PacketOut, RawPacket};
 
 pub mod commands;
+pub mod modern;
 pub mod nbt;
 pub mod v47;
 pub mod v755;
@@ -39,7 +40,6 @@ pub mod v770;
 pub mod v771;
 pub mod v772;
 pub mod v773;
-pub mod v774;
 
 /// A read-only view of the world, so a codec can render chunk columns without
 /// depending on the concrete `World` type (and so tests can feed a fake one).
@@ -739,7 +739,7 @@ pub trait ProtocolCodec: Sync + Send {
 /// Every codec this build can speak, newest protocol first.
 pub fn codecs() -> &'static [&'static dyn ProtocolCodec] {
     static V47: v47::Codec = v47::Codec;
-    static V774: v774::Codec = v774::Codec;
+    static V774: modern::Codec = modern::Codec(&modern::version::V1_21_11);
     static V755: v755::Codec = v755::Codec;
     static V756: v756::Codec = v756::Codec;
     static V757: v757::Codec = v757::Codec;
