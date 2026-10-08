@@ -96,6 +96,42 @@ impl Json {
             _ => None,
         }
     }
+
+    /// This value as a boolean, if it is one.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Json::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// This value as an object, if it is one.
+    pub fn as_obj(&self) -> Option<&BTreeMap<String, Json>> {
+        match self {
+            Json::Obj(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Member `key` as a number, or `default`.
+    pub fn f64_or(&self, key: &str, default: f64) -> f64 {
+        self.get(key).and_then(Json::as_f64).unwrap_or(default)
+    }
+
+    /// Member `key` as an integer, or `default`.
+    pub fn i32_or(&self, key: &str, default: i32) -> i32 {
+        self.get(key).and_then(Json::as_f64).map(|v| v as i32).unwrap_or(default)
+    }
+
+    /// Member `key` as a boolean, or `default`.
+    pub fn bool_or(&self, key: &str, default: bool) -> bool {
+        self.get(key).and_then(Json::as_bool).unwrap_or(default)
+    }
+
+    /// Member `key` as a string.
+    pub fn str_of(&self, key: &str) -> Option<&str> {
+        self.get(key).and_then(Json::as_str)
+    }
 }
 
 struct Parser<'a> {

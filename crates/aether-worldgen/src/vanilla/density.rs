@@ -113,6 +113,49 @@ impl DataPack {
         Json::parse(&text).map_err(|e| BuildError(format!("{}: {e}", path.display())))
     }
 
+    /// The raw JSON of `worldgen/<kind>/<id>.json` — `kind` is a registry
+    /// directory such as `biome`, `placed_feature` or `configured_carver`.
+    pub fn read_json(&self, kind: &str, id: &str) -> Result<Json, BuildError> {
+        self.read(kind, id)
+    }
+
+    /// Every id in `worldgen/<kind>/`, namespaced and sorted. Subdirectories
+    /// become path segments (`minecraft:trees/oak`).
+    pub fn list(&self, kind: &str) -> Result<Vec<String>, BuildError> {
+        fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) -> std::io::Result<()> {
+            for e in std::fs::read_dir(dir)? {
+                let e = e?;
+                let name = e.file_name().to_string_lossy().into_owned();
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, &format!("{prefix}{name}/"), out)?;
+                } else if let Some(stem) = name.strip_suffix(".json") {
+                    out.push(format!("minecraft:{prefix}{stem}"));
+                }
+            }
+            Ok(())
+        }
+        let dir = self.worldgen.join(kind);
+        let mut out = Vec::new();
+        walk(&dir, "", &mut out)
+            .map_err(|e| BuildError(format!("cannot list {}: {e}", dir.display())))?;
+        out.sort();
+        Ok(out)
+    }
+
+    /// The raw JSON of `data/minecraft/tags/<kind>/<id>.json` (`kind` is
+    /// e.g. `block`), or `None` when the pack has no such tag.
+    pub fn tag_json(&self, kind: &str, id: &str) -> Option<Json> {
+        let path = self
+            .worldgen
+            .parent()?
+            .join("tags")
+            .join(kind)
+            .join(format!("{}.json", strip_ns(id)));
+        let text = std::fs::read_to_string(path).ok()?;
+        Json::parse(&text).ok()
+    }
+
     /// The raw JSON of one `worldgen/noise_settings/<id>.json`.
     pub fn noise_settings(&self, id: &str) -> Result<Json, BuildError> {
         self.read("noise_settings", id)
@@ -176,6 +219,12 @@ impl NoiseRegistry {
     pub fn forked_factory(&self, name: &str) -> super::random::PositionalFactory {
         let mut r = self.factory.from_hash_of(name);
         r.fork_positional()
+    }
+
+    /// The world's root positional factory — vanilla's `RandomState.random`,
+    /// which the surface system draws its per-column randoms from.
+    pub fn factory(&self) -> super::random::PositionalFactory {
+        self.factory
     }
 
     /// The old terrain noise, seeded from `minecraft:terrain`.
@@ -368,6 +417,8 @@ pub enum Node {
     /// `offset(z, x, 0) * 4`, the Z half. The argument order really is
     /// rotated like that.
     ShiftB(Arc<NormalNoise>),
+    /// `offset(x, y, z) * 4` — the 3D shift.
+    Shift(Arc<NormalNoise>),
     /// A linear ramp in Y, clamped outside its band.
     YClampedGradient {
         /// Y at which the ramp starts.
@@ -505,6 +556,45 @@ pub enum Node {
     /// `minecraft:old_blended_noise` — the pre-1.18 terrain noise, which still
     /// supplies the overworld's 3D shape.
     OldBlendedNoise(Arc<super::noise::BlendedNoise>),
+    /// `minecraft:weird_scaled_sampler`: the spaghetti caves' rarity-scaled
+    /// noise. `input` is quantized to a rarity `r` and the result is
+    /// `r * |noise(pos / r)|`.
+    WeirdScaledSampler {
+        /// The rarity input.
+        input: Arc<Node>,
+        /// The sampled noise.
+        noise: Arc<NormalNoise>,
+        /// `type_1` (3D rarity) when true, `type_2` (2D rarity) otherwise.
+        type_1: bool,
+    },
+}
+
+/// `NoiseRouterData.QuantizedSpaghettiRarity.getSpaghettiRarity3D`.
+fn spaghetti_rarity_3d(v: f64) -> f64 {
+    if v < -0.5 {
+        0.75
+    } else if v < 0.0 {
+        1.0
+    } else if v < 0.5 {
+        1.5
+    } else {
+        2.0
+    }
+}
+
+/// `NoiseRouterData.QuantizedSpaghettiRarity.getSphaghettiRarity2D`.
+fn spaghetti_rarity_2d(v: f64) -> f64 {
+    if v < -0.75 {
+        0.5
+    } else if v < -0.5 {
+        0.75
+    } else if v < 0.5 {
+        1.0
+    } else if v < 0.75 {
+        2.0
+    } else {
+        3.0
+    }
 }
 
 impl Node {
@@ -583,6 +673,9 @@ impl Node {
             Node::ShiftB(n) => {
                 n.get_value(ctx.z as f64 * 0.25, ctx.x as f64 * 0.25, 0.0) * 4.0
             }
+            Node::Shift(n) => {
+                n.get_value(ctx.x as f64 * 0.25, ctx.y as f64 * 0.25, ctx.z as f64 * 0.25) * 4.0
+            }
             Node::YClampedGradient {
                 from_y,
                 to_y,
@@ -650,6 +743,21 @@ impl Node {
             Node::BlendAlpha => 1.0,
             Node::BlendOffset => 0.0,
             Node::OldBlendedNoise(n) => n.compute(ctx.x, ctx.y, ctx.z),
+            Node::WeirdScaledSampler {
+                input,
+                noise,
+                type_1,
+            } => {
+                let v = input.compute(ctx);
+                let r = if *type_1 {
+                    spaghetti_rarity_3d(v)
+                } else {
+                    spaghetti_rarity_2d(v)
+                };
+                r * noise
+                    .get_value(ctx.x as f64 / r, ctx.y as f64 / r, ctx.z as f64 / r)
+                    .abs()
+            }
             Node::FindTopSurface {
                 density,
                 upper_bound,
@@ -891,6 +999,19 @@ fn clamped_map(v: f64, from: f64, to: f64, from_value: f64, to_value: f64) -> f6
 
 // --- building --------------------------------------------------------------
 
+/// A process-wide id for a caching node.
+///
+/// The memo tables are thread-local and shared by every graph on the thread —
+/// the terrain's, the biome source's, a second world's — so the ids that key
+/// them must be unique across graphs, not merely within one. Per-builder
+/// counters made the terrain's cache #3 and the climate sampler's cache #3
+/// the same entry, and a column whose biomes were sampled first then read the
+/// climate's value back as its surface height.
+fn next_cache_id() -> u32 {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Turns worldgen JSON into an evaluable [`Node`] graph.
 ///
 /// Referenced functions are built once and shared, so a graph that names
@@ -900,8 +1021,6 @@ pub struct Builder<'a> {
     pack: &'a DataPack,
     noises: &'a NoiseRegistry,
     mode: Mode,
-    next_interpolator_id: u32,
-    next_marker_id: u32,
     memo: HashMap<String, Arc<Node>>,
     /// References currently being resolved, so a cyclic data pack is reported
     /// rather than overflowing the stack.
@@ -944,8 +1063,6 @@ impl<'a> Builder<'a> {
             pack,
             noises,
             mode,
-            next_interpolator_id: 0,
-            next_marker_id: 0,
             memo: HashMap::new(),
             in_flight: Vec::new(),
         }
@@ -1026,8 +1143,7 @@ impl<'a> Builder<'a> {
             // both, just less reuse than vanilla's own `cache_all_in_cell`
             // array would give).
             "cache_once" | "cache_all_in_cell" => {
-                let id = self.next_marker_id;
-                self.next_marker_id += 1;
+                let id = next_cache_id();
                 Node::CacheOnce {
                     inner: self.arg(v, "argument")?,
                     id,
@@ -1036,8 +1152,7 @@ impl<'a> Builder<'a> {
             // `cache_2d` and `flat_cache` both wrap functions vanilla itself
             // treats as column-only, so both are safe to key on `(x, z)`.
             "cache_2d" | "flat_cache" => {
-                let id = self.next_marker_id;
-                self.next_marker_id += 1;
+                let id = next_cache_id();
                 Node::Cache2D {
                     inner: self.arg(v, "argument")?,
                     id,
@@ -1049,8 +1164,7 @@ impl<'a> Builder<'a> {
                     cell_width,
                     cell_height,
                 } => {
-                    let id = self.next_interpolator_id;
-                    self.next_interpolator_id += 1;
+                    let id = next_cache_id();
                     Node::CellInterpolated {
                         inner: self.arg(v, "argument")?,
                         cell_width,
@@ -1148,6 +1262,17 @@ impl<'a> Builder<'a> {
                 Self::num(v, "y_factor")?,
                 Self::num(v, "smear_scale_multiplier")?,
             )),
+            "weird_scaled_sampler" => Node::WeirdScaledSampler {
+                input: self.arg(v, "input")?,
+                noise: self.noise_of(v, "noise")?,
+                type_1: match v.get("rarity_value_mapper").and_then(Json::as_str) {
+                    Some("type_1") => true,
+                    Some("type_2") => false,
+                    other => return err(format!("weird_scaled_sampler: bad rarity_value_mapper {other:?}")),
+                },
+            },
+            "constant" => Node::Const(Self::num(v, "argument")?),
+            "shift" => Node::Shift(self.noise_of(v, "argument")?),
             other => return err(format!("unsupported density function type `{other}`")),
         };
         Ok(Arc::new(node))

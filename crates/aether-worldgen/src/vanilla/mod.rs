@@ -92,13 +92,22 @@
 //! already has, and deliberately not vendored into this repository.
 
 pub mod aquifer;
+pub mod biome;
+pub mod biome_manager;
+pub mod biome_table;
+pub mod blockinfo;
+pub mod carver;
+pub mod chunk;
 pub mod climate;
 pub mod density;
+pub mod feature;
 pub mod generator;
 pub mod json;
 pub mod noise;
 pub mod ore_veins;
 pub mod overworld;
 pub mod random;
+pub mod rng;
+pub mod simplex;
 pub mod surface;
 pub mod terrain;

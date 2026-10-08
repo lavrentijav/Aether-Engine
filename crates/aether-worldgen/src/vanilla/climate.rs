@@ -267,6 +267,14 @@ impl ParameterList {
         if entries.is_empty() {
             return Err(BuildError::new("biome parameter report is empty"));
         }
+        Ok(Self::from_points(entries))
+    }
+
+    /// Build the table from rows, in the order given — the order is part of
+    /// the search tree's shape (see the module docs). [`super::biome_table`]
+    /// supplies the overworld's rows without needing a report.
+    pub fn from_points(entries: Vec<ParameterPoint>) -> Self {
+        assert!(!entries.is_empty(), "a biome table needs at least one row");
         let root = build_tree(
             entries
                 .iter()
@@ -277,7 +285,12 @@ impl ParameterList {
                 })
                 .collect(),
         );
-        Ok(Self { entries, root })
+        Self { entries, root }
+    }
+
+    /// The rows, in insertion order.
+    pub fn entries(&self) -> &[ParameterPoint] {
+        &self.entries
     }
 
     /// How many rows the table has.
@@ -300,6 +313,11 @@ impl ParameterList {
     /// reproduce that sequence exactly.
     pub fn find_cached(&self, target: &TargetPoint, cache: &mut SearchCache) -> &str {
         &self.entries[self.find_index(target, cache)].biome
+    }
+
+    /// The row index nearest `target`, with no search history.
+    pub fn find_entry(&self, target: &TargetPoint) -> usize {
+        self.search(&self.root, &target.to_axes(), None)
     }
 
     fn find_index(&self, target: &TargetPoint, cache: &mut SearchCache) -> usize {

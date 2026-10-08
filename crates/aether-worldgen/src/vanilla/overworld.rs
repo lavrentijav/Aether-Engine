@@ -29,6 +29,50 @@ pub struct OverworldBiomeSource {
 }
 
 impl OverworldBiomeSource {
+    /// Build from an unpacked data pack and a world seed, with the biome
+    /// table rebuilt in code ([`super::biome_table`]) — no report needed.
+    pub fn new(pack_root: impl AsRef<Path>, seed: u64) -> Result<Self, BuildError> {
+        Self::with_table(pack_root, ParameterList::from_points(super::biome_table::overworld()), seed)
+    }
+
+    fn with_table(pack_root: impl AsRef<Path>, biomes: ParameterList, seed: u64) -> Result<Self, BuildError> {
+        let pack = DataPack::open(pack_root)?;
+        let settings = pack.noise_settings("minecraft:overworld")?;
+        let router = settings
+            .get("noise_router")
+            .ok_or_else(|| BuildError::new("overworld noise settings: no `noise_router`"))?;
+        let noises = Box::new(NoiseRegistry::new(pack.clone(), seed));
+        let sampler = {
+            let mut b = Builder::new(&pack, &noises);
+            let mut entry = |name: &str| -> Result<_, BuildError> {
+                let v = router
+                    .get(name)
+                    .ok_or_else(|| BuildError::new(format!("noise router: no `{name}`")))?;
+                b.build(v)
+            };
+            Sampler {
+                temperature: entry("temperature")?,
+                humidity: entry("vegetation")?,
+                continentalness: entry("continents")?,
+                erosion: entry("erosion")?,
+                depth: entry("depth")?,
+                weirdness: entry("ridges")?,
+            }
+        };
+        Ok(Self {
+            sampler,
+            biomes,
+            _noises: noises,
+        })
+    }
+
+    /// The table row nearest the climate at a quart position — an index into
+    /// [`ParameterList::entries`].
+    pub fn entry_at(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> usize {
+        self.biomes
+            .find_entry(&self.sampler.sample(quart_x, quart_y, quart_z))
+    }
+
     /// Build from an unpacked data pack, a `--reports` biome-parameter dump
     /// and a world seed.
     ///
@@ -124,11 +168,5 @@ impl OverworldBiomeSource {
     /// The biome table.
     pub fn biomes(&self) -> &ParameterList {
         &self.biomes
-    }
-}
-
-impl super::surface::BiomeAt for OverworldBiomeSource {
-    fn biome_at(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> &str {
-        self.biome_at(quart_x, quart_y, quart_z)
     }
 }

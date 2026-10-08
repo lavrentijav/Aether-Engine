@@ -28,6 +28,37 @@ pub struct GeneratedColumn {
     /// `(cy, sub-chunk)` pairs, ascending in `cy`. Empty (all-air) sections are
     /// omitted.
     pub sections: Vec<(i8, SubChunk)>,
+    /// Per-section biomes, when the generator has them (the vanilla one
+    /// does; the flat and noise generators leave this `None`, meaning
+    /// "plains everywhere").
+    pub biomes: Option<ColumnBiomes>,
+}
+
+/// A column's biomes on the 4×4×4 quart grid the protocol sends.
+///
+/// One entry of `sections` per 16-block section, **every** section of the
+/// world height (not just the non-empty ones), bottom first, starting at
+/// section `min_section_y`. Each entry is 64 indices into `palette`, ordered
+/// `(qy * 4 + qz) * 4 + qx` — exactly the order of a chunk section's biome
+/// paletted container.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColumnBiomes {
+    /// Section Y of `sections[0]` (`-4` for the overworld).
+    pub min_section_y: i8,
+    /// Namespaced biome ids, e.g. `minecraft:plains`.
+    pub palette: Vec<String>,
+    /// 64 palette indices per section.
+    pub sections: Vec<[u8; 64]>,
+}
+
+impl ColumnBiomes {
+    /// The biome id at section `cy`, quart `(qx, qy, qz)` within it, or
+    /// `None` when `cy` is outside the column.
+    pub fn get(&self, cy: i8, qx: usize, qy: usize, qz: usize) -> Option<&str> {
+        let i = (cy as i32 - self.min_section_y as i32) as usize;
+        let sec = self.sections.get(i)?;
+        self.palette.get(sec[(qy * 4 + qz) * 4 + qx] as usize).map(String::as_str)
+    }
 }
 
 /// A source of freshly generated chunk columns.
@@ -79,6 +110,7 @@ impl<'a> ColumnBuilder<'a> {
                 .into_iter()
                 .filter(|(_, sc)| !sc.is_empty())
                 .collect(),
+            biomes: None,
         }
     }
 }
