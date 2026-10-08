@@ -187,6 +187,16 @@ pub fn dispatch(
                 world.block_name_of(b).unwrap_or_default()
             )]
         }
+        "food" => {
+            if !op {
+                return deny();
+            }
+            let n: i32 = args.first().and_then(|a| a.parse().ok()).unwrap_or(20);
+            let mut st = handle.game();
+            st.food = n.clamp(0, 20);
+            st.saturation = 0.0;
+            vec![format!("Food set to {}", st.food)]
+        }
         "heal" => {
             if !op {
                 return deny();

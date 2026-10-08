@@ -27,7 +27,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - 🚧 **Physics engine**: basic voxel AABB collision + movement/gravity shipped (`aether-physics`); staged pipeline, SIMD broad-phase and the `Cached Environment` O(1) fast path still 📋.
 - 📋 **Redstone**: compiled Directed Dependency Graph (basic components; **QC deviations allowed** — see [Known Issues](KNOWN_ISSUES.md)).
 - 📋 **Lighting**: async cell-based flood-fill with safe-point merges. A `FullBright` fallback (always max light) ships in the meantime so worlds render.
-- 📋 **Entities/AI**: ECS storage, Flow-Field navigation, cached A\*, batched spawner. A single `Player` entity already exists for the preview server.
+- 🚧 **Entities/AI**: ECS storage, Flow-Field navigation, cached A\*, batched spawner. The preview server now runs server-side mobs (eight kinds, straight-line AI, batched spawner) and item/arrow entities on 1.21.11; ECS storage and Flow-Field navigation remain.
 - ✅ **Storage**: Fjall KV backend, Zstandard sub-chunk blobs, order-preserving keys (+ in-memory backend for tests). [Design Notes §5](DESIGN_NOTES.md#5-git-like-immutable-chunk-storage-instant-save--rollback) sketches a Git-like immutable/CoW write path (instant save & rollback) on top of this backend — not yet a committed plan, needs a design spike first.
 - 📋 **World Engine** process model (one OS process per world).
 - 📋 Work-stealing scheduler for generation / save / lighting off the main tick.

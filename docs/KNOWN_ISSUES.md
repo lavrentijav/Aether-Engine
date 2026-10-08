@@ -10,7 +10,7 @@
 ---
 
 ### A. Current known problems (early alpha)
-1. **Gameplay subsystems unbuilt.** Storage, basic physics, worldgen and the core API exist, but redstone, async lighting, ECS entities/AI and the full staged physics pipeline are not implemented yet. Lighting currently uses the `FullBright` fallback (always max light).
+1. **Gameplay runs on 1.21.11 only; engine-level subsystems are still unbuilt.** The server now has a survival game layer (`crates/aether-server/src/game`: mobs, items, combat, hunger, crafting, chests, furnaces — see item 11), but it is a server-side layer, not the ECS/Flow-Field design of the roadmap; redstone, fluid flow and the full staged physics pipeline are not implemented.
 2. **SIMD parity only partially validated.** `Scalar / SSE4.2 / AVX2` paths are implemented and unit-tested; `AVX-512` is *detected* but routed to the AVX2 path — there is no native AVX-512 backend yet.
 3. **Determinism unproven.** Parallel subsystems must merge at Safe Points; the merge points are specified but not validated, and the work-stealing scheduler that would exercise them does not exist yet.
 4. **Experimental 1.8.9 server is unverified against a live client.** `aether-server` speaks protocol 47 in offline mode with no compression/encryption, and its framing is checked only against a raw socket client. A real Minecraft 1.8.9 client may still reject some packets (chunk-data format is the most likely gap). It binds to loopback by default and must not be exposed publicly.
@@ -46,9 +46,19 @@
 
    **Throughput is no longer the problem.** It was: the generator once managed 35 columns in 120 s against a live client, about 10 s a column. Two bugs in the density graph's node cache did it — the `cache_once` / `cache_2d` / `flat_cache` markers were no-ops that memoized nothing, and the cell-corner cache packed `x0`/`y0`/`z0` into overlapping bit ranges, so with `min_y = -64` it collided on nearly every lookup. A third fix sized the corner cache to the real working set. Measured against a real 1.21.11 client at view radius 8: **spawn at 1.87 s, all 289 columns in ~21 s** cold, and within the first five seconds once the column cache is warm.
 
-9. **A joining client's input is not acted on until its columns have finished streaming.** Measured: a bot that joins, waits 1.5 s and then places blocks gets no block updates at all and receives every prediction ack in one burst about two seconds later — the placements are read late, after the initial stream. Waiting for the stream to finish (~21 s at view radius 8 on the vanilla generator) makes the same probe work every time. The session loop interleaves sending columns with reading the socket, so input queues behind the column stream rather than being dropped; nothing is lost, but the first half-minute of a join is unresponsive. Found with `tools/probe`, not by a test.
+9. ~~**A joining client's input is not acted on until its columns have finished streaming.**~~ **Fixed:** columns now stream from a per-player thread (nearest first, re-targeted as the player moves), so the connection thread keeps reading input while the horizon generates.
 
 10. **No headless-client regression suite yet.** `tools/probe` connects a real 1.21.11 client (mineflayer) and reports what the server actually sends; it found two live defects in one run — a seven-entry item→block table that placed every other block as **stone**, and a missing `set_health` that stalled every bot client before spawn. It is a set of scripts, not a test suite, and nothing runs it automatically.
+
+11. **What the survival layer does not do yet** (1.21.11; every other codec ignores the gameplay events and keeps its older, client-trusting subset — no mobs, no server-side windows):
+    - **Mob AI is straight-line.** Mobs walk towards their goal, jump one-block steps and refuse unclimbable drops; there is no pathfinding around obstacles, no door opening, no climbing for spiders. Eight kinds exist: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider. No breeding, taming, villagers or the Nether/End mobs.
+    - **No redstone, fluid flow, crop growth, leaf decay, fire spread or falling sand/gravel.** Water and lava are placed and picked up as static blocks.
+    - **No enchanting, brewing, anvils, smithing, villager trading, beds only set the spawn point and skip the night.** Status effects (golden apples, poison) are not applied; foods restore hunger only.
+    - **No XP orbs.** Experience is credited to the killer directly; ores give none.
+    - **Chests do not double**, and hoppers/droppers/dispensers have no inventory.
+    - **Block collision is per cube**: slabs, stairs and fences collide as full blocks for mobs and item entities (as for the burial check in item 6).
+    - **Anti-cheat is minimal**: mining time is checked at half the expected duration, reach at 6 blocks; movement is trusted.
+    - **Light is not consulted for spawning**: monsters spawn at night under open sky, or at any time under cover.
 
 ### B. Known Deviations Registry (Phase 1 — accepted on purpose)
 These are **not bugs** in Phase 1 — they are documented, temporary compatibility gaps that must be recorded in the engine config and closed in Phase 2.
@@ -58,7 +68,8 @@ These are **not bugs** in Phase 1 — they are documented, temporary compatibili
 | **Redstone** | Quasi-Connectivity (QC) ignored across inactive chunk borders | Full dependency graph with cross-chunk QC |
 | **Fluids** | Parallel simplified spread; Java tick timing not preserved | Deterministic fluid layers 1:1 with Vanilla |
 | **Update order** | Simultaneous redstone updates ordered by the parallel graph | Strict deterministic directional-priority queue |
-| **Entity spawn** | Batched async spawn every N ticks | Per-tick precise spawner |
+| **Entity spawn** | Batched async spawn every N ticks (every 40 ticks, per-player caps, sky/darkness test without light levels) | Per-tick precise spawner |
+| **Mob AI** | Straight-line steering with step jumps and drop avoidance | Flow-Field navigation + cached A\* |
 | **Lighting** | `FullBright` fallback — every block is fully lit | Async cell-based flood-fill with safe-point merges |
 
 ### C. Engineering risks & trade-offs

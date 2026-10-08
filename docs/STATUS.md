@@ -6,7 +6,7 @@
 >
 > Legend: ✅ done · 🚧 in progress · 📋 planned · ❄️ deferred · ❌ cancelled.
 >
-> Last reviewed: 2026-09-08 · Spec: v1.1
+> Last reviewed: 2026-10-08 · Spec: v1.1
 >
 > Forward-looking architecture ideas not yet built (SIMD cell format refinements, 2D
 > heightmap skipping, LOD/Ultra-Full render modes, a Surface API for LOD mods, Git-like
@@ -90,7 +90,17 @@ server a vanilla 1.8.9 client can connect to.
 | Vanilla terrain generation — noise stage bit-exact against the game (1,179,648/1,179,648 blocks), selectable via `worldgen_data` | 🚧 Preview |
 | …but ~10 s per column, so the server ships on the noise generator; and no surface rules yet, so it is bare stone. See [Known Issues A.8](KNOWN_ISSUES.md) | ❌ |
 | CI (build/test/clippy/fmt) + Criterion bench harness | ✅ |
-| Redstone / async lighting / entities / full staged physics | ❌ Not yet started |
+| **Survival gameplay on 1.21.11** (`game/`): 20 TPS world tick, day/night, hunger, regeneration, starvation, fall/void/lava damage, death screen, inventory dropped on death, respawn | ✅ |
+| Mobs: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider — natural spawning, wander/flee/chase AI, melee, skeleton arrows, creeper explosions, undead burn in daylight, loot and XP | 🚧 Preview |
+| Combat: 1.9 attack cooldown, critical hits, knockback, armour reduction and wear, tool durability, PvP | ✅ |
+| Item entities: block drops from loot tables, Q / drop stack, pickup with the collect animation, merging, 5-minute expiry | ✅ |
+| Server-authoritative windows: every click mode, 2×2 and 3×3 crafting over all 1,359 shaped + shapeless recipes, chests and furnaces persisted as block entities, smelting + fuel | ✅ |
+| Survival mining: vanilla dig times, harvest tools, tool wear; placement consumes items; buckets, hoes, flint and steel, beds (spawn point, skip night), eating, bows | ✅ |
+| Entity tracker: entities spawn/despawn per client by range, updates only to those tracking them | ✅ |
+| Player state persisted (position, health, food, XP, mode, spawn); gameplay commands `/gamemode /time /give /summon /tp /heal /food /killall /kill /spawn /block` | ✅ |
+| Chunks stream on a per-player thread — input is read while the horizon generates | ✅ |
+| Gameplay events on the other 18 codecs (they keep the older subset) | ❌ |
+| Redstone / fluid flow / async lighting / full staged physics | ❌ Not yet started |
 
 ### 📋 What is planned
 Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
@@ -107,7 +117,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 - 🚧 Physics pipeline (basic collision + gravity ✅; SIMD broad-phase, cached environment 📋)
 - 📋 Graph-based redstone (DDG)
 - 📋 Async lighting (cell flood-fill) — `FullBright` fallback ships in the meantime
-- 📋 ECS entities + Flow-Field AI
+- 🚧 Entities + AI — server-side mobs with straight-line AI ship on 1.21.11; ECS storage + Flow-Field still 📋
 - ✅ KV storage (Fjall + Zstd)
 - 📋 Per-world process isolation + work-stealing scheduler
 
