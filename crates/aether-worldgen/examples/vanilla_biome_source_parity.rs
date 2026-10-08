@@ -32,6 +32,8 @@
 //! The report separates those cases out: ties are a known, bounded ambiguity,
 //! anything else is a real bug.
 
+#![allow(clippy::type_complexity)]
+
 use std::collections::BTreeMap;
 
 use aether_worldgen::vanilla::climate::SearchCache;

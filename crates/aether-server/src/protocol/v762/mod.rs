@@ -25,7 +25,7 @@ use aether_world::BlockStateId;
 
 use super::{json_escape, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::players::PosLook;
-use crate::proto::{Conn, read_packet, PacketIn, PacketOut, RawPacket};
+use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 
 /// The protocol id this codec speaks.
 pub const PROTOCOL: i32 = 762;
@@ -298,6 +298,8 @@ impl ProtocolCodec for Codec {
                 p.u8(0);
                 vec![p]
             }
+            // Gameplay events this version does not render.
+            _ => Vec::new(),
         }
     }
 
@@ -567,11 +569,8 @@ mod tests {
             i64::from_be_bytes(body[0..8].try_into().unwrap()),
             encode_position(1, 2, 3)
         );
-        let mut pos = 8usize;
         let mut state = 0i32;
-        for i in 0..5 {
-            let byte = body[pos];
-            pos += 1;
+        for (i, &byte) in body[8..].iter().take(5).enumerate() {
             state |= ((byte & 0x7f) as i32) << (7 * i);
             if byte & 0x80 == 0 {
                 break;

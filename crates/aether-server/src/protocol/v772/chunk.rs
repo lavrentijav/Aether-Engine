@@ -269,7 +269,9 @@ mod tests {
         // An NBT compound here (the pre-1.21.5 shape) would shift every
         // following field.
         let mut wire = Vec::new();
-        chunk_data_packet(0x27, 0, 0, &Empty).write_to(&mut wire, None).unwrap();
+        chunk_data_packet(0x27, 0, 0, &Empty)
+            .write_to(&mut wire, None)
+            .unwrap();
         let mut pos = 0usize;
         read_varint(&wire, &mut pos);
         read_varint(&wire, &mut pos);
@@ -280,7 +282,9 @@ mod tests {
     #[test]
     fn unload_packet_puts_z_before_x() {
         let mut wire = Vec::new();
-        unload_chunk_packet(0x21, 3, -5).write_to(&mut wire, None).unwrap();
+        unload_chunk_packet(0x21, 3, -5)
+            .write_to(&mut wire, None)
+            .unwrap();
         let body = &wire[2..];
         assert_eq!(i32::from_be_bytes(body[0..4].try_into().unwrap()), -5);
         assert_eq!(i32::from_be_bytes(body[4..8].try_into().unwrap()), 3);

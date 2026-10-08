@@ -277,8 +277,7 @@ impl<B: KvBackend> Journal<B> {
         // corruption).
         self.backend.put(&event_key(seq), &e.encode())?;
         if let Some((x, _, z)) = e.position() {
-            self.backend
-                .put(&column_key(x >> 4, z >> 4, seq), &[])?;
+            self.backend.put(&column_key(x >> 4, z >> 4, seq), &[])?;
         }
         self.backend.put(&actor_key(actor, seq), &[])?;
         self.backend.put(K_HEAD, &seq.to_be_bytes())?;

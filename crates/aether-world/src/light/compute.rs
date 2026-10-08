@@ -206,8 +206,14 @@ mod tests {
                 continue;
             }
             let (xi, yi, zi) = (x as i32, y as i32, z as i32);
-            for (dx, dy, dz) in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
-            {
+            for (dx, dy, dz) in [
+                (1, 0, 0),
+                (-1, 0, 0),
+                (0, 1, 0),
+                (0, -1, 0),
+                (0, 0, 1),
+                (0, 0, -1),
+            ] {
                 let (nx, ny, nz) = (xi + dx, yi + dy, zi + dz);
                 if !(0..DIM as i32).contains(&nx)
                     || !(0..h as i32).contains(&ny)
@@ -336,11 +342,7 @@ mod tests {
         for y in 0..h {
             for z in 0..DIM {
                 for x in 0..DIM {
-                    assert_eq!(
-                        got.get(x, y, z),
-                        want.get(x, y, z),
-                        "at {x},{y},{z}"
-                    );
+                    assert_eq!(got.get(x, y, z), want.get(x, y, z), "at {x},{y},{z}");
                 }
             }
         }
@@ -406,7 +408,11 @@ mod tests {
             }
         }
         let l = sky_light(&opaque, &Mask::zeroed(h));
-        assert_eq!(l.get(3, 7, 8), 15, "outside the roof, daylight falls freely");
+        assert_eq!(
+            l.get(3, 7, 8),
+            15,
+            "outside the roof, daylight falls freely"
+        );
         let under: Vec<u8> = (4..12).map(|x| l.get(x, 7, 8)).collect();
         assert_eq!(under[0], 14, "one step in from the edge");
         for w in under.windows(2) {

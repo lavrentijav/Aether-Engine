@@ -160,19 +160,18 @@ impl Stash {
     /// `placed_by_rollback` is what each undone event *put* there — the `to`
     /// side — which is what the rollback removed and therefore what is owed
     /// back.
-    pub fn from_recovered(
-        items: impl IntoIterator<Item = (String, Vec<String>)>,
-    ) -> Stash {
+    pub fn from_recovered(items: impl IntoIterator<Item = (String, Vec<String>)>) -> Stash {
         let mut counts: BTreeMap<(String, Vec<String>), u64> = BTreeMap::new();
         for (block, mut tags) in items {
             tags.sort();
             *counts.entry((block, tags)).or_default() += 1;
         }
-        let mut s = Stash::default();
-        s.entries = counts
-            .into_iter()
-            .map(|((block, tags), count)| Entry { block, tags, count })
-            .collect();
+        let mut s = Stash {
+            entries: counts
+                .into_iter()
+                .map(|((block, tags), count)| Entry { block, tags, count })
+                .collect(),
+        };
         s.sort();
         s
     }
@@ -200,7 +199,9 @@ pub enum Cell {
     /// Grey stained glass: the frame. Clicking does nothing.
     Filler,
     /// One stash entry, at this index into [`Stash::entries`].
-    Item { index: usize },
+    Item {
+        index: usize,
+    },
     /// Page back / page forward.
     PrevPage,
     NextPage,
@@ -283,9 +284,21 @@ mod tests {
     #[test]
     fn tag_order_does_not_split_a_group() {
         let mut s = Stash::default();
-        s.deposit("minecraft:oak_stairs", &tags(["facing=north", "half=top"]), 1);
-        s.deposit("minecraft:oak_stairs", &tags(["half=top", "facing=north"]), 1);
-        assert_eq!(s.len(), 1, "the same tags in another order are the same tags");
+        s.deposit(
+            "minecraft:oak_stairs",
+            &tags(["facing=north", "half=top"]),
+            1,
+        );
+        s.deposit(
+            "minecraft:oak_stairs",
+            &tags(["half=top", "facing=north"]),
+            1,
+        );
+        assert_eq!(
+            s.len(),
+            1,
+            "the same tags in another order are the same tags"
+        );
         assert_eq!(s.entries()[0].count, 2);
     }
 
@@ -317,7 +330,10 @@ mod tests {
         // No interior slot may touch an edge.
         for s in &interior {
             let (row, col) = (s / COLS, s % COLS);
-            assert!(row > 0 && row < ROWS - 1, "slot {s} is on a horizontal edge");
+            assert!(
+                row > 0 && row < ROWS - 1,
+                "slot {s} is on a horizontal edge"
+            );
             assert!(col > 0 && col < COLS - 1, "slot {s} is on a vertical edge");
         }
     }
@@ -341,7 +357,11 @@ mod tests {
 
         let last = layout(&s, pages(&s) - 1);
         assert_eq!(last[SLOT_PREV], Cell::PrevPage);
-        assert_eq!(last[SLOT_NEXT], Cell::Filler, "no forward arrow on the last");
+        assert_eq!(
+            last[SLOT_NEXT],
+            Cell::Filler,
+            "no forward arrow on the last"
+        );
     }
 
     #[test]
@@ -462,7 +482,7 @@ pub fn adjust(chosen: u64, delta: i64, available: u64) -> u64 {
 
 /// The amount the dialogue opens on: a stack, or everything if that is less.
 pub fn default_take(available: u64) -> u64 {
-    available.min(64).max(1)
+    available.clamp(1, 64)
 }
 
 #[cfg(test)]

@@ -14,12 +14,13 @@
 //! logic every version shares.
 
 mod commands;
+mod config;
 mod db;
 mod economy;
+mod game;
 mod gencache;
 mod ground;
 mod inventory;
-mod config;
 mod placement;
 mod players;
 mod proto;
@@ -101,9 +102,9 @@ fn main() -> std::process::ExitCode {
     let cfg = Arc::new(cfg);
     let next_eid = Arc::new(AtomicI32::new(1));
     let registry: SharedRegistry = Arc::new(Registry::default());
-    // Items on the floor fall and expire on their own thread, independently of
-    // whether anyone is connected.
-    ground::spawn_ticker(Arc::clone(&registry), Arc::clone(&world));
+    // The world ticks on its own thread, independently of whether anyone is
+    // connected: time, mobs, items on the floor, furnaces.
+    game::tick::start(Arc::clone(&registry), Arc::clone(&world));
 
     let addr = format!("{}:{}", cfg.server.host, cfg.server.port);
     let listener = match TcpListener::bind(&addr) {
@@ -160,7 +161,9 @@ fn main() -> std::process::ExitCode {
 /// Every failure path here returns `None` and prints why. A server whose audit
 /// database is unreachable must still start: the journal on disk is the source
 /// of truth and it is unaffected.
-fn open_history_mirror(cfg: &config::DatabaseConfig) -> Option<aether_world::journal::BatchingSink> {
+fn open_history_mirror(
+    cfg: &config::DatabaseConfig,
+) -> Option<aether_world::journal::BatchingSink> {
     let url = cfg.connection_url();
     if url.is_empty() {
         return None;

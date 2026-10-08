@@ -484,7 +484,10 @@ pub fn read_packet_from<R: Read>(
         let mut head = PacketIn::new(&buf);
         let inflated_len = head.var_int()?;
         if inflated_len < 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "neg inflated len"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "neg inflated len",
+            ));
         }
         let rest = &buf[head.pos..];
         if inflated_len == 0 {
@@ -550,7 +553,11 @@ mod tests {
 
         let mut pos = 0;
         let frame_len = read_varint_at(&wire, &mut pos) as usize;
-        assert_eq!(frame_len, wire.len() - pos, "length covers the rest exactly");
+        assert_eq!(
+            frame_len,
+            wire.len() - pos,
+            "length covers the rest exactly"
+        );
         assert_eq!(
             read_varint_at(&wire, &mut pos),
             0,

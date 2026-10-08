@@ -32,9 +32,9 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use aether_core::math::Vec3;
 use aether_physics::{step, BlockView};
+use aether_world::journal::{ActorId, EventBody, Filter, Journal, Restore};
 use aether_world::registry::BlockRegistry;
 use aether_world::storage::format::SubChunkKey;
-use aether_world::journal::{ActorId, EventBody, Filter, Journal, Restore};
 use aether_world::{KvBackend, StorageError, SubChunk, WorldStorage};
 use aether_worldgen::ChunkGenerator;
 
@@ -43,10 +43,8 @@ pub mod player;
 // Public re-exports: the pieces callers most often need alongside `World`.
 pub use aether_core::math::{Aabb, Vec3 as Vector3};
 pub use aether_physics::{Body, PhysicsParams};
+pub use aether_world::journal::{ActorId as JournalActor, Anomaly, Event, ItemUid, Ledger, Place};
 pub use aether_world::registry::ids as block_ids;
-pub use aether_world::journal::{
-    ActorId as JournalActor, Anomaly, Event, ItemUid, Ledger, Place,
-};
 pub use aether_world::{BlockProperties, BlockStateId, FullBright, LightView, MemStore};
 pub use aether_worldgen::{FlatGenerator, NoiseGenerator};
 pub use player::{GameMode, Player};
@@ -509,10 +507,7 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "aether-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("aether-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -528,7 +523,9 @@ mod tests {
         let dir = scratch_dir("registry");
         {
             let world = World::new(FjallStore::open(&dir).unwrap(), FlatGenerator::classic());
-            world.set_block(1, 20, 1, "minecraft:diamond_block").unwrap();
+            world
+                .set_block(1, 20, 1, "minecraft:diamond_block")
+                .unwrap();
             world.set_block(2, 20, 2, "minecraft:oak_planks").unwrap();
             world.flush().unwrap();
         }
@@ -591,10 +588,7 @@ mod tests {
         // there next time the server starts.
         let dir = scratch_dir("restart");
         {
-            let world = World::new(
-                FjallStore::open(&dir).unwrap(),
-                FlatGenerator::classic(),
-            );
+            let world = World::new(FjallStore::open(&dir).unwrap(), FlatGenerator::classic());
             assert_eq!(world.get_block(3, 3, 3), block_ids::GRASS_BLOCK);
             world.set_block(3, 20, 3, "minecraft:stone").unwrap();
             // Dig out a generated block too: a removal has to persist just as
@@ -603,10 +597,7 @@ mod tests {
             world.flush().unwrap();
         }
         {
-            let world = World::new(
-                FjallStore::open(&dir).unwrap(),
-                FlatGenerator::classic(),
-            );
+            let world = World::new(FjallStore::open(&dir).unwrap(), FlatGenerator::classic());
             assert_eq!(
                 world.get_block(3, 20, 3),
                 block_ids::STONE,

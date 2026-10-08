@@ -41,8 +41,8 @@ pub struct ServerConfig {
     ///
     /// Separate from [`Self::worldgen_data`] because it is not in the data
     /// pack: the overworld's biome table is code in the game, and exists on
-    /// disk only in a `--reports` dump. Without it the vanilla generator
-    /// cannot place biomes, and so cannot run its surface rules.
+    /// disk only in a `--reports` dump. Optional: the generator carries a
+    /// port of that table, and uses the report only when one is given.
     #[serde(default)]
     pub biome_data: String,
     /// World seed for the terrain generator.
@@ -252,13 +252,12 @@ max_players = 20
 view_radius = 8       # chunk radius kept loaded around each player
 compression_threshold = 256  # deflate packets this size or larger; -1 disables
 game_mode = "creative"  # survival: blocks drop and pay; creative: build freely
-# The game's own worldgen data, read at run time. Empty uses the built-in
-# noise terrain. Surface rules are not implemented yet, so vanilla terrain
-# arrives as bare stone: right shape, no soil and no bedrock.
+# The game's own data pack (data/minecraft/), read at run time. When set,
+# the world is vanilla terrain: biomes, surface, caves, ores, trees and
+# plants. Empty uses the built-in noise terrain.
 worldgen_data = ""
-# The game's reports/biome_parameters/minecraft/overworld.json, from the same
-# copy. Not part of the data pack: the biome table is code, not data, and the
-# surface rules need it to know which biome a column is in.
+# Optional: the game's reports/biome_parameters/minecraft/overworld.json.
+# The biome table is built in; set this only to override it with a report.
 biome_data = ""
 seed = 42             # world seed for the terrain generator
 world_dir = "world"   # persistent world directory, created on first run
@@ -322,15 +321,17 @@ mod tests {
     /// live server, not here.
     #[test]
     fn the_sample_puts_the_operator_list_where_toml_will_read_it() {
-        let cfg: super::Config = toml::from_str(
-            &super::SAMPLE.replace("operators = []", r#"operators = ["root"]"#),
-        )
-        .expect("the sample must parse");
+        let cfg: super::Config =
+            toml::from_str(&super::SAMPLE.replace("operators = []", r#"operators = ["root"]"#))
+                .expect("the sample must parse");
         assert_eq!(cfg.operators, vec!["root".to_string()]);
 
         // And the shape that caused it must still be wrong, or the test is
         // asserting nothing.
-        let broken = format!("{}\noperators = [\"root\"]\n", super::SAMPLE.replace("operators = []\n", ""));
+        let broken = format!(
+            "{}\noperators = [\"root\"]\n",
+            super::SAMPLE.replace("operators = []\n", "")
+        );
         let cfg: super::Config = toml::from_str(&broken).expect("parses, wrongly");
         assert!(
             cfg.operators.is_empty(),
@@ -364,15 +365,23 @@ mod tests {
         // SAFETY: single-threaded test, and the variable is read only here.
         unsafe { std::env::remove_var(DATABASE_URL_ENV) };
         assert_eq!(cfg.connection_url(), "host=from-file");
+        // SAFETY: as above.
         unsafe { std::env::set_var(DATABASE_URL_ENV, "   ") };
-        assert_eq!(cfg.connection_url(), "host=from-file", "blank is not an override");
+        assert_eq!(
+            cfg.connection_url(),
+            "host=from-file",
+            "blank is not an override"
+        );
+        // SAFETY: as above.
         unsafe { std::env::set_var(DATABASE_URL_ENV, "host=from-env") };
         assert_eq!(cfg.connection_url(), "host=from-env");
+        // SAFETY: as above.
         unsafe { std::env::remove_var(DATABASE_URL_ENV) };
     }
 
     #[test]
     fn mirroring_is_off_unless_it_is_configured() {
+        // SAFETY: single-threaded test, and the variable is read only here.
         unsafe { std::env::remove_var(DATABASE_URL_ENV) };
         assert!(DatabaseConfig::default().connection_url().is_empty());
     }

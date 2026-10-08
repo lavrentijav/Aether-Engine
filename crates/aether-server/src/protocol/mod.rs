@@ -11,8 +11,8 @@
 //! [`ServerEvent::SpawnPlayer`] is encoded separately for a 1.8 viewer and a
 //! 1.21 viewer, from the same source of truth.
 
-use std::io;
 use aether_world::BlockStateId;
+use std::io;
 
 use crate::players::{PlayerHandle, PosLook};
 use crate::proto::{Conn, PacketOut, RawPacket};
@@ -46,6 +46,15 @@ pub mod v774;
 pub trait BlockSource: Sync {
     /// Engine block id at absolute world coordinates, air when out of range.
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId;
+
+    /// The biomes of column `(cx, cz)`, when the generator produced any.
+    fn column_biomes(
+        &self,
+        _cx: i32,
+        _cz: i32,
+    ) -> Option<std::sync::Arc<aether_worldgen::ColumnBiomes>> {
+        None
+    }
 }
 
 /// Something the server wants a client told, stated without reference to any
@@ -69,6 +78,24 @@ pub struct ContainerSlot {
     pub label: String,
 }
 
+impl ServerEvent<'_> {
+    /// The nearest event a codec without the gameplay events understands,
+    /// for the few that have an older equivalent.
+    pub fn legacy(&self) -> Option<ServerEvent<'static>> {
+        match self {
+            ServerEvent::EntityPos {
+                entity_id, x, y, z, ..
+            } => Some(ServerEvent::MoveEntity {
+                entity_id: *entity_id,
+                x: *x,
+                y: *y,
+                z: *z,
+            }),
+            _ => None,
+        }
+    }
+}
+
 impl ContainerSlot {
     /// The grey glass that frames the window.
     pub fn filler() -> Self {
@@ -83,7 +110,11 @@ impl ContainerSlot {
         Self {
             item: "minecraft:arrow".into(),
             count: 1,
-            label: if next { "Next page".into() } else { "Previous page".into() },
+            label: if next {
+                "Next page".into()
+            } else {
+                "Previous page".into()
+            },
         }
     }
     /// A control: a named item standing in for an action.
@@ -182,7 +213,12 @@ pub enum ServerEvent<'a> {
     /// Distinct from [`ServerEvent::EntityMove`], which takes a player handle
     /// and reads its look angles: a dropped item has no look, and giving it
     /// one would make it spin as it fell.
-    MoveEntity { entity_id: i32, x: f64, y: f64, z: f64 },
+    MoveEntity {
+        entity_id: i32,
+        x: f64,
+        y: f64,
+        z: f64,
+    },
     /// A stack lying on the ground.
     ///
     /// What happens to items a player has been given but cannot hold. The
@@ -225,6 +261,176 @@ pub enum ServerEvent<'a> {
     /// as the player walks away are dropped on arrival and the world looks
     /// finite. 1.8 has no such packet and ignores the event.
     SetCenterChunk { cx: i32, cz: i32 },
+
+    // --- Gameplay. Encoded by the 1.21.11 codec; every other codec renders
+    // these as no packets, so a version that has not implemented them keeps
+    // working with the subset it always had.
+    /// Make any non-player entity appear: a mob, a dropped item, an arrow.
+    SpawnEntity {
+        entity_id: i32,
+        uuid: u128,
+        /// `minecraft:`-qualified entity type.
+        kind: &'a str,
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+        pitch: f32,
+        /// Blocks per tick.
+        velocity: (f64, f64, f64),
+        /// Type-specific spawn data (an arrow's shooter + 1, ...).
+        data: i32,
+    },
+    /// Entity metadata entries.
+    EntityMeta {
+        entity_id: i32,
+        entries: Vec<(u8, MetaValue)>,
+    },
+    /// Absolute position and look of any entity.
+    EntityPos {
+        entity_id: i32,
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+        pitch: f32,
+        on_ground: bool,
+    },
+    /// Which way an entity's head points.
+    EntityHead { entity_id: i32, yaw: f32 },
+    /// Set an entity's velocity — for the player it describes, a knockback.
+    EntityVelocity {
+        entity_id: i32,
+        velocity: (f64, f64, f64),
+    },
+    /// Arm swing (0 main hand, 3 offhand), critical hit (4), ...
+    EntityAnimation { entity_id: i32, animation: u8 },
+    /// Entity status byte: 3 death, 9 finished eating, ...
+    EntityStatus { entity_id: i32, status: i8 },
+    /// An entity was hurt: red flash, hurt sound, camera tilt for a player.
+    Damage {
+        entity_id: i32,
+        /// Damage type, `minecraft:`-qualified (`minecraft:mob_attack`).
+        source: &'static str,
+        attacker: Option<i32>,
+    },
+    /// An item entity flew into `collector`.
+    Collect {
+        item: i32,
+        collector: i32,
+        count: u8,
+    },
+    /// What an entity is holding and wearing: `(slot, stack)` where slot is
+    /// 0 main hand, 1 offhand, 2 boots, 3 leggings, 4 chestplate, 5 helmet.
+    Equipment {
+        entity_id: i32,
+        slots: Vec<(u8, Option<crate::inventory::Stack>)>,
+    },
+    /// The player's own health and hunger.
+    Health {
+        health: f32,
+        food: i32,
+        saturation: f32,
+    },
+    /// The player's own experience bar.
+    Experience { bar: f32, level: i32, total: i32 },
+    /// World age and time of day, in ticks.
+    Time { age: i64, time_of_day: i64 },
+    /// Every slot of a window plus the stack on the cursor.
+    WindowContents {
+        window_id: u8,
+        state_id: i32,
+        slots: Vec<Option<crate::inventory::Stack>>,
+        cursor: Option<crate::inventory::Stack>,
+    },
+    /// Open a game window (crafting table, chest, furnace).
+    OpenWindow {
+        window_id: u8,
+        menu: Menu,
+        title: String,
+    },
+    /// Close a window from the server's side.
+    CloseWindow(u8),
+    /// A window property — a furnace's flame and arrow.
+    WindowProperty {
+        window_id: u8,
+        property: i16,
+        value: i16,
+    },
+    /// A level event: 2001 is block-break particles and sound for `data`
+    /// (a block state).
+    WorldEvent {
+        event: i32,
+        x: i32,
+        y: i32,
+        z: i32,
+        data: i32,
+    },
+    /// Cracks on a block somebody is mining, `0..=9`, anything else clears.
+    BreakAnimation {
+        entity_id: i32,
+        x: i32,
+        y: i32,
+        z: i32,
+        stage: i8,
+    },
+    /// Bring a dead player back.
+    Respawn { game_mode: GameMode },
+    /// Switch the player's game mode (and the abilities that come with it).
+    GameModeChange(GameMode),
+    /// Select a hotbar slot on the client.
+    SetHeldSlot(u8),
+    /// Move the player themselves.
+    Teleport {
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+        pitch: f32,
+    },
+    /// The death screen's message.
+    DeathMessage { entity_id: i32, text: String },
+    /// An explosion: sound, particles, and a push for the player it is sent
+    /// to.
+    Explosion {
+        x: f64,
+        y: f64,
+        z: f64,
+        radius: f32,
+        knockback: Option<(f64, f64, f64)>,
+    },
+    /// A sound at a position, by its `minecraft:` sound event name.
+    Sound {
+        name: &'static str,
+        category: u8,
+        x: f64,
+        y: f64,
+        z: f64,
+        volume: f32,
+        pitch: f32,
+    },
+}
+
+/// A game window's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Menu {
+    /// 3×3 crafting.
+    Crafting,
+    /// A single chest, 27 slots.
+    Chest,
+    /// A furnace.
+    Furnace,
+}
+
+/// One entity-metadata value, in neutral terms.
+#[derive(Debug, Clone)]
+pub enum MetaValue {
+    Byte(i8),
+    VarInt(i32),
+    Float(f32),
+    Item(Option<crate::inventory::Stack>),
+    /// An entity pose: 0 standing, 5 crouching, 7 dying.
+    Pose(i32),
 }
 
 /// What a client asked for, parsed out of its version's packets.
@@ -277,15 +483,39 @@ pub enum ClientEvent {
         item: Option<String>,
         count: u8,
     },
-    /// The player clicked slot `slot` of an open container.
-    ///
-    /// Only the slot survives translation. Buttons and drag modes are
-    /// deliberately collapsed: the stash window treats every click the same,
-    /// and a window whose behaviour depends on which mouse button was used is
-    /// a window players get wrong.
-    ContainerClick { slot: i16 },
     /// The player closed the open container.
     ContainerClose,
+    /// Started mining a block (survival), or broke it outright (creative).
+    StartDig { x: i32, y: i32, z: i32, seq: i32 },
+    /// Gave up mining.
+    CancelDig { seq: i32 },
+    /// Throw the held item: one, or the whole stack.
+    DropHeld { all: bool },
+    /// Stopped using an item (eating, drawing a bow).
+    ReleaseUse,
+    /// Swap main hand and offhand.
+    SwapHands,
+    /// Right-click with an item, not at a block.
+    UseItem { hand: u8, seq: i32 },
+    /// Hit (`attack`) or use an entity.
+    Interact { target: i32, attack: bool },
+    /// Arm swing.
+    Swing { hand: u8 },
+    /// Started or stopped sprinting.
+    Sprint(bool),
+    /// The movement keys; only sneaking is acted on.
+    Input { sneak: bool },
+    /// The respawn button on the death screen.
+    Respawn,
+    /// A click in a window, as the protocol describes it.
+    WindowClick {
+        window: u8,
+        slot: i16,
+        button: i8,
+        mode: i32,
+    },
+    /// Middle-click on a block (creative pick).
+    PickBlock { x: i32, y: i32, z: i32 },
     /// Anything this server does not act on (keep-alive replies, animations,
     /// ...).
     Ignored,
@@ -408,6 +638,14 @@ pub trait ProtocolCodec: Sync + Send {
         false
     }
 
+    /// Whether this codec renders the gameplay events — entities, combat,
+    /// windows, health — so the server can run survival authoritatively for
+    /// this client. Versions that do not keep the older, client-trusting
+    /// subset.
+    fn full_gameplay(&self) -> bool {
+        false
+    }
+
     /// The items this codec puts in the hotbar at join, slot `0..9`, as
     /// `(name, count)`.
     ///
@@ -527,7 +765,6 @@ mod tests {
         assert!(codec_for(1).is_none(), "unknown protocol must not resolve");
     }
 }
-
 
 /// Decode the VarInt that ends `body`.
 ///

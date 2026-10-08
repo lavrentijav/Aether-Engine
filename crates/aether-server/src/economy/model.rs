@@ -120,14 +120,16 @@ impl Listing {
 
     /// Whether this offer is still open at `now_ms`.
     pub fn is_open(&self, now_ms: u64) -> bool {
-        self.count > 0 && self.expires_ms.is_none_or(|e| e > now_ms)
+        self.count > 0 && self.expires_ms.map_or(true, |e| e > now_ms)
     }
 
     /// A one-line description for the market window.
     pub fn describe(&self, now_ms: u64) -> String {
         let short = self.item.split_once(':').map_or(&*self.item, |(_, n)| n);
         let left = match self.expires_ms {
-            Some(e) if e > now_ms => format!(" ({} left)", crate::economy::model::until(e - now_ms)),
+            Some(e) if e > now_ms => {
+                format!(" ({} left)", crate::economy::model::until(e - now_ms))
+            }
             Some(_) => " (expired)".to_string(),
             None => String::new(),
         };

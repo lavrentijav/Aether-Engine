@@ -10,7 +10,7 @@ use std::io;
 
 use super::{json_escape, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::players::{PlayerHandle, PosLook};
-use crate::proto::{Conn, read_packet, PacketIn, PacketOut, RawPacket};
+use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 
 /// Vanilla item ids handed to every player's hotbar so they can actually
 /// build: this server sends no real inventory, and a client holding nothing
@@ -156,6 +156,8 @@ impl ProtocolCodec for Codec {
                     .u8(0); // position: normal chat
                 vec![p]
             }
+            // Gameplay events this version does not render.
+            _ => Vec::new(),
         }
     }
 
@@ -246,7 +248,7 @@ impl ProtocolCodec for Codec {
                     z: bz + dz,
                     block,
                     seq: 0,
-                    face: face as u8,
+                    face,
                     // No cursor on this codec's wire yet; the centre of
                     // the face is what a client clicking normally sends.
                     cursor: (0.5, 0.5, 0.5),
@@ -397,6 +399,22 @@ fn decode_position(v: i64) -> (i32, i32, i32) {
     )
 }
 
+/// How much to add to an engine Y to get one this version's client can hold.
+///
+/// The engine's world runs `-64..=319`, the modern range. This version's client
+/// has no concept of a negative Y — its world is `0..=255` — so the whole
+/// column is shifted up by 64 on the way out and back down on the way in. A
+/// player standing on bedrock sees `y = 0`, which is what they expect, and the
+/// server still knows they are at `-64`.
+///
+/// This is the one version where the range genuinely cannot be widened. 1.8's
+/// chunk packet carries its section bitmask as a **`u16`** — sixteen sections,
+/// 256 blocks — and there is no dimension type to say otherwise, so `0..=255`
+/// is a protocol limit rather than a choice. Shifted by 64 it shows the engine's
+/// `-64..=191`; the 192 blocks above that are not sent. Clipping the sky is the
+/// least damaging place to lose them.
+pub const Y_OFFSET: i32 = 64;
+
 #[cfg(test)]
 mod tests {
 
@@ -478,19 +496,3 @@ mod tests {
         assert_eq!(s, "c1bb91ad-ab62-3f9f-8ab7-78f49746acf0");
     }
 }
-
-/// How much to add to an engine Y to get one this version's client can hold.
-///
-/// The engine's world runs `-64..=319`, the modern range. This version's client
-/// has no concept of a negative Y — its world is `0..=255` — so the whole
-/// column is shifted up by 64 on the way out and back down on the way in. A
-/// player standing on bedrock sees `y = 0`, which is what they expect, and the
-/// server still knows they are at `-64`.
-///
-/// This is the one version where the range genuinely cannot be widened. 1.8's
-/// chunk packet carries its section bitmask as a **`u16`** — sixteen sections,
-/// 256 blocks — and there is no dimension type to say otherwise, so `0..=255`
-/// is a protocol limit rather than a choice. Shifted by 64 it shows the engine's
-/// `-64..=191`; the 192 blocks above that are not sent. Clipping the sky is the
-/// least damaging place to lose them.
-pub const Y_OFFSET: i32 = 64;

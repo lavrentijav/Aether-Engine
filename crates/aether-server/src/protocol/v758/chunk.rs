@@ -129,7 +129,8 @@ fn motion_blocking(cx: i32, cz: i32, world: &dyn BlockSource) -> Vec<i64> {
         for x in 0..AXIS {
             let mut h = 0u32;
             for y in (MIN_Y..MIN_Y + HEIGHT).rev() {
-                if world.block_at(cx * AXIS + x, y, cz * AXIS + z) != aether_world::BlockStateId::AIR
+                if world.block_at(cx * AXIS + x, y, cz * AXIS + z)
+                    != aether_world::BlockStateId::AIR
                 {
                     h = (y - MIN_Y + 1) as u32;
                     break;
@@ -361,7 +362,9 @@ mod tests {
         // The whole packet, decoded as a client does: all sections present in
         // order, every block back where the world put it.
         let mut wire = Vec::new();
-        chunk_data_packet(0x22, 3, -5, &Flat).write_to(&mut wire, None).unwrap();
+        chunk_data_packet(0x22, 3, -5, &Flat)
+            .write_to(&mut wire, None)
+            .unwrap();
 
         let mut pos = 0usize;
         let _frame = read_varint(&wire, &mut pos);
@@ -415,7 +418,9 @@ mod tests {
     fn unload_packet_puts_x_before_z() {
         // 1.21 reversed this; copying the newer codec would swap the column.
         let mut wire = Vec::new();
-        unload_chunk_packet(0x1D, 3, -5).write_to(&mut wire, None).unwrap();
+        unload_chunk_packet(0x1D, 3, -5)
+            .write_to(&mut wire, None)
+            .unwrap();
         let body = &wire[2..];
         assert_eq!(i32::from_be_bytes(body[0..4].try_into().unwrap()), 3);
         assert_eq!(i32::from_be_bytes(body[4..8].try_into().unwrap()), -5);

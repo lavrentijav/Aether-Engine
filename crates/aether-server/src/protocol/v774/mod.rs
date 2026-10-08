@@ -18,6 +18,7 @@
 pub mod chunk;
 pub mod inventory;
 pub mod items;
+pub mod play;
 pub mod registry;
 
 use std::io;
@@ -26,7 +27,7 @@ use aether_world::BlockStateId;
 
 use super::{BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::players::PosLook;
-use crate::proto::{Conn, read_packet, PacketIn, PacketOut, RawPacket};
+use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 
 // --- Packet ids (1.21.11) ---
 const LOGIN_SUCCESS: i32 = 0x02;
@@ -124,6 +125,20 @@ const SB_BLOCK_DIG: i32 = 0x28;
 const SB_BLOCK_PLACE: i32 = 0x3F;
 /// Serverbound: a click inside an open container.
 const SB_WINDOW_CLICK: i32 = 0x11;
+/// Serverbound: respawn / statistics request.
+const SB_CLIENT_COMMAND: i32 = 0x0B;
+/// Serverbound: attack or use an entity.
+const SB_USE_ENTITY: i32 = 0x19;
+/// Serverbound: creative middle-click on a block.
+const SB_PICK_BLOCK: i32 = 0x23;
+/// Serverbound: sprinting and friends.
+const SB_ENTITY_ACTION: i32 = 0x29;
+/// Serverbound: the movement keys, sneaking among them since 1.21.6.
+const SB_PLAYER_INPUT: i32 = 0x2A;
+/// Serverbound: arm swing.
+const SB_ARM_ANIMATION: i32 = 0x3C;
+/// Serverbound: right-click with an item in the air.
+const SB_USE_ITEM: i32 = 0x40;
 /// Serverbound: the player closed a container.
 const SB_CLOSE_WINDOW: i32 = 0x12;
 
@@ -147,7 +162,7 @@ const META_END: u8 = 0xFF;
 
 /// Stable id for the pack this server offers, so a client can tell a repeat
 /// offer from a new one across reconnects.
-const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_000000000001;
+const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_0000_0000_0001;
 
 /// The 1.21.11 codec.
 pub struct Codec;
@@ -289,16 +304,19 @@ impl ProtocolCodec for Codec {
         // client that starts already flying never enters the swimming state,
         // and submerging with no underwater view is exactly the symptom
         // reported. Let the player choose to fly instead.
+        let flags = match p.game_mode {
+            super::GameMode::Creative => 0x01 | 0x04 | 0x08, // invulnerable | allow flying | creative
+            super::GameMode::Survival => 0,
+        };
         PacketOut::new(PLAY_ABILITIES)
-            .u8(0x01 | 0x04 | 0x08) // invulnerable | allow flying | creative
+            .u8(flags)
             .f32(0.05) // flying speed
             .f32(0.10) // walking speed
             .send(s)?;
 
-        // Something to build with. Without this a 1.21 client holds nothing:
-        // the placement packet names only the hand, so an empty hotbar means
-        // no placement can be attributed to a block at all.
-        inventory::window_items_packet(PLAY_WINDOW_ITEMS).send(s)?;
+        // The inventory itself follows from the session, which owns it: the
+        // server's copy is authoritative and is sent whole once the player
+        // is registered.
         inventory::held_item_packet(PLAY_HELD_ITEM, 0).send(s)?;
 
         // Full health and food. This server models neither, so the values are
@@ -482,10 +500,10 @@ impl ProtocolCodec for Codec {
                 // a bare tag with no name — where 1.8 sent a JSON string. A
                 // plain string tag is a valid component on its own.
                 let mut p = PacketOut::new(PLAY_SYSTEM_CHAT);
-                p.bytes(&super::nbt::string(text).to_network())
-                    .bool(false); // not an action-bar overlay
+                p.bytes(&super::nbt::string(text).to_network()).bool(false); // not an action-bar overlay
                 vec![p]
             }
+            other => play::encode(other).unwrap_or_default(),
         }
     }
 
@@ -521,6 +539,10 @@ impl ProtocolCodec for Codec {
     }
 
     fn supports_containers(&self) -> bool {
+        true
+    }
+
+    fn full_gameplay(&self) -> bool {
         true
     }
 
@@ -612,14 +634,65 @@ impl ProtocolCodec for Codec {
                 let Ok(status) = pin.var_int() else {
                     return ClientEvent::Ignored;
                 };
-                if status != 0 && status != 2 {
-                    return ClientEvent::Ignored;
-                }
                 let Ok(packed) = pin.i64() else {
                     return ClientEvent::Ignored;
                 };
                 let (x, y, z) = decode_position(packed);
-                ClientEvent::Dig { x, y, z, seq }
+                match status {
+                    0 => ClientEvent::StartDig { x, y, z, seq },
+                    1 => ClientEvent::CancelDig { seq },
+                    2 => ClientEvent::Dig { x, y, z, seq },
+                    3 => ClientEvent::DropHeld { all: true },
+                    4 => ClientEvent::DropHeld { all: false },
+                    5 => ClientEvent::ReleaseUse,
+                    6 => ClientEvent::SwapHands,
+                    _ => ClientEvent::Ignored,
+                }
+            }
+            SB_CLIENT_COMMAND => match pin.var_int() {
+                Ok(0) => ClientEvent::Respawn,
+                _ => ClientEvent::Ignored,
+            },
+            SB_USE_ENTITY => {
+                let (Ok(target), Ok(mouse)) = (pin.var_int(), pin.var_int()) else {
+                    return ClientEvent::Ignored;
+                };
+                if mouse == 2 {
+                    let _ = (pin.f32(), pin.f32(), pin.f32());
+                }
+                ClientEvent::Interact {
+                    target,
+                    attack: mouse == 1,
+                }
+            }
+            SB_PICK_BLOCK => match pin.i64() {
+                Ok(packed) => {
+                    let (x, y, z) = decode_position(packed);
+                    ClientEvent::PickBlock { x, y, z }
+                }
+                Err(_) => ClientEvent::Ignored,
+            },
+            SB_ENTITY_ACTION => {
+                let _ = pin.var_int();
+                match pin.var_int() {
+                    Ok(1) => ClientEvent::Sprint(true),
+                    Ok(2) => ClientEvent::Sprint(false),
+                    _ => ClientEvent::Ignored,
+                }
+            }
+            SB_PLAYER_INPUT => match pin.u8() {
+                Ok(flags) => ClientEvent::Input {
+                    sneak: flags & 0x20 != 0,
+                },
+                Err(_) => ClientEvent::Ignored,
+            },
+            SB_ARM_ANIMATION => ClientEvent::Swing {
+                hand: pin.var_int().unwrap_or(0) as u8,
+            },
+            SB_USE_ITEM => {
+                let hand = pin.var_int().unwrap_or(0) as u8;
+                let seq = pin.var_int().unwrap_or(0);
+                ClientEvent::UseItem { hand, seq }
             }
             SB_BLOCK_PLACE => {
                 let Ok(_hand) = pin.var_int() else {
@@ -664,20 +737,24 @@ impl ProtocolCodec for Codec {
                 }
             }
             SB_WINDOW_CLICK => {
-                // windowId, stateId, slot — the rest of the packet (button,
-                // mode, the client's view of what changed) is deliberately
-                // dropped: this server's only container treats every click the
-                // same, and trusting a client's changed-slot list would let it
-                // dictate the container's contents.
-                let Ok(_window) = pin.u8() else {
+                // windowId, stateId, slot, button, mode. The client's own
+                // view of what changed (hashed slots) is deliberately
+                // dropped: the server computes the click itself and sends the
+                // whole window back, so a client cannot dictate contents.
+                let Ok(window) = pin.var_int() else {
                     return ClientEvent::Ignored;
                 };
                 let Ok(_state) = pin.var_int() else {
                     return ClientEvent::Ignored;
                 };
-                match pin.i16() {
-                    Ok(slot) => ClientEvent::ContainerClick { slot },
-                    Err(_) => ClientEvent::Ignored,
+                let (Ok(slot), Ok(button), Ok(mode)) = (pin.i16(), pin.u8(), pin.var_int()) else {
+                    return ClientEvent::Ignored;
+                };
+                ClientEvent::WindowClick {
+                    window: window as u8,
+                    slot,
+                    button: button as i8,
+                    mode,
                 }
             }
             SB_CLOSE_WINDOW => ClientEvent::ContainerClose,
@@ -773,7 +850,11 @@ mod tests {
         }
         // And the two encodings really are different, so a mix-up would show.
         let modern = encode_position(1, 2, 3);
-        assert_ne!(modern, ((1i64) << 38) | (2 << 26) | 3, "must not be 1.8 order");
+        assert_ne!(
+            modern,
+            ((1i64) << 38) | (2 << 26) | 3,
+            "must not be 1.8 order"
+        );
     }
 
     #[test]
@@ -881,7 +962,11 @@ mod tests {
         for _ in 0..3 {
             rest.f64().unwrap();
         }
-        assert_eq!(rest.u8().unwrap(), 0x00, "velocity at rest is one zero byte");
+        assert_eq!(
+            rest.u8().unwrap(),
+            0x00,
+            "velocity at rest is one zero byte"
+        );
     }
 
     #[test]
@@ -1055,8 +1140,9 @@ mod tests {
                 BlockStateId::AIR
             }
         }
-        let slot = crate::protocol::ContainerSlot::block("minecraft:cobblestone", 4000, "cobblestone")
-            .with_quantity();
+        let slot =
+            crate::protocol::ContainerSlot::block("minecraft:cobblestone", 4000, "cobblestone")
+                .with_quantity();
         assert_eq!(slot.wire_count(), 1);
         assert_eq!(slot.label, "cobblestone (x4000)");
 
@@ -1173,7 +1259,11 @@ mod tests {
         let mut seen: HashSet<u32> = HashSet::new();
         for (i, row) in blocks::BLOCKS.iter().enumerate() {
             let state = block_state(BlockStateId(blocks::DEFAULT_STATE[i]));
-            assert!(seen.insert(state), "{} shares a state with another block", row.0);
+            assert!(
+                seen.insert(state),
+                "{} shares a state with another block",
+                row.0
+            );
         }
     }
 
@@ -1181,7 +1271,10 @@ mod tests {
     fn a_block_beyond_the_table_substitutes_rather_than_escaping_the_registry() {
         // Only reachable for a modded block. Handing the client an id outside
         // its own registry disconnects it.
-        assert_eq!(block_state(BlockStateId(999_999)), aether_world::registry::ids::STONE.raw());
+        assert_eq!(
+            block_state(BlockStateId(999_999)),
+            aether_world::registry::ids::STONE.raw()
+        );
     }
 
     #[test]

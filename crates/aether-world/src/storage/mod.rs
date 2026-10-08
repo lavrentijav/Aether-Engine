@@ -329,7 +329,8 @@ impl<B: KvBackend> WorldStorage<B> {
     /// columns and leaves holes in the world, so completion is recorded
     /// explicitly instead.
     pub fn mark_column_generated(&self, cx: i32, cz: i32) -> Result<(), StorageError> {
-        self.backend.put(&column_marker_key(cx, cz), &[MARKER_VERSION])
+        self.backend
+            .put(&column_marker_key(cx, cz), &[MARKER_VERSION])
     }
 
     /// Whether [`Self::mark_column_generated`] has been called for `(cx, cz)`.

@@ -23,7 +23,7 @@ pub mod pager;
 pub mod query;
 
 use aether_api::{JournalActor, Ledger};
-use aether_world::journal::{now_ms, EventBody, Event};
+use aether_world::journal::{now_ms, Event, EventBody};
 use aether_world::BlockStateId;
 
 use crate::players::{PlayerHandle, SharedRegistry};
@@ -62,6 +62,7 @@ fn usage() -> Reply {
         "  /stash — open the recovered blocks from your last rollback".into(),
         "  /audit — item duplication report".into(),
         "Filters: player:<name> time:30m block:stone action:place radius:20".into(),
+        "Game: /gamemode /time /give /summon /tp /heal /killall (operators), /kill /spawn".into(),
         "Economy:".into(),
         "  /balance [player]  /pay <player> <amount>".into(),
         "  /sell <count> <price> [duration]  — sells what you hold".into(),
@@ -86,9 +87,17 @@ pub fn dispatch(
     let args: Vec<&str> = words.collect();
     // The economy owns its own verbs; it answers `None` for anything else, so
     // a command name never means two things.
-    if let Some(reply) =
-        crate::economy::commands::dispatch(cmd, &args, handle, registry, world, crate::economy::get())
-    {
+    if let Some(lines) = crate::game::commands::dispatch(cmd, &args, handle, registry, world) {
+        return Some(Reply(lines));
+    }
+    if let Some(reply) = crate::economy::commands::dispatch(
+        cmd,
+        &args,
+        handle,
+        registry,
+        world,
+        crate::economy::get(),
+    ) {
         return Some(reply);
     }
     Some(match cmd {
@@ -164,10 +173,9 @@ fn describe(e: &Event, world: &DemoWorld, actor_name: &dyn Fn(u128) -> String) -
             uid.0,
             e.seq
         )),
-        EventBody::ItemDestroy { uid, .. } => Some(format!(
-            "  {ago} item {:032x} destroyed  #{}",
-            uid.0, e.seq
-        )),
+        EventBody::ItemDestroy { uid, .. } => {
+            Some(format!("  {ago} item {:032x} destroyed  #{}", uid.0, e.seq))
+        }
     }
 }
 
@@ -342,12 +350,10 @@ fn inventory(handle: &PlayerHandle) -> Reply {
     if inv.is_empty() {
         return Reply::one("the server has you carrying nothing");
     }
-    let mut lines = vec![format!(
-        "Inventory (holding slot {}):",
-        inv.held_slot() + 1
-    )];
+    let mut lines = vec![format!("Inventory (holding slot {}):", inv.held_slot() + 1)];
     for (slot, stack) in inv.occupied() {
-        let where_ = if slot >= crate::inventory::FIRST_HOTBAR && slot < crate::inventory::OFFHAND {
+        let where_ = if (crate::inventory::FIRST_HOTBAR..crate::inventory::OFFHAND).contains(&slot)
+        {
             format!("hotbar {}", slot - crate::inventory::FIRST_HOTBAR + 1)
         } else if slot == crate::inventory::OFFHAND {
             "offhand".to_string()
@@ -365,18 +371,13 @@ fn inventory(handle: &PlayerHandle) -> Reply {
     }
     // Anything of theirs on the floor is part of the answer to "what do I
     // have": it is theirs, it is just not in a slot yet.
-    let mine: Vec<crate::ground::Drop> = crate::ground::all()
-        .into_iter()
-        .filter(|d| d.owner == handle.uuid)
-        .collect();
+    let mine = crate::game::entities::owned_items(handle.uuid);
     if !mine.is_empty() {
         lines.push(format!("On the ground ({} stack(s)):", mine.len()));
-        for d in mine {
-            let p = d.pos();
-            let left = crate::ground::DESPAWN_SECS.saturating_sub(d.born.elapsed().as_secs());
+        for (item, count, p, left) in mine {
             lines.push(format!(
-                "  {}x {} at {:.0} {:.0} {:.0} — walk over it ({left}s left)",
-                d.count, d.item, p.x, p.y, p.z
+                "  {count}x {item} at {:.0} {:.0} {:.0} — walk over it ({left}s left)",
+                p.x, p.y, p.z
             ));
         }
     }
@@ -485,7 +486,13 @@ mod tests {
     #[test]
     fn an_empty_query_is_recognised_as_unrestricted() {
         assert!(Query::parse(&[], &ctx()).unwrap().is_unrestricted());
-        for one in ["player:steve", "time:5m", "radius:10", "block:stone", "action:place"] {
+        for one in [
+            "player:steve",
+            "time:5m",
+            "radius:10",
+            "block:stone",
+            "action:place",
+        ] {
             assert!(
                 !Query::parse(&[one], &ctx()).unwrap().is_unrestricted(),
                 "{one} should restrict the query"

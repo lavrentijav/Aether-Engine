@@ -113,7 +113,10 @@ fn upper_half(ctx: &Context) -> bool {
 pub fn upper_half_of(state: BlockStateId) -> Option<BlockStateId> {
     let (id, _) = blocks::block_of_state(state)?;
     let two_tall = props::schema_of(id).any(|(n, vals)| {
-        n == "half" && vals.iter().any(|v| props::VALUE_STRINGS[*v as usize] == "upper")
+        n == "half"
+            && vals
+                .iter()
+                .any(|v| props::VALUE_STRINGS[*v as usize] == "upper")
     });
     if !two_tall {
         return None;
@@ -144,8 +147,8 @@ pub fn state_for(block: BlockStateId, ctx: &Context) -> BlockStateId {
         props::schema_of(id).any(|(n, vals)| {
             n == name
                 && vals.iter().any(|v| {
-                    props::VALUE_STRINGS[props::VALUES[*v as usize..].first().copied().unwrap_or(0)
-                        as usize]
+                    props::VALUE_STRINGS
+                        [props::VALUES[*v as usize..].first().copied().unwrap_or(0) as usize]
                         == value
                 })
         })
@@ -172,9 +175,7 @@ pub fn state_for(block: BlockStateId, ctx: &Context) -> BlockStateId {
 
     // Which way it points.
     if has("facing") {
-        let want = if props::schema_of(id).any(|(n, vals)| {
-            n == "facing" && vals.len() > 4
-        }) {
+        let want = if props::schema_of(id).any(|(n, vals)| n == "facing" && vals.len() > 4) {
             // Six-way facing (pistons, observers, droppers, end rods): vanilla
             // uses the direction the player is *looking*, not the face — which
             // is why a piston placed while looking down points down even when
@@ -225,7 +226,10 @@ pub fn state_for(block: BlockStateId, ctx: &Context) -> BlockStateId {
         chosen.push((
             "half",
             if props::schema_of(id).any(|(n, vals)| {
-                n == "half" && vals.iter().any(|v| props::VALUE_STRINGS[*v as usize] == "lower")
+                n == "half"
+                    && vals
+                        .iter()
+                        .any(|v| props::VALUE_STRINGS[*v as usize] == "lower")
             }) {
                 "lower"
             } else if upper {
@@ -282,9 +286,7 @@ fn looking(yaw: f32, pitch: f32) -> &'static str {
 /// characters are `pdoor`.
 fn faces_the_players_own_way(block: u16) -> bool {
     let name = blocks::BLOCKS[block as usize].0;
-    name.ends_with("_stairs")
-        || name.ends_with("_door")
-        || name.ends_with("_fence_gate")
+    name.ends_with("_stairs") || name.ends_with("_door") || name.ends_with("_fence_gate")
 }
 
 /// The opposite of any of the six directions.
@@ -342,7 +344,12 @@ mod tests {
         // `StairBlock.getStateForPlacement` calls `getHorizontalDirection()`
         // with no `.getOpposite()` — verified in the 1.21.11 server's own
         // bytecode. This test asserted the opposite until that was checked.
-        for (yaw, want) in [(0.0, "south"), (90.0, "west"), (180.0, "north"), (270.0, "east")] {
+        for (yaw, want) in [
+            (0.0, "south"),
+            (90.0, "west"),
+            (180.0, "north"),
+            (270.0, "east"),
+        ] {
             let s = place("minecraft:oak_stairs", ctx(yaw, 1, 1.0));
             assert!(s.contains(&format!("facing={want}")), "yaw {yaw}: {s}");
         }
@@ -397,11 +404,19 @@ mod tests {
     fn tall_plants_are_two_blocks_too_and_ordinary_ones_are_not() {
         // Data-driven, so the same rule that makes a door two tall makes a
         // sunflower two tall — with no list to keep in step.
-        for tall in ["minecraft:sunflower", "minecraft:tall_grass", "minecraft:large_fern"] {
+        for tall in [
+            "minecraft:sunflower",
+            "minecraft:tall_grass",
+            "minecraft:large_fern",
+        ] {
             let s = blocks::default_state(tall).unwrap();
             assert!(upper_half_of(s).is_some(), "{tall} should be two tall");
         }
-        for short in ["minecraft:stone", "minecraft:oak_stairs", "minecraft:oak_slab"] {
+        for short in [
+            "minecraft:stone",
+            "minecraft:oak_stairs",
+            "minecraft:oak_slab",
+        ] {
             let s = blocks::default_state(short).unwrap();
             assert!(upper_half_of(s).is_none(), "{short} is one block");
         }
@@ -414,7 +429,11 @@ mod tests {
         // and AbstractFurnaceBlock call .getOpposite() on it. Getting this
         // backwards makes every staircase run the wrong way.
         let c = ctx(0.0, 1, 1.0); // yaw 0 is south
-        for direct in ["minecraft:oak_stairs", "minecraft:oak_door", "minecraft:oak_fence_gate"] {
+        for direct in [
+            "minecraft:oak_stairs",
+            "minecraft:oak_door",
+            "minecraft:oak_fence_gate",
+        ] {
             let s = place(direct, c);
             assert!(s.contains("facing=south"), "{direct}: {s}");
         }
@@ -442,9 +461,15 @@ mod tests {
         let mut c = ctx(0.0, 4, 0.5);
         assert!(place("minecraft:piston", c).contains("facing=north"));
         c.pitch = 80.0;
-        assert!(place("minecraft:piston", c).contains("facing=up"), "looking down");
+        assert!(
+            place("minecraft:piston", c).contains("facing=up"),
+            "looking down"
+        );
         c.pitch = -80.0;
-        assert!(place("minecraft:piston", c).contains("facing=down"), "looking up");
+        assert!(
+            place("minecraft:piston", c).contains("facing=down"),
+            "looking up"
+        );
     }
 
     #[test]
@@ -647,7 +672,10 @@ mod interaction_tests {
             panic!()
         };
         let n = name(open);
-        assert!(n.contains("facing=east") && n.contains("hinge=right"), "{n}");
+        assert!(
+            n.contains("facing=east") && n.contains("hinge=right"),
+            "{n}"
+        );
     }
 
     #[test]
@@ -745,7 +773,13 @@ fn can_take_shape(
 ///
 /// Computed at placement, which is where vanilla computes it too, and again
 /// whenever a neighbour changes — see [`neighbour_updates`].
-pub fn stair_shape(state: BlockStateId, x: i32, y: i32, z: i32, get: &Neighbours<'_>) -> BlockStateId {
+pub fn stair_shape(
+    state: BlockStateId,
+    x: i32,
+    y: i32,
+    z: i32,
+    get: &Neighbours<'_>,
+) -> BlockStateId {
     if !is_stairs(state) {
         return state;
     }
@@ -761,9 +795,8 @@ pub fn stair_shape(state: BlockStateId, x: i32, y: i32, z: i32, get: &Neighbours
         let corner = is_stairs(front)
             && prop_of(front, "half") == Some(half)
             && front_facing.is_some_and(|f| !same_axis(f, facing))
-            && front_facing.is_some_and(|f| {
-                can_take_shape(facing, half, x, y, z, opposite(f), get)
-            });
+            && front_facing
+                .is_some_and(|f| can_take_shape(facing, half, x, y, z, opposite(f), get));
         if corner {
             if front_facing == Some(ccw) {
                 Some("outer_left")
@@ -1086,13 +1119,7 @@ const HORIZONTAL: [&str; 4] = ["north", "east", "south", "west"];
 ///
 /// Returns the state unchanged for blocks whose shape is not a function of
 /// their neighbours, which is nearly all of them.
-pub fn reshape(
-    state: BlockStateId,
-    x: i32,
-    y: i32,
-    z: i32,
-    get: &Neighbours<'_>,
-) -> BlockStateId {
+pub fn reshape(state: BlockStateId, x: i32, y: i32, z: i32, get: &Neighbours<'_>) -> BlockStateId {
     let name = block_name(state);
     if is_stairs(state) {
         return stair_shape(state, x, y, z, get);
@@ -1307,7 +1334,11 @@ mod neighbour_tests {
         let mid = reshape(b("minecraft:cobblestone_wall"), 0, 0, 0, &w.get());
         assert_eq!(prop_of(mid, "north"), Some("low"));
         assert_eq!(prop_of(mid, "south"), Some("low"));
-        assert_eq!(prop_of(mid, "up"), Some("false"), "a straight run has no post");
+        assert_eq!(
+            prop_of(mid, "up"),
+            Some("false"),
+            "a straight run has no post"
+        );
 
         // Bend it: the same block with one arm going east keeps the post.
         let mut m = HashMap::new();

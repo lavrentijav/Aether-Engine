@@ -39,20 +39,20 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use aether_world::storage::format::{deserialize_subchunk, serialize_subchunk};
-use aether_worldgen::{ChunkGenerator, GeneratedColumn};
+use aether_worldgen::{ChunkGenerator, ColumnBiomes, GeneratedColumn};
 
 /// Bump this whenever the generator's output changes for the same seed.
 ///
 /// It is part of the cache directory's name, so bumping it orphans every old
 /// entry instead of serving terrain the current generator would not produce.
-pub const GEN_REVISION: u32 = 2;
+pub const GEN_REVISION: u32 = 3;
 
 /// How long a half-written `.tmp` file is left alone before the sweep treats
 /// it as debris from a crash rather than a write in progress.
 const TMP_GRACE: Duration = Duration::from_secs(600);
 
 /// The on-disk format's own version, independent of the terrain's.
-const FORMAT_MAGIC: &[u8; 4] = b"AGC1";
+const FORMAT_MAGIC: &[u8; 4] = b"AGC2";
 
 /// How the cache is sized and aged.
 #[derive(Debug, Clone)]
@@ -95,7 +95,15 @@ pub struct Cached<G> {
     dir: Option<PathBuf>,
     ttl: Duration,
     stats: Arc<CacheStats>,
+    /// Biomes of recently generated columns. The world keeps a column's
+    /// blocks but not its biomes, so they are remembered here for the chunk
+    /// encoder; bounded, and a forgotten column falls back to plains.
+    biomes:
+        std::sync::Mutex<std::collections::HashMap<(i32, i32), Arc<aether_worldgen::ColumnBiomes>>>,
 }
+
+/// How many columns' biomes are remembered.
+const BIOME_MEMORY: usize = 20_000;
 
 impl<G: ChunkGenerator> Cached<G> {
     /// Wrap `inner`, creating the cache directory for `seed`.
@@ -125,6 +133,22 @@ impl<G: ChunkGenerator> Cached<G> {
             dir,
             ttl: cfg.ttl,
             stats,
+            biomes: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// The biomes of column `(cx, cz)`, if it was generated recently.
+    pub fn biomes(&self, cx: i32, cz: i32) -> Option<Arc<aether_worldgen::ColumnBiomes>> {
+        self.biomes.lock().unwrap().get(&(cx, cz)).cloned()
+    }
+
+    fn remember(&self, cx: i32, cz: i32, column: &GeneratedColumn) {
+        if let Some(b) = &column.biomes {
+            let mut m = self.biomes.lock().unwrap();
+            if m.len() >= BIOME_MEMORY {
+                m.clear();
+            }
+            m.insert((cx, cz), Arc::new(b.clone()));
         }
     }
 
@@ -205,11 +229,13 @@ impl<G: ChunkGenerator> ChunkGenerator for Cached<G> {
         if let Some(path) = &path {
             if let Some(column) = self.read(path) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                self.remember(cx, cz, &column);
                 return column;
             }
         }
         self.stats.misses.fetch_add(1, Ordering::Relaxed);
         let column = self.inner.generate_column(cx, cz);
+        self.remember(cx, cz, &column);
         if let Some(path) = &path {
             self.write(path, &column);
         }
@@ -217,7 +243,10 @@ impl<G: ChunkGenerator> ChunkGenerator for Cached<G> {
     }
 }
 
-/// `AGC1`, a section count, then `(cy, length, bytes)` per section.
+/// `AGC2`, a section count, then `(cy, length, bytes)` per section, then the
+/// biomes: a presence byte and, when present, the first section Y, the
+/// palette (`u16` count, then `u8`-length-prefixed names) and 64 palette
+/// indices per section (`u16` count).
 fn encode(column: &GeneratedColumn) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(FORMAT_MAGIC);
@@ -228,7 +257,63 @@ fn encode(column: &GeneratedColumn) -> Vec<u8> {
         out.extend_from_slice(&(body.len() as u32).to_le_bytes());
         out.extend_from_slice(&body);
     }
+    match &column.biomes {
+        None => out.push(0),
+        Some(b) => {
+            out.push(1);
+            out.push(b.min_section_y as u8);
+            out.extend_from_slice(&(b.palette.len() as u16).to_le_bytes());
+            for name in &b.palette {
+                out.push(name.len().min(255) as u8);
+                out.extend_from_slice(&name.as_bytes()[..name.len().min(255)]);
+            }
+            out.extend_from_slice(&(b.sections.len() as u16).to_le_bytes());
+            for sec in &b.sections {
+                out.extend_from_slice(sec);
+            }
+        }
+    }
     out
+}
+
+fn decode_biomes(buf: &[u8], pos: &mut usize) -> Option<Option<ColumnBiomes>> {
+    let flag = *buf.get(*pos)?;
+    *pos += 1;
+    if flag == 0 {
+        return Some(None);
+    }
+    let min_section_y = *buf.get(*pos)? as i8;
+    let n = u16::from_le_bytes(buf.get(*pos + 1..*pos + 3)?.try_into().ok()?) as usize;
+    *pos += 3;
+    if n > buf.len().saturating_sub(*pos) {
+        return None;
+    }
+    let mut palette = Vec::with_capacity(n);
+    for _ in 0..n {
+        let len = *buf.get(*pos)? as usize;
+        let name = std::str::from_utf8(buf.get(*pos + 1..*pos + 1 + len)?).ok()?;
+        palette.push(name.to_string());
+        *pos += 1 + len;
+    }
+    let count = u16::from_le_bytes(buf.get(*pos..*pos + 2)?.try_into().ok()?) as usize;
+    *pos += 2;
+    if count > buf.len().saturating_sub(*pos) / 64 {
+        return None;
+    }
+    let mut sections = Vec::with_capacity(count);
+    for _ in 0..count {
+        let sec: [u8; 64] = buf.get(*pos..*pos + 64)?.try_into().ok()?;
+        if sec.iter().any(|i| *i as usize >= palette.len()) {
+            return None;
+        }
+        sections.push(sec);
+        *pos += 64;
+    }
+    Some(Some(ColumnBiomes {
+        min_section_y,
+        palette,
+        sections,
+    }))
 }
 
 /// The inverse. `None` for anything that does not decode cleanly — a cache
@@ -238,6 +323,12 @@ fn decode(buf: &[u8]) -> Option<GeneratedColumn> {
         return None;
     }
     let count = u32::from_le_bytes(buf[4..8].try_into().ok()?) as usize;
+    // The count is untrusted: every section takes at least five bytes, and a
+    // column has at most 256 of them, so anything claiming more is corrupt —
+    // and must be rejected *before* it sizes an allocation.
+    if count > 256 || count > (buf.len() - 8) / 5 {
+        return None;
+    }
     let mut pos = 8;
     let mut sections = Vec::with_capacity(count);
     for _ in 0..count {
@@ -251,11 +342,12 @@ fn decode(buf: &[u8]) -> Option<GeneratedColumn> {
         pos += len;
         sections.push((cy, deserialize_subchunk(body).ok()?));
     }
+    let biomes = decode_biomes(buf, &mut pos)?;
     // Trailing bytes mean this is not the file we think it is.
     if pos != buf.len() {
         return None;
     }
-    Some(GeneratedColumn { sections })
+    Some(GeneratedColumn { sections, biomes })
 }
 
 /// Delete expired entries, and the oldest ones above `max_entries`.
@@ -320,7 +412,10 @@ fn spawn_sweeper(dir: PathBuf, max_entries: usize, ttl: Duration, stats: Arc<Cac
         let n = sweep(&dir, max_entries, ttl);
         if n > 0 {
             stats.evicted.fetch_add(n as u64, Ordering::Relaxed);
-            println!("column cache: swept {n} stale entr{}", if n == 1 { "y" } else { "ies" });
+            println!(
+                "column cache: swept {n} stale entr{}",
+                if n == 1 { "y" } else { "ies" }
+            );
         }
         std::thread::sleep(Duration::from_secs(3600));
     });
@@ -344,6 +439,11 @@ mod tests {
             other.set(0, 0, 0, BlockStateId(7), Default::default());
             GeneratedColumn {
                 sections: vec![(0, sc), (4, other)],
+                biomes: Some(ColumnBiomes {
+                    min_section_y: -4,
+                    palette: vec!["minecraft:plains".into(), "minecraft:river".into()],
+                    sections: vec![[1u8; 64]; 24],
+                }),
             }
         }
     }
@@ -390,7 +490,11 @@ mod tests {
         a.generate_column(0, 0);
         let b = Cached::new(Counting(AtomicUsize::new(0)), 2, &cfg(root.clone()));
         b.generate_column(0, 0);
-        assert_eq!(b.stats.hits.load(Ordering::Relaxed), 0, "seed 2 starts cold");
+        assert_eq!(
+            b.stats.hits.load(Ordering::Relaxed),
+            0,
+            "seed 2 starts cold"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -416,7 +520,7 @@ mod tests {
         let c = Cached::new(Counting(AtomicUsize::new(0)), 1, &cfg(root.clone()));
         c.generate_column(5, 5);
         let path = c.path(5, 5).unwrap();
-        std::fs::write(&path, b"AGC1\xff\xff\xff\xffgarbage").unwrap();
+        std::fs::write(&path, b"AGC2\xff\xff\xff\xffgarbage").unwrap();
         let again = c.generate_column(5, 5);
         assert_eq!(again.sections.len(), 2, "the generator answered instead");
         assert_eq!(c.stats.rejected.load(Ordering::Relaxed), 1);
@@ -429,6 +533,7 @@ mod tests {
         let column = g.generate_column(3, -4);
         let back = decode(&encode(&column)).expect("round trip");
         assert_eq!(back.sections.len(), column.sections.len());
+        assert_eq!(back.biomes, column.biomes, "biomes survive too");
     }
 
     #[test]
@@ -436,7 +541,9 @@ mod tests {
         assert!(decode(b"").is_none());
         assert!(decode(b"NOPE\0\0\0\0").is_none());
         // Right magic, claims one section, has none.
-        assert!(decode(b"AGC1\x01\x00\x00\x00").is_none());
+        assert!(decode(b"AGC2\x01\x00\x00\x00").is_none());
+        // An older format is a miss, not a misread.
+        assert!(decode(b"AGC1\x00\x00\x00\x00").is_none());
     }
 
     /// Regression: the startup sweep used to delete every non-`.col` file it

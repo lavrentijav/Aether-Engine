@@ -174,7 +174,7 @@ mod tests {
         // A typo in a block name is a row that can never pay out, and nothing
         // else would ever report it.
         for (name, value) in VALUES {
-            assert!(*&value > 0, "{name} is in the table but pays nothing");
+            assert!(value > 0, "{name} is in the table but pays nothing");
             assert!(
                 crate::protocol::v774::items::item_id(name).is_some(),
                 "{name} is not an item in 1.21.11 — is the name right?"

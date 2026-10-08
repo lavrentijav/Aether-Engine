@@ -6,7 +6,7 @@
 >
 > Legend: ✅ done · 🚧 in progress · 📋 planned · ❄️ deferred · ❌ cancelled.
 >
-> Last reviewed: 2026-09-08 · Spec: v1.1
+> Last reviewed: 2026-10-08 · Spec: v1.1
 >
 > Forward-looking architecture ideas not yet built (SIMD cell format refinements, 2D
 > heightmap skipping, LOD/Ultra-Full render modes, a Surface API for LOD mods, Git-like
@@ -61,7 +61,11 @@ server a vanilla 1.8.9 client can connect to.
 | Command tree declared at join ("Declare Commands"), so the server's commands complete and colour in a real client | ✅ |
 | Shape updates when a neighbour changes: fences, walls, panes and stair corners settle both ways, not only towards a block that already existed | ✅ |
 | The vanilla generator serves a live join — 289 columns in ~21 s cold at view radius 8, inside five seconds once cached | ✅ |
-| Vanilla surface rules interpreted from the pack: grass over dirt over stone, deepslate, a bedrock floor, sand and gravel under water (four decoration-only conditions stubbed — see [Known Issues](KNOWN_ISSUES.md)) | 🚧 Preview |
+| Vanilla surface rules interpreted from the pack, all conditions including `temperature`, `steep`, `hole` and badlands banding — 99.9998% of blocks against the game's own surface stage | ✅ |
+| Vanilla carvers (caves, canyons, extra-underground caves) — matched against the game's carver stage | ✅ |
+| Vanilla decoration from the pack's placed features: ores, trees, grass and flowers, sugar cane, kelp and seagrass, lakes, springs, corals, icebergs… — vanilla-like, 99.7% of blocks against a vanilla server world, not position-exact | 🚧 Preview |
+| Per-section biome ids (4×4×4 quart grid) exposed on `GeneratedColumn` and kept by the column cache; the overworld biome table is built in, `biome_data` optional | ✅ |
+| Biomes on the wire (1.21.11): all 65 biomes registered, per-section paletted biome containers; block containers widen past 4 bits / go direct | ✅ |
 | Disk cache for unmodified generated columns, aged out after a day and swept above a cap — never a source of truth, every entry reproducible from the seed (`/cache`) | ✅ |
 | A block is refused where it would be placed inside a player, their own or anyone else's | ✅ |
 | Mining pays by scarcity, only for generator-placed blocks — a position the journal has never seen filled — so place-and-break is not a coin press | ✅ |
@@ -87,10 +91,20 @@ server a vanilla 1.8.9 client can connect to.
 | Player inventories: full 46 slots, per-stack identity, saved to the world store on change and restored on join (`/inv`) | ✅ |
 | Economy in PostgreSQL — balances, `/pay`, listings, auction (`/sell` `/market` `/buy` `/listings` `/unlist`), operator grants (`/econ give`) | ✅ |
 | Economy integrity: every trade in one transaction, `SELECT … FOR UPDATE` on listings, `CHECK (balance >= 0)` | ✅ |
-| Vanilla terrain generation — noise stage bit-exact against the game (1,179,648/1,179,648 blocks), selectable via `worldgen_data` | 🚧 Preview |
-| …but ~10 s per column, so the server ships on the noise generator; and no surface rules yet, so it is bare stone. See [Known Issues A.8](KNOWN_ISSUES.md) | ❌ |
+| Vanilla terrain generation — noise stage bit-exact against the game (1,179,648/1,179,648 blocks); the default whenever `worldgen_data` is set, ~45 ms noise + ~170 ms per full decorated column | ✅ |
+| Structures, geodes, dungeons, fossils, dripstone and sculk are not generated. See [Known Issues A.8](KNOWN_ISSUES.md) | ❌ |
 | CI (build/test/clippy/fmt) + Criterion bench harness | ✅ |
-| Redstone / async lighting / entities / full staged physics | ❌ Not yet started |
+| **Survival gameplay on 1.21.11** (`game/`): 20 TPS world tick, day/night, hunger, regeneration, starvation, fall/void/lava damage, death screen, inventory dropped on death, respawn | ✅ |
+| Mobs: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider — natural spawning, wander/flee/chase AI, melee, skeleton arrows, creeper explosions, undead burn in daylight, loot and XP | 🚧 Preview |
+| Combat: 1.9 attack cooldown, critical hits, knockback, armour reduction and wear, tool durability, PvP | ✅ |
+| Item entities: block drops from loot tables, Q / drop stack, pickup with the collect animation, merging, 5-minute expiry | ✅ |
+| Server-authoritative windows: every click mode, 2×2 and 3×3 crafting over all 1,359 shaped + shapeless recipes, chests and furnaces persisted as block entities, smelting + fuel | ✅ |
+| Survival mining: vanilla dig times, harvest tools, tool wear; placement consumes items; buckets, hoes, flint and steel, beds (spawn point, skip night), eating, bows | ✅ |
+| Entity tracker: entities spawn/despawn per client by range, updates only to those tracking them | ✅ |
+| Player state persisted (position, health, food, XP, mode, spawn); gameplay commands `/gamemode /time /give /summon /tp /heal /food /killall /kill /spawn /block` | ✅ |
+| Chunks stream on a per-player thread — input is read while the horizon generates | ✅ |
+| Gameplay events on the other 18 codecs (they keep the older subset) | ❌ |
+| Redstone / fluid flow / async lighting / full staged physics | ❌ Not yet started |
 
 ### 📋 What is planned
 Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
@@ -107,7 +121,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 - 🚧 Physics pipeline (basic collision + gravity ✅; SIMD broad-phase, cached environment 📋)
 - 📋 Graph-based redstone (DDG)
 - 📋 Async lighting (cell flood-fill) — `FullBright` fallback ships in the meantime
-- 📋 ECS entities + Flow-Field AI
+- 🚧 Entities + AI — server-side mobs with straight-line AI ship on 1.21.11; ECS storage + Flow-Field still 📋
 - ✅ KV storage (Fjall + Zstd)
 - 📋 Per-world process isolation + work-stealing scheduler
 

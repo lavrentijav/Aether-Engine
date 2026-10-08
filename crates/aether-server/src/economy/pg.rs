@@ -188,16 +188,17 @@ fn transfer(
     // Lock in a fixed order — lower uuid first — so two payments in opposite
     // directions between the same pair cannot deadlock by each holding what
     // the other wants.
-    let (a, b) = if from.0 <= to.0 { (from, to) } else { (to, from) };
+    let (a, b) = if from.0 <= to.0 {
+        (from, to)
+    } else {
+        (to, from)
+    };
     balance_locked(tx, a)?;
     balance_locked(tx, b)?;
 
     let have = balance_locked(tx, from)?;
     if have < amount {
-        return Err(TradeError::Insufficient {
-            need: amount,
-            have,
-        });
+        return Err(TradeError::Insufficient { need: amount, have });
     }
     tx.execute(
         "UPDATE aether_accounts SET balance = balance - $2::text::bigint, updated = now() \
@@ -236,7 +237,9 @@ fn listing_from_row(row: &postgres::Row) -> Listing {
         count: row.get::<_, i64>("count").max(0) as u64,
         unit_price: Money(row.get::<_, i64>("unit_price")),
         created_ms: row.get::<_, i64>("created_ms").max(0) as u64,
-        expires_ms: row.get::<_, Option<i64>>("expires_ms").map(|v| v.max(0) as u64),
+        expires_ms: row
+            .get::<_, Option<i64>>("expires_ms")
+            .map(|v| v.max(0) as u64),
     }
 }
 
@@ -373,7 +376,15 @@ impl Economy for PgEconomy {
                 &[&id.to_string(), &count.to_string()],
             )
             .map_err(db_fail)?;
-            transfer(&mut tx, buyer, listing.seller, cost, "buy", Some(id), &listing.item)?;
+            transfer(
+                &mut tx,
+                buyer,
+                listing.seller,
+                cost,
+                "buy",
+                Some(id),
+                &listing.item,
+            )?;
             tx.commit().map_err(db_fail)?;
             Ok(Purchase {
                 listing: id,
@@ -654,7 +665,10 @@ mod live_tests {
             .unwrap();
         let ids: Vec<i64> = rows.iter().map(|l| l.id).collect();
         assert!(ids.contains(&cheap) && ids.contains(&dear));
-        assert!(!ids.contains(&gone), "a cancelled listing is not on the market");
+        assert!(
+            !ids.contains(&gone),
+            "a cancelled listing is not on the market"
+        );
         let cheap_at = ids.iter().position(|i| *i == cheap).unwrap();
         let dear_at = ids.iter().position(|i| *i == dear).unwrap();
         assert!(cheap_at < dear_at, "cheapest first");
@@ -698,10 +712,7 @@ mod tests {
             "created_ms",
             "expires_ms",
         ] {
-            assert!(
-                LISTING_COLUMNS.contains(field),
-                "{field} is not selected"
-            );
+            assert!(LISTING_COLUMNS.contains(field), "{field} is not selected");
         }
     }
 }

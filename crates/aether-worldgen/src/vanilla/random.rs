@@ -162,7 +162,8 @@ impl PositionalFactory {
 
 /// Vanilla's `Mth.getSeed`: fold a block position into one value.
 fn block_seed(x: i32, y: i32, z: i32) -> u64 {
-    let l = (x.wrapping_mul(3_129_871)) as i64 ^ ((z as i64).wrapping_mul(116_129_781)) ^ (y as i64);
+    let l =
+        (x.wrapping_mul(3_129_871)) as i64 ^ ((z as i64).wrapping_mul(116_129_781)) ^ (y as i64);
     let l = l
         .wrapping_mul(l)
         .wrapping_mul(42_317_861)
@@ -182,7 +183,8 @@ const MD5_S: [u32; 64] = [
 
 /// MD5 digest of `input`.
 pub fn md5(input: &[u8]) -> [u8; 16] {
-    let k: [u32; 64] = std::array::from_fn(|i| ((i as f64 + 1.0).sin().abs() * 4_294_967_296.0) as u32);
+    let k: [u32; 64] =
+        std::array::from_fn(|i| ((i as f64 + 1.0).sin().abs() * 4_294_967_296.0) as u32);
 
     let mut msg = input.to_vec();
     let bit_len = (input.len() as u64).wrapping_mul(8);
@@ -192,12 +194,17 @@ pub fn md5(input: &[u8]) -> [u8; 16] {
     }
     msg.extend_from_slice(&bit_len.to_le_bytes());
 
-    let (mut a0, mut b0, mut c0, mut d0) =
-        (0x6745_2301u32, 0xefcd_ab89u32, 0x98ba_dcfeu32, 0x1032_5476u32);
+    let (mut a0, mut b0, mut c0, mut d0) = (
+        0x6745_2301u32,
+        0xefcd_ab89u32,
+        0x98ba_dcfeu32,
+        0x1032_5476u32,
+    );
 
     for chunk in msg.chunks_exact(64) {
-        let m: [u32; 16] =
-            std::array::from_fn(|i| u32::from_le_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap()));
+        let m: [u32; 16] = std::array::from_fn(|i| {
+            u32::from_le_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap())
+        });
         let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
         for i in 0..64 {
             let (f, g) = match i / 16 {
@@ -206,10 +213,7 @@ pub fn md5(input: &[u8]) -> [u8; 16] {
                 2 => (b ^ c ^ d, (3 * i + 5) % 16),
                 _ => (c ^ (b | !d), (7 * i) % 16),
             };
-            let f2 = f
-                .wrapping_add(a)
-                .wrapping_add(k[i])
-                .wrapping_add(m[g]);
+            let f2 = f.wrapping_add(a).wrapping_add(k[i]).wrapping_add(m[g]);
             a = d;
             d = c;
             c = b;

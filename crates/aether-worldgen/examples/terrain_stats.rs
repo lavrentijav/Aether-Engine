@@ -16,6 +16,9 @@
 //! cargo run -p aether-worldgen --example terrain_stats -- [seed] [radius] [stride]
 //! ```
 
+#![allow(clippy::type_complexity)]
+#![allow(clippy::needless_range_loop)]
+
 use aether_world::registry::ids;
 use aether_world::BlockStateId;
 use aether_worldgen::{ChunkGenerator, GeneratedColumn, NoiseGenerator};
@@ -135,7 +138,10 @@ fn main() {
     let land = total - water_columns;
     let pct = |n: usize| 100.0 * n as f64 / total as f64;
 
-    println!("seed {seed}, {} columns, sea level {sea}, height {height}", total);
+    println!(
+        "seed {seed}, {} columns, sea level {sea}, height {height}",
+        total
+    );
     println!(
         "land   : {:.1}%  ({land} columns)   water: {:.1}%",
         pct(land),

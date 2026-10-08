@@ -210,7 +210,14 @@ mod tests {
     fn neighbours(x: usize, y: usize, z: usize, h: usize) -> Vec<(usize, usize, usize)> {
         let mut out = vec![(x, y, z)];
         let (xi, yi, zi) = (x as i32, y as i32, z as i32);
-        for (dx, dy, dz) in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
+        for (dx, dy, dz) in [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ] {
             let (nx, ny, nz) = (xi + dx, yi + dy, zi + dz);
             if (0..DIM as i32).contains(&nx)
                 && (0..h as i32).contains(&ny)
@@ -255,7 +262,10 @@ mod tests {
             let want = neighbours(x, y, z, h);
             assert_eq!(got.count() as usize, want.len(), "at {x},{y},{z}");
             for (nx, ny, nz) in want {
-                assert!(got.get(nx, ny, nz), "{x},{y},{z} should reach {nx},{ny},{nz}");
+                assert!(
+                    got.get(nx, ny, nz),
+                    "{x},{y},{z} should reach {nx},{ny},{nz}"
+                );
             }
         }
     }

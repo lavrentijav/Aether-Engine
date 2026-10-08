@@ -33,8 +33,6 @@ pub const SECTIONS: i32 = HEIGHT / 16;
 
 /// The single dimension this server serves.
 pub const DIMENSION_NAME: &str = "minecraft:overworld";
-/// The single biome every column reports.
-pub const BIOME_NAME: &str = "minecraft:plains";
 
 /// `(registry id, entries)` for everything sent in the configuration phase.
 ///
@@ -43,16 +41,25 @@ pub const BIOME_NAME: &str = "minecraft:plains";
 /// self-describing.
 pub fn registries() -> Vec<(&'static str, Vec<(String, Nbt)>)> {
     vec![
-        ("minecraft:dimension_type", vec![(DIMENSION_NAME.into(), dimension_type())]),
-        ("minecraft:worldgen/biome", vec![(BIOME_NAME.into(), plains())]),
+        (
+            "minecraft:dimension_type",
+            vec![(DIMENSION_NAME.into(), dimension_type())],
+        ),
+        ("minecraft:worldgen/biome", biomes()),
         ("minecraft:damage_type", damage_types()),
         // Registries the client validates the *presence* of even though this
         // server spawns none of the corresponding content. Each must carry at
         // least one entry: the client rejects an empty one outright ("Registry
         // must be non-empty") and stays stuck in configuration. One entry each
         // is enough — none of these mobs exist here.
-        ("minecraft:painting_variant", vec![("minecraft:kebab".into(), painting())]),
-        ("minecraft:wolf_variant", vec![("minecraft:pale".into(), wolf_variant())]),
+        (
+            "minecraft:painting_variant",
+            vec![("minecraft:kebab".into(), painting())],
+        ),
+        (
+            "minecraft:wolf_variant",
+            vec![("minecraft:pale".into(), wolf_variant())],
+        ),
         (
             "minecraft:wolf_sound_variant",
             vec![("minecraft:classic".into(), wolf_sound_variant())],
@@ -127,22 +134,182 @@ fn dimension_type() -> Nbt {
     ])
 }
 
-/// A plains biome, matching the flat biome id the 1.8 codec reports.
-fn plains() -> Nbt {
-    compound([
-        ("has_precipitation", Nbt::Byte(1)),
-        ("temperature", Nbt::Float(0.8)),
-        ("downfall", Nbt::Float(0.4)),
-        (
-            "effects",
-            compound([
-                ("sky_color", Nbt::Int(0x78A7FF)),
-                ("water_color", Nbt::Int(0x3F76E4)),
-                ("water_fog_color", Nbt::Int(0x050533)),
-                ("fog_color", Nbt::Int(0xC0D8FF)),
-            ]),
-        ),
-    ])
+/// Every biome 1.21.11 defines, as `(name, temperature, has_precipitation)`,
+/// from `minecraft-data` pc/1.21.11. Sorted by name; the registry index of
+/// each is its position here, which is what chunk data refers to.
+const BIOMES: [(&str, f32, bool); 65] = [
+    ("badlands", 2.0, false),
+    ("bamboo_jungle", 0.95, true),
+    ("basalt_deltas", 2.0, false),
+    ("beach", 0.8, true),
+    ("birch_forest", 0.6, true),
+    ("cherry_grove", 0.5, true),
+    ("cold_ocean", 0.5, true),
+    ("crimson_forest", 2.0, false),
+    ("dark_forest", 0.7, true),
+    ("deep_cold_ocean", 0.5, true),
+    ("deep_dark", 0.8, true),
+    ("deep_frozen_ocean", 0.5, true),
+    ("deep_lukewarm_ocean", 0.5, true),
+    ("deep_ocean", 0.5, true),
+    ("desert", 2.0, false),
+    ("dripstone_caves", 0.8, true),
+    ("end_barrens", 0.5, false),
+    ("end_highlands", 0.5, false),
+    ("end_midlands", 0.5, false),
+    ("eroded_badlands", 2.0, false),
+    ("flower_forest", 0.7, true),
+    ("forest", 0.7, true),
+    ("frozen_ocean", 0.0, true),
+    ("frozen_peaks", -0.7, true),
+    ("frozen_river", 0.0, true),
+    ("grove", -0.2, true),
+    ("ice_spikes", 0.0, true),
+    ("jagged_peaks", -0.7, true),
+    ("jungle", 0.95, true),
+    ("lukewarm_ocean", 0.5, true),
+    ("lush_caves", 0.5, true),
+    ("mangrove_swamp", 0.8, true),
+    ("meadow", 0.5, true),
+    ("mushroom_fields", 0.9, true),
+    ("nether_wastes", 2.0, false),
+    ("ocean", 0.5, true),
+    ("old_growth_birch_forest", 0.6, true),
+    ("old_growth_pine_taiga", 0.3, true),
+    ("old_growth_spruce_taiga", 0.25, true),
+    ("pale_garden", 0.7, true),
+    ("plains", 0.8, true),
+    ("river", 0.5, true),
+    ("savanna", 2.0, false),
+    ("savanna_plateau", 2.0, false),
+    ("small_end_islands", 0.5, false),
+    ("snowy_beach", 0.05, true),
+    ("snowy_plains", 0.0, true),
+    ("snowy_slopes", -0.3, true),
+    ("snowy_taiga", -0.5, true),
+    ("soul_sand_valley", 2.0, false),
+    ("sparse_jungle", 0.95, true),
+    ("stony_peaks", 1.0, true),
+    ("stony_shore", 0.2, true),
+    ("sunflower_plains", 0.8, true),
+    ("swamp", 0.8, true),
+    ("taiga", 0.25, true),
+    ("the_end", 0.5, false),
+    ("the_void", 0.5, false),
+    ("warm_ocean", 0.5, true),
+    ("warped_forest", 2.0, false),
+    ("windswept_forest", 0.2, true),
+    ("windswept_gravelly_hills", 0.2, true),
+    ("windswept_hills", 0.2, true),
+    ("windswept_savanna", 2.0, false),
+    ("wooded_badlands", 2.0, false),
+];
+
+/// The registry index of a biome, `minecraft:`-qualified or not; plains
+/// for anything unknown.
+pub fn biome_index(name: &str) -> u32 {
+    let short = name.strip_prefix("minecraft:").unwrap_or(name);
+    BIOMES
+        .binary_search_by(|(n, ..)| (*n).cmp(short))
+        .or_else(|_| BIOMES.binary_search_by(|(n, ..)| (*n).cmp("plains")))
+        .unwrap_or(0) as u32
+}
+
+/// Vanilla's sky colour for a temperature (`Biome.calculateSkyColor`).
+fn sky_color(temperature: f32) -> i32 {
+    let t = (temperature / 3.0).clamp(-1.0, 1.0);
+    hsb_to_rgb(0.622_222_2 - t * 0.05, 0.5 + t * 0.1, 1.0)
+}
+
+/// `java.awt.Color.HSBtoRGB`.
+fn hsb_to_rgb(hue: f32, sat: f32, bri: f32) -> i32 {
+    let h = (hue - hue.floor()) * 6.0;
+    let f = h - h.floor();
+    let p = bri * (1.0 - sat);
+    let q = bri * (1.0 - sat * f);
+    let t = bri * (1.0 - sat * (1.0 - f));
+    let (r, g, b) = match h as i32 {
+        0 => (bri, t, p),
+        1 => (q, bri, p),
+        2 => (p, bri, t),
+        3 => (p, q, bri),
+        4 => (t, p, bri),
+        _ => (bri, p, q),
+    };
+    let c = |v: f32| (v * 255.0 + 0.5) as i32;
+    (c(r) << 16) | (c(g) << 8) | c(b)
+}
+
+/// A biome's rainfall, which with temperature picks grass and foliage
+/// colour. Not in `minecraft-data`; vanilla's values by family.
+fn downfall(name: &str) -> f32 {
+    match name {
+        n if n.contains("jungle") || n == "swamp" || n == "mangrove_swamp" => 0.9,
+        "mushroom_fields" => 1.0,
+        n if n.contains("desert") || n.contains("savanna") || n.contains("badlands") => 0.0,
+        n if n.contains("nether")
+            || n.contains("basalt")
+            || n.contains("crimson")
+            || n.contains("warped")
+            || n.contains("soul") =>
+        {
+            0.0
+        }
+        n if n.contains("ocean") || n == "river" || n == "beach" => 0.5,
+        "forest"
+        | "flower_forest"
+        | "dark_forest"
+        | "taiga"
+        | "old_growth_pine_taiga"
+        | "old_growth_spruce_taiga"
+        | "cherry_grove"
+        | "pale_garden" => 0.8,
+        "birch_forest" | "old_growth_birch_forest" => 0.6,
+        "meadow" => 0.8,
+        n if n.contains("snowy") || n.contains("frozen") || n == "ice_spikes" || n == "grove" => {
+            0.5
+        }
+        _ => 0.4,
+    }
+}
+
+fn water_color(name: &str) -> i32 {
+    match name {
+        "swamp" => 0x617B64,
+        "mangrove_swamp" => 0x3A7A6A,
+        "warm_ocean" => 0x43D5EE,
+        "lukewarm_ocean" | "deep_lukewarm_ocean" => 0x45ADF2,
+        "cold_ocean" | "deep_cold_ocean" | "snowy_taiga" | "snowy_beach" => 0x3D57D6,
+        "frozen_ocean" | "deep_frozen_ocean" | "frozen_river" => 0x3938C9,
+        "cherry_grove" => 0x5DB7EF,
+        _ => 0x3F76E4,
+    }
+}
+
+/// The whole biome registry, in [`BIOMES`] order.
+fn biomes() -> Vec<(String, Nbt)> {
+    BIOMES
+        .iter()
+        .map(|(name, temperature, rain)| {
+            (
+                format!("minecraft:{name}"),
+                compound([
+                    ("has_precipitation", Nbt::Byte(*rain as i8)),
+                    ("temperature", Nbt::Float(*temperature)),
+                    ("downfall", Nbt::Float(downfall(name))),
+                    (
+                        "effects",
+                        compound([
+                            ("sky_color", Nbt::Int(sky_color(*temperature))),
+                            ("water_color", Nbt::Int(water_color(name))),
+                            ("water_fog_color", Nbt::Int(0x050533)),
+                            ("fog_color", Nbt::Int(0xC0D8FF)),
+                        ]),
+                    ),
+                ]),
+            )
+        })
+        .collect()
 }
 
 /// The two `scaling` values vanilla damage types use.
@@ -208,6 +375,13 @@ const DAMAGE_TYPES: [(&str, &str, &str, f32); 50] = [
     ("wither", "wither", ALIVE, 0.0),
     ("wither_skull", "witherSkull", ALIVE, 0.1),
 ];
+
+/// The registry index of a damage type, as the client numbers it: the order
+/// the entries were sent in.
+pub fn damage_type_index(name: &str) -> Option<usize> {
+    let short = name.strip_prefix("minecraft:").unwrap_or(name);
+    DAMAGE_TYPES.iter().position(|(n, ..)| *n == short)
+}
 
 /// Damage types the client resolves by name for its death screen. Nothing here
 /// can actually kill a player on this server, but the registry must exist and

@@ -91,10 +91,7 @@ impl DataPack {
     /// operator plausibly has on disk.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, BuildError> {
         let root = root.as_ref();
-        let candidates = [
-            root.join("data/minecraft/worldgen"),
-            root.to_path_buf(),
-        ];
+        let candidates = [root.join("data/minecraft/worldgen"), root.to_path_buf()];
         for c in candidates {
             if c.join("noise_settings").is_dir() && c.join("density_function").is_dir() {
                 return Ok(Self { worldgen: c });
@@ -107,10 +104,56 @@ impl DataPack {
     }
 
     fn read(&self, kind: &str, id: &str) -> Result<Json, BuildError> {
-        let path = self.worldgen.join(kind).join(format!("{}.json", strip_ns(id)));
+        let path = self
+            .worldgen
+            .join(kind)
+            .join(format!("{}.json", strip_ns(id)));
         let text = std::fs::read_to_string(&path)
             .map_err(|e| BuildError(format!("cannot read {}: {e}", path.display())))?;
         Json::parse(&text).map_err(|e| BuildError(format!("{}: {e}", path.display())))
+    }
+
+    /// The raw JSON of `worldgen/<kind>/<id>.json` — `kind` is a registry
+    /// directory such as `biome`, `placed_feature` or `configured_carver`.
+    pub fn read_json(&self, kind: &str, id: &str) -> Result<Json, BuildError> {
+        self.read(kind, id)
+    }
+
+    /// Every id in `worldgen/<kind>/`, namespaced and sorted. Subdirectories
+    /// become path segments (`minecraft:trees/oak`).
+    pub fn list(&self, kind: &str) -> Result<Vec<String>, BuildError> {
+        fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) -> std::io::Result<()> {
+            for e in std::fs::read_dir(dir)? {
+                let e = e?;
+                let name = e.file_name().to_string_lossy().into_owned();
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, &format!("{prefix}{name}/"), out)?;
+                } else if let Some(stem) = name.strip_suffix(".json") {
+                    out.push(format!("minecraft:{prefix}{stem}"));
+                }
+            }
+            Ok(())
+        }
+        let dir = self.worldgen.join(kind);
+        let mut out = Vec::new();
+        walk(&dir, "", &mut out)
+            .map_err(|e| BuildError(format!("cannot list {}: {e}", dir.display())))?;
+        out.sort();
+        Ok(out)
+    }
+
+    /// The raw JSON of `data/minecraft/tags/<kind>/<id>.json` (`kind` is
+    /// e.g. `block`), or `None` when the pack has no such tag.
+    pub fn tag_json(&self, kind: &str, id: &str) -> Option<Json> {
+        let path = self
+            .worldgen
+            .parent()?
+            .join("tags")
+            .join(kind)
+            .join(format!("{}.json", strip_ns(id)));
+        let text = std::fs::read_to_string(path).ok()?;
+        Json::parse(&text).ok()
     }
 
     /// The raw JSON of one `worldgen/noise_settings/<id>.json`.
@@ -178,6 +221,12 @@ impl NoiseRegistry {
         r.fork_positional()
     }
 
+    /// The world's root positional factory — vanilla's `RandomState.random`,
+    /// which the surface system draws its per-column randoms from.
+    pub fn factory(&self) -> super::random::PositionalFactory {
+        self.factory
+    }
+
     /// The old terrain noise, seeded from `minecraft:terrain`.
     ///
     /// It is built fresh per call rather than cached by name because its scale
@@ -224,10 +273,7 @@ impl NoiseRegistry {
             .collect();
         let mut r = self.factory.from_hash_of(&key);
         let noise = Arc::new(NormalNoise::create(&mut r, first_octave, &amps));
-        self.cache
-            .lock()
-            .unwrap()
-            .insert(key, Arc::clone(&noise));
+        self.cache.lock().unwrap().insert(key, Arc::clone(&noise));
         Ok(noise)
     }
 }
@@ -368,6 +414,8 @@ pub enum Node {
     /// `offset(z, x, 0) * 4`, the Z half. The argument order really is
     /// rotated like that.
     ShiftB(Arc<NormalNoise>),
+    /// `offset(x, y, z) * 4` — the 3D shift.
+    Shift(Arc<NormalNoise>),
     /// A linear ramp in Y, clamped outside its band.
     YClampedGradient {
         /// Y at which the ramp starts.
@@ -505,6 +553,45 @@ pub enum Node {
     /// `minecraft:old_blended_noise` — the pre-1.18 terrain noise, which still
     /// supplies the overworld's 3D shape.
     OldBlendedNoise(Arc<super::noise::BlendedNoise>),
+    /// `minecraft:weird_scaled_sampler`: the spaghetti caves' rarity-scaled
+    /// noise. `input` is quantized to a rarity `r` and the result is
+    /// `r * |noise(pos / r)|`.
+    WeirdScaledSampler {
+        /// The rarity input.
+        input: Arc<Node>,
+        /// The sampled noise.
+        noise: Arc<NormalNoise>,
+        /// `type_1` (3D rarity) when true, `type_2` (2D rarity) otherwise.
+        type_1: bool,
+    },
+}
+
+/// `NoiseRouterData.QuantizedSpaghettiRarity.getSpaghettiRarity3D`.
+fn spaghetti_rarity_3d(v: f64) -> f64 {
+    if v < -0.5 {
+        0.75
+    } else if v < 0.0 {
+        1.0
+    } else if v < 0.5 {
+        1.5
+    } else {
+        2.0
+    }
+}
+
+/// `NoiseRouterData.QuantizedSpaghettiRarity.getSphaghettiRarity2D`.
+fn spaghetti_rarity_2d(v: f64) -> f64 {
+    if v < -0.75 {
+        0.5
+    } else if v < -0.5 {
+        0.75
+    } else if v < 0.5 {
+        1.0
+    } else if v < 0.75 {
+        2.0
+    } else {
+        3.0
+    }
 }
 
 impl Node {
@@ -577,11 +664,14 @@ impl Node {
                 let z = ctx.z as f64 * xz_scale + shift_z.compute(ctx);
                 noise.get_value(x, y, z)
             }
-            Node::ShiftA(n) => {
-                n.get_value(ctx.x as f64 * 0.25, 0.0, ctx.z as f64 * 0.25) * 4.0
-            }
-            Node::ShiftB(n) => {
-                n.get_value(ctx.z as f64 * 0.25, ctx.x as f64 * 0.25, 0.0) * 4.0
+            Node::ShiftA(n) => n.get_value(ctx.x as f64 * 0.25, 0.0, ctx.z as f64 * 0.25) * 4.0,
+            Node::ShiftB(n) => n.get_value(ctx.z as f64 * 0.25, ctx.x as f64 * 0.25, 0.0) * 4.0,
+            Node::Shift(n) => {
+                n.get_value(
+                    ctx.x as f64 * 0.25,
+                    ctx.y as f64 * 0.25,
+                    ctx.z as f64 * 0.25,
+                ) * 4.0
             }
             Node::YClampedGradient {
                 from_y,
@@ -650,6 +740,21 @@ impl Node {
             Node::BlendAlpha => 1.0,
             Node::BlendOffset => 0.0,
             Node::OldBlendedNoise(n) => n.compute(ctx.x, ctx.y, ctx.z),
+            Node::WeirdScaledSampler {
+                input,
+                noise,
+                type_1,
+            } => {
+                let v = input.compute(ctx);
+                let r = if *type_1 {
+                    spaghetti_rarity_3d(v)
+                } else {
+                    spaghetti_rarity_2d(v)
+                };
+                r * noise
+                    .get_value(ctx.x as f64 / r, ctx.y as f64 / r, ctx.z as f64 / r)
+                    .abs()
+            }
             Node::FindTopSurface {
                 density,
                 upper_bound,
@@ -658,8 +763,8 @@ impl Node {
             } => {
                 // The ceiling is snapped *down* to a cell boundary first, so
                 // the scan only ever probes cell corners.
-                let start = (upper_bound.compute(ctx) / *cell_height as f64).floor() as i32
-                    * cell_height;
+                let start =
+                    (upper_bound.compute(ctx) / *cell_height as f64).floor() as i32 * cell_height;
                 if start <= *lower_bound {
                     return *lower_bound as f64;
                 }
@@ -743,15 +848,10 @@ thread_local! {
 /// Pure memoization of a pure function, so it cannot change a result — it is
 /// here only because the corner subtree is the most expensive thing in the
 /// graph.
-fn corners_of(
-    id: u32,
-    inner: &Arc<Node>,
-    x0: i32,
-    y0: i32,
-    z0: i32,
-    w: i32,
-    h: i32,
-) -> [f64; 8] {
+fn corners_of(id: u32, inner: &Arc<Node>, x0: i32, y0: i32, z0: i32, w: i32, h: i32) -> [f64; 8] {
+    if let Some(v) = grid_corners(id, inner, x0, y0, z0, w, h) {
+        return v;
+    }
     let slot = {
         let mut h = id as u64;
         h = h.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (x0 as u32 as u64);
@@ -771,9 +871,8 @@ fn corners_of(
         return hit;
     }
 
-    let at = |dx: i32, dy: i32, dz: i32| {
-        inner.compute(Ctx::new(x0 + dx * w, y0 + dy * h, z0 + dz * w))
-    };
+    let at =
+        |dx: i32, dy: i32, dz: i32| inner.compute(Ctx::new(x0 + dx * w, y0 + dy * h, z0 + dz * w));
     let v = [
         at(0, 0, 0),
         at(0, 0, 1),
@@ -795,6 +894,137 @@ fn corners_of(
         }
     });
     v
+}
+
+/// The corner lattice of one chunk, per interpolated node — vanilla's
+/// `NoiseChunk` slices. Each corner is computed once and shared by the up to
+/// eight cells that touch it; the per-cell cache above recomputes a shared
+/// corner for every cell that misses, which made it five times the work.
+struct ChunkGrid {
+    x0: i32,
+    z0: i32,
+    min_y: i32,
+    w: i32,
+    h: i32,
+    nx: usize,
+    ny: usize,
+    values: Vec<Vec<f64>>,
+}
+
+thread_local! {
+    static CHUNK_GRID: std::cell::RefCell<Option<ChunkGrid>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While alive, interpolated nodes on this thread share corners across the
+/// chunk at `(chunk_x, chunk_z)`. Pure memoization: results are identical.
+pub struct ChunkGridGuard(());
+
+impl ChunkGridGuard {
+    /// Activate the lattice for one chunk.
+    pub fn enter(
+        chunk_x: i32,
+        chunk_z: i32,
+        min_y: i32,
+        height: i32,
+        cell_width: i32,
+        cell_height: i32,
+    ) -> Self {
+        CHUNK_GRID.with(|g| {
+            *g.borrow_mut() = Some(ChunkGrid {
+                x0: chunk_x * 16,
+                z0: chunk_z * 16,
+                min_y,
+                w: cell_width,
+                h: cell_height,
+                nx: (16 / cell_width) as usize + 1,
+                ny: (height / cell_height) as usize + 1,
+                values: Vec::new(),
+            })
+        });
+        ChunkGridGuard(())
+    }
+}
+
+impl Drop for ChunkGridGuard {
+    fn drop(&mut self) {
+        CHUNK_GRID.with(|g| *g.borrow_mut() = None);
+    }
+}
+
+fn grid_corners(
+    id: u32,
+    inner: &Arc<Node>,
+    x0: i32,
+    y0: i32,
+    z0: i32,
+    w: i32,
+    h: i32,
+) -> Option<[f64; 8]> {
+    let (idx, nx, ny) = CHUNK_GRID.with(|g| {
+        let g = g.borrow();
+        let g = g.as_ref()?;
+        if g.w != w || g.h != h {
+            return None;
+        }
+        let (ix, iy, iz) = (x0 - g.x0, y0 - g.min_y, z0 - g.z0);
+        if ix < 0 || iz < 0 || iy < 0 || ix % w != 0 || iz % w != 0 || iy % h != 0 {
+            return None;
+        }
+        let (ix, iy, iz) = ((ix / w) as usize, (iy / h) as usize, (iz / w) as usize);
+        if ix + 1 >= g.nx || iz + 1 >= g.nx || iy + 1 >= g.ny {
+            return None;
+        }
+        Some(((ix, iy, iz), g.nx, g.ny))
+    })?;
+    let at = |dx: usize, dy: usize, dz: usize| ((idx.0 + dx) * ny + idx.1 + dy) * nx + idx.2 + dz;
+    let order = [
+        (0, 0, 0),
+        (0, 0, 1),
+        (0, 1, 0),
+        (0, 1, 1),
+        (1, 0, 0),
+        (1, 0, 1),
+        (1, 1, 0),
+        (1, 1, 1),
+    ];
+    let mut out = [f64::NAN; 8];
+    CHUNK_GRID.with(|g| {
+        let mut g = g.borrow_mut();
+        let Some(g) = g.as_mut() else { return };
+        let size = g.nx * g.nx * g.ny;
+        let id = id as usize;
+        if g.values.len() <= id {
+            g.values.resize(id + 1, Vec::new());
+        }
+        if g.values[id].is_empty() {
+            g.values[id] = vec![f64::NAN; size];
+        }
+        let v = &g.values[id];
+        for (k, (dx, dy, dz)) in order.iter().enumerate() {
+            out[k] = v[at(*dx, *dy, *dz)];
+        }
+    });
+    for (k, (dx, dy, dz)) in order.iter().enumerate() {
+        if out[k].is_nan() {
+            let c = inner.compute(Ctx::new(
+                x0 + *dx as i32 * w,
+                y0 + *dy as i32 * h,
+                z0 + *dz as i32 * w,
+            ));
+            out[k] = c;
+            let i = at(*dx, *dy, *dz);
+            CHUNK_GRID.with(|g| {
+                if let Some(g) = g.borrow_mut().as_mut() {
+                    if let Some(v) = g.values.get_mut(id as usize) {
+                        if !v.is_empty() {
+                            v[i] = c;
+                        }
+                    }
+                }
+            });
+        }
+    }
+    Some(out)
 }
 
 /// How many entries the marker cache remembers per thread, across every
@@ -891,6 +1121,19 @@ fn clamped_map(v: f64, from: f64, to: f64, from_value: f64, to_value: f64) -> f6
 
 // --- building --------------------------------------------------------------
 
+/// A process-wide id for a caching node.
+///
+/// The memo tables are thread-local and shared by every graph on the thread —
+/// the terrain's, the biome source's, a second world's — so the ids that key
+/// them must be unique across graphs, not merely within one. Per-builder
+/// counters made the terrain's cache #3 and the climate sampler's cache #3
+/// the same entry, and a column whose biomes were sampled first then read the
+/// climate's value back as its surface height.
+fn next_cache_id() -> u32 {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Turns worldgen JSON into an evaluable [`Node`] graph.
 ///
 /// Referenced functions are built once and shared, so a graph that names
@@ -900,8 +1143,6 @@ pub struct Builder<'a> {
     pack: &'a DataPack,
     noises: &'a NoiseRegistry,
     mode: Mode,
-    next_interpolator_id: u32,
-    next_marker_id: u32,
     memo: HashMap<String, Arc<Node>>,
     /// References currently being resolved, so a cyclic data pack is reported
     /// rather than overflowing the stack.
@@ -944,8 +1185,6 @@ impl<'a> Builder<'a> {
             pack,
             noises,
             mode,
-            next_interpolator_id: 0,
-            next_marker_id: 0,
             memo: HashMap::new(),
             in_flight: Vec::new(),
         }
@@ -1026,8 +1265,7 @@ impl<'a> Builder<'a> {
             // both, just less reuse than vanilla's own `cache_all_in_cell`
             // array would give).
             "cache_once" | "cache_all_in_cell" => {
-                let id = self.next_marker_id;
-                self.next_marker_id += 1;
+                let id = next_cache_id();
                 Node::CacheOnce {
                     inner: self.arg(v, "argument")?,
                     id,
@@ -1036,8 +1274,7 @@ impl<'a> Builder<'a> {
             // `cache_2d` and `flat_cache` both wrap functions vanilla itself
             // treats as column-only, so both are safe to key on `(x, z)`.
             "cache_2d" | "flat_cache" => {
-                let id = self.next_marker_id;
-                self.next_marker_id += 1;
+                let id = next_cache_id();
                 Node::Cache2D {
                     inner: self.arg(v, "argument")?,
                     id,
@@ -1049,8 +1286,7 @@ impl<'a> Builder<'a> {
                     cell_width,
                     cell_height,
                 } => {
-                    let id = self.next_interpolator_id;
-                    self.next_interpolator_id += 1;
+                    let id = next_cache_id();
                     Node::CellInterpolated {
                         inner: self.arg(v, "argument")?,
                         cell_width,
@@ -1148,6 +1384,21 @@ impl<'a> Builder<'a> {
                 Self::num(v, "y_factor")?,
                 Self::num(v, "smear_scale_multiplier")?,
             )),
+            "weird_scaled_sampler" => Node::WeirdScaledSampler {
+                input: self.arg(v, "input")?,
+                noise: self.noise_of(v, "noise")?,
+                type_1: match v.get("rarity_value_mapper").and_then(Json::as_str) {
+                    Some("type_1") => true,
+                    Some("type_2") => false,
+                    other => {
+                        return err(format!(
+                            "weird_scaled_sampler: bad rarity_value_mapper {other:?}"
+                        ))
+                    }
+                },
+            },
+            "constant" => Node::Const(Self::num(v, "argument")?),
+            "shift" => Node::Shift(self.noise_of(v, "argument")?),
             other => return err(format!("unsupported density function type `{other}`")),
         };
         Ok(Arc::new(node))
@@ -1199,7 +1450,9 @@ impl<'a> Builder<'a> {
         match v {
             Json::Num(n) => Ok(SplineValue::Const(*n as f32)),
             Json::Obj(_) => Ok(SplineValue::Nested(self.build_spline(v)?)),
-            other => err(format!("spline value: expected number or spline, got {other:?}")),
+            other => err(format!(
+                "spline value: expected number or spline, got {other:?}"
+            )),
         }
     }
 }

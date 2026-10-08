@@ -13,9 +13,9 @@
 //! bytes, and each recipient renders it in their own dialect — which is how
 //! a 1.8 and a 1.21 client can share one world.
 
+use crate::proto::Conn;
 use std::collections::HashMap;
 use std::io;
-use crate::proto::Conn;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::protocol::{BlockSource, ProtocolCodec, ServerEvent};
@@ -44,8 +44,14 @@ pub struct PlayerHandle {
     /// Inspection mode and the last query's paged output. See
     /// [`crate::commands`].
     session: Mutex<crate::commands::Session>,
+    /// Survival state: health, hunger, the open window, the cursor.
+    ///
+    /// Lock order, everywhere: this, then the inventory, then the block
+    /// entities. The tick thread and the connection thread both take these.
+    game: Mutex<crate::game::player::PlayerState>,
+    /// Entities (not players) this client currently has spawned.
+    tracked: Mutex<std::collections::HashSet<i32>>,
 }
-
 
 impl PlayerHandle {
     /// Current position/look.
@@ -67,6 +73,29 @@ impl PlayerHandle {
     /// the history instead of changing the world.
     pub fn inspecting(&self) -> bool {
         self.session.lock().unwrap().inspecting
+    }
+
+    /// Borrow this player's survival state.
+    pub fn game(&self) -> std::sync::MutexGuard<'_, crate::game::player::PlayerState> {
+        self.game.lock().unwrap()
+    }
+
+    /// Borrow the set of entities this client has spawned.
+    pub fn tracked(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<i32>> {
+        self.tracked.lock().unwrap()
+    }
+
+    /// Whether this client runs the full, server-authoritative gameplay.
+    pub fn full(&self) -> bool {
+        self.codec.full_gameplay()
+    }
+
+    /// Send the player's whole inventory window (and the open window, if
+    /// any) as the server sees it.
+    pub fn sync_inventory(&self, world: &dyn BlockSource) {
+        if self.full() {
+            crate::game::window::sync(self, world);
+        }
     }
 
     /// Borrow this player's inventory.
@@ -133,10 +162,11 @@ impl PlayerHandle {
     /// loop, which then cleans up the registry — a broadcaster shouldn't tear
     /// down someone else's connection.
     pub fn emit(&self, ev: &ServerEvent, world: &dyn BlockSource) {
-        let packets = self.codec.encode(ev, world);
+        let legacy = if self.full() { None } else { ev.legacy() };
+        let packets = self.codec.encode(legacy.as_ref().unwrap_or(ev), world);
         if let Ok(mut w) = self.writer.lock() {
             for p in &packets {
-                if p.send(&mut *w).is_err() {
+                if p.send(&mut w).is_err() {
                     break;
                 }
             }
@@ -177,6 +207,10 @@ impl Registry {
             pos: Mutex::new(pos),
             inventory: Mutex::new(crate::inventory::Inventory::new()),
             session: Mutex::new(crate::commands::Session::default()),
+            game: Mutex::new(crate::game::player::PlayerState::new(
+                crate::server_game_mode(),
+            )),
+            tracked: Mutex::new(std::collections::HashSet::new()),
         });
         self.players
             .write()
@@ -240,6 +274,20 @@ impl Registry {
         // *down* from -1,000,000, so excluding nobody has to be spelled this
         // way rather than by passing a plausible id.
         self.broadcast_except(i32::MIN, ev, world);
+    }
+
+    /// The online player with this entity id.
+    pub fn by_entity(&self, entity_id: i32) -> Option<Arc<PlayerHandle>> {
+        self.players.read().unwrap().get(&entity_id).cloned()
+    }
+
+    /// Send `ev` to everyone whose client has entity `entity_id` spawned.
+    pub fn broadcast_tracking(&self, entity_id: i32, ev: &ServerEvent, world: &dyn BlockSource) {
+        for handle in self.snapshot() {
+            if handle.tracked().contains(&entity_id) {
+                handle.emit(ev, world);
+            }
+        }
     }
 
     pub fn broadcast_except(&self, exclude: i32, ev: &ServerEvent, world: &dyn BlockSource) {

@@ -96,6 +96,45 @@ impl Json {
             _ => None,
         }
     }
+
+    /// This value as a boolean, if it is one.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Json::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// This value as an object, if it is one.
+    pub fn as_obj(&self) -> Option<&BTreeMap<String, Json>> {
+        match self {
+            Json::Obj(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Member `key` as a number, or `default`.
+    pub fn f64_or(&self, key: &str, default: f64) -> f64 {
+        self.get(key).and_then(Json::as_f64).unwrap_or(default)
+    }
+
+    /// Member `key` as an integer, or `default`.
+    pub fn i32_or(&self, key: &str, default: i32) -> i32 {
+        self.get(key)
+            .and_then(Json::as_f64)
+            .map(|v| v as i32)
+            .unwrap_or(default)
+    }
+
+    /// Member `key` as a boolean, or `default`.
+    pub fn bool_or(&self, key: &str, default: bool) -> bool {
+        self.get(key).and_then(Json::as_bool).unwrap_or(default)
+    }
+
+    /// Member `key` as a string.
+    pub fn str_of(&self, key: &str) -> Option<&str> {
+        self.get(key).and_then(Json::as_str)
+    }
 }
 
 struct Parser<'a> {
@@ -207,12 +246,18 @@ impl<'a> Parser<'a> {
         self.eat(b'"')?;
         let mut s = String::new();
         loop {
-            let c = *self.b.get(self.i).ok_or_else(|| self.err("unterminated string"))?;
+            let c = *self
+                .b
+                .get(self.i)
+                .ok_or_else(|| self.err("unterminated string"))?;
             self.i += 1;
             match c {
                 b'"' => return Ok(s),
                 b'\\' => {
-                    let e = *self.b.get(self.i).ok_or_else(|| self.err("unterminated escape"))?;
+                    let e = *self
+                        .b
+                        .get(self.i)
+                        .ok_or_else(|| self.err("unterminated escape"))?;
                     self.i += 1;
                     match e {
                         b'"' => s.push('"'),
@@ -234,8 +279,7 @@ impl<'a> Parser<'a> {
                                 {
                                     self.i += 2;
                                     let lo = self.hex4()?;
-                                    let combined =
-                                        0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                    let combined = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
                                     s.push(
                                         char::from_u32(combined)
                                             .ok_or_else(|| self.err("bad surrogate pair"))?,
@@ -245,8 +289,7 @@ impl<'a> Parser<'a> {
                                 }
                             } else {
                                 s.push(
-                                    char::from_u32(cp)
-                                        .ok_or_else(|| self.err("bad \\u escape"))?,
+                                    char::from_u32(cp).ok_or_else(|| self.err("bad \\u escape"))?,
                                 );
                             }
                         }
@@ -262,9 +305,7 @@ impl<'a> Parser<'a> {
                         .b
                         .get(start..self.i)
                         .ok_or_else(|| self.err("truncated UTF-8"))?;
-                    s.push_str(
-                        std::str::from_utf8(bytes).map_err(|_| self.err("invalid UTF-8"))?,
-                    );
+                    s.push_str(std::str::from_utf8(bytes).map_err(|_| self.err("invalid UTF-8"))?);
                 }
             }
         }
@@ -297,12 +338,10 @@ impl<'a> Parser<'a> {
             return Err(self.err("expected a value"));
         }
         let s = std::str::from_utf8(&self.b[start..self.i]).map_err(|_| self.err("bad number"))?;
-        s.parse::<f64>()
-            .map(Json::Num)
-            .map_err(|_| JsonError {
-                at: start,
-                msg: format!("`{s}` is not a number"),
-            })
+        s.parse::<f64>().map(Json::Num).map_err(|_| JsonError {
+            at: start,
+            msg: format!("`{s}` is not a number"),
+        })
     }
 }
 
@@ -357,7 +396,10 @@ mod tests {
             "{\"a\":1} junk",
             "\"unterminated",
         ] {
-            assert!(Json::parse(bad).is_err(), "accepted malformed input {bad:?}");
+            assert!(
+                Json::parse(bad).is_err(),
+                "accepted malformed input {bad:?}"
+            );
         }
     }
 }

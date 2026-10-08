@@ -12,7 +12,7 @@
 //! * each registry is `{type, value: [{name, id, element}]}` — entries carry
 //!   their own numeric ids rather than being positional.
 //!
-//! 
+//!
 //! The biome carries a `precipitation` string. 1.19.4 replaces it with a
 //! `has_precipitation` byte, so do not copy this shape forward.
 //!

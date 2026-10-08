@@ -170,6 +170,9 @@ mod tests {
                 }
             }
         }
-        assert!(deep_solid > sky_solid, "deep {deep_solid} vs sky {sky_solid}");
+        assert!(
+            deep_solid > sky_solid,
+            "deep {deep_solid} vs sky {sky_solid}"
+        );
     }
 }

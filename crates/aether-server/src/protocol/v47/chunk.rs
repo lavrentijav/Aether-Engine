@@ -223,7 +223,9 @@ mod tests {
             }
         };
         let mut wire = Vec::new();
-        chunk_data_packet(3, -5, &get).write_to(&mut wire, None).unwrap();
+        chunk_data_packet(3, -5, &get)
+            .write_to(&mut wire, None)
+            .unwrap();
         let (bitmask, sections) = decode_chunk_packet(&wire);
         // Sections 0..=4 hold terrain; nothing above may be sent.
         assert_eq!(bitmask, 0b0000_0000_0001_1111, "section bitmask");

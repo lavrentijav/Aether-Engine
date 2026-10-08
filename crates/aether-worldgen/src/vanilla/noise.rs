@@ -68,10 +68,10 @@ pub struct ImprovedNoise {
 impl ImprovedNoise {
     /// Draw one octave from `random`, consuming exactly what vanilla consumes:
     /// three doubles for the offset, then 256 bounded ints for the shuffle.
-    pub fn new(random: &mut XoroshiroRandom) -> Self {
-        let xo = random.next_f64() * 256.0;
-        let yo = random.next_f64() * 256.0;
-        let zo = random.next_f64() * 256.0;
+    pub fn new(random: &mut impl super::rng::Rng) -> Self {
+        let xo = random.next_double() * 256.0;
+        let yo = random.next_double() * 256.0;
+        let zo = random.next_double() * 256.0;
         let mut p = [0u8; 256];
         for (i, slot) in p.iter_mut().enumerate() {
             *slot = i as u8;
@@ -79,7 +79,7 @@ impl ImprovedNoise {
         for i in 0..256usize {
             // A partial Fisher-Yates that swaps forward only: the bound
             // shrinks as `i` advances, so the draw count is fixed at 256.
-            let j = random.next_i32_bounded(256 - i as i32) as usize;
+            let j = random.next_int_bounded(256 - i as i32) as usize;
             p.swap(i, i + j);
         }
         Self { xo, yo, zo, p }
@@ -118,16 +118,20 @@ impl ImprovedNoise {
         let dx = x + self.xo;
         let dy = y + self.yo;
         let dz = z + self.zo;
-        let ix = dx.floor();
-        let iy = dy.floor();
-        let iz = dz.floor();
+        let ix = ffloor(dx);
+        let iy = ffloor(dy);
+        let iz = ffloor(dz);
         let fx = dx - ix;
         let fy = dy - iy;
         let fz = dz - iz;
 
         let shift = if y_scale != 0.0 {
-            let cap = if y_max >= 0.0 && y_max < fy { y_max } else { fy };
-            (cap / y_scale + 1.0E-7_f32 as f64).floor() * y_scale
+            let cap = if y_max >= 0.0 && y_max < fy {
+                y_max
+            } else {
+                fy
+            };
+            ffloor(cap / y_scale + 1.0E-7_f32 as f64) * y_scale
         } else {
             0.0
         };
@@ -186,7 +190,7 @@ impl ImprovedNoise {
 #[inline]
 pub fn wrap(v: f64) -> f64 {
     const P: f64 = 3.354_432_0E7;
-    v - ((v / P + 0.5).floor()) * P
+    v - ffloor(v / P + 0.5) * P
 }
 
 /// A stack of [`ImprovedNoise`] octaves with per-octave amplitudes — vanilla's
@@ -212,12 +216,39 @@ impl PerlinNoise {
     /// it.
     pub fn create(random: &mut XoroshiroRandom, first_octave: i32, amplitudes: &[f64]) -> Self {
         let factory = random.fork_positional();
+        Self::from_octaves(first_octave, amplitudes, |name| {
+            ImprovedNoise::new(&mut factory.from_hash_of(name))
+        })
+    }
+
+    /// The same construction over a legacy-LCG source:
+    /// `LegacyPositionalRandomFactory(seed).fromHashOf(name)` is
+    /// `new LegacyRandomSource(name.hashCode() ^ seed)`.
+    pub fn create_legacy(
+        random: &mut super::rng::LegacyRandom,
+        first_octave: i32,
+        amplitudes: &[f64],
+    ) -> Self {
+        use super::rng::Rng;
+        let seed = random.next_long();
+        Self::from_octaves(first_octave, amplitudes, |name| {
+            let h = name
+                .bytes()
+                .fold(0i32, |h, b| h.wrapping_mul(31).wrapping_add(b as i32));
+            ImprovedNoise::new(&mut super::rng::LegacyRandom::new(h as i64 ^ seed))
+        })
+    }
+
+    fn from_octaves(
+        first_octave: i32,
+        amplitudes: &[f64],
+        mut make: impl FnMut(&str) -> ImprovedNoise,
+    ) -> Self {
         let mut levels = Vec::with_capacity(amplitudes.len());
         for (k, &amp) in amplitudes.iter().enumerate() {
             if amp != 0.0 {
                 let octave = first_octave + k as i32;
-                let mut r = factory.from_hash_of(&format!("octave_{octave}"));
-                levels.push(Some(ImprovedNoise::new(&mut r)));
+                levels.push(Some(make(&format!("octave_{octave}"))));
             } else {
                 levels.push(None);
             }
@@ -275,7 +306,11 @@ impl PerlinNoise {
         let mut value = self.lowest_freq_value_factor;
         for (i, level) in self.levels.iter().enumerate() {
             if let Some(n) = level {
-                let yy = if fixed_y { -n.y_origin() } else { wrap(y * input) };
+                let yy = if fixed_y {
+                    -n.y_origin()
+                } else {
+                    wrap(y * input)
+                };
                 let g = n.noise_with_smear(
                     wrap(x * input),
                     yy,
@@ -316,7 +351,19 @@ impl NormalNoise {
     pub fn create(random: &mut XoroshiroRandom, first_octave: i32, amplitudes: &[f64]) -> Self {
         let first = PerlinNoise::create(random, first_octave, amplitudes);
         let second = PerlinNoise::create(random, first_octave, amplitudes);
+        Self::from_stacks(first, second, amplitudes)
+    }
 
+    /// `NormalNoise.create(new WorldgenRandom(new LegacyRandomSource(seed)), …)`,
+    /// as the noise-based block state providers build theirs.
+    pub fn create_legacy(seed: i64, first_octave: i32, amplitudes: &[f64]) -> Self {
+        let mut r = super::rng::LegacyRandom::new(seed);
+        let first = PerlinNoise::create_legacy(&mut r, first_octave, amplitudes);
+        let second = PerlinNoise::create_legacy(&mut r, first_octave, amplitudes);
+        Self::from_stacks(first, second, amplitudes)
+    }
+
+    fn from_stacks(first: PerlinNoise, second: PerlinNoise, amplitudes: &[f64]) -> Self {
         // The spread of non-zero amplitudes — not their count — sets the
         // expected deviation, so a stack with holes in it still normalizes to
         // roughly unit range.
@@ -637,5 +684,19 @@ mod tests {
             let got = b.compute(i * 7, 40 - i * 11, i * -5);
             assert_eq!(got, *w, "blended sample {i}");
         }
+    }
+}
+
+/// `Math.floor` for the lattice coordinates noise works in, without a libm
+/// call: the target baseline has no SSE4.1 `roundsd`, and `f64::floor` was a
+/// measurable share of terrain generation. Exact for every finite value
+/// below 2^63 in magnitude, which noise inputs never leave.
+#[inline(always)]
+pub fn ffloor(v: f64) -> f64 {
+    let t = v as i64 as f64;
+    if t > v {
+        t - 1.0
+    } else {
+        t
     }
 }

@@ -178,7 +178,10 @@ mod tests {
         let Nbt::Compound(fields) = dimension_type() else {
             panic!("compound");
         };
-        for absent in ["monster_spawn_light_level", "monster_spawn_block_light_limit"] {
+        for absent in [
+            "monster_spawn_light_level",
+            "monster_spawn_block_light_limit",
+        ] {
             assert!(
                 !fields.iter().any(|(n, _)| n == absent),
                 "{absent} does not exist in 1.18"
@@ -209,7 +212,10 @@ mod tests {
                 panic!("entry compound");
             };
             assert_eq!(
-                first.iter().find(|(n, _)| n == "id").map(|(_, v)| v.clone()),
+                first
+                    .iter()
+                    .find(|(n, _)| n == "id")
+                    .map(|(_, v)| v.clone()),
                 Some(Nbt::Int(0))
             );
         }

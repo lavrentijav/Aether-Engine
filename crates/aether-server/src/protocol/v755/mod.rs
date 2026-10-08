@@ -33,7 +33,7 @@ use aether_world::BlockStateId;
 
 use super::{json_escape, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::players::PosLook;
-use crate::proto::{Conn, read_packet, PacketIn, PacketOut, RawPacket};
+use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 
 // --- Clientbound packet ids (1.17.1) ---
 const LOGIN_SUCCESS: i32 = 0x02;
@@ -307,7 +307,7 @@ impl ProtocolCodec for Codec {
                     (*y + registry::Y_OFFSET) as i64,
                     *z as i64,
                 ))
-                    .var_int(block_state(*block) as i32);
+                .var_int(block_state(*block) as i32);
                 vec![p]
             }
             ServerEvent::AckBlockChange(_) => Vec::new(),
@@ -339,6 +339,8 @@ impl ProtocolCodec for Codec {
                     .uuid(0);
                 vec![p]
             }
+            // Gameplay events this version does not render.
+            _ => Vec::new(),
         }
     }
 
@@ -629,9 +631,9 @@ mod tests {
         let mut wire = Vec::new();
         pkts[0].write_to(&mut wire, None).unwrap();
         let body = &wire[2..]; // past frame length and packet id
-        // Shifted on the way out: this client's world starts at zero and the
-        // engine's at -64, so an engine Y of 2 reaches it as 66. Sending the
-        // engine's own Y would put every block 64 blocks too low.
+                               // Shifted on the way out: this client's world starts at zero and the
+                               // engine's at -64, so an engine Y of 2 reaches it as 66. Sending the
+                               // engine's own Y would put every block 64 blocks too low.
         assert_eq!(
             i64::from_be_bytes(body[0..8].try_into().unwrap()),
             encode_position(1, 2 + registry::Y_OFFSET as i64, 3)
@@ -644,7 +646,8 @@ mod tests {
     /// `PlayerHandle` owns a `TcpStream` and has no public constructor.
     fn loopback_player() -> std::sync::Arc<crate::players::PlayerHandle> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = Conn::new(std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        let client =
+            Conn::new(std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap());
         let _server_side = listener.accept().unwrap();
         crate::players::Registry::default()
             .join(

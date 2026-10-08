@@ -20,7 +20,7 @@ use aether_world::BlockStateId;
 
 use super::{BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::players::PosLook;
-use crate::proto::{Conn, read_packet, PacketIn, PacketOut, RawPacket};
+use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 
 /// Login state ids.
 const LOGIN_SUCCESS: i32 = 0x02;
@@ -101,7 +101,7 @@ const SB_BLOCK_PLACE: i32 = 0x3E;
 const PLAYER_ENTITY_TYPE: i32 = 148;
 
 /// Stable id for the pack this server offers.
-const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_000000000002;
+const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_0000_0000_0002;
 
 /// Engine block id -> this version's block-state id.
 pub fn block_state(id: BlockStateId) -> u32 {
@@ -338,6 +338,8 @@ impl ProtocolCodec for Codec {
                 p.bytes(&super::nbt::string(text).to_network()).bool(false);
                 vec![p]
             }
+            // Gameplay events this version does not render.
+            _ => Vec::new(),
         }
     }
 
@@ -372,14 +374,16 @@ impl ProtocolCodec for Codec {
                 pin.f32(),
                 pin.u8(),
             ) {
-                (Ok(x), Ok(y), Ok(z), Ok(yaw), Ok(pitch), Ok(flags)) => ClientEvent::Move(PosLook {
-                    x,
-                    y,
-                    z,
-                    yaw,
-                    pitch,
-                    on_ground: flags & 1 != 0,
-                }),
+                (Ok(x), Ok(y), Ok(z), Ok(yaw), Ok(pitch), Ok(flags)) => {
+                    ClientEvent::Move(PosLook {
+                        x,
+                        y,
+                        z,
+                        yaw,
+                        pitch,
+                        on_ground: flags & 1 != 0,
+                    })
+                }
                 _ => ClientEvent::Ignored,
             },
             SB_LOOK => match (pin.f32(), pin.f32(), pin.u8()) {
@@ -488,7 +492,6 @@ fn decode_position(v: i64) -> (i32, i32, i32) {
         ((v << 26) >> 38) as i32,
     )
 }
-
 
 #[cfg(test)]
 mod tests {

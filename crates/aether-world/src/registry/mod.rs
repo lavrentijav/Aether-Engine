@@ -33,7 +33,6 @@ use std::collections::HashMap;
 pub mod blocks;
 pub mod props;
 
-/// Fixed ids for the blocks the engine itself refers to by name.
 pub mod ids {
     //! Default states of the blocks the engine itself refers to by name.
     //!
@@ -375,7 +374,10 @@ mod tests {
         let east = props::state_with(block, &[("facing", "east")]).unwrap();
         let name = r.name_of(BlockStateId(east)).unwrap();
         assert!(name.contains("facing=east"), "{name}");
-        assert!(name.contains("half=bottom"), "unnamed properties keep the default: {name}");
+        assert!(
+            name.contains("half=bottom"),
+            "unnamed properties keep the default: {name}"
+        );
 
         // Order must not matter.
         let a = props::state_with(block, &[("facing", "west"), ("half", "top")]);

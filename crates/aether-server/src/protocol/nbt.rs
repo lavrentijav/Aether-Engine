@@ -136,7 +136,10 @@ mod tests {
         let nbt = compound([("a", Nbt::Byte(1))]);
         let bytes = nbt.to_network();
         assert_eq!(bytes[0], 10, "root tag is TAG_Compound");
-        assert_eq!(bytes[1], 1, "next byte is the first field's tag, not a name");
+        assert_eq!(
+            bytes[1], 1,
+            "next byte is the first field's tag, not a name"
+        );
         assert_eq!(&bytes[2..4], &[0, 1], "field name length");
         assert_eq!(&bytes[4..5], b"a");
         assert_eq!(bytes[5], 1, "field payload");
