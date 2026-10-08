@@ -5,7 +5,8 @@
 //!
 //! ```text
 //! magic     : b"ASC1"                    (4 bytes)
-//! entries   : u16 LE                     (palette size, incl. air at 0)
+//! entries   : u16 LE                     (palette size, ≥ 1; any order — a section
+//!                                         with no air has no air entry)
 //!   id      : u32 LE                      × entries
 //!   flags   : u8  (bit0 solid, bit1 collision, bit2 redstone)  × entries
 //! bits      : u8   (index width: written as 4 / 8 / 16; 0 / 1 / 2 also read)

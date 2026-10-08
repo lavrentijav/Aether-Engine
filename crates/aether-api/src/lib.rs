@@ -120,7 +120,11 @@ pub struct World<B: KvBackend, G: ChunkGenerator> {
     /// interning it needs to mutate the table through a shared `&World`.
     registry: RwLock<BlockRegistry>,
     cache: RwLock<HashMap<SubChunkKey, SubChunk>>,
-    dirty: RwLock<HashSet<SubChunkKey>>,
+    /// Sections with edits not yet saved, each with the number of its latest
+    /// edit, so a flush clears only the marks it actually saved.
+    dirty: RwLock<HashMap<SubChunkKey, u64>>,
+    /// Numbers the edits that mark sections dirty.
+    edits: AtomicU64,
     /// Per-column materialization latch: see [`Latch`]. Keyed per column so
     /// unrelated columns still generate in parallel. An entry exists exactly
     /// while the column may be resident; [`World::unload`] removes both.
@@ -181,7 +185,8 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             generator,
             registry: RwLock::new(registry),
             cache: RwLock::new(HashMap::new()),
-            dirty: RwLock::new(HashSet::new()),
+            dirty: RwLock::new(HashMap::new()),
+            edits: AtomicU64::new(0),
             columns: RwLock::new(HashMap::new()),
             sweep: AtomicU64::new(0),
             params: PhysicsParams::default(),
@@ -269,9 +274,11 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
                 }))
             }
         };
+        // Only ever forwards: a touch that read the clock just before a sweep
+        // must not overwrite one that read it just after.
         let now = self.sweep.load(Ordering::Relaxed);
-        if latch.last_used.load(Ordering::Relaxed) != now {
-            latch.last_used.store(now, Ordering::Relaxed);
+        if latch.last_used.load(Ordering::Relaxed) < now {
+            latch.last_used.fetch_max(now, Ordering::Relaxed);
         }
         let mut materialized = latch.materialized.lock().unwrap();
         if *materialized {
@@ -404,9 +411,15 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
                 }
             }
         }
-        self.dirty.write().unwrap().insert(key);
+        self.mark_dirty(key);
         (policy.on_rebuild)(key, kept);
         fresh
+    }
+
+    /// Mark `key` as holding an edit not yet saved.
+    fn mark_dirty(&self, key: SubChunkKey) {
+        let n = self.edits.fetch_add(1, Ordering::Relaxed);
+        self.dirty.write().unwrap().insert(key, n);
     }
 
     fn key_of(x: i32, y: i32, z: i32) -> Option<(SubChunkKey, usize, usize, usize)> {
@@ -494,7 +507,7 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             let mut cache = self.cache.write().unwrap();
             cache.entry(key).or_default().set(lx, ly, lz, id, props);
         }
-        self.dirty.write().unwrap().insert(key);
+        self.mark_dirty(key);
     }
 
     /// Set the block at `(x, y, z)` and record who did it.
@@ -594,7 +607,14 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         // event is numbered, so every event below this is already in the
         // sections about to be saved. It becomes their columns' checkpoint.
         let head = self.journal.head();
-        let keys: Vec<SubChunkKey> = self.dirty.read().unwrap().iter().copied().collect();
+        let marks: Vec<(SubChunkKey, u64)> = self
+            .dirty
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(&k, &n)| (k, n))
+            .collect();
+        let keys: Vec<SubChunkKey> = marks.iter().map(|&(k, _)| k).collect();
         {
             let cache = self.cache.read().unwrap();
             for key in &keys {
@@ -620,13 +640,17 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         self.storage
             .save_registry(self.registry.read().unwrap().names())?;
 
-        // Only commit the durability flush, then clear exactly the keys we
-        // saved — not the whole set — so keys dirtied concurrently survive and a
-        // failed flush leaves the dirty bookkeeping intact for a retry.
+        // Only commit the durability flush, then clear exactly the marks we
+        // saved — not the whole set, and not a key edited again since it was
+        // read above — so an edit made while this ran stays dirty (and its
+        // column resident) until the next flush, and a failed flush leaves
+        // the bookkeeping intact for a retry.
         self.storage.flush()?;
         let mut dirty = self.dirty.write().unwrap();
-        for key in &keys {
-            dirty.remove(key);
+        for (key, n) in &marks {
+            if dirty.get(key) == Some(n) {
+                dirty.remove(key);
+            }
         }
         Ok(())
     }
@@ -705,12 +729,28 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         idle_sweeps: u64,
     ) -> UnloadStats {
         let now = self.sweep.fetch_add(1, Ordering::Relaxed) + 1;
+        let idle_long = |used: u64| now.saturating_sub(used) > idle_sweeps;
+        // `keep` is the caller's and may call back into the world, so it is
+        // asked before any lock of ours is held.
+        let unneeded: HashSet<(i32, i32)> = {
+            let seen: Vec<((i32, i32), u64)> = self
+                .columns
+                .read()
+                .unwrap()
+                .iter()
+                .map(|(&col, latch)| (col, latch.last_used.load(Ordering::Relaxed)))
+                .collect();
+            seen.into_iter()
+                .filter(|&((cx, cz), used)| idle_long(used) && !keep(cx, cz))
+                .map(|(col, _)| col)
+                .collect()
+        };
         let mut columns = self.columns.write().unwrap();
         let dirty: HashSet<(i32, i32)> = self
             .dirty
             .read()
             .unwrap()
-            .iter()
+            .keys()
             .map(|k| (k.cx, k.cz))
             .collect();
 
@@ -725,9 +765,10 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
 
         let mut gone = Vec::new();
         let mut stats = UnloadStats::default();
-        idle.retain(|&((cx, cz), used)| {
-            if now.saturating_sub(used) > idle_sweeps && !keep(cx, cz) {
-                gone.push((cx, cz));
+        idle.retain(|&(col, used)| {
+            // Idle checked again: the column may have been touched since.
+            if unneeded.contains(&col) && idle_long(used) {
+                gone.push(col);
                 stats.unneeded += 1;
                 false
             } else {
@@ -748,13 +789,16 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         }
 
         if !gone.is_empty() {
-            let mut cache = self.cache.write().unwrap();
-            for &(cx, cz) in &gone {
-                columns.remove(&(cx, cz));
-                for cy in SCAN_CY_MIN..=SCAN_CY_MAX {
-                    cache.remove(&SubChunkKey::new(cx, cy, cz));
-                }
+            for col in &gone {
+                columns.remove(col);
             }
+            // Every section of each, the scanned band and any written outside
+            // it alike.
+            let gone_set: HashSet<(i32, i32)> = gone.iter().copied().collect();
+            self.cache
+                .write()
+                .unwrap()
+                .retain(|k, _| !gone_set.contains(&(k.cx, k.cz)));
         }
         // Still under the map's lock: a column touched again cannot start
         // loading — and have the generator remember it afresh — until the

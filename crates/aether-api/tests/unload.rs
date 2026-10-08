@@ -128,3 +128,73 @@ fn a_resident_column_is_a_few_kilobytes() {
     );
     assert!(per_column < 20_000, "{per_column} bytes per column");
 }
+
+/// A store that runs a hook once, while a flush writes column checkpoints:
+/// after the sections are saved, before their dirty marks are cleared.
+#[derive(Default)]
+struct Hooked {
+    inner: MemStore,
+    hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl aether_world::KvBackend for Hooked {
+    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), aether_world::StorageError> {
+        self.inner.put(key, value)?;
+        if key.first() == Some(&b'K') {
+            let hook = self.hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        Ok(())
+    }
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, aether_world::StorageError> {
+        self.inner.get(key)
+    }
+    fn delete(&self, key: &[u8]) -> Result<(), aether_world::StorageError> {
+        self.inner.delete(key)
+    }
+    fn scan_prefix(
+        &self,
+        prefix: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, aether_world::StorageError> {
+        self.inner.scan_prefix(prefix)
+    }
+}
+
+#[test]
+fn an_edit_made_while_a_flush_runs_keeps_its_column_until_saved() {
+    // An edit with no journal entry — fluid flow, say — landing after its
+    // section was saved but before the flush cleared the mark used to lose
+    // the mark: the column read as clean, was unloaded, and came back
+    // without the edit.
+    let backend = Arc::new(Hooked::default());
+    let world = Arc::new(World::new(Arc::clone(&backend), NoiseGenerator::new(7)));
+    let sand = b::SAND;
+    let props = props_of_state(sand).unwrap();
+    world.set_block_id(1, 120, 1, b::OAK_LOG, props_of_state(b::OAK_LOG).unwrap());
+    {
+        let world = Arc::clone(&world);
+        *backend.hook.lock().unwrap() = Some(Box::new(move || {
+            world.set_block_id(2, 120, 1, sand, props);
+        }));
+    }
+    world.flush().unwrap();
+
+    let nothing = |_: i32, _: i32| false;
+    world.unload(&nothing, 0, 0);
+    assert_eq!(
+        world.unload(&nothing, 0, 0).resident,
+        1,
+        "the edit made during the flush is still unsaved"
+    );
+    world.flush().unwrap();
+    world.unload(&nothing, 0, 0);
+    assert_eq!(world.resident_columns(), 0);
+    assert_eq!(
+        world.get_block(2, 120, 1),
+        sand,
+        "and it survives the reload"
+    );
+    assert_eq!(world.get_block(1, 120, 1), b::OAK_LOG);
+}
