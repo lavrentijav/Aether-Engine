@@ -65,7 +65,7 @@ server a vanilla 1.8.9 client can connect to.
 | Vanilla carvers (caves, canyons, extra-underground caves) — matched against the game's carver stage | ✅ |
 | Vanilla decoration from the pack's placed features: ores, trees, grass and flowers, sugar cane, kelp and seagrass, lakes, springs, corals, icebergs… — vanilla-like, 99.7% of blocks against a vanilla server world, not position-exact | 🚧 Preview |
 | Per-section biome ids (4×4×4 quart grid) exposed on `GeneratedColumn` and kept by the column cache; the overworld biome table is built in, `biome_data` optional | ✅ |
-| Biomes on the wire: the server still registers one biome and sends biome 0 — see [Known Issues A.8](KNOWN_ISSUES.md) | ❌ |
+| Biomes on the wire (1.21.11): all 65 biomes registered, per-section paletted biome containers; block containers widen past 4 bits / go direct | ✅ |
 | Disk cache for unmodified generated columns, aged out after a day and swept above a cap — never a source of truth, every entry reproducible from the seed (`/cache`) | ✅ |
 | A block is refused where it would be placed inside a player, their own or anyone else's | ✅ |
 | Mining pays by scarcity, only for generator-placed blocks — a position the journal has never seen filled — so place-and-break is not a coin press | ✅ |

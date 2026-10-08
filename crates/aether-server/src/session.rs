@@ -42,6 +42,14 @@ impl BlockSource for DemoWorld {
             block_ids::AIR
         }
     }
+
+    fn column_biomes(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Option<std::sync::Arc<aether_worldgen::ColumnBiomes>> {
+        self.generator().biomes(cx, cz)
+    }
 }
 
 /// Serve one accepted connection: handshake, then either a status ping or a

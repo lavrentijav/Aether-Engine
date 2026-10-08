@@ -46,6 +46,15 @@ pub mod v774;
 pub trait BlockSource: Sync {
     /// Engine block id at absolute world coordinates, air when out of range.
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId;
+
+    /// The biomes of column `(cx, cz)`, when the generator produced any.
+    fn column_biomes(
+        &self,
+        _cx: i32,
+        _cz: i32,
+    ) -> Option<std::sync::Arc<aether_worldgen::ColumnBiomes>> {
+        None
+    }
 }
 
 /// Something the server wants a client told, stated without reference to any

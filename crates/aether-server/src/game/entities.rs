@@ -792,8 +792,10 @@ fn merge_items(all: &mut [Entity], actions: &mut Vec<Action>) {
 /// Whether a player standing at `feet` reaches the box `b`, with vanilla's
 /// pickup inflation of the player's box.
 fn near_player(feet: Vector3, b: aether_api::Aabb, grow_h: f64, grow_v: f64) -> bool {
-    let pb = aether_api::Aabb::from_base(feet, 0.6 + 2.0 * grow_h, 1.8 + grow_v)
-        .offset(Vector3::new(0.0, -grow_v / 2.0, 0.0));
+    // `getBoundingBox().inflate(grow_h, grow_v, grow_h)`: grown on every
+    // side, so `grow_v` below the feet as well as above the head.
+    let pb = aether_api::Aabb::from_base(feet, 0.6 + 2.0 * grow_h, 1.8 + 2.0 * grow_v)
+        .offset(Vector3::new(0.0, -grow_v, 0.0));
     pb.intersects(b)
 }
 
@@ -965,7 +967,7 @@ mod tests {
             |x: f64, y: f64| aether_api::Aabb::from_base(Vector3::new(x, y, 0.0), 0.25, 0.25);
         assert!(near_player(feet, item(1.2, 64.0), 1.0, 0.5));
         assert!(!near_player(feet, item(1.6, 64.0), 1.0, 0.5));
-        assert!(near_player(feet, item(0.0, 63.8), 1.0, 0.5));
-        assert!(!near_player(feet, item(0.0, 62.0), 1.0, 0.5));
+        assert!(near_player(feet, item(0.0, 63.6), 1.0, 0.5));
+        assert!(!near_player(feet, item(0.0, 63.2), 1.0, 0.5));
     }
 }

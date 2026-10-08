@@ -95,7 +95,15 @@ pub struct Cached<G> {
     dir: Option<PathBuf>,
     ttl: Duration,
     stats: Arc<CacheStats>,
+    /// Biomes of recently generated columns. The world keeps a column's
+    /// blocks but not its biomes, so they are remembered here for the chunk
+    /// encoder; bounded, and a forgotten column falls back to plains.
+    biomes:
+        std::sync::Mutex<std::collections::HashMap<(i32, i32), Arc<aether_worldgen::ColumnBiomes>>>,
 }
+
+/// How many columns' biomes are remembered.
+const BIOME_MEMORY: usize = 20_000;
 
 impl<G: ChunkGenerator> Cached<G> {
     /// Wrap `inner`, creating the cache directory for `seed`.
@@ -125,6 +133,22 @@ impl<G: ChunkGenerator> Cached<G> {
             dir,
             ttl: cfg.ttl,
             stats,
+            biomes: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// The biomes of column `(cx, cz)`, if it was generated recently.
+    pub fn biomes(&self, cx: i32, cz: i32) -> Option<Arc<aether_worldgen::ColumnBiomes>> {
+        self.biomes.lock().unwrap().get(&(cx, cz)).cloned()
+    }
+
+    fn remember(&self, cx: i32, cz: i32, column: &GeneratedColumn) {
+        if let Some(b) = &column.biomes {
+            let mut m = self.biomes.lock().unwrap();
+            if m.len() >= BIOME_MEMORY {
+                m.clear();
+            }
+            m.insert((cx, cz), Arc::new(b.clone()));
         }
     }
 
@@ -205,11 +229,13 @@ impl<G: ChunkGenerator> ChunkGenerator for Cached<G> {
         if let Some(path) = &path {
             if let Some(column) = self.read(path) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                self.remember(cx, cz, &column);
                 return column;
             }
         }
         self.stats.misses.fetch_add(1, Ordering::Relaxed);
         let column = self.inner.generate_column(cx, cz);
+        self.remember(cx, cz, &column);
         if let Some(path) = &path {
             self.write(path, &column);
         }
