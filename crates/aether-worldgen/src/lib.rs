@@ -67,6 +67,10 @@ impl ColumnBiomes {
 pub trait ChunkGenerator: Send + Sync {
     /// Generate the column at chunk coordinates `(cx, cz)`.
     fn generate_column(&self, cx: i32, cz: i32) -> GeneratedColumn;
+
+    /// The world no longer holds column `(cx, cz)`: anything kept about it
+    /// alongside its blocks can go too. A later touch generates it again.
+    fn forget(&self, _cx: i32, _cz: i32) {}
 }
 
 /// Accumulates blocks for a column across sub-chunk boundaries, then emits the

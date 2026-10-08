@@ -16,6 +16,8 @@ use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 /// build: this server sends no real inventory, and a client holding nothing
 /// cannot place anything. Kept to blocks [`chunk::engine_id`] maps back, so
 /// anything placed is a block the engine world can really store.
+/// Client Information (`settings`), play state: carries the view distance.
+const SB_CLIENT_INFORMATION: i32 = 0x15;
 const HOTBAR: [u16; 7] = [1, 3, 2, 12, 13, 17, 18];
 
 /// The 1.8.9 codec.
@@ -164,6 +166,10 @@ impl ProtocolCodec for Codec {
     fn decode(&self, pkt: &RawPacket, prev: PosLook) -> ClientEvent {
         let mut pin = PacketIn::new(&pkt.data);
         match pkt.id {
+            SB_CLIENT_INFORMATION => match crate::proto::view_distance_of(&pkt.data) {
+                Some(d) => ClientEvent::ViewDistance(d),
+                None => ClientEvent::Ignored,
+            },
             0x03 => match pin.bool() {
                 Ok(on_ground) => ClientEvent::Move(PosLook { on_ground, ..prev }),
                 Err(_) => ClientEvent::Ignored,

@@ -97,7 +97,8 @@ pub struct Cached<G> {
     stats: Arc<CacheStats>,
     /// Biomes of recently generated columns. The world keeps a column's
     /// blocks but not its biomes, so they are remembered here for the chunk
-    /// encoder; bounded, and a forgotten column falls back to plains.
+    /// encoder; dropped when the world unloads the column, and bounded besides.
+    /// A column whose biomes are missing falls back to plains.
     biomes:
         std::sync::Mutex<std::collections::HashMap<(i32, i32), Arc<aether_worldgen::ColumnBiomes>>>,
 }
@@ -162,8 +163,14 @@ impl<G: ChunkGenerator> Cached<G> {
     fn remember(&self, cx: i32, cz: i32, column: &GeneratedColumn) {
         if let Some(b) = &column.biomes {
             let mut m = self.biomes.lock().unwrap();
+            // Columns the world unloads are forgotten as they go (see
+            // `forget`), so this only fills when more is resident than it
+            // holds; then one arbitrary entry makes room, rather than every
+            // column at once falling back to plains.
             if m.len() >= BIOME_MEMORY {
-                m.clear();
+                if let Some(&k) = m.keys().next() {
+                    m.remove(&k);
+                }
             }
             m.insert((cx, cz), Arc::new(b.clone()));
         }
@@ -257,6 +264,11 @@ impl<G: ChunkGenerator> ChunkGenerator for Cached<G> {
             self.write(path, &column);
         }
         column
+    }
+
+    fn forget(&self, cx: i32, cz: i32) {
+        self.biomes.lock().unwrap().remove(&(cx, cz));
+        self.inner.forget(cx, cz);
     }
 }
 

@@ -186,7 +186,42 @@ pub struct VanillaGenerator {
     decorator: Decorator,
     registry: BlockRegistry,
     base_cache: Mutex<Lru<Arc<ProtoChunk>>>,
-    decor_cache: Mutex<Lru<Arc<Vec<(i32, i32, i32, BlockStateId)>>>>,
+    decor_cache: Mutex<Lru<Arc<[DecorWrite]>>>,
+}
+
+/// One decoration write, packed to eight bytes relative to the decorated
+/// chunk's corner: a chunk's decoration runs to thousands of writes, and a
+/// thousand chunks of them kept as `(i32, i32, i32, BlockStateId)` were over
+/// a hundred MiB.
+#[derive(Clone, Copy)]
+struct DecorWrite {
+    dx: i16,
+    y: i16,
+    dz: i16,
+    state: u16,
+}
+
+impl DecorWrite {
+    /// `None` for a write that does not fit — never for vanilla features,
+    /// which stay within a chunk's neighbours and its height, and block
+    /// states, which number under 65 536.
+    fn pack(cx: i32, cz: i32, (x, y, z, s): (i32, i32, i32, BlockStateId)) -> Option<Self> {
+        Some(Self {
+            dx: i16::try_from(x - cx * 16).ok()?,
+            y: i16::try_from(y).ok()?,
+            dz: i16::try_from(z - cz * 16).ok()?,
+            state: u16::try_from(s.0).ok()?,
+        })
+    }
+
+    fn unpack(self, cx: i32, cz: i32) -> (i32, i32, i32, BlockStateId) {
+        (
+            cx * 16 + self.dx as i32,
+            self.y as i32,
+            cz * 16 + self.dz as i32,
+            BlockStateId(self.state as u32),
+        )
+    }
 }
 
 /// Quart biomes around one chunk, filled on first use: the jittered lookup
@@ -465,12 +500,37 @@ impl VanillaGenerator {
             .collect()
     }
 
+    /// What the generator's caches hold right now: `(chunks, bytes)` of
+    /// carved chunks kept for their neighbours, then of decoration writes.
+    pub fn cache_footprint(&self) -> ((usize, usize), (usize, usize)) {
+        let base = self.base_cache.lock().unwrap();
+        let decor = self.decor_cache.lock().unwrap();
+        (
+            (
+                base.map.len(),
+                base.map.values().map(|(_, c)| c.block_bytes()).sum(),
+            ),
+            (
+                decor.map.len(),
+                decor
+                    .map
+                    .values()
+                    .map(|(_, d)| std::mem::size_of_val::<[DecorWrite]>(d))
+                    .sum(),
+            ),
+        )
+    }
+
     /// The chunk through carving, cached.
     pub(crate) fn base(&self, cx: i32, cz: i32) -> Arc<ProtoChunk> {
         if let Some(c) = self.base_cache.lock().unwrap().get((cx, cz)) {
             return c;
         }
-        let c = Arc::new(self.proto_chunk(cx, cz, Stage::Carvers));
+        // Kept for the neighbours' decoration, so packed: 1024 dense chunks
+        // were 200 MiB of the generator's memory on their own.
+        let mut c = self.proto_chunk(cx, cz, Stage::Carvers);
+        c.freeze();
+        let c = Arc::new(c);
         self.base_cache
             .lock()
             .unwrap()
@@ -480,7 +540,7 @@ impl VanillaGenerator {
 
     /// The blocks chunk `(cx, cz)`'s decoration writes, anywhere in its 3×3
     /// neighbourhood. Cached.
-    fn decoration_of(&self, cx: i32, cz: i32) -> Arc<Vec<(i32, i32, i32, BlockStateId)>> {
+    fn decoration_of(&self, cx: i32, cz: i32) -> Arc<[DecorWrite]> {
         if let Some(d) = self.decor_cache.lock().unwrap().get((cx, cz)) {
             return d;
         }
@@ -491,7 +551,30 @@ impl VanillaGenerator {
             }
         }
         let region = region.map(|r| r.map(|c| c.expect("filled")));
-        let writes = Arc::new(self.decorator.decorate(&self.core, cx, cz, &region));
+        // Kept as the neighbours will read it: only writes inside the 3×3
+        // they cover, and one per position — the last value, in the order
+        // the position was first written, which is how `decoration_around`
+        // reads a list with repeats anyway.
+        let (x0, z0) = ((cx - 1) * 16, (cz - 1) * 16);
+        let mut at: super::FxHashMap<(i32, i32, i32), usize> = Default::default();
+        let mut kept: Vec<(i32, i32, i32, BlockStateId)> = Vec::new();
+        for w in self.decorator.decorate(&self.core, cx, cz, &region) {
+            let (x, y, z, s) = w;
+            if !(x0..x0 + 48).contains(&x) || !(z0..z0 + 48).contains(&z) {
+                continue;
+            }
+            match at.entry((x, y, z)) {
+                std::collections::hash_map::Entry::Occupied(e) => kept[*e.get()].3 = s,
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(kept.len());
+                    kept.push(w);
+                }
+            }
+        }
+        let writes: Arc<[DecorWrite]> = kept
+            .into_iter()
+            .filter_map(|w| DecorWrite::pack(cx, cz, w))
+            .collect();
         self.decor_cache
             .lock()
             .unwrap()
@@ -531,10 +614,11 @@ impl VanillaGenerator {
         let mut order: Vec<(i32, i32, i32)> = Vec::new();
         for dz in -1..=1 {
             for dx in -1..=1 {
-                let d = self.decoration_of(cx + dx, cz + dz);
+                let (ncx, ncz) = (cx + dx, cz + dz);
+                let d = self.decoration_of(ncx, ncz);
                 let mut mine: super::FxHashMap<(i32, i32, i32), BlockStateId> = Default::default();
                 let mut mine_order = Vec::new();
-                for &(x, y, z, s) in d.iter() {
+                for (x, y, z, s) in d.iter().map(|w| w.unpack(ncx, ncz)) {
                     if (x0..x0 + 16).contains(&x)
                         && (z0..z0 + 16).contains(&z)
                         && mine.insert((x, y, z), s).is_none()

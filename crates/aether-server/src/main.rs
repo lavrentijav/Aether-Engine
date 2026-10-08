@@ -160,6 +160,7 @@ fn main() -> std::process::ExitCode {
         "saved to   : {} (autosave every {}s)",
         cfg.server.world_dir, cfg.server.autosave_secs
     ));
+    log::info(&ops::radius_estimate(&cfg.server));
     warn_if_exposed(&cfg);
 
     spawn_autosave(Arc::clone(&world), cfg.server.autosave_secs);
@@ -167,8 +168,14 @@ fn main() -> std::process::ExitCode {
     ops::spawn_shutdown(Arc::clone(&registry), Arc::clone(&world));
     ops::spawn_monitor(
         Arc::clone(&registry),
+        Arc::clone(&world),
         cfg.server.watchdog_secs,
         cfg.server.status_secs,
+    );
+    ops::spawn_residency(
+        Arc::clone(&registry),
+        Arc::clone(&world),
+        cfg.server.max_resident_columns,
     );
     log::info("ready (SIGINT or SIGTERM stops cleanly)");
 
@@ -361,6 +368,15 @@ fn warn_if_exposed(cfg: &Config) {
             cfg.server.host
         ));
     }
+}
+
+/// The chunk radius to stream to a client whose own view distance is
+/// `client`: see [`config::ServerConfig::radius_for`].
+pub fn view_radius_for(client: Option<u8>) -> i32 {
+    CONFIG
+        .get()
+        .map(|c| c.server.radius_for(client))
+        .unwrap_or(8)
 }
 
 /// The mode this server runs, installed at startup.

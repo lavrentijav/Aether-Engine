@@ -21,7 +21,8 @@ host = "127.0.0.1"
 port = 25565
 motd = "Aether Engine — 1.8.9 demo (full-bright noise terrain)"
 max_players = 20
-view_radius = 8       # chunk radius kept loaded around each player
+view_radius = 8       # largest chunk radius sent to a player (each gets min(this, their own + 1))
+max_resident_columns = 0  # columns kept in memory at most, least recently used go first; 0 = no limit
 compression_threshold = 256  # deflate packets this size or larger; -1 disables
 game_mode = "creative"  # survival: blocks drop and pay; creative: build freely
 # The directory holding the game's data pack (it contains data/minecraft/),

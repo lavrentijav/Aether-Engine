@@ -3,15 +3,19 @@
 //! Most sub-chunks use only a handful of distinct block states, so instead of
 //! storing a 16-bit id per block we keep a small **palette** of the distinct
 //! ids and a [`PackedArray`] of narrow indices into it. The index width
-//! auto-expands `u4 → u8 → u16` as the palette grows.
+//! auto-expands `0 → 1 → 2 → 4 → 8 → 16` bits as the palette grows, and
+//! [`Palette::compact`] shrinks it back.
+//!
+//! Width 0 is the common case that matters most for memory: a sub-chunk of a
+//! single block — all air, all stone, all water — stores no indices at all.
 
 use crate::block::{BlockProperties, BlockStateId};
-use std::collections::HashMap;
 
 /// A tightly packed array of fixed-width unsigned integers.
 ///
-/// The width is one of 4, 8 or 16 bits, each of which divides 64 evenly, so an
-/// entry never straddles a `u64` word — get/set are a single shift-and-mask.
+/// The width is one of 0, 1, 2, 4, 8 or 16 bits. Each non-zero width divides
+/// 64 evenly, so an entry never straddles a `u64` word — get/set are a single
+/// shift-and-mask. Width 0 holds no words: every entry reads as 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackedArray {
     bits_per_entry: u8,
@@ -19,25 +23,33 @@ pub struct PackedArray {
     words: Vec<u64>,
 }
 
+/// Whether `bits` is a width a [`PackedArray`] can hold.
+#[inline]
+pub fn valid_width(bits: u8) -> bool {
+    matches!(bits, 0 | 1 | 2 | 4 | 8 | 16)
+}
+
 impl PackedArray {
-    fn entries_per_word(bits: u8) -> usize {
-        64 / bits as usize
+    fn word_count(bits: u8, len: usize) -> usize {
+        if bits == 0 {
+            0
+        } else {
+            len.div_ceil(64 / bits as usize)
+        }
     }
 
     /// A zero-filled array of `len` entries at `bits_per_entry` bits each.
     ///
-    /// `bits_per_entry` must be 4, 8 or 16.
+    /// `bits_per_entry` must be 0, 1, 2, 4, 8 or 16.
     pub fn new(bits_per_entry: u8, len: usize) -> Self {
         assert!(
-            matches!(bits_per_entry, 4 | 8 | 16),
-            "bits_per_entry must be 4, 8 or 16, got {bits_per_entry}"
+            valid_width(bits_per_entry),
+            "bits_per_entry must be 0, 1, 2, 4, 8 or 16, got {bits_per_entry}"
         );
-        let epw = Self::entries_per_word(bits_per_entry);
-        let words = vec![0u64; len.div_ceil(epw)];
         Self {
             bits_per_entry,
             len,
-            words,
+            words: vec![0u64; Self::word_count(bits_per_entry, len)],
         }
     }
 
@@ -67,11 +79,10 @@ impl PackedArray {
 
     /// Rebuild directly from raw words (used by the storage deserializer).
     pub fn from_words(bits_per_entry: u8, len: usize, words: Vec<u64>) -> Self {
-        assert!(matches!(bits_per_entry, 4 | 8 | 16));
-        let epw = Self::entries_per_word(bits_per_entry);
+        assert!(valid_width(bits_per_entry));
         assert_eq!(
             words.len(),
-            len.div_ceil(epw),
+            Self::word_count(bits_per_entry, len),
             "word count does not match len"
         );
         Self {
@@ -83,65 +94,78 @@ impl PackedArray {
 
     #[inline]
     fn locate(&self, i: usize) -> (usize, u32, u64) {
-        let epw = Self::entries_per_word(self.bits_per_entry);
+        let bits = self.bits_per_entry as usize;
+        let epw = 64 / bits;
         let word = i / epw;
-        let shift = ((i % epw) * self.bits_per_entry as usize) as u32;
-        let mask = if self.bits_per_entry == 16 {
-            0xffff
-        } else {
-            (1u64 << self.bits_per_entry) - 1
-        };
-        (word, shift, mask)
+        let shift = ((i % epw) * bits) as u32;
+        (word, shift, (1u64 << bits) - 1)
     }
 
     /// Read entry `i`.
     #[inline]
     pub fn get(&self, i: usize) -> u16 {
         assert!(i < self.len, "index {i} out of bounds ({})", self.len);
+        if self.bits_per_entry == 0 {
+            return 0;
+        }
         let (word, shift, mask) = self.locate(i);
         ((self.words[word] >> shift) & mask) as u16
     }
 
-    /// Write entry `i`.
+    /// Write entry `i`. At width 0 only 0 can be written.
     #[inline]
     pub fn set(&mut self, i: usize, value: u16) {
         assert!(i < self.len, "index {i} out of bounds ({})", self.len);
+        if self.bits_per_entry == 0 {
+            debug_assert_eq!(value, 0, "a width-0 array holds only zeros");
+            return;
+        }
         let (word, shift, mask) = self.locate(i);
         let w = &mut self.words[word];
         *w = (*w & !(mask << shift)) | (((value as u64) & mask) << shift);
     }
 
-    /// Return a copy widened to `new_bits`, preserving every entry.
-    fn widened(&self, new_bits: u8) -> PackedArray {
+    /// A copy at `new_bits`, preserving every entry (which must fit).
+    fn resized(&self, new_bits: u8) -> PackedArray {
         let mut out = PackedArray::new(new_bits, self.len);
-        for i in 0..self.len {
-            out.set(i, self.get(i));
+        if self.bits_per_entry != 0 {
+            for i in 0..self.len {
+                out.set(i, self.get(i));
+            }
         }
         out
+    }
+
+    /// Heap bytes held by the array.
+    pub fn heap_bytes(&self) -> usize {
+        self.words.capacity() * 8
     }
 }
 
 /// A sub-chunk palette: distinct block states plus their [`BlockProperties`],
 /// with an auto-widening [`PackedArray`] of per-block indices.
+///
+/// Lookups are a linear scan: a palette rarely holds more than a dozen
+/// entries, and a scan over that few beats hashing — and costs no table.
 #[derive(Debug, Clone)]
 pub struct Palette {
     entries: Vec<BlockStateId>,
     props: Vec<BlockProperties>,
-    lookup: HashMap<BlockStateId, u16>,
     indices: PackedArray,
 }
 
 impl Palette {
     /// A palette for `len` blocks, initialised entirely to air (index 0).
     pub fn new(len: usize) -> Self {
-        let air = BlockStateId::AIR;
-        let mut lookup = HashMap::new();
-        lookup.insert(air, 0u16);
+        Self::uniform(len, BlockStateId::AIR, BlockProperties::AIR)
+    }
+
+    /// A palette for `len` blocks all of `id`, which costs no index storage.
+    pub fn uniform(len: usize, id: BlockStateId, props: BlockProperties) -> Self {
         Self {
-            entries: vec![air],
-            props: vec![BlockProperties::AIR],
-            lookup,
-            indices: PackedArray::new(4, len),
+            entries: vec![id],
+            props: vec![props],
+            indices: PackedArray::new(0, len),
         }
     }
 
@@ -151,7 +175,7 @@ impl Palette {
         self.entries.len()
     }
 
-    /// Current index bit-width (4, 8 or 16).
+    /// Current index bit-width (0, 1, 2, 4, 8 or 16).
     #[inline]
     pub fn bits_per_entry(&self) -> u8 {
         self.indices.bits_per_entry()
@@ -159,12 +183,13 @@ impl Palette {
 
     /// The minimum index width that can hold `distinct` palette entries.
     fn required_bits(distinct: usize) -> u8 {
-        if distinct <= 16 {
-            4
-        } else if distinct <= 256 {
-            8
-        } else {
-            16
+        match distinct {
+            0 | 1 => 0,
+            2 => 1,
+            3..=4 => 2,
+            5..=16 => 4,
+            17..=256 => 8,
+            _ => 16,
         }
     }
 
@@ -174,22 +199,21 @@ impl Palette {
     /// with different properties is a caller bug (masks would then diverge from
     /// the stored palette).
     fn intern(&mut self, id: BlockStateId, props: BlockProperties) -> u16 {
-        if let Some(&idx) = self.lookup.get(&id) {
+        if let Some(idx) = self.entries.iter().position(|&e| e == id) {
             debug_assert_eq!(
-                self.props[idx as usize], props,
+                self.props[idx], props,
                 "block id {id:?} interned with conflicting properties"
             );
-            return idx;
+            return idx as u16;
         }
         let idx = self.entries.len() as u16;
         assert!(idx < 4096, "sub-chunk palette overflow (>4096 states)");
         self.entries.push(id);
         self.props.push(props);
-        self.lookup.insert(id, idx);
 
         let needed = Self::required_bits(self.entries.len());
         if needed > self.indices.bits_per_entry() {
-            self.indices = self.indices.widened(needed);
+            self.indices = self.indices.resized(needed);
         }
         idx
     }
@@ -219,7 +243,7 @@ impl Palette {
         self.props[self.indices.get(pos) as usize]
     }
 
-    /// Distinct palette entries, index order (index 0 is always air).
+    /// Distinct palette entries, in index order.
     #[inline]
     pub fn entries(&self) -> &[BlockStateId] {
         &self.entries
@@ -237,6 +261,76 @@ impl Palette {
         &self.indices
     }
 
+    /// The single block filling the whole palette's range, if there is one.
+    pub fn uniform_block(&self) -> Option<BlockStateId> {
+        if self.indices.bits_per_entry() == 0 {
+            return Some(self.entries[0]);
+        }
+        let first = self.indices.get(0);
+        (1..self.indices.len())
+            .all(|i| self.indices.get(i) == first)
+            .then(|| self.entries[first as usize])
+    }
+
+    /// Drop entries no block uses any more and narrow the indices to the
+    /// smallest width that holds the rest.
+    ///
+    /// The palette only ever grows as blocks are written — a sub-chunk dug out
+    /// to air still carries the stone it had — so this is what returns a
+    /// sub-chunk to its minimal size: run on what the generator produced and
+    /// on what is read back from disk.
+    pub fn compact(&mut self) {
+        let len = self.indices.len();
+        let mut used = vec![false; self.entries.len()];
+        for i in 0..len {
+            used[self.indices.get(i) as usize] = true;
+        }
+        if len == 0 {
+            used[0] = true;
+        }
+        let kept = used.iter().filter(|&&u| u).count();
+        let bits = Self::required_bits(kept);
+        if kept == self.entries.len() && bits == self.indices.bits_per_entry() {
+            return;
+        }
+        let mut remap = vec![0u16; self.entries.len()];
+        let mut entries = Vec::with_capacity(kept);
+        let mut props = Vec::with_capacity(kept);
+        for (old, _) in used.iter().enumerate().filter(|(_, &u)| u) {
+            remap[old] = entries.len() as u16;
+            entries.push(self.entries[old]);
+            props.push(self.props[old]);
+        }
+        let mut indices = PackedArray::new(bits, len);
+        if bits != 0 {
+            for i in 0..len {
+                indices.set(i, remap[self.indices.get(i) as usize]);
+            }
+        }
+        *self = Self {
+            entries,
+            props,
+            indices,
+        };
+    }
+
+    /// The indices at least `min_bits` wide, for a reader that cannot take
+    /// narrower ones.
+    pub(crate) fn widened_to(&self, min_bits: u8) -> PackedArray {
+        if self.indices.bits_per_entry() >= min_bits {
+            self.indices.clone()
+        } else {
+            self.indices.resized(min_bits)
+        }
+    }
+
+    /// Heap bytes held by the palette.
+    pub fn heap_bytes(&self) -> usize {
+        self.entries.capacity() * std::mem::size_of::<BlockStateId>()
+            + self.props.capacity() * std::mem::size_of::<BlockProperties>()
+            + self.indices.heap_bytes()
+    }
+
     /// Reassemble a palette from its serialized parts.
     pub fn from_parts(
         entries: Vec<BlockStateId>,
@@ -244,16 +338,10 @@ impl Palette {
         indices: PackedArray,
     ) -> Self {
         assert_eq!(entries.len(), props.len(), "entries/props length mismatch");
-        assert!(!entries.is_empty(), "palette must contain at least air");
-        let lookup = entries
-            .iter()
-            .enumerate()
-            .map(|(i, &id)| (id, i as u16))
-            .collect();
+        assert!(!entries.is_empty(), "palette must hold at least one entry");
         Self {
             entries,
             props,
-            lookup,
             indices,
         }
     }
@@ -265,7 +353,7 @@ mod tests {
 
     #[test]
     fn packed_array_round_trips_all_widths() {
-        for &bits in &[4u8, 8, 16] {
+        for &bits in &[1u8, 2, 4, 8, 16] {
             let mut pa = PackedArray::new(bits, 100);
             let cap = (1u32 << bits) - 1;
             for i in 0..100 {
@@ -284,7 +372,11 @@ mod tests {
     #[test]
     fn palette_auto_expands_width() {
         let mut p = Palette::new(4096);
-        assert_eq!(p.bits_per_entry(), 4);
+        assert_eq!(p.bits_per_entry(), 0, "all air needs no indices");
+        p.set(0, BlockStateId(1), BlockProperties::SOLID);
+        assert_eq!(p.bits_per_entry(), 1);
+        p.set(1, BlockStateId(2), BlockProperties::SOLID);
+        assert_eq!(p.bits_per_entry(), 2);
         // air + 15 distinct = 16 entries, still u4.
         for i in 0..15 {
             p.set(i, BlockStateId(i as u32 + 1), BlockProperties::SOLID);
@@ -324,6 +416,43 @@ mod tests {
         }
         // air + 3 distinct = 4 entries.
         assert_eq!(p.distinct(), 4);
-        assert_eq!(p.bits_per_entry(), 4);
+        assert_eq!(p.bits_per_entry(), 2);
+    }
+
+    #[test]
+    fn compact_drops_unused_entries_and_narrows() {
+        let mut p = Palette::new(4096);
+        for i in 0..4096 {
+            p.set(i, BlockStateId((i % 20) as u32 + 1), BlockProperties::SOLID);
+        }
+        assert_eq!(p.bits_per_entry(), 8, "air + 20 states");
+        // Everything becomes stone: one state left in use.
+        for i in 0..4096 {
+            p.set(i, BlockStateId(1), BlockProperties::SOLID);
+        }
+        assert_eq!(p.uniform_block(), Some(BlockStateId(1)));
+        p.compact();
+        assert_eq!(p.distinct(), 1);
+        assert_eq!(p.bits_per_entry(), 0);
+        assert_eq!(p.indices().words().len(), 0);
+        assert_eq!(p.get(1234), BlockStateId(1));
+        assert_eq!(p.props_at(1234), BlockProperties::SOLID);
+
+        // Two states in use: one bit, values intact.
+        p.set(7, BlockStateId::AIR, BlockProperties::AIR);
+        p.compact();
+        assert_eq!(p.bits_per_entry(), 1);
+        assert_eq!(p.get(7), BlockStateId::AIR);
+        assert_eq!(p.get(8), BlockStateId(1));
+    }
+
+    #[test]
+    fn compact_keeps_a_minimal_palette_as_it_is() {
+        let mut p = Palette::new(4096);
+        p.set(3, BlockStateId(5), BlockProperties::SOLID);
+        let before = p.clone();
+        p.compact();
+        assert_eq!(p.entries(), before.entries());
+        assert_eq!(p.indices(), before.indices());
     }
 }

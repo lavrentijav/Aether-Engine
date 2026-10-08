@@ -167,6 +167,8 @@ pub struct Conn {
     /// Body length at or above which a frame is deflated; `None` while the
     /// connection is still uncompressed.
     threshold: Option<usize>,
+    /// The view distance the client asked for in configuration, if it said.
+    view_distance: Option<u8>,
 }
 
 /// Set Compression, login state. The same id in every version this server
@@ -179,7 +181,13 @@ impl Conn {
         Self {
             stream,
             threshold: None,
+            view_distance: None,
         }
+    }
+
+    /// The view distance the client sent during configuration, if any.
+    pub fn view_distance(&self) -> Option<u8> {
+        self.view_distance
     }
 
     /// Announce compression to the client and switch this connection to it.
@@ -209,6 +217,7 @@ impl Conn {
         Ok(Self {
             stream: self.stream.try_clone()?,
             threshold: self.threshold,
+            view_distance: self.view_distance,
         })
     }
 
@@ -449,6 +458,39 @@ pub struct RawPacket {
     pub id: i32,
     /// Payload after the id.
     pub data: Vec<u8>,
+}
+
+/// The view distance in a Client Information (`settings`) packet's payload.
+///
+/// The same in every version from 1.8 on: a locale string, then the distance
+/// as a byte. A client may claim anything; below 2 is read as 2.
+pub fn view_distance_of(data: &[u8]) -> Option<u8> {
+    let mut pin = PacketIn::new(data);
+    pin.string().ok()?;
+    let d = pin.u8().ok()?;
+    Some(d.clamp(2, 127))
+}
+
+/// Read configuration packets until one with `id` arrives and return it,
+/// noting the view distance of any Client Information packet (id `settings`)
+/// met on the way.
+pub fn await_config(c: &mut Conn, id: i32, settings: i32) -> io::Result<RawPacket> {
+    for _ in 0..64 {
+        if let Some(p) = read_packet(c)? {
+            if p.id == id {
+                return Ok(p);
+            }
+            if p.id == settings {
+                if let Some(d) = view_distance_of(&p.data) {
+                    c.view_distance = Some(d);
+                }
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "client never sent the expected handshake packet",
+    ))
 }
 
 /// Read a full packet frame from `r`.
@@ -825,5 +867,21 @@ mod tests {
             "a fairly long payload that spans several reads"
         );
         assert_eq!(pin.i64().unwrap(), 1234567890);
+    }
+
+    #[test]
+    fn the_view_distance_follows_the_locale() {
+        let mut p = PacketOut::new(0);
+        p.string("en_us").u8(12).var_int(0);
+        let mut wire = Vec::new();
+        p.write_to(&mut wire, None).unwrap();
+        let raw = read_packet_from(&mut &wire[..], None).unwrap().unwrap();
+        assert_eq!(view_distance_of(&raw.data), Some(12));
+        assert_eq!(
+            view_distance_of(&[]),
+            None,
+            "a truncated packet says nothing"
+        );
+        assert_eq!(view_distance_of(&[0, 0]), Some(2), "below two reads as two");
     }
 }

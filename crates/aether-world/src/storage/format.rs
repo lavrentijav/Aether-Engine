@@ -5,10 +5,11 @@
 //!
 //! ```text
 //! magic     : b"ASC1"                    (4 bytes)
-//! entries   : u16 LE                     (palette size, incl. air at 0)
+//! entries   : u16 LE                     (palette size, ≥ 1; any order — a section
+//!                                         with no air has no air entry)
 //!   id      : u32 LE                      × entries
 //!   flags   : u8  (bit0 solid, bit1 collision, bit2 redstone)  × entries
-//! bits      : u8   (index width: 4 / 8 / 16)
+//! bits      : u8   (index width: written as 4 / 8 / 16; 0 / 1 / 2 also read)
 //! words     : u16 LE                     (packed-index word count)
 //!   word    : u64 LE                      × words
 //! ```
@@ -91,7 +92,11 @@ pub fn serialize_subchunk(sc: &SubChunk) -> Vec<u8> {
     let palette = sc.palette();
     let entries = palette.entries();
     let props = palette.entry_props();
-    let indices = palette.indices();
+    // Narrower indices are an in-memory form only. A blob keeps the widths
+    // every build reads (4, 8, 16), so a world saved by this build still opens
+    // under an older one; on disk the difference is a few hundred bytes the
+    // backend's compression mostly takes back.
+    let indices = palette.widened_to(4);
 
     let mut out = Vec::with_capacity(4 + 2 + entries.len() * 6 + 4 + indices.words().len() * 8);
     out.extend_from_slice(&MAGIC);
@@ -161,11 +166,15 @@ pub fn deserialize_subchunk(buf: &[u8]) -> Result<SubChunk, FormatError> {
         props.push(props_of(flags, r.u8()?));
     }
     let bits = r.u8()?;
-    if !matches!(bits, 4 | 8 | 16) {
+    if !crate::palette::valid_width(bits) {
         return Err(FormatError::Invalid("bits_per_entry"));
     }
     let word_count = r.u16()? as usize;
-    let expected = VOLUME.div_ceil(64 / bits as usize);
+    let expected = if bits == 0 {
+        0
+    } else {
+        VOLUME.div_ceil(64 / bits as usize)
+    };
     if word_count != expected {
         return Err(FormatError::Invalid("packed word count"));
     }
@@ -174,8 +183,13 @@ pub fn deserialize_subchunk(buf: &[u8]) -> Result<SubChunk, FormatError> {
         words.push(r.u64()?);
     }
     let indices = PackedArray::from_words(bits, VOLUME, words);
+    if (0..VOLUME).any(|i| indices.get(i) as usize >= entries.len()) {
+        return Err(FormatError::Invalid("palette index out of range"));
+    }
     let palette = Palette::from_parts(entries, props, indices);
-    Ok(SubChunk::from_palette(palette))
+    let mut sc = SubChunk::from_palette(palette);
+    sc.compact();
+    Ok(sc)
 }
 
 /// Coordinates of a sub-chunk within a world: chunk column `(cx, cz)` and the

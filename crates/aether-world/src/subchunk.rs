@@ -1,6 +1,6 @@
-//! The 16×16×16 Sub-Chunk: palette-compressed block ids plus Structure-of-Arrays
-//! bit masks, all addressed in Morton (Z-order) so neighbouring blocks stay
-//! close in memory.
+//! The 16×16×16 Sub-Chunk: palette-compressed block ids, addressed in Morton
+//! (Z-order) so neighbouring blocks stay close in memory, with
+//! Structure-of-Arrays bit masks derived from the palette on request.
 
 use crate::block::{BlockProperties, BlockStateId};
 use crate::palette::Palette;
@@ -59,12 +59,14 @@ impl std::fmt::Debug for Mask {
 }
 
 /// A 16×16×16 volume of blocks in the engine's SoA memory layout.
+///
+/// Only the palette is stored. The property masks are derived from it on
+/// request: each palette entry carries its block's properties, so a mask is
+/// one pass over the indices, while storing three of them cost 1.5 KiB per
+/// sub-chunk — more than the blocks themselves for most of a world.
 #[derive(Debug, Clone)]
 pub struct SubChunk {
     palette: Palette,
-    solid: Mask,
-    collision: Mask,
-    redstone: Mask,
 }
 
 impl SubChunk {
@@ -72,9 +74,13 @@ impl SubChunk {
     pub fn new() -> Self {
         Self {
             palette: Palette::new(VOLUME),
-            solid: Mask::zeroed(),
-            collision: Mask::zeroed(),
-            redstone: Mask::zeroed(),
+        }
+    }
+
+    /// A sub-chunk filled with one block, which costs no index storage.
+    pub fn filled(id: BlockStateId, props: BlockProperties) -> Self {
+        Self {
+            palette: Palette::uniform(VOLUME, id, props),
         }
     }
 
@@ -91,30 +97,52 @@ impl SubChunk {
         self.palette.get(Self::index(x, y, z) as usize)
     }
 
-    /// Set the block at local `(x, y, z)` to `id` with the given `props`,
-    /// updating every SoA mask accordingly.
+    /// The properties of the block at local `(x, y, z)`.
+    #[inline]
+    pub fn props(&self, x: usize, y: usize, z: usize) -> BlockProperties {
+        self.palette.props_at(Self::index(x, y, z) as usize)
+    }
+
+    /// Set the block at local `(x, y, z)` to `id` with the given `props`.
     pub fn set(&mut self, x: usize, y: usize, z: usize, id: BlockStateId, props: BlockProperties) {
         let m = Self::index(x, y, z);
         self.palette.set(m as usize, id, props);
-        self.solid.set(m, props.solid);
-        self.collision.set(m, props.collision);
-        self.redstone.set(m, props.redstone);
+    }
+
+    /// A mask of the blocks whose properties satisfy `pick`.
+    pub fn mask_of(&self, pick: impl Fn(&BlockProperties) -> bool) -> Mask {
+        let props = self.palette.entry_props();
+        let mut mask = Mask::zeroed();
+        if self.palette.bits_per_entry() == 0 {
+            if pick(&props[0]) {
+                mask.0 = [u64::MAX; MASK_WORDS];
+            }
+            return mask;
+        }
+        let picked: Vec<bool> = props.iter().map(&pick).collect();
+        if !picked.iter().any(|&p| p) {
+            return mask;
+        }
+        let indices = self.palette.indices();
+        for m in 0..VOLUME {
+            if picked[indices.get(m) as usize] {
+                mask.0[m >> 6] |= 1 << (m & 63);
+            }
+        }
+        mask
     }
 
     /// The `SolidMask`.
-    #[inline]
-    pub fn solid_mask(&self) -> &Mask {
-        &self.solid
+    pub fn solid_mask(&self) -> Mask {
+        self.mask_of(|p| p.solid)
     }
     /// The collision mask.
-    #[inline]
-    pub fn collision_mask(&self) -> &Mask {
-        &self.collision
+    pub fn collision_mask(&self) -> Mask {
+        self.mask_of(|p| p.collision)
     }
     /// The redstone-flags mask.
-    #[inline]
-    pub fn redstone_mask(&self) -> &Mask {
-        &self.redstone
+    pub fn redstone_mask(&self) -> Mask {
+        self.mask_of(|p| p.redstone)
     }
 
     /// The palette (block ids + packed indices) — used by the serializer.
@@ -125,27 +153,24 @@ impl SubChunk {
 
     /// Whether the sub-chunk contains only air.
     pub fn is_empty(&self) -> bool {
-        self.palette.distinct() == 1 && self.solid.count() == 0
+        self.palette.uniform_block() == Some(BlockStateId::AIR)
     }
 
-    /// Reassemble a sub-chunk from a palette, recomputing masks from its
-    /// per-block properties. Used by the storage deserializer.
+    /// Shrink to the minimal palette and index width: see
+    /// [`Palette::compact`]. A sub-chunk of one block then holds no indices.
+    pub fn compact(&mut self) {
+        self.palette.compact();
+    }
+
+    /// Bytes this sub-chunk occupies, inline and on the heap.
+    pub fn memory_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.palette.heap_bytes()
+    }
+
+    /// Reassemble a sub-chunk from a palette. Used by the storage
+    /// deserializer.
     pub fn from_palette(palette: Palette) -> Self {
-        let mut solid = Mask::zeroed();
-        let mut collision = Mask::zeroed();
-        let mut redstone = Mask::zeroed();
-        for m in 0..VOLUME {
-            let p = palette.props_at(m);
-            solid.set(m as u16, p.solid);
-            collision.set(m as u16, p.collision);
-            redstone.set(m as u16, p.redstone);
-        }
-        Self {
-            palette,
-            solid,
-            collision,
-            redstone,
-        }
+        Self { palette }
     }
 }
 
@@ -188,6 +213,27 @@ mod tests {
         assert_eq!(sc.solid_mask().count(), 1);
         sc.set(5, 5, 5, BlockStateId::AIR, BlockProperties::AIR);
         assert_eq!(sc.solid_mask().count(), 0);
+    }
+
+    #[test]
+    fn a_uniform_sub_chunk_holds_no_indices_and_masks_still_work() {
+        let mut sc = SubChunk::new();
+        for y in 0..16 {
+            for z in 0..16 {
+                for x in 0..16 {
+                    sc.set(x, y, z, BlockStateId(1), BlockProperties::SOLID);
+                }
+            }
+        }
+        sc.compact();
+        assert_eq!(sc.palette().indices().words().len(), 0);
+        assert_eq!(sc.solid_mask().count(), 4096);
+        assert_eq!(sc.redstone_mask().count(), 0);
+        assert!(sc.memory_bytes() < 200, "{} bytes", sc.memory_bytes());
+        assert_eq!(
+            SubChunk::filled(BlockStateId(1), BlockProperties::SOLID).get(3, 4, 5),
+            BlockStateId(1)
+        );
     }
 
     #[test]

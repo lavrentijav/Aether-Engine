@@ -31,6 +31,7 @@ server a vanilla 1.8.9 client can connect to.
 | Runtime SIMD dispatch (Scalar/SSE4.2/AVX2 real, AVX-512 detected) + Morton | ✅ |
 | Telemetry: counters/gauges/timers + Prometheus exporter | ✅ |
 | SoA memory model: AVX-Cell, Sub-Chunk, Morton masks, palette compression | ✅ |
+| Compact sub-chunks: index widths 0/1/2/4/8/16 (a section of one block stores no indices), palettes compacted on load, property masks derived from the palette instead of stored — ~22 KiB per vanilla column, down from 70–85 | ✅ |
 | KV world storage (Fjall + Zstandard blobs, order-preserving keys) | ✅ |
 | `aether-convert`: Anvil `.mca` → KV migration (parallel, audited) | ✅ |
 | `aether-baseproxy`: live vanilla → core translation (network chunk sections, block states) | ✅ |
@@ -68,6 +69,10 @@ server a vanilla 1.8.9 client can connect to.
 | Biomes on the wire (1.21.11): all 65 biomes registered, per-section paletted biome containers; block containers widen past 4 bits / go direct | ✅ |
 | Disk cache for unmodified generated columns, aged out after a day and swept above a cap — never a source of truth, every entry reproducible from the seed (`/cache`) | ✅ |
 | A block is refused where it would be placed inside a player, their own or anyone else's | ✅ |
+| Columns leave memory when no player needs them (idle for two 10 s sweeps and outside every view), and `max_resident_columns` caps them least recently used first; a column with unsaved edits stays until the autosave | ✅ |
+| Each player is streamed `min(view_radius, their view distance + 1)`, re-read whenever they change the setting (every codec from 1.8.9 up); `view_radius` is no longer capped at 12 in code | ✅ |
+| The vanilla generator's caches are bounded and packed: carved chunks kept for their neighbours a tenth the size, decoration writes eight bytes each — ~50 MiB in place of ~300 (`vanilla_memory` example) | ✅ |
+| Memory in the status line: RSS, resident columns and sections and their size, columns unloaded; freed heap handed back to the OS after large unloads | ✅ |
 | Mining pays by scarcity, only for generator-placed blocks — a position the journal has never seen filled — so place-and-break is not a coin press | ✅ |
 | 250 coins per 10 minutes of connected time | ✅ |
 | Block registry seeds the **entire** vanilla 1.21.11 set (1166 blocks) with real properties; engine block ids are vanilla's block ids | ✅ |
