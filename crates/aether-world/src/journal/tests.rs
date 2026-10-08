@@ -29,6 +29,7 @@ fn an_event_survives_a_round_trip_through_storage() {
         seq: 7,
         at_ms: 1_700_000_000_000,
         actor: alice(),
+        cause: None,
         body: set(-5, 70, 300, DIRT, STONE),
     };
     assert_eq!(Event::decode(&e.encode()), Ok(e));
@@ -41,6 +42,7 @@ fn the_encoded_header_is_the_layout_the_docs_describe() {
         seq: 0x0102_0304_0506_0708,
         at_ms: 0x1112_1314_1516_1718,
         actor: ActorId(0xAB),
+        cause: None,
         body: set(1, 2, 3, DIRT, STONE),
     };
     let b = e.encode();
@@ -56,6 +58,7 @@ fn a_blob_from_another_format_version_is_refused_not_guessed_at() {
         seq: 1,
         at_ms: 1,
         actor: alice(),
+        cause: None,
         body: set(0, 0, 0, DIRT, STONE),
     }
     .encode();
@@ -69,6 +72,7 @@ fn a_truncated_blob_is_refused_at_every_length() {
         seq: 1,
         at_ms: 1,
         actor: alice(),
+        cause: None,
         body: EventBody::ItemMint {
             uid: ItemUid(9),
             item: "minecraft:diamond".into(),
@@ -113,6 +117,7 @@ fn every_place_variant_round_trips() {
             seq: 1,
             at_ms: 2,
             actor: bob(),
+            cause: None,
             body: EventBody::ItemDestroy {
                 uid: ItemUid(1),
                 from: place,
@@ -576,4 +581,113 @@ fn an_untouched_block_reports_no_change_even_in_a_busy_column() {
     }
     assert!(j.last_change_at(2, 64, 2).unwrap().is_none());
     assert!(j.last_change_at(1, 49, 1).unwrap().is_some());
+}
+
+#[test]
+fn a_derived_item_and_a_cause_survive_a_round_trip() {
+    let e = Event {
+        seq: 9,
+        at_ms: 1_700_000_000_000,
+        actor: alice(),
+        cause: Some(4),
+        body: EventBody::ItemDerive {
+            uid: ItemUid(0x42),
+            item: "minecraft:iron_pickaxe".into(),
+            count: 1,
+            to: Place::Inventory {
+                owner: alice(),
+                slot: 36,
+            },
+            from: vec![ItemUid(7), ItemUid(8)],
+        },
+    };
+    assert_eq!(Event::decode(&e.encode()), Ok(e));
+}
+
+#[test]
+fn an_entry_written_before_causes_existed_reads_with_none() {
+    // The old layout simply ended after the body; the trailer is optional.
+    let e = Event {
+        seq: 1,
+        at_ms: 2,
+        actor: bob(),
+        cause: None,
+        body: set(0, 64, 0, STONE, DIRT),
+    };
+    let old = e.encode();
+    let with_cause = Event {
+        cause: Some(77),
+        ..e.clone()
+    }
+    .encode();
+    assert_eq!(
+        &with_cause[..old.len()],
+        &old[..],
+        "the cause is a pure suffix"
+    );
+    assert_eq!(Event::decode(&old).unwrap().cause, None);
+    assert_eq!(Event::decode(&with_cause).unwrap().cause, Some(77));
+}
+
+#[test]
+fn the_ledger_remembers_what_an_item_was_made_from() {
+    let inv = |slot| Place::Inventory {
+        owner: alice(),
+        slot,
+    };
+    let mint = |seq, uid, item: &str| Event {
+        seq,
+        at_ms: 0,
+        actor: alice(),
+        cause: None,
+        body: EventBody::ItemMint {
+            uid: ItemUid(uid),
+            item: item.into(),
+            count: 1,
+            to: inv(seq as i16),
+        },
+    };
+    let events = vec![
+        mint(1, 10, "minecraft:stick"),
+        mint(2, 11, "minecraft:iron_ingot"),
+        Event {
+            seq: 3,
+            at_ms: 0,
+            actor: alice(),
+            cause: None,
+            body: EventBody::ItemDerive {
+                uid: ItemUid(12),
+                item: "minecraft:iron_pickaxe".into(),
+                count: 1,
+                to: inv(5),
+                from: vec![ItemUid(10), ItemUid(11)],
+            },
+        },
+    ];
+    let l = ledger::Ledger::replay(&events);
+    let pick = l.get(ItemUid(12)).unwrap();
+    assert_eq!(pick.derived_from, vec![ItemUid(10), ItemUid(11)]);
+    assert!(l.anomalies().is_empty());
+}
+
+#[test]
+fn append_caused_records_the_cause() {
+    let j = Journal::open(MemStore::new()).unwrap();
+    let brk = j
+        .append(alice(), set(1, 2, 3, DIAMOND, BlockStateId::AIR))
+        .unwrap();
+    let drop = j
+        .append_caused(
+            alice(),
+            EventBody::ItemMint {
+                uid: ItemUid(5),
+                item: "minecraft:diamond".into(),
+                count: 1,
+                to: Place::Ground { x: 1, y: 2, z: 3 },
+            },
+            Some(brk),
+        )
+        .unwrap();
+    assert_eq!(j.get(drop).unwrap().unwrap().cause, Some(brk));
+    assert_eq!(j.get(brk).unwrap().unwrap().cause, None);
 }

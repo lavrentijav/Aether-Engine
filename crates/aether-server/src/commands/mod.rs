@@ -176,6 +176,14 @@ fn describe(e: &Event, world: &DemoWorld, actor_name: &dyn Fn(u128) -> String) -
         EventBody::ItemDestroy { uid, .. } => {
             Some(format!("  {ago} item {:032x} destroyed  #{}", uid.0, e.seq))
         }
+        EventBody::ItemDerive {
+            item, count, from, ..
+        } => Some(format!(
+            "  {ago} {} made {count}x {item} from {} item(s)  #{}",
+            actor_name(e.actor.0),
+            from.len(),
+            e.seq
+        )),
     }
 }
 
@@ -431,6 +439,7 @@ mod tests {
             seq,
             at_ms: 1_000_000,
             actor: ActorId(actor),
+            cause: None,
             body: EventBody::BlockSet {
                 x,
                 y: 64,

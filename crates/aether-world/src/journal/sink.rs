@@ -269,6 +269,7 @@ mod tests {
             seq,
             at_ms: 1000 + seq,
             actor: ActorId(1),
+            cause: None,
             body: EventBody::BlockSet {
                 x: seq as i32,
                 y: 64,

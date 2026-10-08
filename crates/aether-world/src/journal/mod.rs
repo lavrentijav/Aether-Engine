@@ -264,11 +264,33 @@ impl<B: KvBackend> Journal<B> {
         body: EventBody,
         at_ms: u64,
     ) -> Result<u64, StorageError> {
+        self.append_full(actor, body, None, at_ms)
+    }
+
+    /// Append an event that happened because of event `cause` — a drop out of
+    /// the block break that produced it.
+    pub fn append_caused(
+        &self,
+        actor: ActorId,
+        body: EventBody,
+        cause: Option<u64>,
+    ) -> Result<u64, StorageError> {
+        self.append_full(actor, body, cause, now_ms())
+    }
+
+    fn append_full(
+        &self,
+        actor: ActorId,
+        body: EventBody,
+        cause: Option<u64>,
+        at_ms: u64,
+    ) -> Result<u64, StorageError> {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let e = Event {
             seq,
             at_ms,
             actor,
+            cause,
             body,
         };
         // The payload goes down before either index, so a crash between writes
