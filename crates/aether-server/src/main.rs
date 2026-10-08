@@ -111,10 +111,16 @@ fn main() -> std::process::ExitCode {
         }
     };
     let described = generator.describe(cfg.server.seed);
+    let revision = generator.revision();
     // The generator is deterministic, so its output is a cache and never a
     // source of truth: see `gencache`. Edits still live in the journal.
-    let generator = gencache::Cached::new(generator, cfg.server.seed, &cfg.cache.to_config());
-    let mut world = World::new(store, generator);
+    let generator = gencache::Cached::with_revision(
+        generator,
+        cfg.server.seed,
+        revision,
+        &cfg.cache.to_config(),
+    );
+    let mut world = World::new(store, generator).with_snapshot_policy(snapshot_policy(revision));
     if let Some(sink) = open_history_mirror(&cfg.database) {
         world = world.with_journal_sink(sink);
     }
@@ -186,6 +192,72 @@ fn main() -> std::process::ExitCode {
         }
     }
     std::process::ExitCode::SUCCESS
+}
+
+/// Sub-chunk snapshots carry the generator revision they were saved under;
+/// a stale one is rebuilt over the fresh terrain as it loads (see
+/// [`World::with_snapshot_policy`]). Without this, sub-chunks edited under an
+/// older generator kept its terrain whole — bare stone between neighbours the
+/// new one had given grass and trees.
+fn snapshot_policy(revision: u32) -> aether_api::SnapshotPolicy {
+    aether_api::SnapshotPolicy {
+        revision,
+        keep: Box::new(|id| !is_generated_terrain(id)),
+        on_rebuild: Box::new(|key, kept| {
+            log::info(&format!(
+                "rebuilt sub-chunk ({}, {}, {}) saved by an older generator; kept {kept} placed block(s)",
+                key.cx, key.cy, key.cz
+            ))
+        }),
+    }
+}
+
+/// Whether a block is terrain a generator lays down — rock, soil, fluid, air
+/// — rather than something a player is likely to have placed. In a stale
+/// snapshot these are the old generator's output and give way to the new
+/// one's; everything else is kept. Edits the journal recorded are replayed
+/// afterwards either way, so a placed block of stone or dirt still returns.
+fn is_generated_terrain(id: aether_api::BlockStateId) -> bool {
+    let Some((_, name)) = aether_world::registry::blocks::block_of_state(id) else {
+        return false;
+    };
+    matches!(
+        name.trim_start_matches("minecraft:"),
+        "air"
+            | "cave_air"
+            | "void_air"
+            | "bedrock"
+            | "stone"
+            | "deepslate"
+            | "tuff"
+            | "granite"
+            | "diorite"
+            | "andesite"
+            | "calcite"
+            | "dirt"
+            | "coarse_dirt"
+            | "rooted_dirt"
+            | "grass_block"
+            | "podzol"
+            | "mycelium"
+            | "mud"
+            | "clay"
+            | "gravel"
+            | "sand"
+            | "red_sand"
+            | "sandstone"
+            | "red_sandstone"
+            | "terracotta"
+            | "snow"
+            | "snow_block"
+            | "powder_snow"
+            | "ice"
+            | "packed_ice"
+            | "water"
+            | "lava"
+            | "netherrack"
+            | "end_stone"
+    )
 }
 
 /// Start the history mirror, if one is configured and compiled in.

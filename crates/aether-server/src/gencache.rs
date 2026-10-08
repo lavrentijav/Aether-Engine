@@ -111,14 +111,23 @@ impl<G: ChunkGenerator> Cached<G> {
     /// A directory that cannot be created disables the cache and says so: a
     /// server that will not start because its *cache* is unwritable would be
     /// trading a performance feature for an outage.
+    #[cfg(test)]
     pub fn new(inner: G, seed: u64, cfg: &CacheConfig) -> Self {
+        Self::with_revision(inner, seed, GEN_REVISION, cfg)
+    }
+
+    /// [`Self::new`] for a generator of a given revision — the vanilla
+    /// generator's [`GEN_REVISION`], or another value for another kind of
+    /// terrain, so switching generators never serves one's columns as the
+    /// other's.
+    pub fn with_revision(inner: G, seed: u64, revision: u32, cfg: &CacheConfig) -> Self {
         let dir = if cfg.root.is_empty() {
             None
         } else {
-            let dir = Path::new(&cfg.root).join(format!("s{seed}-r{GEN_REVISION}"));
+            let dir = Path::new(&cfg.root).join(format!("s{seed}-r{revision}"));
             match std::fs::create_dir_all(&dir) {
                 Ok(()) => {
-                    for old in remove_stale_revisions(Path::new(&cfg.root), seed) {
+                    for old in remove_stale_revisions(Path::new(&cfg.root), seed, revision) {
                         crate::log::info(&format!(
                             "column cache: removed `{}`, written by an older generator",
                             old.display()
@@ -414,13 +423,13 @@ pub fn sweep(dir: &Path, max_entries: usize, ttl: Duration) -> usize {
     removed
 }
 
-/// Delete `root/s{seed}-r{N}` for every revision but [`GEN_REVISION`]: they
-/// are never read again, since the revision is part of the path. Other seeds'
+/// Delete `root/s{seed}-r{N}` for every revision but `revision`: they are
+/// never read again, since the revision is part of the path. Other seeds'
 /// directories are left alone — another world may share the cache root.
 /// Returns what was removed.
-fn remove_stale_revisions(root: &Path, seed: u64) -> Vec<PathBuf> {
+fn remove_stale_revisions(root: &Path, seed: u64, revision: u32) -> Vec<PathBuf> {
     let prefix = format!("s{seed}-r");
-    let current = format!("{prefix}{GEN_REVISION}");
+    let current = format!("{prefix}{revision}");
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
@@ -465,7 +474,7 @@ mod revision_tests {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         std::fs::create_dir_all(root.join(format!("s42-r{GEN_REVISION}"))).unwrap();
-        let mut removed: Vec<String> = remove_stale_revisions(&root, 42)
+        let mut removed: Vec<String> = remove_stale_revisions(&root, 42, GEN_REVISION)
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();

@@ -280,6 +280,17 @@ fn column_marker_key(cx: i32, cz: i32) -> [u8; 10] {
     k
 }
 
+/// Key for a sub-chunk snapshot's generator revision.
+///
+/// Ten bytes, `V` then the sub-chunk key: never a sub-chunk key (nine bytes)
+/// and never a column marker (`C`).
+fn revision_key(key: SubChunkKey) -> [u8; 10] {
+    let mut k = [0u8; 10];
+    k[0] = b'V';
+    k[1..].copy_from_slice(&key.encode());
+    k
+}
+
 /// High-level world storage: sub-chunk `save` / `load` over a [`KvBackend`],
 /// transparently serializing and (de)compressing blobs.
 pub struct WorldStorage<B: KvBackend> {
@@ -318,6 +329,28 @@ impl<B: KvBackend> WorldStorage<B> {
     /// Delete the sub-chunk at `key`.
     pub fn delete(&self, key: SubChunkKey) -> Result<(), StorageError> {
         self.backend.delete(&key.encode())
+    }
+
+    /// Record which revision of the generator the snapshot at `key` was taken
+    /// over.
+    ///
+    /// A snapshot is a whole sub-chunk: the generator's output with the edits
+    /// on top. When the generator changes, a snapshot taken under the old one
+    /// still carries the old terrain, and loading it whole leaves a seam
+    /// against its freshly generated neighbours. The revision is what lets a
+    /// loader tell such a snapshot apart and rebuild it.
+    pub fn save_revision(&self, key: SubChunkKey, revision: u32) -> Result<(), StorageError> {
+        self.backend
+            .put(&revision_key(key), &revision.to_be_bytes())
+    }
+
+    /// The revision recorded by [`Self::save_revision`] for `key`; `None` for
+    /// a snapshot saved before revisions were recorded.
+    pub fn revision(&self, key: SubChunkKey) -> Result<Option<u32>, StorageError> {
+        Ok(self
+            .backend
+            .get(&revision_key(key))?
+            .and_then(|b| b.try_into().ok().map(u32::from_be_bytes)))
     }
 
     /// Record that column `(cx, cz)` has been generated in full.
@@ -399,6 +432,18 @@ impl<B: KvBackend> WorldStorage<B> {
 mod tests {
     use super::*;
     use crate::block::{BlockProperties, BlockStateId};
+
+    #[test]
+    fn revisions_round_trip_per_sub_chunk() {
+        let storage = WorldStorage::new(MemStore::new());
+        let a = SubChunkKey::new(1, 2, 3);
+        let b = SubChunkKey::new(1, 3, 3);
+        assert_eq!(storage.revision(a).unwrap(), None, "unrecorded");
+        storage.save_revision(a, 7).unwrap();
+        assert_eq!(storage.revision(a).unwrap(), Some(7));
+        assert_eq!(storage.revision(b).unwrap(), None);
+        assert_eq!(revision_key(a).len(), 10);
+    }
 
     #[test]
     fn column_markers_round_trip_and_never_collide_with_sections() {

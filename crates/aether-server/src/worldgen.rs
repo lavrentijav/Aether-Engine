@@ -33,6 +33,9 @@ pub enum Generator {
     Noise(NoiseGenerator),
 }
 
+/// Snapshot revision of the noise terrain; far from any vanilla revision.
+const NOISE_REVISION: u32 = 0x4E00_0001;
+
 impl Generator {
     /// The generator the configuration asks for: noise terrain when no data
     /// pack is set, vanilla terrain from it when one is.
@@ -57,6 +60,17 @@ impl Generator {
         let g = built.map_err(|e| e.to_string())?;
         crate::log::info(&format!("worldgen   : vanilla (from {pack_root})"));
         Ok(Generator::Vanilla(Box::new(g)))
+    }
+
+    /// Which terrain this generator produces, as stamped on saved sub-chunk
+    /// snapshots: the vanilla generator's [`crate::gencache::GEN_REVISION`],
+    /// or a value of its own for the noise terrain, so a world that switches
+    /// between them rebuilds its snapshots too.
+    pub fn revision(&self) -> u32 {
+        match self {
+            Generator::Vanilla(_) => crate::gencache::GEN_REVISION,
+            Generator::Noise(_) => NOISE_REVISION,
+        }
     }
 
     /// A one-line description for the console banner.
