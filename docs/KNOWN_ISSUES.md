@@ -54,7 +54,7 @@
 
 11. **What the survival layer does not do yet** (1.21.11; every other codec ignores the gameplay events and keeps its older, client-trusting subset — no mobs, no server-side windows):
     - **Mob AI is straight-line.** Mobs walk towards their goal, jump one-block steps and refuse unclimbable drops; there is no pathfinding around obstacles, no door opening, no climbing for spiders. Eight kinds exist: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider. No breeding, taming, villagers or the Nether/End mobs.
-    - **No redstone, fluid flow, crop growth, leaf decay, fire spread or falling sand/gravel.** Water and lava are placed and picked up as static blocks.
+    - **No redstone, crop growth, leaf decay, fire spread or falling sand/gravel.** Water and lava **do flow** now (`game/fluids.rs`: scheduled updates with vanilla delays, levels, falls, slope-seeking, infinite water, lava + water → obsidian/cobblestone/stone), but flowing water does not push mobs or items, waterlogged blocks do not flow, and generated water only starts moving when something next to it changes.
     - **No enchanting, brewing, anvils, smithing, villager trading, beds only set the spawn point and skip the night.** Status effects (golden apples, poison) are not applied; foods restore hunger only.
     - **No XP orbs.** Experience is credited to the killer directly; ores give none.
     - **Chests do not double**, and hoppers/droppers/dispensers have no inventory.
@@ -68,7 +68,7 @@ These are **not bugs** in Phase 1 — they are documented, temporary compatibili
 | Subsystem | Phase 1 deviation | Phase 2 target |
 |-----------|-------------------|----------------|
 | **Redstone** | Quasi-Connectivity (QC) ignored across inactive chunk borders | Full dependency graph with cross-chunk QC |
-| **Fluids** | Parallel simplified spread; Java tick timing not preserved | Deterministic fluid layers 1:1 with Vanilla |
+| **Fluids** | Scheduled-update flow with vanilla delays and levels on one queue, capped per tick; no entity push, no waterlogged flow | Deterministic fluid layers 1:1 with Vanilla |
 | **Update order** | Simultaneous redstone updates ordered by the parallel graph | Strict deterministic directional-priority queue |
 | **Entity spawn** | Batched async spawn every N ticks (every 40 ticks, per-player caps, sky/darkness test without light levels) | Per-tick precise spawner |
 | **Mob AI** | Straight-line steering with step jumps and drop avoidance | Flow-Field navigation + cached A\* |

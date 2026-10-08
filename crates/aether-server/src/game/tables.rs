@@ -199,6 +199,12 @@ impl Rng {
         }
         lo + (self.next_u64() % (hi - lo + 1) as u64) as i32
     }
+    /// Standard normal, Box–Muller.
+    pub fn gaussian(&mut self) -> f64 {
+        let u1 = self.f64().max(1e-12);
+        let u2 = self.f64();
+        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+    }
     pub fn chance(&mut self, p: f32) -> bool {
         self.f32() < p
     }

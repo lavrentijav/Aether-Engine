@@ -47,6 +47,18 @@ pub trait BlockSource: Sync {
     /// Engine block id at absolute world coordinates, air when out of range.
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId;
 
+    /// Copy section `(cx, cy, cz)` into `out`, indexed `x | z << 4 | y << 8`.
+    /// The default asks block by block; a world that can do better should.
+    fn copy_section(&self, cx: i32, cy: i32, cz: i32, out: &mut [BlockStateId; 4096]) {
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = self.block_at(
+                cx * 16 + (i & 15) as i32,
+                cy * 16 + (i >> 8) as i32,
+                cz * 16 + ((i >> 4) & 15) as i32,
+            );
+        }
+    }
+
     /// The biomes of column `(cx, cz)`, when the generator produced any.
     fn column_biomes(
         &self,
@@ -54,6 +66,60 @@ pub trait BlockSource: Sync {
         _cz: i32,
     ) -> Option<std::sync::Arc<aether_worldgen::ColumnBiomes>> {
         None
+    }
+}
+
+/// A view of one column that reads each section from the world once.
+///
+/// Chunk encoders ask for every block of a column, and their light pass asks
+/// again; through the world that is a quarter of a million lookups, each
+/// taking the world's locks — slower than generating the column was. This
+/// copies a section the first time any block in it is asked for and answers
+/// everything after from the copy. Anything outside the column goes to the
+/// world as before.
+pub struct ColumnView<'a> {
+    inner: &'a dyn BlockSource,
+    cx: i32,
+    cz: i32,
+    sections: std::sync::Mutex<std::collections::HashMap<i32, Box<[BlockStateId; 4096]>>>,
+}
+
+impl<'a> ColumnView<'a> {
+    pub fn new(inner: &'a dyn BlockSource, cx: i32, cz: i32) -> Self {
+        Self {
+            inner,
+            cx,
+            cz,
+            sections: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl BlockSource for ColumnView<'_> {
+    fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+        if x >> 4 != self.cx || z >> 4 != self.cz {
+            return self.inner.block_at(x, y, z);
+        }
+        let cy = y >> 4;
+        let mut sections = self.sections.lock().unwrap();
+        let sec = sections.entry(cy).or_insert_with(|| {
+            let mut out = Box::new([BlockStateId::AIR; 4096]);
+            self.inner.copy_section(self.cx, cy, self.cz, &mut out);
+            out
+        });
+        sec[((y & 15) << 8 | (z & 15) << 4 | (x & 15)) as usize]
+    }
+
+    fn copy_section(&self, cx: i32, cy: i32, cz: i32, out: &mut [BlockStateId; 4096]) {
+        self.inner.copy_section(cx, cy, cz, out)
+    }
+
+    fn column_biomes(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Option<std::sync::Arc<aether_worldgen::ColumnBiomes>> {
+        self.inner.column_biomes(cx, cz)
     }
 }
 
@@ -514,6 +580,8 @@ pub enum ClientEvent {
         button: i8,
         mode: i32,
     },
+    /// The game-mode switcher (F3+F4) asked for a mode.
+    ChangeGameMode(GameMode),
     /// Middle-click on a block (creative pick).
     PickBlock { x: i32, y: i32, z: i32 },
     /// Anything this server does not act on (keep-alive replies, animations,

@@ -163,7 +163,15 @@ impl PlayerHandle {
     /// down someone else's connection.
     pub fn emit(&self, ev: &ServerEvent, world: &dyn BlockSource) {
         let legacy = if self.full() { None } else { ev.legacy() };
-        let packets = self.codec.encode(legacy.as_ref().unwrap_or(ev), world);
+        let packets = match ev {
+            // Every codec reads a column block by block; give it a view that
+            // copies each section once instead of locking per block.
+            ServerEvent::ChunkColumn { cx, cz } => {
+                let view = crate::protocol::ColumnView::new(world, *cx, *cz);
+                self.codec.encode(ev, &view)
+            }
+            _ => self.codec.encode(legacy.as_ref().unwrap_or(ev), world),
+        };
         if let Ok(mut w) = self.writer.lock() {
             for p in &packets {
                 if p.send(&mut w).is_err() {

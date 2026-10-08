@@ -168,6 +168,8 @@ pub struct Mob {
     pub wool: u8,
     pub sheared: bool,
     pub meta_dirty: bool,
+    /// Ticks the current target has been in view (negative: out of view).
+    pub see_time: i32,
 }
 
 impl Mob {
@@ -204,6 +206,7 @@ impl Mob {
             wool,
             sheared: false,
             meta_dirty: false,
+            see_time: 0,
         }
     }
 
@@ -368,6 +371,16 @@ pub fn tick(
                         )
                     })
                     .filter(|(_, d)| *d < range * range)
+                    // Vanilla's target goals must *see* a player to pick
+                    // them; a monster behind a wall does not know you are
+                    // there.
+                    .filter(|(p, _)| {
+                        line_of_sight(
+                            world,
+                            eye(pos, body),
+                            Vector3::new(p.pos.x, p.pos.y + 1.62, p.pos.z),
+                        )
+                    })
                     .min_by(|a, b| a.1.total_cmp(&b.1))
                     .map(|(p, _)| p)
             }
@@ -381,20 +394,33 @@ pub fn tick(
             *pitch = (-(dy + 1.0)).atan2(dist_h).to_degrees() as f32;
             match m.def.kind {
                 "minecraft:skeleton" => {
-                    if dist > 10.0 {
+                    // Vanilla's RangedBowAttackGoal: close in until within
+                    // 15 blocks with a clear view, hold position while the
+                    // bow is drawn, and loose only after seeing the target
+                    // for a second — then wait out the interval.
+                    let from = eye(pos, body);
+                    let sees =
+                        line_of_sight(world, from, Vector3::new(p.pos.x, p.pos.y + 1.62, p.pos.z));
+                    m.see_time = if sees {
+                        m.see_time.max(0) + 1
+                    } else {
+                        m.see_time.min(0) - 1
+                    };
+                    if dist > 15.0 || !sees {
                         goal = Some((p.pos.x, p.pos.z, m.def.speed));
                     } else if dist < 4.0 {
                         goal = Some((pos.x - dx, pos.z - dz, m.def.speed));
                     }
-                    if dist < 15.0 && m.attack_cd == 0 {
-                        m.attack_cd = 40 + rng.range(0, 20) as u32;
-                        let from = Vector3::new(pos.x, pos.y + 1.5, pos.z);
-                        let ty = p.pos.y + 1.1 - from.y;
-                        let speed = 1.6;
-                        let h = dist_h.max(0.1);
-                        // Lead the shot against gravity (0.05/tick²): t = h / speed.
-                        let vy = ty / h * speed + 0.025 * h / speed;
-                        let vel = Vector3::new(dx / h * speed, vy.clamp(-2.0, 2.0), dz / h * speed);
+                    if sees && dist < 15.0 && m.see_time >= 20 && m.attack_cd == 0 {
+                        m.attack_cd = SKELETON_INTERVAL;
+                        // `AbstractSkeleton.performRangedAttack`: aim at a
+                        // third of the target's height, lift by a fifth of
+                        // the horizontal distance, then `shoot` at 1.6 with
+                        // inaccuracy 14 - 4 × difficulty (normal: 6).
+                        let (ax, ay, az) =
+                            (p.pos.x - from.x, p.pos.y + 0.6 - from.y, p.pos.z - from.z);
+                        let h = (ax * ax + az * az).sqrt();
+                        let vel = shoot_vector(ax, ay + h * 0.2, az, 1.6, SKELETON_INACCURACY, rng);
                         actions.push(Action::Shoot {
                             from,
                             vel,
@@ -515,24 +541,28 @@ pub fn tick(
             }
         }
     }
-    let swimming =
-        is_water(world, bx, by, bz) || is_water(world, bx, (pos.y + 0.6).floor() as i32, bz);
+    // In water a mob floats with half its body under and swims at half
+    // pace, the way vanilla's `travel` (drag 0.8, a quarter of gravity) and
+    // `FloatGoal` (rise while more than 0.4 deep) settle it. Holding exactly
+    // against gravity at the surface, as this did, stood mobs *on* the water.
+    let height = body_height(body);
+    let feet_wet = is_water(world, bx, (pos.y + 0.1).floor() as i32, bz);
+    let middle_wet = is_water(world, bx, (pos.y + height * 0.5).floor() as i32, bz);
+    let swimming = feet_wet || middle_wet;
+    let pace = if swimming { 0.5 } else { 1.0 };
     if m.knock > 0 {
         m.knock -= 1;
     } else {
-        body.velocity.x = want.0;
-        body.velocity.z = want.1;
+        body.velocity.x = want.0 * pace;
+        body.velocity.z = want.1 * pace;
     }
     if swimming {
-        // Buoyancy that beats the physics step's 0.08 of gravity: rise while
-        // the head is under, bob at the surface once it is out.
-        let head_under = is_water(
-            world,
-            bx,
-            (pos.y + body_height(body) * 0.8).floor() as i32,
-            bz,
-        );
-        body.velocity.y = if head_under { 0.12 } else { 0.08 };
+        // The physics step then takes 0.08 of gravity off: deep, the net is
+        // +0.04 a tick, a gentle rise; shallow, −0.02, a slow settle. The
+        // two meet with the waterline at mid-body.
+        let lift = if middle_wet { 0.12 } else { 0.06 };
+        body.velocity.y = body.velocity.y * 0.8 + lift;
+        body.velocity.y = body.velocity.y.clamp(-0.3, 0.12);
     } else if m.jump && body.on_ground {
         body.velocity.y = 0.42;
     }
@@ -546,6 +576,55 @@ pub fn tick(
         m.jump = true;
     }
     false
+}
+
+/// Ticks between a skeleton's shots on normal difficulty.
+const SKELETON_INTERVAL: u32 = 40;
+/// `14 - 4 × difficulty`, normal difficulty.
+const SKELETON_INACCURACY: f64 = 6.0;
+
+/// Where a mob looks from: 85 % of its height, vanilla's default eye.
+fn eye(feet: Vector3, body: &Body) -> Vector3 {
+    Vector3::new(feet.x, feet.y + body_height(body) * 0.85, feet.z)
+}
+
+/// Whether nothing solid lies between `a` and `b`, stepping a fifth of a
+/// block at a time.
+pub fn line_of_sight(world: &DemoWorld, a: Vector3, b: Vector3) -> bool {
+    let (dx, dy, dz) = (b.x - a.x, b.y - a.y, b.z - a.z);
+    let len = (dx * dx + dy * dy + dz * dz).sqrt();
+    let steps = (len / 0.2).ceil().max(1.0) as i32;
+    let mut last = (i32::MIN, i32::MIN, i32::MIN);
+    for i in 1..steps {
+        let t = i as f64 / steps as f64;
+        let c = (
+            (a.x + dx * t).floor() as i32,
+            (a.y + dy * t).floor() as i32,
+            (a.z + dz * t).floor() as i32,
+        );
+        if c != last {
+            last = c;
+            let props = world.props_of(world.get_block(c.0, c.1, c.2));
+            // Glass and leaves block movement but not sight.
+            if props.collision && props.light_opacity > 1 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// `Projectile.shoot`: normalise, add Gaussian spread scaled by
+/// `0.0075 × inaccuracy` per axis, then scale to `speed`.
+fn shoot_vector(x: f64, y: f64, z: f64, speed: f64, inaccuracy: f64, rng: &mut Rng) -> Vector3 {
+    let len = (x * x + y * y + z * z).sqrt().max(1e-6);
+    let spread = 0.0075 * inaccuracy;
+    let (x, y, z) = (
+        x / len + rng.gaussian() * spread,
+        y / len + rng.gaussian() * spread,
+        z / len + rng.gaussian() * spread,
+    );
+    Vector3::new(x * speed, y * speed, z * speed)
 }
 
 fn body_height(b: &Body) -> f64 {

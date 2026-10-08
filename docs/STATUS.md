@@ -104,7 +104,9 @@ server a vanilla 1.8.9 client can connect to.
 | Player state persisted (position, health, food, XP, mode, spawn); gameplay commands `/gamemode /time /give /summon /tp /heal /food /killall /kill /spawn /block` | ✅ |
 | Chunks stream on a per-player thread — input is read while the horizon generates | ✅ |
 | Gameplay events on the other 18 codecs (they keep the older subset) | ❌ |
-| Redstone / fluid flow / async lighting / full staged physics | ❌ Not yet started |
+| Water and lava flow: vanilla delays and levels, falls, slope-seeking, infinite water, lava/water → obsidian/cobblestone/stone | ✅ |
+| Parallel column generation + encoding on a server-wide pool of one worker per core; sections copied once per encode (cold 289-column join 20 s → 9.5 s on 4 cores, warm 1.8 s) | ✅ |
+| Redstone / async lighting / full staged physics | ❌ Not yet started |
 
 ### 📋 What is planned
 Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).

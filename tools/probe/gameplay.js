@@ -66,7 +66,7 @@ bot.once('spawn', async () => {
     const sword = bot.inventory.items().find(i => i.name === 'diamond_sword')
     if (sword) await bot.equip(sword, 'hand')
     // Fight on dry land, away from the spawn's lake.
-    bot.chat('/tp ' + Math.floor(bot.entity.position.x) + ' ' + Math.floor(bot.entity.position.y) + ' ' + Math.floor(bot.entity.position.z))
+    bot.chat('/tp 27 70 37')
     await sleep(2500)
     bot.chat('/summon zombie')
     await sleep(1500)

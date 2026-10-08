@@ -57,6 +57,7 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
         apply(a, registry, world);
     }
     entities::update_tracking(registry, world);
+    super::fluids::tick(world, registry);
 
     let players = registry.snapshot();
     for p in &players {

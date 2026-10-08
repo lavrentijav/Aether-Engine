@@ -125,6 +125,8 @@ const SB_BLOCK_DIG: i32 = 0x28;
 const SB_BLOCK_PLACE: i32 = 0x3F;
 /// Serverbound: a click inside an open container.
 const SB_WINDOW_CLICK: i32 = 0x11;
+/// Serverbound: the F3+F4 game-mode switcher.
+const SB_CHANGE_GAME_MODE: i32 = 0x04;
 /// Serverbound: respawn / statistics request.
 const SB_CLIENT_COMMAND: i32 = 0x0B;
 /// Serverbound: attack or use an entity.
@@ -649,6 +651,11 @@ impl ProtocolCodec for Codec {
                     _ => ClientEvent::Ignored,
                 }
             }
+            SB_CHANGE_GAME_MODE => match pin.var_int() {
+                Ok(0) => ClientEvent::ChangeGameMode(super::GameMode::Survival),
+                Ok(1) => ClientEvent::ChangeGameMode(super::GameMode::Creative),
+                _ => ClientEvent::Ignored,
+            },
             SB_CLIENT_COMMAND => match pin.var_int() {
                 Ok(0) => ClientEvent::Respawn,
                 _ => ClientEvent::Ignored,

@@ -370,7 +370,12 @@ pub fn encode(ev: &ServerEvent) -> Option<Vec<PacketOut>> {
                 .var_int(0)
                 .var_int(63)
                 .u8(0); // keep nothing
-            vec![p, abilities(*game_mode)]
+                        // Then "start waiting for level chunks", as at login. Without it a
+                        // 1.20.3+ client holds the loading screen after a respawn until
+                        // it gives up — the world never appears.
+            let mut wait = PacketOut::new(GAME_STATE);
+            wait.u8(13).f32(0.0);
+            vec![p, abilities(*game_mode), wait]
         }
         ServerEvent::GameModeChange(mode) => {
             let mut p = PacketOut::new(GAME_STATE);
