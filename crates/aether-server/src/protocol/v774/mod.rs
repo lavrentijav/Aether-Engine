@@ -20,6 +20,8 @@ pub mod inventory;
 pub mod items;
 pub mod play;
 pub mod registry;
+#[rustfmt::skip]
+pub mod tags;
 
 use std::io;
 
@@ -35,6 +37,8 @@ const LOGIN_ACKNOWLEDGED: i32 = 0x03;
 const CFG_FINISH: i32 = 0x03;
 const CFG_REGISTRY_DATA: i32 = 0x07;
 const CFG_ADD_RESOURCE_PACK: i32 = 0x09;
+/// Configuration: the tag sets of the registries.
+const CFG_UPDATE_TAGS: i32 = 0x0D;
 const CFG_FINISH_ACK: i32 = 0x03;
 const PLAY_LOGIN: i32 = 0x30;
 const PLAY_CHUNK: i32 = 0x2C;
@@ -246,6 +250,13 @@ impl ProtocolCodec for Codec {
                 .bool(false) // no custom prompt message
                 .send(s)?;
         }
+
+        // Tags. Not decoration: the client decides what water *is* by the
+        // `minecraft:water` fluid tag — swimming, the underwater view and
+        // drowning all ask it — and without one every water block behaves as
+        // air. Climbing asks `climbable`; a pickaxe's speed asks the
+        // `mineable/*` block tags.
+        tags_packet().send(s)?;
 
         PacketOut::new(CFG_FINISH).send(s)?;
         wait_for(s, CFG_FINISH_ACK)?;
@@ -802,6 +813,22 @@ fn write_container_slot(p: &mut PacketOut, slot: &super::ContainerSlot) {
     inventory::write_named_item(p, id, slot.wire_count() as i32, &slot.label);
 }
 
+/// The "Update Tags" packet for every static registry.
+fn tags_packet() -> PacketOut {
+    let mut p = PacketOut::new(CFG_UPDATE_TAGS);
+    p.var_int(tags::TAGS.len() as i32);
+    for (registry, entries) in tags::TAGS {
+        p.string(registry).var_int(entries.len() as i32);
+        for (name, ids) in entries.iter() {
+            p.string(name).var_int(ids.len() as i32);
+            for id in ids.iter() {
+                p.var_int(*id as i32);
+            }
+        }
+    }
+    p
+}
+
 /// Read packets until one with `id` arrives, ignoring the rest.
 ///
 /// The client interleaves its own configuration traffic (client settings,
@@ -847,6 +874,33 @@ fn decode_position(v: i64) -> (i32, i32, i32) {
 mod tests {
     use super::*;
     use aether_api::block_ids as b;
+
+    #[test]
+    fn the_tags_make_water_water_and_ladders_climbable() {
+        let find = |reg: &str, tag: &str| {
+            tags::TAGS
+                .iter()
+                .find(|(r, _)| *r == reg)
+                .and_then(|(_, t)| t.iter().find(|(n, _)| *n == tag))
+                .map(|(_, ids)| ids.to_vec())
+        };
+        // flowing_water = 1, water = 2 in the fluid registry.
+        assert_eq!(find("minecraft:fluid", "minecraft:water"), Some(vec![1, 2]));
+        assert_eq!(find("minecraft:fluid", "minecraft:lava"), Some(vec![3, 4]));
+        let ladder =
+            aether_world::registry::blocks::block_id_of("minecraft:ladder").unwrap() as u32;
+        assert!(find("minecraft:block", "minecraft:climbable")
+            .unwrap()
+            .contains(&ladder));
+        let stone = aether_world::registry::blocks::block_id_of("minecraft:stone").unwrap() as u32;
+        assert!(find("minecraft:block", "minecraft:mineable/pickaxe")
+            .unwrap()
+            .contains(&stone));
+        // And the packet carries all of it.
+        let mut wire = Vec::new();
+        tags_packet().write_to(&mut wire, None).unwrap();
+        assert!(wire.len() > 10_000);
+    }
 
     #[test]
     fn position_layout_differs_from_1_8() {

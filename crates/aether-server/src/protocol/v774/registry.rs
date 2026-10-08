@@ -286,6 +286,18 @@ fn water_color(name: &str) -> i32 {
     }
 }
 
+/// The underwater fog colour — murky green in swamps, as in vanilla.
+fn water_fog_color(name: &str) -> i32 {
+    match name {
+        "swamp" => 0x232317,
+        "mangrove_swamp" => 0x4D7A60,
+        "warm_ocean" => 0x041F33,
+        "lukewarm_ocean" | "deep_lukewarm_ocean" => 0x041633,
+        "cherry_grove" => 0x5DB7EF,
+        _ => 0x050533,
+    }
+}
+
 /// The whole biome registry, in [`BIOMES`] order.
 fn biomes() -> Vec<(String, Nbt)> {
     BIOMES
@@ -302,7 +314,7 @@ fn biomes() -> Vec<(String, Nbt)> {
                         compound([
                             ("sky_color", Nbt::Int(sky_color(*temperature))),
                             ("water_color", Nbt::Int(water_color(name))),
-                            ("water_fog_color", Nbt::Int(0x050533)),
+                            ("water_fog_color", Nbt::Int(water_fog_color(name))),
                             ("fog_color", Nbt::Int(0xC0D8FF)),
                         ]),
                     ),
