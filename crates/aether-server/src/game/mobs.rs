@@ -577,7 +577,8 @@ pub fn spawn_round(
         }
         let (n, hostile) = super::entities::mobs_near(p.pos, 64.0);
         let passive = n - hostile;
-        for _ in 0..3 {
+        let attempts = if night { 8 } else { 4 };
+        for _ in 0..attempts {
             let a = rng.f64() * std::f64::consts::TAU;
             let r = 24.0 + rng.f64() * 30.0;
             let x = (p.pos.x + a.cos() * r).floor() as i32;
@@ -599,7 +600,7 @@ pub fn spawn_round(
             let open_sky = sky_above(world, x, y + 2, z);
             let dark = !open_sky || night;
             let at = Vector3::new(x as f64 + 0.5, y as f64, z as f64 + 0.5);
-            if dark && hostile < 10 && ground != "minecraft:water" && rng.chance(0.5) {
+            if dark && hostile < 12 && ground != "minecraft:water" && rng.chance(0.7) {
                 let def = match rng.range(0, 99) {
                     0..=39 => &ZOMBIE,
                     40..=64 => &SKELETON,
