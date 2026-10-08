@@ -3,9 +3,11 @@
 //! Two of them, chosen at startup:
 //!
 //! * **Vanilla** — `aether_worldgen::vanilla::VanillaGenerator`, driven by the
-//!   operator's own copy of the game's `data/minecraft/worldgen/`. Its noise
-//!   stage is verified bit-exact against the game: 1,179,648 of 1,179,648
-//!   blocks across twelve chunks.
+//!   operator's own copy of the game's `data/minecraft/`. Terrain shape,
+//!   biomes, surface and carvers are verified against the game itself; the
+//!   decoration step (ores, trees, plants, lakes, springs…) is data-driven
+//!   and vanilla-like but not position-exact. This is the generator used
+//!   whenever `worldgen_data` is set and readable.
 //! * **Noise** — the engine's own value-noise terrain, which needs no data and
 //!   always works.
 //!
@@ -15,11 +17,10 @@
 //!
 //! # What the vanilla generator does not do yet
 //!
-//! Surface rules are interpreted from the pack, so the world has soil,
-//! deepslate and a bedrock floor. Four condition sources still evaluate to
-//! false — `temperature`, `steep`, `hole` and the badlands banding rule — so
-//! snow patches, the cave-badlands variant and banded terracotta are missing.
-//! They gate decoration, never the ground itself; see `KNOWN_ISSUES`.
+//! Structures (villages, mineshafts, strongholds…), geodes, dungeons, fossils
+//! and dripstone are not generated; see `KNOWN_ISSUES`. The biome table is
+//! built into the crate, so `biome_data` is optional: when it is set the
+//! report is used instead of the built-in table.
 
 use aether_worldgen::{ChunkGenerator, GeneratedColumn, NoiseGenerator};
 
@@ -44,18 +45,16 @@ impl Generator {
         if pack_root.is_empty() {
             return Generator::Noise(NoiseGenerator::new(seed));
         }
-        if biome_report.is_empty() {
-            eprintln!(
-                "warning: `worldgen_data` is set but `biome_data` is not — the vanilla \
-                 generator needs the biome-parameter report to place biomes; using noise terrain"
-            );
-            return Generator::Noise(NoiseGenerator::new(seed));
-        }
-        match aether_worldgen::vanilla::generator::VanillaGenerator::load(
-            pack_root,
-            biome_report,
-            seed,
-        ) {
+        let built = if biome_report.is_empty() {
+            aether_worldgen::vanilla::generator::VanillaGenerator::new(pack_root, seed)
+        } else {
+            aether_worldgen::vanilla::generator::VanillaGenerator::load(
+                pack_root,
+                biome_report,
+                seed,
+            )
+        };
+        match built {
             Ok(g) => {
                 println!("worldgen   : vanilla (from {pack_root})");
                 Generator::Vanilla(Box::new(g))

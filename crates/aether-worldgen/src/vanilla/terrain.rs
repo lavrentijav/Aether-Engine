@@ -30,7 +30,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::aquifer::{AquiferConfig, ChunkAquifer};
-use super::density::{BuildError, Builder, Ctx, DataPack, Mode, NoiseRegistry, Node};
+use super::density::{BuildError, Builder, Ctx, DataPack, Mode, Node, NoiseRegistry};
 use super::json::Json;
 use super::ore_veins::OreVeins;
 
@@ -213,6 +213,12 @@ pub struct ChunkTerrain<'a> {
 }
 
 impl ChunkTerrain<'_> {
+    /// The aquifer's answer for an explicit density — what carvers ask with
+    /// a density of zero to learn whether a carved cell floods.
+    pub fn aquifer_fill(&self, x: i32, y: i32, z: i32, density: f64) -> Fill {
+        self.aquifer.substance(x, y, z, density)
+    }
+
     /// Solid, water, lava or air — the aquifer's answer, before ore veins.
     pub fn fill_at(&self, x: i32, y: i32, z: i32) -> Fill {
         self.aquifer

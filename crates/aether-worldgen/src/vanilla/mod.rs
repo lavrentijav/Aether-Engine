@@ -23,7 +23,10 @@
 //! | [`aquifer`] — fluid choice and stone barriers | done | see below |
 //! | [`ore_veins`] | done | see below |
 //! | [`generator`] — engine sub-chunks from all of it | done | — |
-//! | surface rules | not started | — |
+//! | [`biome_table`] — `OverworldBiomeBuilder` ported to code | done | row-for-row equal to the game's `biome_parameters` report |
+//! | [`surface`] — surface rule tree, incl. `temperature`/`steep`/`hole`/bandlands | done | 100% of blocks on 6 chunks, 99.9998% on 40, against the game's surface stage |
+//! | [`carver`] — cave, canyon, extra-underground cave | done | same as surface, against the game's carver stage |
+//! | [`feature`] — placed features (ores, trees, plants, lakes, springs…) | vanilla-like | 99.7% of all blocks and 96.7% of top blocks against a vanilla server world (plains); not position-exact |
 //!
 //! The noise stage as a whole — interpolation, aquifers and ore veins together,
 //! compared block by block against the game's own output:
@@ -44,18 +47,14 @@
 //! the terrain.** [`generator::VanillaGenerator`] turns that into engine
 //! sub-chunks.
 //!
-//! What is missing is the layer of paint on top. Vanilla's noise stage produces
-//! only stone, water, lava and ore; grass, dirt, sand, gravel, deepslate and
-//! bedrock are all placed afterwards by the surface rule tree, which is not
-//! implemented. The generated world therefore has vanilla's exact shape and
-//! vanilla's exact water, in bare stone.
-//!
-//! Surface rules are a subsystem rather than a function, which is why they are
-//! not half-done here: the rule tree needs the biome at each position (through
-//! vanilla's position-fuzzing `BiomeManager`, not the raw biome source), a
-//! `WORLD_SURFACE_WG` heightmap, a column walker that tracks depth above and
-//! below stone, and several more noises. Guessing at any of it would produce
-//! terrain that looks finished and is wrong.
+//! On top of that sit the surface rules, the carvers and the decoration step.
+//! Surface and carvers are ports checked stage by stage against the game's
+//! own `NoiseBasedChunkGenerator` driven over a `ProtoChunk`. Decoration is
+//! data-driven from the pack's placed and configured features with the
+//! game's seeding (`setDecorationSeed` / `setFeatureSeed`) and feature order;
+//! it is vanilla-like rather than exact, because vanilla's own result depends
+//! on the order in which neighbouring chunks were decorated. Not generated:
+//! structures, geodes, dungeons, fossils, dripstone, sculk, desert wells.
 //!
 //! ## The one place parity is ambiguous
 //!
@@ -91,14 +90,78 @@
 //! algorithm. They are read at run time from a copy of the game the operator
 //! already has, and deliberately not vendored into this repository.
 
+// Ports of Java loops read better index-for-index, and the float literals
+// are the game's own constants, spelled as the game spells them.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::excessive_precision,
+    clippy::int_plus_one,
+    clippy::manual_range_contains,
+    clippy::collapsible_if,
+    clippy::assertions_on_constants,
+    clippy::items_after_test_module,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+
 pub mod aquifer;
+pub mod biome;
+pub mod biome_manager;
+pub mod biome_table;
+pub mod blockinfo;
+pub mod carver;
+pub mod chunk;
 pub mod climate;
 pub mod density;
+pub mod feature;
 pub mod generator;
 pub mod json;
+pub mod mth;
 pub mod noise;
 pub mod ore_veins;
 pub mod overworld;
+pub mod providers;
 pub mod random;
+pub mod rng;
+pub mod simplex;
 pub mod surface;
+pub mod tags;
 pub mod terrain;
+
+/// A small, fast, non-cryptographic hasher for the generator's position-keyed
+/// memo tables (FxHash's multiply-rotate). The default SipHash showed up as a
+/// tenth of terrain generation time.
+#[derive(Default, Clone, Copy)]
+pub struct FxHasher(u64);
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.write_u64(*b as u64);
+        }
+    }
+    #[inline]
+    fn write_u32(&mut self, v: u32) {
+        self.write_u64(v as u64);
+    }
+    #[inline]
+    fn write_i32(&mut self, v: i32) {
+        self.write_u64(v as u32 as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    #[inline]
+    fn write_usize(&mut self, v: usize) {
+        self.write_u64(v as u64);
+    }
+}
+
+/// A `HashMap` keyed with [`FxHasher`].
+pub type FxHashMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;

@@ -100,14 +100,18 @@ fn bedrock_is_at_the_bottom_of_every_column() {
             let above_gradient = 5;
             for (i, b) in names.iter().enumerate().skip(above_gradient) {
                 assert_ne!(
-                    *b, bedrock,
+                    *b,
+                    bedrock,
                     "bedrock above the gradient at ({x},{},{z})",
                     s.min_y + i as i32
                 );
             }
         }
     }
-    assert!(saw_bedrock, "no column had bedrock at min_y across a spread of columns");
+    assert!(
+        saw_bedrock,
+        "no column had bedrock at min_y across a spread of columns"
+    );
 }
 
 #[test]
@@ -242,7 +246,10 @@ fn an_underwater_column_gets_sand_or_gravel_not_grass() {
             }
         }
     }
-    assert!(saw_underwater, "no underwater column found in the sampled range");
+    assert!(
+        saw_underwater,
+        "no underwater column found in the sampled range"
+    );
     assert!(
         saw_sand_family,
         "no sand/gravel/sandstone seabed found in the sampled range"

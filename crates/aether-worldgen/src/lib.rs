@@ -28,6 +28,39 @@ pub struct GeneratedColumn {
     /// `(cy, sub-chunk)` pairs, ascending in `cy`. Empty (all-air) sections are
     /// omitted.
     pub sections: Vec<(i8, SubChunk)>,
+    /// Per-section biomes, when the generator has them (the vanilla one
+    /// does; the flat and noise generators leave this `None`, meaning
+    /// "plains everywhere").
+    pub biomes: Option<ColumnBiomes>,
+}
+
+/// A column's biomes on the 4×4×4 quart grid the protocol sends.
+///
+/// One entry of `sections` per 16-block section, **every** section of the
+/// world height (not just the non-empty ones), bottom first, starting at
+/// section `min_section_y`. Each entry is 64 indices into `palette`, ordered
+/// `(qy * 4 + qz) * 4 + qx` — exactly the order of a chunk section's biome
+/// paletted container.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColumnBiomes {
+    /// Section Y of `sections[0]` (`-4` for the overworld).
+    pub min_section_y: i8,
+    /// Namespaced biome ids, e.g. `minecraft:plains`.
+    pub palette: Vec<String>,
+    /// 64 palette indices per section.
+    pub sections: Vec<[u8; 64]>,
+}
+
+impl ColumnBiomes {
+    /// The biome id at section `cy`, quart `(qx, qy, qz)` within it, or
+    /// `None` when `cy` is outside the column.
+    pub fn get(&self, cy: i8, qx: usize, qy: usize, qz: usize) -> Option<&str> {
+        let i = (cy as i32 - self.min_section_y as i32) as usize;
+        let sec = self.sections.get(i)?;
+        self.palette
+            .get(sec[(qy * 4 + qz) * 4 + qx] as usize)
+            .map(String::as_str)
+    }
 }
 
 /// A source of freshly generated chunk columns.
@@ -79,6 +112,7 @@ impl<'a> ColumnBuilder<'a> {
                 .into_iter()
                 .filter(|(_, sc)| !sc.is_empty())
                 .collect(),
+            biomes: None,
         }
     }
 }
@@ -196,7 +230,12 @@ impl NoiseGenerator {
     /// interpolated to full block resolution. Evaluating the noise stacks at
     /// grid resolution (5×17×5 = 425 points) rather than every block
     /// (16×128×16 ≈ 33k) is what actually makes this affordable per chunk.
-    fn density_grid(&self, cx: i32, cz: i32) -> [[[f64; GRID_XZ_POINTS]; GRID_Y_POINTS]; GRID_XZ_POINTS] {
+    #[allow(clippy::needless_range_loop)]
+    fn density_grid(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> [[[f64; GRID_XZ_POINTS]; GRID_Y_POINTS]; GRID_XZ_POINTS] {
         let mut grid = [[[0.0; GRID_XZ_POINTS]; GRID_Y_POINTS]; GRID_XZ_POINTS];
         for gx in 0..GRID_XZ_POINTS {
             let wx = cx * 16 + gx as i32 * GRID_XZ_STEP;
@@ -367,7 +406,10 @@ mod tests {
         }
         let min = *heights.iter().min().unwrap();
         let max = *heights.iter().max().unwrap();
-        assert!(max > min, "terrain is perfectly flat across columns: {heights:?}");
+        assert!(
+            max > min,
+            "terrain is perfectly flat across columns: {heights:?}"
+        );
         for &h in &heights {
             assert!(
                 (0..beta::WORLD_HEIGHT).contains(&h),

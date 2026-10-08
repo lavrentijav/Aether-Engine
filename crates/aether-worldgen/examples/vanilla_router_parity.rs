@@ -35,9 +35,11 @@
 //! Nothing from the game is checked into this repository — the dump is
 //! regenerated from the operator's copy when it is needed.
 
+#![allow(clippy::type_complexity)]
+
 use std::sync::Arc;
 
-use aether_worldgen::vanilla::density::{Builder, Ctx, DataPack, NoiseRegistry, Node};
+use aether_worldgen::vanilla::density::{Builder, Ctx, DataPack, Node, NoiseRegistry};
 
 /// Router entries, in the order the dump writes them.
 const ENTRIES: [&str; 15] = [
@@ -78,7 +80,9 @@ fn main() {
     // quietly dropped, so the sample size per entry stays honest.
     let mut built: Vec<Option<Arc<Node>>> = Vec::new();
     for name in ENTRIES {
-        let json = router.get(name).unwrap_or_else(|| panic!("no router entry `{name}`"));
+        let json = router
+            .get(name)
+            .unwrap_or_else(|| panic!("no router entry `{name}`"));
         match builder.build(json) {
             Ok(f) => built.push(Some(f)),
             Err(e) => {
