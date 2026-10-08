@@ -488,6 +488,12 @@ pub enum Menu {
     Furnace,
 }
 
+/// Flag on an [`ServerEvent::EntityMeta`] index: the field belongs to a
+/// subclass of `AgeableMob` and its index counts from the end of that
+/// class's fields, which moved between versions. `META_AGEABLE | 0` is a
+/// sheep's wool, say. Every other index is absolute.
+pub const META_AGEABLE: u8 = 0x40;
+
 /// One entity-metadata value, in neutral terms.
 #[derive(Debug, Clone)]
 pub enum MetaValue {
@@ -739,6 +745,9 @@ pub trait ProtocolCodec: Sync + Send {
 /// Every codec this build can speak, newest protocol first.
 pub fn codecs() -> &'static [&'static dyn ProtocolCodec] {
     static V47: v47::Codec = v47::Codec;
+    static V777: modern::Codec = modern::Codec(&modern::version::V26_3);
+    static V776: modern::Codec = modern::Codec(&modern::version::V26_2);
+    static V775: modern::Codec = modern::Codec(&modern::version::V26_1);
     static V774: modern::Codec = modern::Codec(&modern::version::V1_21_11);
     static V755: v755::Codec = v755::Codec;
     static V756: v756::Codec = v756::Codec;
@@ -760,9 +769,9 @@ pub fn codecs() -> &'static [&'static dyn ProtocolCodec] {
     // Newest first. 764 and 765 are absent on purpose: before 1.20.5 the whole
     // registry set travels as one NBT compound rather than a packet per
     // registry, which is a separate code path still to be written.
-    static ALL: [&dyn ProtocolCodec; 19] = [
-        &V774, &V773, &V772, &V771, &V770, &V769, &V768, &V767, &V766, &V763, &V762, &V761, &V760,
-        &V759, &V758, &V757, &V756, &V755, &V47,
+    static ALL: [&dyn ProtocolCodec; 22] = [
+        &V777, &V776, &V775, &V774, &V773, &V772, &V771, &V770, &V769, &V768, &V767, &V766, &V763,
+        &V762, &V761, &V760, &V759, &V758, &V757, &V756, &V755, &V47,
     ];
     &ALL
 }
@@ -830,6 +839,9 @@ mod tests {
     fn dispatch_maps_ids_to_codecs() {
         assert_eq!(codec_for(47).unwrap().version_name(), "1.8.9");
         assert_eq!(codec_for(774).unwrap().version_name(), "1.21.11");
+        assert_eq!(codec_for(775).unwrap().version_name(), "26.1.x");
+        assert_eq!(codec_for(776).unwrap().version_name(), "26.2");
+        assert_eq!(codec_for(777).unwrap().version_name(), "26.3");
         assert!(codec_for(1).is_none(), "unknown protocol must not resolve");
     }
 }

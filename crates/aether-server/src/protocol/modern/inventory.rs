@@ -1,4 +1,4 @@
-//! The player's hotbar as 1.21.11 wants it on the wire.
+//! The player's hotbar and item stacks on the wire.
 //!
 //! Items are not block states: `minecraft:dirt` is item 28 but block state 10,
 //! and the two numbering spaces are unrelated. Ids here come from
@@ -55,26 +55,28 @@ pub(super) fn write_item(p: &mut PacketOut, item_id: i32, count: i32) {
         .var_int(0); // and none removed
 }
 
-/// Data component id of `minecraft:custom_name`.
-///
-/// From `minecraft-data` `pc/1.21.11/protocol.json`, cross-checked against the
-/// `--reports` dump of the vanilla server's `data_component_type` registry —
-/// two independent sources, because a wrong component id is read as a
-/// different component entirely and the client rejects the whole stack.
-const COMPONENT_CUSTOM_NAME: i32 = 6;
-
 /// Append one stack of `item_id` carrying a display name.
 ///
 /// The name is how a server-driven window says anything at all: a slot has no
 /// other text, and the stack-count badge tops out at what fits in a corner of
 /// a 16-pixel icon. So a quantity that will not read as a badge is put in the
 /// name instead — see [`super::write_container_slot`].
-pub(super) fn write_named_item(p: &mut PacketOut, item_id: i32, count: i32, name: &str) {
+///
+/// `custom_name` is this version's id of the `minecraft:custom_name` data
+/// component (6 in 1.21.11): a wrong one is read as a different component
+/// entirely and the client rejects the whole stack.
+pub(super) fn write_named_item(
+    p: &mut PacketOut,
+    custom_name: i32,
+    item_id: i32,
+    count: i32,
+    name: &str,
+) {
     p.var_int(count)
         .var_int(item_id)
         .var_int(1) // one component added...
         .var_int(0) // ...and none removed
-        .var_int(COMPONENT_CUSTOM_NAME);
+        .var_int(custom_name);
     // An *anonymous* NBT component, the same shape System Chat uses here.
     p.bytes(&crate::protocol::nbt::string(name).to_network());
 }

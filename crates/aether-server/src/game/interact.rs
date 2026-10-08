@@ -141,7 +141,7 @@ pub fn on_broken(
             x,
             y,
             z,
-            data: crate::protocol::modern::block_state(broken) as i32,
+            data: broken.raw() as i32, // the codec translates it
         },
         world,
     );

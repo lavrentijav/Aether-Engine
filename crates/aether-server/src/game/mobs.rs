@@ -225,7 +225,7 @@ impl Mob {
                 v.push((16, MetaValue::VarInt(if self.fuse > 0 { 1 } else { -1 })))
             }
             "minecraft:sheep" => v.push((
-                17,
+                crate::protocol::META_AGEABLE,
                 MetaValue::Byte((self.wool | if self.sheared { 0x10 } else { 0 }) as i8),
             )),
             _ => {}

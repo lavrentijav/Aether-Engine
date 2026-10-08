@@ -4,7 +4,7 @@
 Usage:
   versions.py <module name> <reports dir of that version> <data/minecraft dir>
               <reports dir of 1.21.11> <synced registries, comma separated>
-              <core pack versions, comma separated>  >  gen/<module>.rs
+              <core pack versions, comma separated> <gen dir>  >  gen/<module>.rs
 
 Everything is resolved from the game's own data-generator reports and data
 pack, so a new release is a regeneration rather than a hand edit:
@@ -15,11 +15,14 @@ pack, so a new release is a regeneration rather than a hand edit:
 * item, entity-type, menu, data-component and particle ids by name;
 * the entries of every synchronized registry, in the order they are sent;
 * the tags of the static registries and of the synchronized ones;
-* the overworld dimension type, as an NBT builder.
+* the overworld dimension type, as an NBT builder;
+* every entry of every synchronized registry as network NBT, deflated into
+  `gen/<module>.registries.z`, for a client that does not have the vanilla
+  pack to fill them from (bot libraries, mostly).
 """
-import json, os, sys
+import json, os, struct, sys, zlib
 
-mod, rep, data, base_rep, synced_arg, packs_arg = sys.argv[1:7]
+mod, rep, data, base_rep, synced_arg, packs_arg, gen_dir = sys.argv[1:8]
 synced = [s for s in synced_arg.split(",") if s]
 packs = [p for p in packs_arg.split(",") if p]
 regs = json.load(open(os.path.join(rep, "registries.json")))
@@ -169,4 +172,61 @@ w("/// The vanilla overworld dimension type; the codec overrides its height.")
 w("pub fn overworld() -> Nbt {")
 w("    " + nbt(dim))
 w("}")
+
+# --- every synced entry as network NBT
+# JSON maps onto NBT the way the game's own JsonOps -> NbtOps conversion
+# reads back: integers as Int, other numbers as Double, booleans as Byte. A
+# list whose elements differ in type is written the 1.21.5 way, each element
+# wrapped in a compound under the empty key.
+def tag_of(v):
+    if isinstance(v, bool): return 1
+    if isinstance(v, int): return 3
+    if isinstance(v, float): return 6
+    if isinstance(v, str): return 8
+    if isinstance(v, list): return 9
+    return 10
+def mutf8(t):
+    b = t.encode("utf-8")
+    return struct.pack(">H", len(b)) + b
+def payload(v):
+    t = tag_of(v)
+    if t == 1: return struct.pack(">b", int(v))
+    if t == 3:
+        if -2**31 <= v < 2**31: return struct.pack(">i", v)
+        return struct.pack(">d", float(v))
+    if t == 6: return struct.pack(">d", v)
+    if t == 8: return mutf8(v)
+    if t == 9:
+        types = {tag_of(x) for x in v}
+        if types <= {3, 6} and len(types) == 2:
+            v, types = [float(x) for x in v], {6}
+        if types == {3} and any(not (-2**31 <= x < 2**31) for x in v):
+            v, types = [float(x) for x in v], {6}
+        if len(types) > 1:
+            v, types = [{"": x} for x in v], {10}
+        et = types.pop() if types else 0
+        return bytes([et]) + struct.pack(">i", len(v)) + b"".join(payload(x) for x in v)
+    body = b""
+    for k, x in v.items():
+        tt = tag_of(x)
+        if tt == 3 and not (-2**31 <= x < 2**31): tt = 6
+        body += bytes([tt]) + mutf8(k) + payload(x)
+    return body + b"\x00"
+# Biome fields only the generator reads; the network codec ignores them.
+WORLDGEN_ONLY = {"features", "carvers", "spawners", "spawn_costs"}
+blob = b""
+for r in synced:
+    for e in reg_entries[r]:
+        d = json.load(open(os.path.join(data, r.split(":")[1], e.split(":", 1)[1] + ".json")))
+        if r == "minecraft:worldgen/biome":
+            d = {k: x for k, x in d.items() if k not in WORLDGEN_ONLY}
+        n = bytes([tag_of(d)]) + payload(d)
+        blob += struct.pack(">I", len(n)) + n
+ident = "v" + mod.replace(".", "_")
+if synced:
+    open(os.path.join(gen_dir, ident + ".registries.z"), "wb").write(zlib.compress(blob, 9))
+    w("/// Every entry of `SYNCED`, in order, as length-prefixed network NBT, deflated.")
+    w(f'pub static REGISTRY_DATA: &[u8] = include_bytes!("{ident}.registries.z");')
+else:
+    w("pub static REGISTRY_DATA: &[u8] = &[];")
 print("\n".join(out))

@@ -1,9 +1,11 @@
-//! Minecraft 1.21.11 (protocol 774) codec.
+//! The modern codec: Minecraft 1.21.11 (protocol 774) and the releases
+//! after it — 26.1.x (775), 26.2 (776) and 26.3 (777).
 //!
-//! Protocol id and every packet id, block-state id and entity-type id below
-//! come from PrismarineJS `minecraft-data` for **pc/1.21.11** — that
-//! distribution carries its own protocol definition for this exact release,
-//! so none of it is inferred from a neighbouring version.
+//! One codec, parameterized by a [`version::Version`]: every packet id,
+//! block-state, item and entity-type id comes from that version's tables,
+//! generated from the game's own `--reports` dump (`tools/gen/versions.py`).
+//! Where a packet's *layout* changed between releases, the code branches on
+//! [`version::Gen`] with the release that changed it named alongside.
 //!
 //! Structurally this shares nothing with 1.8 but the frame header. Login is
 //! followed by a **configuration phase** (added in 1.20.2) in which the server
@@ -16,14 +18,12 @@
 //! tests and the notes on [`Codec::decode`] for the known gaps.
 
 pub mod chunk;
+#[allow(clippy::all)]
+pub mod gen;
 pub mod inventory;
 pub mod items;
 pub mod play;
 pub mod registry;
-#[rustfmt::skip]
-pub mod tags;
-#[allow(clippy::all)]
-pub mod gen;
 pub mod version;
 
 use std::io;
@@ -33,6 +33,7 @@ use aether_world::BlockStateId;
 use super::{BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::players::PosLook;
 use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
+use version::{Gen, Registries};
 
 /// A spawn packet's velocity, at rest.
 ///
@@ -73,7 +74,10 @@ const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_0000_0000_0001;
 /// The codec of one modern protocol version; see [`version`].
 pub struct Codec(pub &'static version::Version);
 
-/// Engine block id -> 1.21.11 block-state id.
+/// Engine block id -> 1.21.11 block-state id. Other versions translate
+/// through [`version::Version::state`]; this is the reference the tests hold
+/// the 1.21.11 table to.
+#[cfg(test)]
 ///
 /// A table lookup, not a chain of comparisons: the engine's block ids *are*
 /// this version's block ids (see `aether_world::registry::blocks`), so the
@@ -94,11 +98,11 @@ pub fn block_state(id: BlockStateId) -> u32 {
 
 impl ProtocolCodec for Codec {
     fn version_name(&self) -> &'static str {
-        "1.21.11"
+        self.0.name
     }
 
     fn protocol_id(&self) -> i32 {
-        774
+        self.0.protocol
     }
 
     fn read_login_start(&self, s: &mut Conn) -> io::Result<Option<String>> {
@@ -107,7 +111,7 @@ impl ProtocolCodec for Codec {
         let Some(p) = read_packet(s)? else {
             return Ok(None);
         };
-        if p.id != 0x00 {
+        if p.id != self.0.packets.login_sb_hello {
             return Ok(None);
         }
         Ok(Some(PacketIn::new(&p.data).string()?))
@@ -116,33 +120,48 @@ impl ProtocolCodec for Codec {
     fn complete_login(&self, s: &mut Conn, p: &JoinParams) -> io::Result<()> {
         // Login Success: UUID as 16 raw bytes here (1.8 wanted a hyphenated
         // string in the same packet), username, then an empty property list.
-        PacketOut::new(self.0.packets.login_cb_login_finished)
-            .uuid(p.uuid)
-            .string(&p.name)
-            .var_int(0)
-            .send(s)?;
+        let v = self.0;
+        let mut finished = PacketOut::new(v.packets.login_cb_login_finished);
+        finished.uuid(p.uuid).string(&p.name).var_int(0);
+        if v.gen >= Gen::V26_2 {
+            // 26.2: a session id, which the client attaches to its reports.
+            // Any UUID will do for an offline server; the player's own is
+            // as good as another.
+            finished.uuid(p.uuid);
+        }
+        finished.send(s)?;
 
         // The client acknowledges and moves itself into the configuration
         // state; nothing may be sent in between.
-        wait_for(s, self.0.packets.login_sb_login_acknowledged)?;
+        wait_for(s, v.packets.login_sb_login_acknowledged)?;
 
         // Configuration: hand over the registries the client builds its world
         // from. Without these it disconnects before ever reaching play.
-        for (id, entries) in registry::registries() {
-            let mut pkt = PacketOut::new(self.0.packets.cfg_cb_registry_data);
-            pkt.string(id).var_int(entries.len() as i32);
-            for (key, value) in entries {
-                pkt.string(&key)
-                    .bool(true) // this entry carries data
-                    .bytes(&value.to_network());
+        match &v.registries {
+            Registries::Explicit => {
+                for (id, entries) in registry::registries() {
+                    let mut pkt = PacketOut::new(v.packets.cfg_cb_registry_data);
+                    pkt.string(id).var_int(entries.len() as i32);
+                    for (key, value) in entries {
+                        pkt.string(&key)
+                            .bool(true) // this entry carries data
+                            .bytes(&value.to_network());
+                    }
+                    pkt.send(s)?;
+                }
             }
-            pkt.send(s)?;
+            Registries::KnownPacks {
+                core,
+                synced,
+                overworld,
+                data,
+            } => send_known_registries(s, v, core, synced, *overworld, data)?,
         }
 
         // Add Resource Pack, offered while still in configuration so the
         // client downloads before the world appears.
         if p.resource_pack.enabled() {
-            PacketOut::new(self.0.packets.cfg_cb_resource_pack_push)
+            PacketOut::new(v.packets.cfg_cb_resource_pack_push)
                 .uuid(RESOURCE_PACK_ID)
                 .string(&p.resource_pack.url)
                 .string(&p.resource_pack.hash)
@@ -156,13 +175,13 @@ impl ProtocolCodec for Codec {
         // drowning all ask it — and without one every water block behaves as
         // air. Climbing asks `climbable`; a pickaxe's speed asks the
         // `mineable/*` block tags.
-        tags_packet(self.0).send(s)?;
+        tags_packet(v).send(s)?;
 
-        PacketOut::new(self.0.packets.cfg_cb_finish_configuration).send(s)?;
-        wait_for(s, self.0.packets.cfg_sb_finish_configuration)?;
+        PacketOut::new(v.packets.cfg_cb_finish_configuration).send(s)?;
+        wait_for(s, v.packets.cfg_sb_finish_configuration)?;
 
         // Play Login.
-        let mut login = PacketOut::new(self.0.packets.cb_login);
+        let mut login = PacketOut::new(v.packets.cb_login);
         login
             .i32(p.entity_id)
             .bool(false) // not hardcore
@@ -175,17 +194,21 @@ impl ProtocolCodec for Codec {
             .bool(true) // enable respawn screen
             .bool(false) // limited crafting
             // SpawnInfo:
-            .var_int(0) // dimension type: index 0 in the registry above
+            .var_int(dimension_type_id(v))
             .string(registry::DIMENSION_NAME)
             .i64(0) // hashed seed
-            .u8(p.game_mode.wire()) // survival 0 / creative 1
-            .u8(0xFF) // previous game mode: none
+            .u8(p.game_mode.wire()); // survival 0 / creative 1 (a VarInt from 26.3: same byte)
+        play::write_no_previous_mode(v, &mut login);
+        login
             .bool(false) // not a debug world
             .bool(false) // not superflat
             .bool(false) // no death location
             .var_int(0) // portal cooldown
-            .var_int(63) // sea level
-            .bool(false); // does not enforce secure chat
+            .var_int(63); // sea level
+        if v.gen >= Gen::V26_2 {
+            login.bool(false); // 26.2: not in online mode
+        }
+        login.bool(false); // does not enforce secure chat
         login.send(s)?;
 
         // Tell the client to start waiting for chunks rather than rendering
@@ -254,12 +277,7 @@ impl ProtocolCodec for Codec {
                 vec![p]
             }
             ServerEvent::ChunkColumn { cx, cz } => {
-                vec![chunk::chunk_data_packet(
-                    self.0.packets.cb_level_chunk_with_light,
-                    *cx,
-                    *cz,
-                    world,
-                )]
+                vec![chunk::chunk_data_packet(self.0, *cx, *cz, world)]
             }
             ServerEvent::UnloadColumn { cx, cz } => {
                 vec![chunk::unload_chunk_packet(
@@ -332,40 +350,31 @@ impl ProtocolCodec for Codec {
                 meta.var_int(*entity_id)
                     .u8(ITEM_DATA_INDEX)
                     .var_int(META_ITEM_STACK);
-                match items::item_id(item) {
+                match self.0.item_id(item) {
                     Some(id) => inventory::write_item(&mut meta, id, *count as i32),
                     None => inventory::write_empty(&mut meta),
                 }
                 meta.u8(META_END);
                 vec![spawn, meta]
             }
-            ServerEvent::MoveEntity { entity_id, x, y, z } => {
-                let mut p = PacketOut::new(self.0.packets.cb_entity_position_sync);
-                p.var_int(*entity_id)
-                    .f64(*x)
-                    .f64(*y)
-                    .f64(*z)
-                    .f64(0.0)
-                    .f64(0.0)
-                    .f64(0.0)
-                    .f32(0.0)
-                    .f32(0.0)
-                    .bool(true);
-                vec![p]
-            }
+            ServerEvent::MoveEntity { entity_id, x, y, z } => vec![play::position_sync(
+                self.0,
+                *entity_id,
+                (*x, *y, *z),
+                0.0,
+                0.0,
+                true,
+            )],
             ServerEvent::EntityMove(h) => {
                 let pos = h.pos();
-                let mut tp = PacketOut::new(self.0.packets.cb_entity_position_sync);
-                tp.var_int(h.entity_id)
-                    .f64(pos.x)
-                    .f64(pos.y)
-                    .f64(pos.z)
-                    .f64(0.0)
-                    .f64(0.0)
-                    .f64(0.0)
-                    .f32(pos.yaw)
-                    .f32(pos.pitch)
-                    .bool(pos.on_ground);
+                let tp = play::position_sync(
+                    self.0,
+                    h.entity_id,
+                    (pos.x, pos.y, pos.z),
+                    pos.yaw,
+                    pos.pitch,
+                    pos.on_ground,
+                );
                 let mut head = PacketOut::new(self.0.packets.cb_rotate_head);
                 head.var_int(h.entity_id).u8(angle(pos.yaw));
                 vec![tp, head]
@@ -378,7 +387,7 @@ impl ProtocolCodec for Codec {
             ServerEvent::BlockChange { x, y, z, block } => {
                 let mut p = PacketOut::new(self.0.packets.cb_block_update);
                 p.i64(encode_position(*x as i64, *y as i64, *z as i64))
-                    .var_int(block_state(*block) as i32);
+                    .var_int(self.0.state(*block) as i32);
                 vec![p]
             }
             ServerEvent::AckBlockChange(seq) => {
@@ -404,7 +413,7 @@ impl ProtocolCodec for Codec {
                     .var_int(1) // state id
                     .var_int(slots.len() as i32);
                 for slot in slots {
-                    write_container_slot(&mut items, slot);
+                    write_container_slot(self.0, &mut items, slot);
                 }
                 inventory::write_empty(&mut items); // nothing on the cursor
                 vec![open, items]
@@ -428,7 +437,7 @@ impl ProtocolCodec for Codec {
                 p.bytes(&super::nbt::string(text).to_network()).bool(false); // not an action-bar overlay
                 vec![p]
             }
-            other => play::encode(other).unwrap_or_default(),
+            other => play::encode(self.0, other).unwrap_or_default(),
         }
     }
 
@@ -497,7 +506,7 @@ impl ProtocolCodec for Codec {
                     Ok(n) => (
                         pin.var_int()
                             .ok()
-                            .and_then(items::name_of)
+                            .and_then(|id| self.0.item_name(id))
                             .map(str::to_owned),
                         n.clamp(0, u8::MAX as i32) as u8,
                     ),
@@ -584,6 +593,22 @@ impl ProtocolCodec for Codec {
                 Ok(0) => ClientEvent::Respawn,
                 _ => ClientEvent::Ignored,
             },
+            // 26.1 split attacking out of `interact` into a packet of its
+            // own; what is left is always a use, with hand and location.
+            id if id == p.sb_attack => match pin.var_int() {
+                Ok(target) => ClientEvent::Interact {
+                    target,
+                    attack: true,
+                },
+                Err(_) => ClientEvent::Ignored,
+            },
+            id if id == p.sb_interact && self.0.gen >= Gen::V26_1 => match pin.var_int() {
+                Ok(target) => ClientEvent::Interact {
+                    target,
+                    attack: false,
+                },
+                Err(_) => ClientEvent::Ignored,
+            },
             id if id == p.sb_interact => {
                 let (Ok(target), Ok(mouse)) = (pin.var_int(), pin.var_int()) else {
                     return ClientEvent::Ignored;
@@ -620,6 +645,9 @@ impl ProtocolCodec for Codec {
             id if id == p.sb_swing => ClientEvent::Swing {
                 hand: pin.var_int().unwrap_or(0) as u8,
             },
+            // 26.3: an empty-handed swing at nothing — the arm swing the
+            // swing packet used to report.
+            id if id == p.sb_punch => ClientEvent::Swing { hand: 0 },
             id if id == p.sb_use_item => {
                 let hand = pin.var_int().unwrap_or(0) as u8;
                 let seq = pin.var_int().unwrap_or(0);
@@ -710,20 +738,122 @@ impl ProtocolCodec for Codec {
 /// skipped: a hole in the window would silently shift every later slot and
 /// break the layout, while a barrier is visibly "something is here that I
 /// cannot show you".
-fn write_container_slot(p: &mut PacketOut, slot: &super::ContainerSlot) {
+fn write_container_slot(v: &version::Version, p: &mut PacketOut, slot: &super::ContainerSlot) {
     if slot.is_empty() {
         inventory::write_empty(p);
         return;
     }
-    let id = items::item_for_block(&slot.item)
-        .or_else(|| items::item_id("minecraft:barrier"))
+    let id = v
+        .item_id(&slot.item)
+        .or_else(|| v.item_id("minecraft:barrier"))
         .unwrap_or(0);
     // The badge shows `wire_count`, which is one for anything past a stack;
     // the real number rides in the name. The wire could carry 4000 — the count
     // is a VarInt since 1.20.5 — but the client renders that badge into the
     // corner of a 16-pixel icon and four digits do not fit there. A label
     // reading `Cobblestone (x4000)` is legible; a smear of pixels is not.
-    inventory::write_named_item(p, id, slot.wire_count() as i32, &slot.label);
+    inventory::write_named_item(
+        p,
+        v.component_custom_name,
+        id,
+        slot.wire_count() as i32,
+        &slot.label,
+    );
+}
+
+/// The dimension type the overworld uses, as an index into the registry.
+fn dimension_type_id(v: &version::Version) -> i32 {
+    v.synced_index("minecraft:dimension_type", registry::DIMENSION_NAME)
+        .unwrap_or(0) as i32
+}
+
+/// The registries of a version whose client carries them itself.
+///
+/// The server offers the vanilla `minecraft:core` pack of each release that
+/// shares this protocol; the client answers with the ones it has. With the
+/// pack, each registry goes by name only — the client fills every entry from
+/// its own copy — except the overworld dimension type, which is sent with
+/// data: this server's world is taller than vanilla's. Without it (a bot
+/// library has no game data) every entry carries its data, as a vanilla
+/// server does.
+fn send_known_registries(
+    s: &mut Conn,
+    v: &version::Version,
+    core: &[&str],
+    synced: &[(&str, &[&str])],
+    overworld: fn() -> super::nbt::Nbt,
+    data: &[u8],
+) -> io::Result<()> {
+    let mut offer = PacketOut::new(v.packets.cfg_cb_select_known_packs);
+    offer.var_int(core.len() as i32);
+    for version in core {
+        offer.string("minecraft").string("core").string(version);
+    }
+    offer.send(s)?;
+
+    let known = loop_until(s, v.packets.cfg_sb_select_known_packs)?;
+    let mut pin = PacketIn::new(&known.data);
+    let mut has_core = false;
+    for _ in 0..pin.var_int().unwrap_or(0).clamp(0, 64) {
+        match (pin.string(), pin.string(), pin.string()) {
+            (Ok(ns), Ok(id), Ok(ver)) => {
+                has_core |= ns == "minecraft" && id == "core" && core.contains(&ver.as_str())
+            }
+            _ => break,
+        }
+    }
+    let full = if has_core {
+        Vec::new()
+    } else {
+        miniz_oxide::inflate::decompress_to_vec_zlib(data).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "corrupt built-in registry data")
+        })?
+    };
+    let mut at = 0usize;
+    let mut next_entry = || -> &[u8] {
+        let len = full
+            .get(at..at + 4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+            .unwrap_or(0);
+        let entry = full.get(at + 4..at + 4 + len).unwrap_or(&[]);
+        at += 4 + len;
+        entry
+    };
+
+    for (id, entries) in synced {
+        let mut pkt = PacketOut::new(v.packets.cfg_cb_registry_data);
+        pkt.string(id).var_int(entries.len() as i32);
+        for key in entries.iter() {
+            pkt.string(key);
+            let entry = if has_core { &[][..] } else { next_entry() };
+            if *id == "minecraft:dimension_type" && *key == registry::DIMENSION_NAME {
+                pkt.bool(true)
+                    .bytes(&tall_overworld(overworld()).to_network());
+            } else if has_core {
+                pkt.bool(false);
+            } else {
+                pkt.bool(true).bytes(entry);
+            }
+        }
+        pkt.send(s)?;
+    }
+    Ok(())
+}
+
+/// A version's own overworld dimension type, at this server's height.
+fn tall_overworld(vanilla: super::nbt::Nbt) -> super::nbt::Nbt {
+    use super::nbt::Nbt;
+    let Nbt::Compound(mut fields) = vanilla else {
+        return vanilla;
+    };
+    for (key, value) in fields.iter_mut() {
+        match key.as_str() {
+            "min_y" => *value = Nbt::Int(registry::MIN_Y),
+            "height" | "logical_height" => *value = Nbt::Int(registry::HEIGHT),
+            _ => {}
+        }
+    }
+    Nbt::Compound(fields)
 }
 
 /// The "Update Tags" packet for every static registry.
@@ -742,23 +872,28 @@ fn tags_packet(v: &version::Version) -> PacketOut {
     p
 }
 
-/// Read packets until one with `id` arrives, ignoring the rest.
-///
-/// The client interleaves its own configuration traffic (client settings,
-/// plugin channels) with the handshake steps the server waits on, so skipping
-/// is required rather than treating them as protocol errors.
-fn wait_for(s: &mut Conn, id: i32) -> io::Result<()> {
+/// Read packets until one with `id` arrives and return it.
+fn loop_until(s: &mut Conn, id: i32) -> io::Result<RawPacket> {
     for _ in 0..64 {
-        match read_packet(s)? {
-            Some(p) if p.id == id => return Ok(()),
-            Some(_) => continue,
-            None => continue,
+        if let Some(p) = read_packet(s)? {
+            if p.id == id {
+                return Ok(p);
+            }
         }
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
         "client never sent the expected handshake packet",
     ))
+}
+
+/// Read packets until one with `id` arrives, ignoring the rest.
+///
+/// The client interleaves its own configuration traffic (client settings,
+/// plugin channels) with the handshake steps the server waits on, so skipping
+/// is required rather than treating them as protocol errors.
+fn wait_for(s: &mut Conn, id: i32) -> io::Result<()> {
+    loop_until(s, id).map(|_| ())
 }
 
 /// Degrees -> the protocol's angle byte (256ths of a full turn).
@@ -793,7 +928,8 @@ mod tests {
     #[test]
     fn the_tags_make_water_water_and_ladders_climbable() {
         let find = |reg: &str, tag: &str| {
-            tags::TAGS
+            version::V1_21_11
+                .tags
                 .iter()
                 .find(|(r, _)| *r == reg)
                 .and_then(|(_, t)| t.iter().find(|(n, _)| *n == tag))

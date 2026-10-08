@@ -91,7 +91,7 @@ pub fn serve(
     let next_state = pin.var_int()?;
 
     match next_state {
-        1 => status(&mut s, cfg, registry),
+        1 => status(&mut s, protocol_id, cfg, registry),
         2 => match protocol::codec_for(protocol_id) {
             Some(codec) => login_and_play(&mut s, codec, world, cfg, next_eid, registry),
             None => protocol::kick_unsupported(&mut s, protocol_id),
@@ -101,16 +101,19 @@ pub fn serve(
 }
 
 /// Answer a server-list ping.
-fn status(s: &mut Conn, cfg: &Config, registry: &SharedRegistry) -> io::Result<()> {
+fn status(s: &mut Conn, asked: i32, cfg: &Config, registry: &SharedRegistry) -> io::Result<()> {
     match read_packet(s)? {
         Some(p) if p.id == 0x00 => {}
         _ => return Ok(()),
     }
 
-    // Report the newest protocol this build speaks. A client of any other
-    // supported version still connects fine — the version block only drives
-    // the "outdated client/server" label in the list.
-    let newest = protocol::codecs()[0];
+    // Echo the client's own protocol when this build speaks it, so no
+    // supported client is labelled outdated; otherwise report the newest.
+    // The version block only drives that label — joining is decided by the
+    // handshake, not by this.
+    let shown = protocol::codec_for(asked)
+        .map(|_| asked)
+        .unwrap_or_else(|| protocol::codecs()[0].protocol_id());
     let names: Vec<&str> = protocol::codecs()
         .iter()
         .map(|c| c.version_name())
@@ -120,7 +123,7 @@ fn status(s: &mut Conn, cfg: &Config, registry: &SharedRegistry) -> io::Result<(
          \"players\":{{\"max\":{},\"online\":{},\"sample\":[]}},\
          \"description\":{{\"text\":\"{}\"}}}}",
         protocol::json_escape(&names.join(" / ")),
-        newest.protocol_id(),
+        shown,
         cfg.server.max_players,
         registry.snapshot().len(),
         protocol::json_escape(&cfg.server.motd),

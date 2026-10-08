@@ -15,6 +15,9 @@ use crate::protocol::nbt::Nbt;
 /// Packet ids of one version, by phase, direction and vanilla name; `-1`
 /// where the version has no such packet. Field list: `tools/gen/packet_fields.txt`.
 #[derive(Debug)]
+// Generated for every packet in the field list, including a few the codec
+// matches by other means.
+#[allow(dead_code)]
 pub struct Packets {
     pub cb_add_entity: i32,
     pub cb_animate: i32,
@@ -123,6 +126,9 @@ pub enum Registries {
         core: &'static [&'static str],
         synced: &'static [(&'static str, &'static [&'static str])],
         overworld: fn() -> Nbt,
+        /// Every entry of `synced` with its data, for a client without the
+        /// pack: length-prefixed network NBT, deflated.
+        data: &'static [u8],
     },
 }
 
@@ -270,6 +276,7 @@ macro_rules! known_packs {
             core: super::gen::$m::CORE_PACKS,
             synced: super::gen::$m::SYNCED,
             overworld: super::gen::$m::overworld,
+            data: super::gen::$m::REGISTRY_DATA,
         }
     };
 }
@@ -281,7 +288,7 @@ pub static V1_21_11: Version = version!(
     v1_21_11,
     Registries::Explicit
 );
-pub static V26_1: Version = version!("26.1", 775, Gen::V26_1, v26_1, known_packs!(v26_1));
+pub static V26_1: Version = version!("26.1.x", 775, Gen::V26_1, v26_1, known_packs!(v26_1));
 pub static V26_2: Version = version!("26.2", 776, Gen::V26_2, v26_2, known_packs!(v26_2));
 pub static V26_3: Version = version!("26.3", 777, Gen::V26_3, v26_3, known_packs!(v26_3));
 
@@ -318,6 +325,31 @@ mod tests {
         assert_eq!(V26_1.packets.sb_attack, 1);
         assert_eq!(V26_3.packets.sb_swing, -1);
         assert!(V26_3.packets.sb_punch > 0);
+    }
+
+    #[test]
+    fn the_built_in_registry_data_has_one_tag_per_entry() {
+        for v in [&V26_1, &V26_2, &V26_3] {
+            let Registries::KnownPacks { synced, data, .. } = &v.registries else {
+                panic!("{} sends registries by known pack", v.name);
+            };
+            let raw = miniz_oxide::inflate::decompress_to_vec_zlib(data).unwrap();
+            let (mut at, mut n) = (0usize, 0usize);
+            while at < raw.len() {
+                let len = u32::from_be_bytes(raw[at..at + 4].try_into().unwrap()) as usize;
+                // Mostly compounds; a block transformer is a list.
+                assert!(
+                    (1..=12).contains(&raw[at + 4]),
+                    "{}: entry {n} is a tag",
+                    v.name
+                );
+                at += 4 + len;
+                n += 1;
+            }
+            assert_eq!(at, raw.len());
+            let want: usize = synced.iter().map(|(_, e)| e.len()).sum();
+            assert_eq!(n, want, "{}", v.name);
+        }
     }
 
     #[test]
