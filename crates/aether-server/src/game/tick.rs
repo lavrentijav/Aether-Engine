@@ -63,6 +63,10 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
 
     let players = registry.snapshot();
     for p in &players {
+        // Eating finishes here, in the tick: journal what it used up. Only
+        // while eating, so a capture is not taken every tick for nothing.
+        let _scope = (p.full() && p.game().eating.is_some())
+            .then(|| super::provenance::Scope::begin(p, world));
         survival(p, registry, world, now);
     }
 

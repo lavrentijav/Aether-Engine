@@ -173,6 +173,9 @@ pub fn die(
 ) {
     let text = death_message(&target.name, source, attacker, registry);
     crate::log::info(&format!("[death] {text}"));
+    // Everything the player held goes to the ground, each stack keeping its
+    // identity; the scope journals the moves when it ends.
+    let _scope = super::provenance::Scope::begin(target, world);
     let items: Vec<Stack> = {
         let mut st = target.game();
         st.window = None;
@@ -189,13 +192,14 @@ pub fn die(
     let p = target.pos();
     for s in items {
         let (vx, vz) = entities::with_rng(|r| (r.f64() * 0.4 - 0.2, r.f64() * 0.4 - 0.2));
-        entities::spawn_item(
-            Vector3::new(p.x, p.y + 1.0, p.z),
-            s,
-            Vector3::new(vx, 0.2, vz),
-            40,
-            None,
+        let at = Vector3::new(p.x, p.y + 1.0, p.z);
+        super::provenance::note_thrown(
+            world,
+            aether_world::journal::ActorId(target.uuid),
+            &s,
+            super::provenance::ground_place(at.x, at.y, at.z),
         );
+        entities::spawn_item(at, s, Vector3::new(vx, 0.2, vz), 40, None);
     }
     crate::session::save_inventory(target, world);
     target.emit(
@@ -352,6 +356,10 @@ pub fn on_mob_hurt(
         hit.pos.y.floor() as i32,
         hit.pos.z.floor() as i32,
         stacks,
+        killer
+            .map(|k| aether_world::journal::ActorId(k.uuid))
+            .unwrap_or(aether_world::journal::ActorId::SERVER),
+        None,
     );
     if let Some(k) = killer {
         give_xp(k, world, hit.xp);
@@ -486,7 +494,7 @@ pub fn explode(pos: Vector3, radius: f32, registry: &SharedRegistry, world: &Dem
     }
     let actor = JournalActor(0);
     for (x, y, z, name) in &broken {
-        world.set_block_by(
+        let seq = world.set_block_by(
             actor,
             *x,
             *y,
@@ -507,7 +515,7 @@ pub fn explode(pos: Vector3, radius: f32, registry: &SharedRegistry, world: &Dem
         if let Some(kind) = super::containers::ContainerKind::of_block(name) {
             super::window::close_viewers((*x, *y, *z), world);
             let items = super::containers::remove(world, (*x, *y, *z), kind);
-            entities::drop_at_block(*x, *y, *z, items);
+            entities::spill(*x, *y, *z, items, actor);
         }
         // Vanilla drops each block with a chance of 1 / radius.
         if entities::with_rng(|g| g.chance(1.0 / radius)) {
@@ -519,6 +527,8 @@ pub fn explode(pos: Vector3, radius: f32, registry: &SharedRegistry, world: &Dem
                 *y,
                 *z,
                 drops.into_iter().map(|(i, n)| Stack::new(&i, n)).collect(),
+                actor,
+                seq,
             );
         }
     }

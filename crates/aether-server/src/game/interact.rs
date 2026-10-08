@@ -130,6 +130,7 @@ pub fn on_broken(
     y: i32,
     z: i32,
     broken: BlockStateId,
+    cause: Option<u64>,
 ) {
     let Some(name) = crate::game::block_name(world, broken) else {
         return;
@@ -172,7 +173,7 @@ pub fn on_broken(
     if let Some(kind) = ContainerKind::of_block(&name) {
         window::close_viewers((x, y, z), world);
         let items = super::containers::remove(world, (x, y, z), kind);
-        entities::drop_at_block(x, y, z, items);
+        entities::spill(x, y, z, items, aether_world::journal::ActorId(handle.uuid));
     }
     let survival = handle.game().survival();
     if !survival {
@@ -185,6 +186,8 @@ pub fn on_broken(
         y,
         z,
         drops.into_iter().map(|(i, n)| Stack::new(&i, n)).collect(),
+        aether_world::journal::ActorId(handle.uuid),
+        cause,
     );
     handle.game().exhaust(0.005);
     let hard = tables::block_info(&name).map(|i| i.hardness).unwrap_or(0.0);

@@ -15,6 +15,7 @@ pub mod fluids;
 pub mod interact;
 pub mod mobs;
 pub mod player;
+pub mod provenance;
 pub mod tables;
 pub mod tick;
 pub mod window;

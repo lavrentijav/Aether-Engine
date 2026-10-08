@@ -376,6 +376,22 @@ fn login_and_play(
     result
 }
 
+/// Whether handling `event` can move, make or use up items. Movement and the
+/// like are the bulk of all packets and cannot, so they skip the capture; a
+/// creative slot set journals itself.
+fn may_move_items(event: &ClientEvent) -> bool {
+    !matches!(
+        event,
+        ClientEvent::Move(_)
+            | ClientEvent::HeldSlot(_)
+            | ClientEvent::CreativeSlot { .. }
+            | ClientEvent::Sprint(_)
+            | ClientEvent::Input { .. }
+            | ClientEvent::Swing { .. }
+            | ClientEvent::Ignored
+    )
+}
+
 /// How long a client may send nothing before it is dropped, as in vanilla.
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -469,7 +485,12 @@ fn play_loop(
         last_heard = Instant::now();
         let full = handle.full();
         let dead = full && handle.game().dead;
-        match handle.codec.decode(&pkt, handle.pos()) {
+        let event = handle.codec.decode(&pkt, handle.pos());
+        // Whatever this packet does to items — a click, a drop, a craft, a
+        // block placed from the hand — is journalled when the scope ends.
+        let _items = (full && may_move_items(&event))
+            .then(|| crate::game::provenance::Scope::begin(handle, world));
+        match event {
             ClientEvent::Move(pos) => {
                 let before = handle.pos();
                 handle.set_pos(pos);
@@ -828,10 +849,10 @@ fn break_block(
     if broken == block_ids::AIR {
         return;
     }
-    set_and_broadcast(world, registry, handle, x, y, z, block_ids::AIR);
+    let seq = set_and_broadcast(world, registry, handle, x, y, z, block_ids::AIR);
     settle_neighbours(world, registry, handle, x, y, z);
     if handle.full() {
-        crate::game::interact::on_broken(handle, registry, world, x, y, z, broken);
+        crate::game::interact::on_broken(handle, registry, world, x, y, z, broken, seq);
     }
     on_block_broken(handle, registry, world, x, y, z, broken);
 }
@@ -1187,17 +1208,18 @@ pub(crate) fn set_and_broadcast(
     y: i32,
     z: i32,
     block: BlockStateId,
-) {
+) -> Option<u64> {
     let props = world.props_of(block);
     // Attributed, so it can be rolled back and audited. A block written
     // without an author is invisible to `/rollback` and to any later question
     // about who did what.
-    world.set_block_by(JournalActor(handle.uuid), x, y, z, block, props);
+    let seq = world.set_block_by(JournalActor(handle.uuid), x, y, z, block, props);
     let ev = ServerEvent::BlockChange { x, y, z, block };
     handle.emit(&ev, world);
     registry.broadcast_except(handle.entity_id, &ev, world);
     // Water and lava next to the change get to react to it.
     crate::game::fluids::notify(world, x, y, z);
+    seq
 }
 
 /// Re-settle the shapes around a block that just changed.

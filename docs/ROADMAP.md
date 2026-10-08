@@ -56,7 +56,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - 📋 **Plugin API**: Native C-ABI tier + WebAssembly (Wasmtime) sandbox + `engine.supports()` capability checks.
 - 🚧 **Aether-Convert**: parallel Anvil `.mca` → KV migration with audit trail & checksums. **Pulled forward** — an initial version shipped alongside Phase 1 storage (both as the `aether-convert` crate and the standalone [Aether-Convert](https://github.com/lavrentijav/Aether-Convert) repo); Phase 4 hardens it (full block-state mapping, gzip/LZ4 chunks, resumable runs).
 - 📋 In-game `/aether profile` visual sub-tick profiler.
-- 🚧 **History Graph + Web Admin**: a derived causal graph over the journal (players, events, blocks, items, containers) for object-centric history, provenance, path finding and relationship analysis, with a read-only admin web UI first. Stage 0, journalling the survival layer's item flows, is in progress. See [Design Notes §10](DESIGN_NOTES.md#10-history-at-scale-and-the-history-graph).
+- 🚧 **History Graph + Web Admin**: a derived causal graph over the journal (players, events, blocks, items, containers) for object-centric history, provenance, path finding and relationship analysis, with a read-only admin web UI first. Stage 0, journalling the survival layer's item flows with derivation and causes, has landed; next are revisions. See [Design Notes §10](DESIGN_NOTES.md#10-history-at-scale-and-the-history-graph).
 - 🚧 Ops hardening: clean stop on SIGINT/SIGTERM, tick watchdog, status line, systemd unit and environment overrides ✅; backups and Grafana dashboards 📋.
 
 ### Cross-cutting / continuous

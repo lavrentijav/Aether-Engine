@@ -570,7 +570,7 @@ players are not recorded at all. A graph built today would hold blocks and littl
 
 | Stage | What |
 |---|---|
-| 0 | Journal the survival layer's item flows (pickup, drop, container put/take, smelting, crafting with its inputs, death drops) and a cause on events |
+| 0 | ✅ Journal the survival layer's item flows (pickup, drop, container put/take, smelting, crafting with its inputs, death drops) and a cause on events — landed: `ItemDerive`, `Event::cause`, `game/provenance.rs` |
 | 1 | Revisions (10.1 step 2) |
 | 2 | Graph indexes (item, container, player↔player) and in-game `/history block`, `/history item` |
 | 3 | Read-only Admin API: object timelines, path finder between two nodes, a player's neighbours with the path that links them — loopback by default, token-protected, HTTPS through a reverse proxy |

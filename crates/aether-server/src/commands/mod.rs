@@ -137,8 +137,35 @@ fn here(handle: &PlayerHandle) -> (i32, i32, i32) {
     (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)
 }
 
-/// Format one event as a chat line.
+/// Format one event as a chat line, with its cause if it has one.
 fn describe(e: &Event, world: &DemoWorld, actor_name: &dyn Fn(u128) -> String) -> Option<String> {
+    let line = describe_body(e, world, actor_name)?;
+    Some(match e.cause {
+        Some(c) => format!("{line} (because of #{c})"),
+        None => line,
+    })
+}
+
+/// A place, short: `inv:36`, `ground 1 64 2`, `chest 4 70 9:3`.
+fn short_place(p: &aether_world::journal::Place) -> String {
+    use aether_world::journal::Place;
+    match p {
+        Place::Inventory { slot, .. } => match *slot {
+            crate::game::provenance::CURSOR_SLOT => "cursor".into(),
+            s if s <= crate::game::provenance::GRID_SLOT => "crafting grid".into(),
+            s => format!("inv:{s}"),
+        },
+        Place::Ground { x, y, z } => format!("ground {x} {y} {z}"),
+        Place::Container { x, y, z, slot } => format!("container {x} {y} {z}:{slot}"),
+        Place::Nowhere => "nowhere".into(),
+    }
+}
+
+fn describe_body(
+    e: &Event,
+    world: &DemoWorld,
+    actor_name: &dyn Fn(u128) -> String,
+) -> Option<String> {
     let ago = describe_age(now_ms().saturating_sub(e.at_ms));
     match &e.body {
         EventBody::BlockSet { x, y, z, from, to } => {
@@ -162,15 +189,31 @@ fn describe(e: &Event, world: &DemoWorld, actor_name: &dyn Fn(u128) -> String) -
                 e.seq
             ))
         }
+        EventBody::ItemMint {
+            item,
+            count,
+            to: aether_world::journal::Place::Ground { x, y, z },
+            ..
+        } => Some(format!(
+            "  {ago} {count}x {item} dropped at {x} {y} {z}  #{}",
+            e.seq
+        )),
         EventBody::ItemMint { item, count, .. } => Some(format!(
             "  {ago} {} received {count}x {item}  #{}",
             actor_name(e.actor.0),
             e.seq
         )),
-        EventBody::ItemMove { uid, .. } => Some(format!(
-            "  {ago} {} moved item {:032x}  #{}",
+        EventBody::ItemMove {
+            uid,
+            from,
+            to,
+            count,
+        } => Some(format!(
+            "  {ago} {} moved {count}x item {:08x}… {} → {}  #{}",
             actor_name(e.actor.0),
-            uid.0,
+            (uid.0 >> 96) as u32,
+            short_place(from),
+            short_place(to),
             e.seq
         )),
         EventBody::ItemDestroy { uid, .. } => {
