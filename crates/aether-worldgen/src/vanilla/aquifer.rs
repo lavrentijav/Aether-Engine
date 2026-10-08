@@ -25,7 +25,6 @@
 //! against the game's own output — see [`super::terrain`].
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::density::{Ctx, Node};
@@ -225,9 +224,9 @@ pub struct ChunkAquifer<'a> {
     /// indexes into it; a map keyed by the cell itself is the same thing
     /// without the bookkeeping, because the value is a pure function of the
     /// cell and the search provably never leaves the range vanilla sized for.
-    centres: RefCell<HashMap<(i32, i32, i32), (i32, i32, i32)>>,
-    statuses: RefCell<HashMap<(i32, i32, i32), FluidStatus>>,
-    surface: RefCell<HashMap<(i32, i32), i32>>,
+    centres: RefCell<super::FxHashMap<(i32, i32, i32), (i32, i32, i32)>>,
+    statuses: RefCell<super::FxHashMap<(i32, i32, i32), FluidStatus>>,
+    surface: RefCell<super::FxHashMap<(i32, i32), i32>>,
 }
 
 impl<'a> ChunkAquifer<'a> {
@@ -249,9 +248,9 @@ impl<'a> ChunkAquifer<'a> {
         let me = Self {
             cfg,
             skip_sampling_above_y: 0,
-            centres: RefCell::new(HashMap::new()),
-            statuses: RefCell::new(HashMap::new()),
-            surface: RefCell::new(HashMap::new()),
+            centres: RefCell::new(super::FxHashMap::default()),
+            statuses: RefCell::new(super::FxHashMap::default()),
+            surface: RefCell::new(super::FxHashMap::default()),
         };
 
         // The highest surface anywhere the chunk's aquifer grid reaches, which

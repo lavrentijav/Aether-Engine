@@ -860,6 +860,9 @@ fn corners_of(
     w: i32,
     h: i32,
 ) -> [f64; 8] {
+    if let Some(v) = grid_corners(id, inner, x0, y0, z0, w, h) {
+        return v;
+    }
     let slot = {
         let mut h = id as u64;
         h = h.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (x0 as u32 as u64);
@@ -903,6 +906,109 @@ fn corners_of(
         }
     });
     v
+}
+
+/// The corner lattice of one chunk, per interpolated node — vanilla's
+/// `NoiseChunk` slices. Each corner is computed once and shared by the up to
+/// eight cells that touch it; the per-cell cache above recomputes a shared
+/// corner for every cell that misses, which made it five times the work.
+struct ChunkGrid {
+    x0: i32,
+    z0: i32,
+    min_y: i32,
+    w: i32,
+    h: i32,
+    nx: usize,
+    ny: usize,
+    values: Vec<Vec<f64>>,
+}
+
+thread_local! {
+    static CHUNK_GRID: std::cell::RefCell<Option<ChunkGrid>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While alive, interpolated nodes on this thread share corners across the
+/// chunk at `(chunk_x, chunk_z)`. Pure memoization: results are identical.
+pub struct ChunkGridGuard(());
+
+impl ChunkGridGuard {
+    /// Activate the lattice for one chunk.
+    pub fn enter(chunk_x: i32, chunk_z: i32, min_y: i32, height: i32, cell_width: i32, cell_height: i32) -> Self {
+        CHUNK_GRID.with(|g| {
+            *g.borrow_mut() = Some(ChunkGrid {
+                x0: chunk_x * 16,
+                z0: chunk_z * 16,
+                min_y,
+                w: cell_width,
+                h: cell_height,
+                nx: (16 / cell_width) as usize + 1,
+                ny: (height / cell_height) as usize + 1,
+                values: Vec::new(),
+            })
+        });
+        ChunkGridGuard(())
+    }
+}
+
+impl Drop for ChunkGridGuard {
+    fn drop(&mut self) {
+        CHUNK_GRID.with(|g| *g.borrow_mut() = None);
+    }
+}
+
+fn grid_corners(id: u32, inner: &Arc<Node>, x0: i32, y0: i32, z0: i32, w: i32, h: i32) -> Option<[f64; 8]> {
+    let (idx, nx, ny) = CHUNK_GRID.with(|g| {
+        let g = g.borrow();
+        let g = g.as_ref()?;
+        if g.w != w || g.h != h {
+            return None;
+        }
+        let (ix, iy, iz) = (x0 - g.x0, y0 - g.min_y, z0 - g.z0);
+        if ix < 0 || iz < 0 || iy < 0 || ix % w != 0 || iz % w != 0 || iy % h != 0 {
+            return None;
+        }
+        let (ix, iy, iz) = ((ix / w) as usize, (iy / h) as usize, (iz / w) as usize);
+        if ix + 1 >= g.nx || iz + 1 >= g.nx || iy + 1 >= g.ny {
+            return None;
+        }
+        Some(((ix, iy, iz), g.nx, g.ny))
+    })?;
+    let at = |dx: usize, dy: usize, dz: usize| ((idx.0 + dx) * ny + idx.1 + dy) * nx + idx.2 + dz;
+    let order = [(0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1), (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1)];
+    let mut out = [f64::NAN; 8];
+    CHUNK_GRID.with(|g| {
+        let mut g = g.borrow_mut();
+        let Some(g) = g.as_mut() else { return };
+        let size = g.nx * g.nx * g.ny;
+        let id = id as usize;
+        if g.values.len() <= id {
+            g.values.resize(id + 1, Vec::new());
+        }
+        if g.values[id].is_empty() {
+            g.values[id] = vec![f64::NAN; size];
+        }
+        let v = &g.values[id];
+        for (k, (dx, dy, dz)) in order.iter().enumerate() {
+            out[k] = v[at(*dx, *dy, *dz)];
+        }
+    });
+    for (k, (dx, dy, dz)) in order.iter().enumerate() {
+        if out[k].is_nan() {
+            let c = inner.compute(Ctx::new(x0 + *dx as i32 * w, y0 + *dy as i32 * h, z0 + *dz as i32 * w));
+            out[k] = c;
+            let i = at(*dx, *dy, *dz);
+            CHUNK_GRID.with(|g| {
+                if let Some(g) = g.borrow_mut().as_mut() {
+                    if let Some(v) = g.values.get_mut(id as usize) {
+                        if !v.is_empty() {
+                            v[i] = c;
+                        }
+                    }
+                }
+            });
+        }
+    }
+    Some(out)
 }
 
 /// How many entries the marker cache remembers per thread, across every

@@ -297,7 +297,7 @@ impl VanillaGenerator {
         let s = terrain.settings();
         let surface = SurfaceSystem::load(surface_rule_json, terrain.noises(), &biomes, s.min_y, s.height, s.sea_level)?;
         let carvers = Carvers::load(&pack, &biomes, s.min_y, s.height)?;
-        let decorator = Decorator::load(&pack, &biomes, &biome_source, &entry_ids, s.min_y, s.height)?;
+        let decorator = Decorator::load(&pack, &biomes, &biome_source, &entry_ids, s.min_y, s.height, terrain.noises())?;
         let core = Core {
             seed: seed as i64,
             terrain: Arc::new(terrain),
@@ -378,6 +378,8 @@ impl VanillaGenerator {
 
     fn fill_noise(&self, c: &mut ProtoChunk) {
         let core = &self.core;
+        let st = core.terrain.settings();
+        let _grid = super::density::ChunkGridGuard::enter(c.cx, c.cz, st.min_y, st.height, st.cell_width, st.cell_height);
         let chunk = core.terrain.chunk(c.cx, c.cz);
         for lz in 0..16usize {
             for lx in 0..16usize {

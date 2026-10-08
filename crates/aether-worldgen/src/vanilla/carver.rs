@@ -67,6 +67,9 @@ struct Configured {
 pub struct Carvers {
     /// Per biome id, its carvers in order.
     per_biome: Vec<Vec<Arc<Configured>>>,
+    /// The biome each source chunk's carvers come from, memoized: every chunk
+    /// asks about its 289 neighbours.
+    source_biomes: std::sync::Mutex<super::FxHashMap<(i32, i32), super::biome::BiomeId>>,
     lava: BlockStateId,
     water: BlockStateId,
     air: BlockStateId,
@@ -104,6 +107,7 @@ impl Carvers {
         let st = |n: &str| blockinfo::parse_state(n).ok_or_else(|| BuildError::new(format!("no block `{n}`")));
         Ok(Self {
             per_biome,
+            source_biomes: std::sync::Mutex::new(Default::default()),
             lava: st("minecraft:lava[level=0]")?,
             water: st("minecraft:water[level=0]")?,
             air: st("minecraft:air")?,
@@ -133,7 +137,19 @@ impl Carvers {
         for dx in -8..=8 {
             for dz in -8..=8 {
                 let (sx, sz) = (cx + dx, cz + dz);
-                let biome = core.noise_biome(sx * 4, 0, sz * 4);
+                let cached = self.source_biomes.lock().unwrap().get(&(sx, sz)).copied();
+                let biome = match cached {
+                    Some(b) => b,
+                    None => {
+                        let b = core.noise_biome(sx * 4, 0, sz * 4);
+                        let mut m = self.source_biomes.lock().unwrap();
+                        if m.len() > 200_000 {
+                            m.clear();
+                        }
+                        m.insert((sx, sz), b);
+                        b
+                    }
+                };
                 for (i, c) in self.per_biome[biome as usize].iter().enumerate() {
                     let mut r = WorldgenRandom::legacy(0);
                     r.set_large_feature_seed(core.seed.wrapping_add(i as i64), sx, sz);
