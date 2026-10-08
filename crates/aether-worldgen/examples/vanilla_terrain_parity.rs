@@ -57,6 +57,8 @@
 //! and the *interpolated density* comparison is upstream of every block
 //! decision, so if that diverges nothing downstream is meaningful.
 
+#![allow(clippy::type_complexity)]
+
 use std::collections::BTreeMap;
 
 use aether_worldgen::vanilla::terrain::Terrain;
@@ -148,9 +150,7 @@ fn main() {
         100.0 * exact as f64 / blocks.max(1) as f64
     );
     println!("columns identical top to bottom: {columns_exact}/{columns}");
-    println!(
-        "  (density alone, ignoring the aquifer's stone barriers: {solid_agree}/{blocks})"
-    );
+    println!("  (density alone, ignoring the aquifer's stone barriers: {solid_agree}/{blocks})");
     if exact != blocks {
         println!("\ndisagreements (vanilla -> ours):");
         let mut v: Vec<_> = confusion.into_iter().collect();
@@ -198,9 +198,7 @@ fn compare_density(terrain: &Terrain, path: &str) {
             }
         }
     }
-    println!(
-        "interpolated density: {agree}/{total} values bit-identical across {columns} columns"
-    );
+    println!("interpolated density: {agree}/{total} values bit-identical across {columns} columns");
     if let Some((x, y, z, want, got)) = first_bad {
         println!(
             "  first divergence at ({x},{y},{z}): vanilla {:.17e}, ours {:.17e}",

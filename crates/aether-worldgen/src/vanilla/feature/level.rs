@@ -83,7 +83,14 @@ pub enum Dir {
 
 impl Dir {
     /// `Direction.values()`.
-    pub const ALL: [Dir; 6] = [Dir::Down, Dir::Up, Dir::North, Dir::South, Dir::West, Dir::East];
+    pub const ALL: [Dir; 6] = [
+        Dir::Down,
+        Dir::Up,
+        Dir::North,
+        Dir::South,
+        Dir::West,
+        Dir::East,
+    ];
     /// `Direction.Plane.HORIZONTAL`, in its iteration order.
     pub const HORIZONTAL: [Dir; 4] = [Dir::North, Dir::East, Dir::South, Dir::West];
 
@@ -231,7 +238,12 @@ pub struct Level<'a> {
 
 impl<'a> Level<'a> {
     /// Over the 3×3 chunks around `(cx, cz)`, `region[dz][dx]`.
-    pub(crate) fn new(core: &'a Core, cx: i32, cz: i32, region: &[[Arc<ProtoChunk>; 3]; 3]) -> Self {
+    pub(crate) fn new(
+        core: &'a Core,
+        cx: i32,
+        cz: i32,
+        region: &[[Arc<ProtoChunk>; 3]; 3],
+    ) -> Self {
         let mut slots = Vec::with_capacity(9);
         for row in region {
             for c in row {
@@ -301,7 +313,9 @@ impl<'a> Level<'a> {
     #[inline]
     pub fn get(&self, p: Pos) -> BlockStateId {
         match self.slot_of(p.x, p.z) {
-            Some(i) => self.slots[i].chunk.get((p.x & 15) as usize, p.y, (p.z & 15) as usize),
+            Some(i) => self.slots[i]
+                .chunk
+                .get((p.x & 15) as usize, p.y, (p.z & 15) as usize),
             None => BlockStateId::AIR,
         }
     }
@@ -353,7 +367,16 @@ impl<'a> Level<'a> {
 
     /// `Heightmap.update`.
     #[allow(clippy::too_many_arguments)]
-    fn update_height(&self, i: usize, ty: Heightmap, lx: usize, lz: usize, y: i32, s: BlockStateId, cur: i32) -> Option<i32> {
+    fn update_height(
+        &self,
+        i: usize,
+        ty: Heightmap,
+        lx: usize,
+        lz: usize,
+        y: i32,
+        s: BlockStateId,
+        cur: i32,
+    ) -> Option<i32> {
         if y <= cur - 2 {
             return None;
         }
@@ -405,7 +428,11 @@ impl<'a> Level<'a> {
                 self.slots[i].live[k].as_ref().unwrap()[idx]
             }
             None => {
-                let k = if ty == Heightmap::WorldSurfaceWg { 0 } else { 1 };
+                let k = if ty == Heightmap::WorldSurfaceWg {
+                    0
+                } else {
+                    1
+                };
                 if self.slots[i].wg[k].is_none() {
                     let hm = self.compute(i, ty);
                     self.slots[i].wg[k] = Some(hm);
@@ -429,7 +456,9 @@ impl<'a> Level<'a> {
             return *b;
         }
         let b = match self.slot_of(qx << 2, qz << 2) {
-            Some(i) => self.slots[i].chunk.biome((qx & 3) as usize, qy - min_qy, (qz & 3) as usize),
+            Some(i) => self.slots[i]
+                .chunk
+                .biome((qx & 3) as usize, qy - min_qy, (qz & 3) as usize),
             None => self.core.noise_biome(qx, qy, qz),
         };
         self.biome_cache.borrow_mut().insert((qx, qy, qz), b);
@@ -444,7 +473,11 @@ impl<'a> Level<'a> {
                 seen[*b as usize] = true;
             }
         }
-        seen.iter().enumerate().filter(|(_, v)| **v).map(|(i, _)| i as BiomeId).collect()
+        seen.iter()
+            .enumerate()
+            .filter(|(_, v)| **v)
+            .map(|(i, _)| i as BiomeId)
+            .collect()
     }
 
     /// `isEmptyBlock`.

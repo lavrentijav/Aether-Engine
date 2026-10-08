@@ -193,7 +193,10 @@ impl BiomeNoises {
     pub fn new() -> Self {
         Self {
             temperature: PerlinSimplexNoise::new(&mut WorldgenRandom::legacy(1234), &[0]),
-            frozen_temperature: PerlinSimplexNoise::new(&mut WorldgenRandom::legacy(3456), &[-2, -1, 0]),
+            frozen_temperature: PerlinSimplexNoise::new(
+                &mut WorldgenRandom::legacy(3456),
+                &[-2, -1, 0],
+            ),
             biome_info: PerlinSimplexNoise::new(&mut WorldgenRandom::legacy(2345), &[0]),
         }
     }

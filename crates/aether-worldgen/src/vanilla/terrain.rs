@@ -30,7 +30,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::aquifer::{AquiferConfig, ChunkAquifer};
-use super::density::{BuildError, Builder, Ctx, DataPack, Mode, NoiseRegistry, Node};
+use super::density::{BuildError, Builder, Ctx, DataPack, Mode, Node, NoiseRegistry};
 use super::json::Json;
 use super::ore_veins::OreVeins;
 

@@ -25,7 +25,10 @@ pub enum Trunk {
     DarkOak,
     Giant,
     MegaJungle,
-    Bending { min_height_for_leaves: i32, bend_length: IntProvider },
+    Bending {
+        min_height_for_leaves: i32,
+        bend_length: IntProvider,
+    },
     Cherry {
         branch_count: IntProvider,
         branch_horizontal_length: IntProvider,
@@ -52,21 +55,47 @@ pub enum Foliage {
     Acacia,
     DarkOak,
     MegaJungle(i32),
-    RandomSpread { height: IntProvider, attempts: i32 },
-    Cherry { height: IntProvider, wide_bottom_hole: f32, corner_hole: f32, hanging: f32, hanging_ext: f32 },
+    RandomSpread {
+        height: IntProvider,
+        attempts: i32,
+    },
+    Cherry {
+        height: IntProvider,
+        wide_bottom_hole: f32,
+        corner_hole: f32,
+        hanging: f32,
+        hanging_ext: f32,
+    },
 }
 
 /// `FeatureSize`.
 #[derive(Debug)]
 pub enum Size {
-    Two { limit: i32, lower: i32, upper: i32, min_clipped: Option<i32> },
-    Three { limit: i32, upper_limit: i32, lower: i32, middle: i32, upper: i32, min_clipped: Option<i32> },
+    Two {
+        limit: i32,
+        lower: i32,
+        upper: i32,
+        min_clipped: Option<i32>,
+    },
+    Three {
+        limit: i32,
+        upper_limit: i32,
+        lower: i32,
+        middle: i32,
+        upper: i32,
+        min_clipped: Option<i32>,
+    },
 }
 
 impl Size {
     fn at(&self, h: i32, y: i32) -> i32 {
         match self {
-            Size::Two { limit, lower, upper, .. } => {
+            Size::Two {
+                limit,
+                lower,
+                upper,
+                ..
+            } => {
                 if y < *limit {
                     *lower
                 } else {
@@ -107,7 +136,12 @@ pub enum Decorator {
     Cocoa(f32),
     Beehive(f32),
     AlterGround(StateProvider),
-    PlaceOnGround { tries: i32, radius: i32, height: i32, provider: StateProvider },
+    PlaceOnGround {
+        tries: i32,
+        radius: i32,
+        height: i32,
+        provider: StateProvider,
+    },
     AttachedToLeaves {
         probability: f32,
         exclusion_xz: i32,
@@ -116,7 +150,11 @@ pub enum Decorator {
         required_empty: i32,
         directions: Vec<Dir>,
     },
-    AttachedToLogs { probability: f32, provider: StateProvider, directions: Vec<Dir> },
+    AttachedToLogs {
+        probability: f32,
+        provider: StateProvider,
+        directions: Vec<Dir>,
+    },
     /// A decorator type this port does not place.
     Unsupported(String),
 }
@@ -150,11 +188,14 @@ pub struct FallenTree {
 }
 
 fn get<'j>(j: &'j Json, k: &str) -> Result<&'j Json, BuildError> {
-    j.get(k).ok_or_else(|| BuildError::new(format!("missing `{k}`")))
+    j.get(k)
+        .ok_or_else(|| BuildError::new(format!("missing `{k}`")))
 }
 
 fn ty(j: &Json) -> &str {
-    j.str_of("type").unwrap_or("").trim_start_matches("minecraft:")
+    j.str_of("type")
+        .unwrap_or("")
+        .trim_start_matches("minecraft:")
 }
 
 fn ip(j: &Json, k: &str) -> Result<IntProvider, BuildError> {
@@ -233,9 +274,12 @@ pub(crate) fn parse_tree(l: &mut Loader, c: &Json) -> Result<TreeConfig, BuildEr
         }
         "upwards_branching_trunk_placer" => Trunk::UpwardsBranching {
             extra_branch_steps: ip(tp, "extra_branch_steps")?,
-            place_branch_per_log_probability: tp.f64_or("place_branch_per_log_probability", 0.0) as f32,
+            place_branch_per_log_probability: tp.f64_or("place_branch_per_log_probability", 0.0)
+                as f32,
             extra_branch_length: ip(tp, "extra_branch_length")?,
-            can_grow_through: l.tags.holder_set(tp.get("can_grow_through").unwrap_or(&Json::Null)),
+            can_grow_through: l
+                .tags
+                .holder_set(tp.get("can_grow_through").unwrap_or(&Json::Null)),
         },
         other => return Err(BuildError::new(format!("unknown trunk placer `{other}`"))),
     };
@@ -264,7 +308,10 @@ pub(crate) fn parse_tree(l: &mut Loader, c: &Json) -> Result<TreeConfig, BuildEr
         other => return Err(BuildError::new(format!("unknown foliage placer `{other}`"))),
     };
     let ms = get(c, "minimum_size")?;
-    let min_clipped = ms.get("min_clipped_height").and_then(Json::as_f64).map(|v| v as i32);
+    let min_clipped = ms
+        .get("min_clipped_height")
+        .and_then(Json::as_f64)
+        .map(|v| v as i32);
     let size = match ty(ms) {
         "three_layers_feature_size" => Size::Three {
             limit: ms.i32_or("limit", 1),
@@ -282,7 +329,8 @@ pub(crate) fn parse_tree(l: &mut Loader, c: &Json) -> Result<TreeConfig, BuildEr
         },
     };
     if c.get("root_placer").is_some() {
-        l.unsupported.insert("root_placer (mangrove roots)".to_string());
+        l.unsupported
+            .insert("root_placer (mangrove roots)".to_string());
     }
     Ok(TreeConfig {
         trunk_provider: StateProvider::parse(get(c, "trunk_provider")?, &l.noises)?,
@@ -341,7 +389,10 @@ impl TreeConfig {
         if valid_tree_pos(ctx, p) {
             return true;
         }
-        if let Trunk::UpwardsBranching { can_grow_through, .. } = &self.trunk {
+        if let Trunk::UpwardsBranching {
+            can_grow_through, ..
+        } = &self.trunk
+        {
             return can_grow_through.contains(ctx.lv.get(p));
         }
         false
@@ -363,7 +414,13 @@ impl TreeConfig {
         }
     }
 
-    fn place_log_with(&self, ctx: &mut Ctx, pl: &mut Placement, p: Pos, axis: Option<&str>) -> bool {
+    fn place_log_with(
+        &self,
+        ctx: &mut Ctx,
+        pl: &mut Placement,
+        p: Pos,
+        axis: Option<&str>,
+    ) -> bool {
         if self.valid_pos(ctx, p) {
             let mut s = self.trunk_provider.get(ctx.r, p);
             if let Some(a) = axis {
@@ -475,7 +532,9 @@ fn max_free_height(ctx: &Ctx, cfg: &TreeConfig, h: i32, origin: Pos) -> i32 {
         for dx in -s..=s {
             for dz in -s..=s {
                 let p = origin.offset(dx, y, dz);
-                if !cfg.is_free(ctx, p) || !cfg.ignore_vines && blockinfo::name(ctx.lv.get(p)) == "minecraft:vine" {
+                if !cfg.is_free(ctx, p)
+                    || !cfg.ignore_vines && blockinfo::name(ctx.lv.get(p)) == "minecraft:vine"
+                {
                     return y - 2;
                 }
             }
@@ -488,7 +547,13 @@ fn random_horizontal(ctx: &mut Ctx) -> Dir {
     Dir::HORIZONTAL[ctx.r.next_int_bounded(4) as usize]
 }
 
-fn place_trunk(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, h: i32, o: Pos) -> Vec<Attachment> {
+fn place_trunk(
+    ctx: &mut Ctx,
+    cfg: &TreeConfig,
+    pl: &mut Placement,
+    h: i32,
+    o: Pos,
+) -> Vec<Attachment> {
     let att = |pos: Pos, ro: i32, dt: bool| Attachment {
         pos,
         radius_offset: ro,
@@ -663,9 +728,15 @@ fn place_trunk(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, h: i32, o: P
             branch_end,
         } => {
             cfg.set_dirt(ctx, pl, o.below(1));
-            let first = 0.max(h - 1 + (ctx.r.next_int_bounded(branch_start.1 - branch_start.0 + 1) + branch_start.0));
+            let first = 0.max(
+                h - 1
+                    + (ctx.r.next_int_bounded(branch_start.1 - branch_start.0 + 1)
+                        + branch_start.0),
+            );
             let second_hi = branch_start.1 - 1;
-            let mut second = 0.max(h - 1 + (ctx.r.next_int_bounded(second_hi - branch_start.0 + 1) + branch_start.0));
+            let mut second = 0.max(
+                h - 1 + (ctx.r.next_int_bounded(second_hi - branch_start.0 + 1) + branch_start.0),
+            );
             if second >= first {
                 second += 1;
             }
@@ -687,9 +758,31 @@ fn place_trunk(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, h: i32, o: P
                 out.push(att(o.above(trunk_h), 0, false));
             }
             let d = random_horizontal(ctx);
-            out.push(cherry_branch(ctx, cfg, pl, h, o, d, first, first < trunk_h - 1, branch_horizontal_length, branch_end));
+            out.push(cherry_branch(
+                ctx,
+                cfg,
+                pl,
+                h,
+                o,
+                d,
+                first,
+                first < trunk_h - 1,
+                branch_horizontal_length,
+                branch_end,
+            ));
             if two {
-                out.push(cherry_branch(ctx, cfg, pl, h, o, d.opposite(), second, second < trunk_h - 1, branch_horizontal_length, branch_end));
+                out.push(cherry_branch(
+                    ctx,
+                    cfg,
+                    pl,
+                    h,
+                    o,
+                    d.opposite(),
+                    second,
+                    second < trunk_h - 1,
+                    branch_horizontal_length,
+                    branch_end,
+                ));
             }
             out
         }
@@ -703,7 +796,10 @@ fn place_trunk(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, h: i32, o: P
             for i in 0..h {
                 let y = o.y + i;
                 let p = Pos::new(o.x, y, o.z);
-                if cfg.place_log(ctx, pl, p) && i < h - 1 && ctx.r.next_float() < *place_branch_per_log_probability {
+                if cfg.place_log(ctx, pl, p)
+                    && i < h - 1
+                    && ctx.r.next_float() < *place_branch_per_log_probability
+                {
                     let d = random_horizontal(ctx);
                     let len = extra_branch_length.sample(ctx.r);
                     let start = 0.max(len - extra_branch_length.sample(ctx.r) - 1);
@@ -783,7 +879,13 @@ fn cherry_branch(
     }
 }
 
-fn fancy_trunk(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, h: i32, o: Pos) -> Vec<Attachment> {
+fn fancy_trunk(
+    ctx: &mut Ctx,
+    cfg: &TreeConfig,
+    pl: &mut Placement,
+    h: i32,
+    o: Pos,
+) -> Vec<Attachment> {
     let height = h + 2;
     let trunk_h = (height as f64 * 0.618).floor() as i32;
     cfg.set_dirt(ctx, pl, o.below(1));
@@ -805,7 +907,11 @@ fn fancy_trunk(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, h: i32, o: P
                     let dx = o.x - base.x;
                     let dz = o.z - base.z;
                     let by = base.y as f64 - ((dx * dx + dz * dz) as f64).sqrt() * 0.381;
-                    let branch_y = if by > trunk_top as f64 { trunk_top } else { by as i32 };
+                    let branch_y = if by > trunk_top as f64 {
+                        trunk_top
+                    } else {
+                        by as i32
+                    };
                     let branch = Pos::new(o.x, branch_y, o.z);
                     if make_limb(ctx, cfg, pl, branch, base, false) {
                         coords.push((base, branch.y));
@@ -849,7 +955,14 @@ fn tree_shape(h: i32, y: i32) -> f32 {
     v * 0.5
 }
 
-fn make_limb(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, from: Pos, to: Pos, place: bool) -> bool {
+fn make_limb(
+    ctx: &mut Ctx,
+    cfg: &TreeConfig,
+    pl: &mut Placement,
+    from: Pos,
+    to: Pos,
+    place: bool,
+) -> bool {
     if !place && from == to {
         return true;
     }
@@ -906,7 +1019,9 @@ fn try_place_leaf(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, p: Pos) -
 impl Foliage {
     fn skip(&self, r: &mut impl Rng, dx: i32, y: i32, dz: i32, range: i32, large: bool) -> bool {
         match self {
-            Foliage::Blob(_) => dx == range && dz == range && (r.next_int_bounded(2) == 0 || y == 0),
+            Foliage::Blob(_) => {
+                dx == range && dz == range && (r.next_int_bounded(2) == 0 || y == 0)
+            }
             Foliage::Fancy(_) => {
                 let a = dx as f32 + 0.5;
                 let b = dz as f32 + 0.5;
@@ -957,9 +1072,18 @@ impl Foliage {
         }
     }
 
-    fn skip_signed(&self, r: &mut impl Rng, dx: i32, y: i32, dz: i32, range: i32, large: bool) -> bool {
+    fn skip_signed(
+        &self,
+        r: &mut impl Rng,
+        dx: i32,
+        y: i32,
+        dz: i32,
+        range: i32,
+        large: bool,
+    ) -> bool {
         if let Foliage::DarkOak = self {
-            let special = y == 0 && large && (dx == -range || dx >= range) && (dz == -range || dz >= range);
+            let special =
+                y == 0 && large && (dx == -range || dx >= range) && (dz == -range || dz >= range);
             if special {
                 return true;
             }
@@ -974,7 +1098,15 @@ impl Foliage {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn leaves_row(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, center: Pos, range: i32, y: i32, large: bool) {
+fn leaves_row(
+    ctx: &mut Ctx,
+    cfg: &TreeConfig,
+    pl: &mut Placement,
+    center: Pos,
+    range: i32,
+    y: i32,
+    large: bool,
+) {
     let extra = if large { 1 } else { 0 };
     for dx in -range..=range + extra {
         for dz in -range..=range + extra {
@@ -1017,7 +1149,14 @@ fn leaves_row_hanging(
     }
 }
 
-fn try_extension(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, chance: f32, base: Pos, p: Pos) -> bool {
+fn try_extension(
+    ctx: &mut Ctx,
+    cfg: &TreeConfig,
+    pl: &mut Placement,
+    chance: f32,
+    base: Pos,
+    p: Pos,
+) -> bool {
     if p.manhattan(base) >= 7 {
         return false;
     }
@@ -1027,7 +1166,15 @@ fn try_extension(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, chance: f3
     try_place_leaf(ctx, cfg, pl, p)
 }
 
-fn create_foliage(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, _free: i32, a: &Attachment, fh: i32, radius: i32) {
+fn create_foliage(
+    ctx: &mut Ctx,
+    cfg: &TreeConfig,
+    pl: &mut Placement,
+    _free: i32,
+    a: &Attachment,
+    fh: i32,
+    radius: i32,
+) {
     let offset = cfg.offset.sample(ctx.r);
     let large = a.double_trunk;
     match &cfg.foliage {
@@ -1042,7 +1189,12 @@ fn create_foliage(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, _free: i3
         Foliage::Fancy(_) => {
             let mut y = offset;
             while y >= offset - fh {
-                let r = radius + if y != offset && y != offset - fh { 1 } else { 0 };
+                let r = radius
+                    + if y != offset && y != offset - fh {
+                        1
+                    } else {
+                        0
+                    };
                 leaves_row(ctx, cfg, pl, a.pos, r, y, large);
                 y -= 1;
             }
@@ -1091,7 +1243,11 @@ fn create_foliage(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, _free: i3
             while y <= a.pos.y + offset {
                 let d = a.pos.y - y;
                 let r0 = radius + a.radius_offset + (d as f32 / fh as f32 * 3.5).floor() as i32;
-                let r = if d > 0 && r0 == prev && (y & 1) == 0 { r0 + 1 } else { r0 };
+                let r = if d > 0 && r0 == prev && (y & 1) == 0 {
+                    r0 + 1
+                } else {
+                    r0
+                };
                 leaves_row(ctx, cfg, pl, Pos::new(a.pos.x, y, a.pos.z), r, 0, large);
                 prev = r0;
                 y += 1;
@@ -1118,7 +1274,11 @@ fn create_foliage(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, _free: i3
             }
         }
         Foliage::MegaJungle(_) => {
-            let n = if large { fh } else { 1 + ctx.r.next_int_bounded(2) };
+            let n = if large {
+                fh
+            } else {
+                1 + ctx.r.next_int_bounded(2)
+            };
             let mut y = offset;
             while y >= offset - n {
                 let r = radius + a.radius_offset + 1 - y;
@@ -1134,7 +1294,11 @@ fn create_foliage(ctx: &mut Ctx, cfg: &TreeConfig, pl: &mut Placement, _free: i3
                 try_place_leaf(ctx, cfg, pl, a.pos.offset(dx, dy, dz));
             }
         }
-        Foliage::Cherry { hanging, hanging_ext, .. } => {
+        Foliage::Cherry {
+            hanging,
+            hanging_ext,
+            ..
+        } => {
             let c = a.pos.above(offset);
             let r = radius + a.radius_offset - 1;
             leaves_row(ctx, cfg, pl, c, r - 2, fh - 3, large);
@@ -1174,8 +1338,13 @@ fn update_leaves(ctx: &mut Ctx, pl: &Placement) {
         y1 = y1.max(p.y);
         z1 = z1.max(p.z);
     }
-    let inside = |p: &Pos| p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 && p.z >= z0 && p.z <= z1;
-    let (w, h, d) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize, (z1 - z0 + 1) as usize);
+    let inside =
+        |p: &Pos| p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 && p.z >= z0 && p.z <= z1;
+    let (w, h, d) = (
+        (x1 - x0 + 1) as usize,
+        (y1 - y0 + 1) as usize,
+        (z1 - z0 + 1) as usize,
+    );
     let idx = |p: &Pos| ((p.x - x0) as usize * h + (p.y - y0) as usize) * d + (p.z - z0) as usize;
     let mut filled = vec![false; w * h * d];
     // Seeded with decorations and roots (there are no roots here), not
@@ -1211,7 +1380,8 @@ fn update_leaves(ctx: &mut Ctx, pl: &Placement) {
         if level != 0 {
             let s = ctx.lv.get(p);
             if leaves_tag.contains(s) || prop(s, "distance").is_some() {
-                ctx.lv.set(p, blockinfo::with_prop(s, "distance", &level.to_string()));
+                ctx.lv
+                    .set(p, blockinfo::with_prop(s, "distance", &level.to_string()));
             }
         }
         filled[idx(&p)] = true;
@@ -1231,7 +1401,14 @@ fn update_leaves(ctx: &mut Ctx, pl: &Placement) {
     }
 }
 
-fn decorate(ctx: &mut Ctx, d: &Decorator, logs: &[Pos], leaves: &[Pos], roots: &[Pos], deco: &mut JavaPosSet) {
+fn decorate(
+    ctx: &mut Ctx,
+    d: &Decorator,
+    logs: &[Pos],
+    leaves: &[Pos],
+    roots: &[Pos],
+    deco: &mut JavaPosSet,
+) {
     let set = |ctx: &mut Ctx, deco: &mut JavaPosSet, p: Pos, s: BlockStateId| {
         deco.insert(p);
         ctx.lv.set(p, s);
@@ -1240,7 +1417,12 @@ fn decorate(ctx: &mut Ctx, d: &Decorator, logs: &[Pos], leaves: &[Pos], roots: &
     match d {
         Decorator::LeaveVine(prob) => {
             for l in leaves {
-                for (side, face) in [(Dir::West, Dir::East), (Dir::East, Dir::West), (Dir::North, Dir::South), (Dir::South, Dir::North)] {
+                for (side, face) in [
+                    (Dir::West, Dir::East),
+                    (Dir::East, Dir::West),
+                    (Dir::North, Dir::South),
+                    (Dir::South, Dir::North),
+                ] {
                     if ctx.r.next_float() < *prob {
                         let p = l.rel(side);
                         if ctx.lv.is_air(p) {
@@ -1259,7 +1441,12 @@ fn decorate(ctx: &mut Ctx, d: &Decorator, logs: &[Pos], leaves: &[Pos], roots: &
         }
         Decorator::TrunkVine => {
             for l in logs {
-                for (side, face) in [(Dir::West, Dir::East), (Dir::East, Dir::West), (Dir::North, Dir::South), (Dir::South, Dir::North)] {
+                for (side, face) in [
+                    (Dir::West, Dir::East),
+                    (Dir::East, Dir::West),
+                    (Dir::North, Dir::South),
+                    (Dir::South, Dir::North),
+                ] {
                     if ctx.r.next_int_bounded(3) > 0 {
                         let p = l.rel(side);
                         if ctx.lv.is_air(p) {
@@ -1281,7 +1468,10 @@ fn decorate(ctx: &mut Ctx, d: &Decorator, logs: &[Pos], leaves: &[Pos], roots: &
                         let p = l.offset(sx, 0, sz);
                         if ctx.lv.is_air(p) {
                             let age = ctx.r.next_int_bounded(3);
-                            let s = blockinfo::parse_state(&format!("minecraft:cocoa[age={age},facing={}]", face.name()));
+                            let s = blockinfo::parse_state(&format!(
+                                "minecraft:cocoa[age={age},facing={}]",
+                                face.name()
+                            ));
                             if let Some(s) = s {
                                 set(ctx, deco, p, s);
                             }
@@ -1302,7 +1492,10 @@ fn decorate(ctx: &mut Ctx, d: &Decorator, logs: &[Pos], leaves: &[Pos], roots: &
             } else {
                 (logs[0].y + 1 + ctx.r.next_int_bounded(3)).min(logs[logs.len() - 1].y)
             };
-            let spawn = [Dir::North, Dir::East, Dir::South, Dir::West].iter().copied().filter(|d| *d != Dir::North);
+            let spawn = [Dir::North, Dir::East, Dir::South, Dir::West]
+                .iter()
+                .copied()
+                .filter(|d| *d != Dir::North);
             let spawn: Vec<Dir> = spawn.collect();
             let cands: Vec<Pos> = logs
                 .iter()
@@ -1317,7 +1510,9 @@ fn decorate(ctx: &mut Ctx, d: &Decorator, logs: &[Pos], leaves: &[Pos], roots: &
                 .into_iter()
                 .find(|p| ctx.lv.is_air(*p) && ctx.lv.is_air(p.rel(Dir::South)))
             {
-                if let Some(s) = blockinfo::parse_state("minecraft:bee_nest[facing=south,honey_level=0]") {
+                if let Some(s) =
+                    blockinfo::parse_state("minecraft:bee_nest[facing=south,honey_level=0]")
+                {
                     set(ctx, deco, p, s);
                     let bees = 2 + ctx.r.next_int_bounded(2);
                     for _ in 0..bees {

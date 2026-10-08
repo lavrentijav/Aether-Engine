@@ -126,7 +126,11 @@ impl ImprovedNoise {
         let fz = dz - iz;
 
         let shift = if y_scale != 0.0 {
-            let cap = if y_max >= 0.0 && y_max < fy { y_max } else { fy };
+            let cap = if y_max >= 0.0 && y_max < fy {
+                y_max
+            } else {
+                fy
+            };
             ffloor(cap / y_scale + 1.0E-7_f32 as f64) * y_scale
         } else {
             0.0
@@ -212,22 +216,34 @@ impl PerlinNoise {
     /// it.
     pub fn create(random: &mut XoroshiroRandom, first_octave: i32, amplitudes: &[f64]) -> Self {
         let factory = random.fork_positional();
-        Self::from_octaves(first_octave, amplitudes, |name| ImprovedNoise::new(&mut factory.from_hash_of(name)))
+        Self::from_octaves(first_octave, amplitudes, |name| {
+            ImprovedNoise::new(&mut factory.from_hash_of(name))
+        })
     }
 
     /// The same construction over a legacy-LCG source:
     /// `LegacyPositionalRandomFactory(seed).fromHashOf(name)` is
     /// `new LegacyRandomSource(name.hashCode() ^ seed)`.
-    pub fn create_legacy(random: &mut super::rng::LegacyRandom, first_octave: i32, amplitudes: &[f64]) -> Self {
+    pub fn create_legacy(
+        random: &mut super::rng::LegacyRandom,
+        first_octave: i32,
+        amplitudes: &[f64],
+    ) -> Self {
         use super::rng::Rng;
         let seed = random.next_long();
         Self::from_octaves(first_octave, amplitudes, |name| {
-            let h = name.bytes().fold(0i32, |h, b| h.wrapping_mul(31).wrapping_add(b as i32));
+            let h = name
+                .bytes()
+                .fold(0i32, |h, b| h.wrapping_mul(31).wrapping_add(b as i32));
             ImprovedNoise::new(&mut super::rng::LegacyRandom::new(h as i64 ^ seed))
         })
     }
 
-    fn from_octaves(first_octave: i32, amplitudes: &[f64], mut make: impl FnMut(&str) -> ImprovedNoise) -> Self {
+    fn from_octaves(
+        first_octave: i32,
+        amplitudes: &[f64],
+        mut make: impl FnMut(&str) -> ImprovedNoise,
+    ) -> Self {
         let mut levels = Vec::with_capacity(amplitudes.len());
         for (k, &amp) in amplitudes.iter().enumerate() {
             if amp != 0.0 {
@@ -290,7 +306,11 @@ impl PerlinNoise {
         let mut value = self.lowest_freq_value_factor;
         for (i, level) in self.levels.iter().enumerate() {
             if let Some(n) = level {
-                let yy = if fixed_y { -n.y_origin() } else { wrap(y * input) };
+                let yy = if fixed_y {
+                    -n.y_origin()
+                } else {
+                    wrap(y * input)
+                };
                 let g = n.noise_with_smear(
                     wrap(x * input),
                     yy,
@@ -344,7 +364,6 @@ impl NormalNoise {
     }
 
     fn from_stacks(first: PerlinNoise, second: PerlinNoise, amplitudes: &[f64]) -> Self {
-
         // The spread of non-zero amplitudes — not their count — sets the
         // expected deviation, so a stack with holes in it still normalizes to
         // roughly unit range.

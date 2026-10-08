@@ -226,14 +226,12 @@ impl Loader<'_> {
                 }
             }
             "vertical_gradient" => {
-                let t = Anchor::parse(
-                    j.get("true_at_and_below")
-                        .ok_or_else(|| BuildError::new("vertical_gradient: no `true_at_and_below`"))?,
-                )?;
-                let f = Anchor::parse(
-                    j.get("false_at_and_above")
-                        .ok_or_else(|| BuildError::new("vertical_gradient: no `false_at_and_above`"))?,
-                )?;
+                let t = Anchor::parse(j.get("true_at_and_below").ok_or_else(|| {
+                    BuildError::new("vertical_gradient: no `true_at_and_below`")
+                })?)?;
+                let f = Anchor::parse(j.get("false_at_and_above").ok_or_else(|| {
+                    BuildError::new("vertical_gradient: no `false_at_and_above`")
+                })?)?;
                 let name = j
                     .str_of("random_name")
                     .ok_or_else(|| BuildError::new("vertical_gradient: no `random_name`"))?;
@@ -315,15 +313,14 @@ pub struct SurfaceSystem {
     packed_ice: BlockStateId,
     water_block: u16,
     sea_level: i32,
-    min_y: i32,
-    height: i32,
     eroded_badlands: Option<BiomeId>,
     frozen_oceans: [Option<BiomeId>; 2],
     unsupported: Vec<String>,
 }
 
 fn state(name: &str) -> Result<BlockStateId, BuildError> {
-    blockinfo::parse_state(name).ok_or_else(|| BuildError::new(format!("block registry has no `{name}`")))
+    blockinfo::parse_state(name)
+        .ok_or_else(|| BuildError::new(format!("block registry has no `{name}`")))
 }
 
 impl SurfaceSystem {
@@ -367,10 +364,11 @@ impl SurfaceSystem {
             packed_ice: state("minecraft:packed_ice")?,
             water_block: blockinfo::block_of(state("minecraft:water")?),
             sea_level,
-            min_y,
-            height,
             eroded_badlands: biomes.id("minecraft:eroded_badlands"),
-            frozen_oceans: [biomes.id("minecraft:frozen_ocean"), biomes.id("minecraft:deep_frozen_ocean")],
+            frozen_oceans: [
+                biomes.id("minecraft:frozen_ocean"),
+                biomes.id("minecraft:deep_frozen_ocean"),
+            ],
             unsupported,
         })
     }
@@ -480,7 +478,6 @@ impl SurfaceSystem {
                     }
                 }
                 let min_surface = col.min_surface_level();
-                drop(col);
                 // The walk only ever reads blocks below the one it may have
                 // replaced, and replacing stone with another solid never
                 // changes what the walk sees, so writes can be applied after.
@@ -488,15 +485,36 @@ impl SurfaceSystem {
                     chunk.set(lx, y, lz, s);
                 }
                 if self.frozen_oceans.contains(&Some(column_biome)) {
-                    self.frozen_ocean_extension(chunk, biomes, column_biome, min_surface, lx, lz, x, z, top);
+                    self.frozen_ocean_extension(
+                        chunk,
+                        biomes,
+                        column_biome,
+                        min_surface,
+                        lx,
+                        lz,
+                        x,
+                        z,
+                        top,
+                    );
                 }
             }
         }
     }
 
-    fn eroded_badlands_extension(&self, chunk: &mut ProtoChunk, lx: usize, lz: usize, x: i32, z: i32, top: i32) {
+    fn eroded_badlands_extension(
+        &self,
+        chunk: &mut ProtoChunk,
+        lx: usize,
+        lz: usize,
+        x: i32,
+        z: i32,
+        top: i32,
+    ) {
         let a = (self.badlands_surface.get_value(x as f64, 0.0, z as f64) * 8.25).abs();
-        let b = self.badlands_pillar.get_value(x as f64 * 0.2, 0.0, z as f64 * 0.2) * 15.0;
+        let b = self
+            .badlands_pillar
+            .get_value(x as f64 * 0.2, 0.0, z as f64 * 0.2)
+            * 15.0;
         let d = a.min(b);
         if d <= 0.0 {
             return;
@@ -544,7 +562,10 @@ impl SurfaceSystem {
         top: i32,
     ) {
         let a = (self.iceberg_surface.get_value(x as f64, 0.0, z as f64) * 8.25).abs();
-        let b = self.iceberg_pillar.get_value(x as f64 * 1.28, 0.0, z as f64 * 1.28) * 15.0;
+        let b = self
+            .iceberg_pillar
+            .get_value(x as f64 * 1.28, 0.0, z as f64 * 1.28)
+            * 15.0;
         let d = a.min(b);
         if d <= 1.8 {
             return;
@@ -636,7 +657,11 @@ impl SurfaceSystem {
                 surface_depth_multiplier,
                 add_stone_depth,
             } => {
-                let adj = if *add_stone_depth { ctx.stone_depth_above } else { 0 };
+                let adj = if *add_stone_depth {
+                    ctx.stone_depth_above
+                } else {
+                    0
+                };
                 ctx.y + adj >= anchor_y + col.surface_depth * surface_depth_multiplier
             }
             Cond::Water {
@@ -647,8 +672,13 @@ impl SurfaceSystem {
                 if ctx.water_height == i32::MIN {
                     return true;
                 }
-                let adj = if *add_stone_depth { ctx.stone_depth_above } else { 0 };
-                ctx.y + adj >= ctx.water_height + offset + col.surface_depth * surface_depth_multiplier
+                let adj = if *add_stone_depth {
+                    ctx.stone_depth_above
+                } else {
+                    0
+                };
+                ctx.y + adj
+                    >= ctx.water_height + offset + col.surface_depth * surface_depth_multiplier
             }
             Cond::Not(inner) => !self.eval_cond(inner, ctx),
             Cond::AbovePreliminarySurface => ctx.y >= col.min_surface_level(),
@@ -658,8 +688,16 @@ impl SurfaceSystem {
                 offset,
                 secondary_depth_range,
             } => {
-                let i = if *ceiling { ctx.stone_depth_below } else { ctx.stone_depth_above };
-                let j = if *add_surface_depth { col.surface_depth } else { 0 };
+                let i = if *ceiling {
+                    ctx.stone_depth_below
+                } else {
+                    ctx.stone_depth_above
+                };
+                let j = if *add_surface_depth {
+                    col.surface_depth
+                } else {
+                    0
+                };
                 let k = if *secondary_depth_range == 0 {
                     0
                 } else {
@@ -695,7 +733,14 @@ struct ColumnCtx<'a, E: SurfaceEnv> {
 }
 
 impl<'a, E: SurfaceEnv> ColumnCtx<'a, E> {
-    fn new(sys: &'a SurfaceSystem, chunk: &'a ProtoChunk, env: &'a E, biomes: &'a BiomeRegistry, x: i32, z: i32) -> Self {
+    fn new(
+        sys: &'a SurfaceSystem,
+        chunk: &'a ProtoChunk,
+        env: &'a E,
+        biomes: &'a BiomeRegistry,
+        x: i32,
+        z: i32,
+    ) -> Self {
         Self {
             sys,
             chunk,

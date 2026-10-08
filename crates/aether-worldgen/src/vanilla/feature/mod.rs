@@ -24,6 +24,7 @@
 //! are not generated.
 
 pub mod blocks;
+pub mod extra;
 pub mod features;
 pub mod level;
 pub mod tree;
@@ -74,7 +75,11 @@ pub enum Modifier {
     /// `noise_threshold_count`.
     NoiseThresholdCount { level: f64, below: i32, above: i32 },
     /// `noise_based_count`.
-    NoiseBasedCount { ratio: i32, factor: f64, offset: f64 },
+    NoiseBasedCount {
+        ratio: i32,
+        factor: f64,
+        offset: f64,
+    },
     /// `surface_relative_threshold_filter`.
     SurfaceRelative(Heightmap, i32, i32),
     /// `count_on_every_layer`.
@@ -111,7 +116,9 @@ pub(crate) struct Loader<'a> {
 }
 
 fn ty(j: &Json) -> &str {
-    j.str_of("type").unwrap_or("").trim_start_matches("minecraft:")
+    j.str_of("type")
+        .unwrap_or("")
+        .trim_start_matches("minecraft:")
 }
 
 impl Loader<'_> {
@@ -130,7 +137,10 @@ impl Loader<'_> {
     }
 
     fn placed_inline(&mut self, j: &Json, id: Option<String>) -> Result<Arc<Placed>, BuildError> {
-        let feature = self.configured(j.get("feature").ok_or_else(|| BuildError::new("placed feature: no feature"))?)?;
+        let feature = self.configured(
+            j.get("feature")
+                .ok_or_else(|| BuildError::new("placed feature: no feature"))?,
+        )?;
         let mut modifiers = Vec::new();
         for m in j.get("placement").and_then(Json::as_arr).unwrap_or(&[]) {
             match self.modifier(m) {
@@ -140,7 +150,11 @@ impl Loader<'_> {
                 }
             }
         }
-        Ok(Arc::new(Placed { id, feature, modifiers }))
+        Ok(Arc::new(Placed {
+            id,
+            feature,
+            modifiers,
+        }))
     }
 
     /// A configured feature by id or inline.
@@ -150,7 +164,9 @@ impl Loader<'_> {
                 return Ok(Arc::clone(c));
             }
             let cj = self.pack.read_json("configured_feature", id)?;
-            let c = Arc::new(features::parse(self, &cj).map_err(|e| BuildError::new(format!("{id}: {e}")))?);
+            let c = Arc::new(
+                features::parse(self, &cj).map_err(|e| BuildError::new(format!("{id}: {e}")))?,
+            );
             self.configured.insert(id.clone(), Arc::clone(&c));
             return Ok(c);
         }
@@ -163,22 +179,33 @@ impl Loader<'_> {
     }
 
     fn modifier(&mut self, j: &Json) -> Result<Modifier, BuildError> {
-        let get = |k: &str| j.get(k).ok_or_else(|| BuildError::new(format!("{}: no `{k}`", ty(j))));
+        let get = |k: &str| {
+            j.get(k)
+                .ok_or_else(|| BuildError::new(format!("{}: no `{k}`", ty(j))))
+        };
         Ok(match ty(j) {
             "count" => Modifier::Count(IntProvider::parse(get("count")?)?),
             "in_square" => Modifier::InSquare,
             "heightmap" => Modifier::Heightmap(
-                Heightmap::parse(j.str_of("heightmap").unwrap_or("")).ok_or_else(|| BuildError::new("bad heightmap"))?,
+                Heightmap::parse(j.str_of("heightmap").unwrap_or(""))
+                    .ok_or_else(|| BuildError::new("bad heightmap"))?,
             ),
-            "height_range" => Modifier::HeightRange(HeightProvider::parse(get("height")?, self.min_y, self.height)?),
+            "height_range" => Modifier::HeightRange(HeightProvider::parse(
+                get("height")?,
+                self.min_y,
+                self.height,
+            )?),
             "rarity_filter" => Modifier::Rarity(j.i32_or("chance", 1)),
-            "surface_water_depth_filter" => Modifier::SurfaceWaterDepth(j.i32_or("max_water_depth", 0)),
+            "surface_water_depth_filter" => {
+                Modifier::SurfaceWaterDepth(j.i32_or("max_water_depth", 0))
+            }
             "random_offset" => Modifier::RandomOffset(
                 IntProvider::parse(get("xz_spread")?)?,
                 IntProvider::parse(get("y_spread")?)?,
             ),
             "environment_scan" => Modifier::EnvironmentScan {
-                dir: Dir::parse(j.str_of("direction_of_search").unwrap_or("down")).unwrap_or(Dir::Down),
+                dir: Dir::parse(j.str_of("direction_of_search").unwrap_or("down"))
+                    .unwrap_or(Dir::Down),
                 target: self.predicate(get("target_condition")?)?,
                 allowed: match j.get("allowed_search_condition") {
                     Some(a) => self.predicate(a)?,
@@ -197,11 +224,14 @@ impl Loader<'_> {
                 offset: j.f64_or("noise_offset", 0.0),
             },
             "surface_relative_threshold_filter" => Modifier::SurfaceRelative(
-                Heightmap::parse(j.str_of("heightmap").unwrap_or("")).ok_or_else(|| BuildError::new("bad heightmap"))?,
+                Heightmap::parse(j.str_of("heightmap").unwrap_or(""))
+                    .ok_or_else(|| BuildError::new("bad heightmap"))?,
                 j.i32_or("min_inclusive", i32::MIN),
                 j.i32_or("max_inclusive", i32::MAX),
             ),
-            "count_on_every_layer" => Modifier::CountOnEveryLayer(IntProvider::parse(get("count")?)?),
+            "count_on_every_layer" => {
+                Modifier::CountOnEveryLayer(IntProvider::parse(get("count")?)?)
+            }
             "block_predicate_filter" => Modifier::Predicate(self.predicate(get("predicate")?)?),
             "biome" => Modifier::Biome,
             "fixed_placement" => Modifier::Fixed(
@@ -211,11 +241,19 @@ impl Loader<'_> {
                     .iter()
                     .filter_map(|p| {
                         let a = p.as_arr()?;
-                        Some(Pos::new(a.first()?.as_f64()? as i32, a.get(1)?.as_f64()? as i32, a.get(2)?.as_f64()? as i32))
+                        Some(Pos::new(
+                            a.first()?.as_f64()? as i32,
+                            a.get(1)?.as_f64()? as i32,
+                            a.get(2)?.as_f64()? as i32,
+                        ))
                     })
                     .collect(),
             ),
-            other => return Err(BuildError::new(format!("unknown placement modifier `{other}`"))),
+            other => {
+                return Err(BuildError::new(format!(
+                    "unknown placement modifier `{other}`"
+                )))
+            }
         })
     }
 }
@@ -315,7 +353,12 @@ impl Decorator {
             for (s, list) in per_biome[b as usize].iter().enumerate() {
                 let mut v: Vec<usize> = list
                     .iter()
-                    .filter_map(|p| index.get(s).and_then(|m| m.get(p.id.as_deref().unwrap_or(""))).copied())
+                    .filter_map(|p| {
+                        index
+                            .get(s)
+                            .and_then(|m| m.get(p.id.as_deref().unwrap_or("")))
+                            .copied()
+                    })
                     .collect();
                 v.sort_unstable();
                 v.dedup();
@@ -403,7 +446,13 @@ pub(crate) fn place_placed(ctx: &mut Ctx, p: &Placed, origin: Pos, top: Option<&
 
 /// The modifier chain, depth first — Java's lazy `flatMap` evaluates each
 /// position all the way down before producing the next.
-fn run_modifiers(ctx: &mut Ctx, mods: &[Modifier], pos: Pos, top: Option<&str>, f: &mut dyn FnMut(&mut Ctx, Pos)) {
+fn run_modifiers(
+    ctx: &mut Ctx,
+    mods: &[Modifier],
+    pos: Pos,
+    top: Option<&str>,
+    f: &mut dyn FnMut(&mut Ctx, Pos),
+) {
     let Some((m, rest)) = mods.split_first() else {
         f(ctx, pos);
         return;
@@ -477,23 +526,31 @@ fn run_modifiers(ctx: &mut Ctx, mods: &[Modifier], pos: Pos, top: Option<&str>, 
                 next(ctx, p);
             }
         }
-        Modifier::NoiseThresholdCount { level, below, above } => {
-            let v = ctx
-                .d
-                .biome_noises
-                .biome_info
-                .get_value(pos.x as f64 / 200.0, pos.z as f64 / 200.0, false);
+        Modifier::NoiseThresholdCount {
+            level,
+            below,
+            above,
+        } => {
+            let v = ctx.d.biome_noises.biome_info.get_value(
+                pos.x as f64 / 200.0,
+                pos.z as f64 / 200.0,
+                false,
+            );
             let n = if v < *level { *below } else { *above };
             for _ in 0..n {
                 next(ctx, pos);
             }
         }
-        Modifier::NoiseBasedCount { ratio, factor, offset } => {
-            let v = ctx
-                .d
-                .biome_noises
-                .biome_info
-                .get_value(pos.x as f64 / factor, pos.z as f64 / factor, false);
+        Modifier::NoiseBasedCount {
+            ratio,
+            factor,
+            offset,
+        } => {
+            let v = ctx.d.biome_noises.biome_info.get_value(
+                pos.x as f64 / factor,
+                pos.z as f64 / factor,
+                false,
+            );
             let n = ((v + offset) * *ratio as f64).ceil() as i32;
             for _ in 0..n {
                 next(ctx, pos);
@@ -555,7 +612,11 @@ fn run_modifiers(ctx: &mut Ctx, mods: &[Modifier], pos: Pos, top: Option<&str>, 
 
 fn find_on_ground(lv: &Level, x: i32, top: i32, z: i32, layer: i32) -> Option<i32> {
     let empty = |s: BlockStateId| {
-        super::blockinfo::is_air(s) || matches!(super::blockinfo::name(s), "minecraft:water" | "minecraft:lava")
+        super::blockinfo::is_air(s)
+            || matches!(
+                super::blockinfo::name(s),
+                "minecraft:water" | "minecraft:lava"
+            )
     };
     let mut seen = 0;
     let mut above = lv.get(Pos::new(x, top, z));
@@ -577,7 +638,10 @@ fn find_on_ground(lv: &Level, x: i32, top: i32, z: i32, layer: i32) -> Option<i3
 /// A port of `FeatureSorter.buildFeaturesPerStep`: one global order per step
 /// that respects every biome's list order, found by a depth-first
 /// topological sort over `(step, first-seen index)` keys.
-fn sort_features(possible: &[BiomeId], per_biome: &[Vec<Vec<Arc<Placed>>>]) -> Vec<Vec<Arc<Placed>>> {
+fn sort_features(
+    possible: &[BiomeId],
+    per_biome: &[Vec<Vec<Arc<Placed>>>],
+) -> Vec<Vec<Arc<Placed>>> {
     // Feature identity is the placed feature's id.
     let mut feature_index: HashMap<String, usize> = HashMap::new();
     let mut by_index: Vec<Arc<Placed>> = Vec::new();

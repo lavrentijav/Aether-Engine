@@ -111,25 +111,67 @@ const MIDDLE_BIOMES: [[&str; 5]; 5] = [
 const MIDDLE_BIOMES_VARIANT: Grid = [
     [Some(ICE_SPIKES), None, Some(SNOWY_TAIGA), None, None],
     [None, None, None, None, Some(OLD_GROWTH_PINE_TAIGA)],
-    [Some(SUNFLOWER_PLAINS), None, None, Some(OLD_GROWTH_BIRCH_FOREST), None],
-    [None, None, Some(PLAINS), Some(SPARSE_JUNGLE), Some(BAMBOO_JUNGLE)],
+    [
+        Some(SUNFLOWER_PLAINS),
+        None,
+        None,
+        Some(OLD_GROWTH_BIRCH_FOREST),
+        None,
+    ],
+    [
+        None,
+        None,
+        Some(PLAINS),
+        Some(SPARSE_JUNGLE),
+        Some(BAMBOO_JUNGLE),
+    ],
     [None, None, None, None, None],
 ];
 
 const PLATEAU_BIOMES: [[&str; 5]; 5] = [
-    [SNOWY_PLAINS, SNOWY_PLAINS, SNOWY_PLAINS, SNOWY_TAIGA, SNOWY_TAIGA],
+    [
+        SNOWY_PLAINS,
+        SNOWY_PLAINS,
+        SNOWY_PLAINS,
+        SNOWY_TAIGA,
+        SNOWY_TAIGA,
+    ],
     [MEADOW, MEADOW, FOREST, TAIGA, OLD_GROWTH_SPRUCE_TAIGA],
     [MEADOW, MEADOW, MEADOW, MEADOW, PALE_GARDEN],
     [SAVANNA_PLATEAU, SAVANNA_PLATEAU, FOREST, FOREST, JUNGLE],
-    [BADLANDS, BADLANDS, BADLANDS, WOODED_BADLANDS, WOODED_BADLANDS],
+    [
+        BADLANDS,
+        BADLANDS,
+        BADLANDS,
+        WOODED_BADLANDS,
+        WOODED_BADLANDS,
+    ],
 ];
 
 const PLATEAU_BIOMES_VARIANT: Grid = [
     [Some(ICE_SPIKES), None, None, None, None],
-    [Some(CHERRY_GROVE), None, Some(MEADOW), Some(MEADOW), Some(OLD_GROWTH_PINE_TAIGA)],
-    [Some(CHERRY_GROVE), Some(CHERRY_GROVE), Some(FOREST), Some(BIRCH_FOREST), None],
+    [
+        Some(CHERRY_GROVE),
+        None,
+        Some(MEADOW),
+        Some(MEADOW),
+        Some(OLD_GROWTH_PINE_TAIGA),
+    ],
+    [
+        Some(CHERRY_GROVE),
+        Some(CHERRY_GROVE),
+        Some(FOREST),
+        Some(BIRCH_FOREST),
+        None,
+    ],
     [None, None, None, None, None],
-    [Some(ERODED_BADLANDS), Some(ERODED_BADLANDS), None, None, None],
+    [
+        Some(ERODED_BADLANDS),
+        Some(ERODED_BADLANDS),
+        None,
+        None,
+        None,
+    ],
 ];
 
 const SHATTERED_BIOMES: Grid = [
@@ -218,7 +260,17 @@ impl Builder {
         }
     }
 
-    fn push(&mut self, t: Parameter, h: Parameter, c: Parameter, e: Parameter, d: Parameter, w: Parameter, offset: f32, biome: &str) {
+    fn push(
+        &mut self,
+        t: Parameter,
+        h: Parameter,
+        c: Parameter,
+        e: Parameter,
+        d: Parameter,
+        w: Parameter,
+        offset: f32,
+        biome: &str,
+    ) {
         self.out.push(ParameterPoint {
             biome: biome.to_string(),
             space: [t, h, c, e, d, w],
@@ -227,18 +279,45 @@ impl Builder {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn surface(&mut self, t: Parameter, h: Parameter, c: Parameter, e: Parameter, w: Parameter, offset: f32, biome: &str) {
+    fn surface(
+        &mut self,
+        t: Parameter,
+        h: Parameter,
+        c: Parameter,
+        e: Parameter,
+        w: Parameter,
+        offset: f32,
+        biome: &str,
+    ) {
         self.push(t, h, c, e, point(0.0), w, offset, biome);
         self.push(t, h, c, e, point(1.0), w, offset, biome);
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn underground(&mut self, t: Parameter, h: Parameter, c: Parameter, e: Parameter, w: Parameter, offset: f32, biome: &str) {
+    fn underground(
+        &mut self,
+        t: Parameter,
+        h: Parameter,
+        c: Parameter,
+        e: Parameter,
+        w: Parameter,
+        offset: f32,
+        biome: &str,
+    ) {
         self.push(t, h, c, e, span(0.2, 0.9), w, offset, biome);
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn bottom(&mut self, t: Parameter, h: Parameter, c: Parameter, e: Parameter, w: Parameter, offset: f32, biome: &str) {
+    fn bottom(
+        &mut self,
+        t: Parameter,
+        h: Parameter,
+        c: Parameter,
+        e: Parameter,
+        w: Parameter,
+        offset: f32,
+        biome: &str,
+    ) {
         self.push(t, h, c, e, point(1.1), w, offset, biome);
     }
 
@@ -276,14 +355,20 @@ impl Builder {
 
     fn add_peaks(&mut self, w: Parameter) {
         let e = self.erosions;
-        let (coast, near, mid, far) = (self.coast, self.near_inland, self.mid_inland, self.far_inland);
+        let (coast, near, mid, far) = (
+            self.coast,
+            self.near_inland,
+            self.mid_inland,
+            self.far_inland,
+        );
         for ti in 0..5 {
             let t = self.temperatures[ti];
             for hi in 0..5 {
                 let h = self.humidities[hi];
                 let middle = pick_middle(ti, hi, w);
                 let middle_badlands = pick_middle_or_badlands_if_hot(ti, hi, w);
-                let middle_badlands_slope = pick_middle_or_badlands_if_hot_or_slope_if_cold(ti, hi, w);
+                let middle_badlands_slope =
+                    pick_middle_or_badlands_if_hot_or_slope_if_cold(ti, hi, w);
                 let plateau = pick_plateau(ti, hi, w);
                 let shattered = pick_shattered(ti, hi, w);
                 let shattered_savanna = maybe_windswept_savanna(ti, hi, w, shattered);
@@ -305,14 +390,20 @@ impl Builder {
 
     fn add_high_slice(&mut self, w: Parameter) {
         let e = self.erosions;
-        let (coast, near, mid, far) = (self.coast, self.near_inland, self.mid_inland, self.far_inland);
+        let (coast, near, mid, far) = (
+            self.coast,
+            self.near_inland,
+            self.mid_inland,
+            self.far_inland,
+        );
         for ti in 0..5 {
             let t = self.temperatures[ti];
             for hi in 0..5 {
                 let h = self.humidities[hi];
                 let middle = pick_middle(ti, hi, w);
                 let middle_badlands = pick_middle_or_badlands_if_hot(ti, hi, w);
-                let middle_badlands_slope = pick_middle_or_badlands_if_hot_or_slope_if_cold(ti, hi, w);
+                let middle_badlands_slope =
+                    pick_middle_or_badlands_if_hot_or_slope_if_cold(ti, hi, w);
                 let plateau = pick_plateau(ti, hi, w);
                 let shattered = pick_shattered(ti, hi, w);
                 let middle_savanna = maybe_windswept_savanna(ti, hi, w, middle);
@@ -340,21 +431,43 @@ impl Builder {
         let f = self.full;
         let tt = self.temperatures;
         self.surface(f, f, self.coast, join(e[0], e[2]), w, 0.0, STONY_SHORE);
-        self.surface(join(tt[1], tt[2]), f, join(self.near_inland, self.far_inland), e[6], w, 0.0, SWAMP);
-        self.surface(join(tt[3], tt[4]), f, join(self.near_inland, self.far_inland), e[6], w, 0.0, MANGROVE_SWAMP);
+        self.surface(
+            join(tt[1], tt[2]),
+            f,
+            join(self.near_inland, self.far_inland),
+            e[6],
+            w,
+            0.0,
+            SWAMP,
+        );
+        self.surface(
+            join(tt[3], tt[4]),
+            f,
+            join(self.near_inland, self.far_inland),
+            e[6],
+            w,
+            0.0,
+            MANGROVE_SWAMP,
+        );
     }
 
     fn add_mid_slice(&mut self, w: Parameter) {
         self.add_swamps_and_stony_shore(w);
         let e = self.erosions;
-        let (coast, near, mid, far) = (self.coast, self.near_inland, self.mid_inland, self.far_inland);
+        let (coast, near, mid, far) = (
+            self.coast,
+            self.near_inland,
+            self.mid_inland,
+            self.far_inland,
+        );
         for ti in 0..5 {
             let t = self.temperatures[ti];
             for hi in 0..5 {
                 let h = self.humidities[hi];
                 let middle = pick_middle(ti, hi, w);
                 let middle_badlands = pick_middle_or_badlands_if_hot(ti, hi, w);
-                let middle_badlands_slope = pick_middle_or_badlands_if_hot_or_slope_if_cold(ti, hi, w);
+                let middle_badlands_slope =
+                    pick_middle_or_badlands_if_hot_or_slope_if_cold(ti, hi, w);
                 let shattered = pick_shattered(ti, hi, w);
                 let plateau = pick_plateau(ti, hi, w);
                 let beach = pick_beach(ti, hi);
@@ -363,7 +476,15 @@ impl Builder {
                 let slope = pick_slope(ti, hi, w);
                 self.surface(t, h, join(near, far), e[0], w, 0.0, slope);
                 self.surface(t, h, join(near, mid), e[1], w, 0.0, middle_badlands_slope);
-                self.surface(t, h, far, e[1], w, 0.0, if ti == 0 { slope } else { plateau });
+                self.surface(
+                    t,
+                    h,
+                    far,
+                    e[1],
+                    w,
+                    0.0,
+                    if ti == 0 { slope } else { plateau },
+                );
                 self.surface(t, h, near, e[2], w, 0.0, middle);
                 self.surface(t, h, mid, e[2], w, 0.0, middle_badlands);
                 self.surface(t, h, far, e[2], w, 0.0, plateau);
@@ -393,21 +514,43 @@ impl Builder {
     fn add_low_slice(&mut self, w: Parameter) {
         self.add_swamps_and_stony_shore(w);
         let e = self.erosions;
-        let (coast, near, mid, far) = (self.coast, self.near_inland, self.mid_inland, self.far_inland);
+        let (coast, near, mid, far) = (
+            self.coast,
+            self.near_inland,
+            self.mid_inland,
+            self.far_inland,
+        );
         for ti in 0..5 {
             let t = self.temperatures[ti];
             for hi in 0..5 {
                 let h = self.humidities[hi];
                 let middle = pick_middle(ti, hi, w);
                 let middle_badlands = pick_middle_or_badlands_if_hot(ti, hi, w);
-                let middle_badlands_slope = pick_middle_or_badlands_if_hot_or_slope_if_cold(ti, hi, w);
+                let middle_badlands_slope =
+                    pick_middle_or_badlands_if_hot_or_slope_if_cold(ti, hi, w);
                 let beach = pick_beach(ti, hi);
                 let middle_savanna = maybe_windswept_savanna(ti, hi, w, middle);
                 let shattered_coast = pick_shattered_coast(ti, hi, w);
                 self.surface(t, h, near, join(e[0], e[1]), w, 0.0, middle_badlands);
-                self.surface(t, h, join(mid, far), join(e[0], e[1]), w, 0.0, middle_badlands_slope);
+                self.surface(
+                    t,
+                    h,
+                    join(mid, far),
+                    join(e[0], e[1]),
+                    w,
+                    0.0,
+                    middle_badlands_slope,
+                );
                 self.surface(t, h, near, join(e[2], e[3]), w, 0.0, middle);
-                self.surface(t, h, join(mid, far), join(e[2], e[3]), w, 0.0, middle_badlands);
+                self.surface(
+                    t,
+                    h,
+                    join(mid, far),
+                    join(e[2], e[3]),
+                    w,
+                    0.0,
+                    middle_badlands,
+                );
                 self.surface(t, h, coast, join(e[3], e[4]), w, 0.0, beach);
                 self.surface(t, h, join(near, far), e[4], w, 0.0, middle);
                 self.surface(t, h, coast, e[5], w, 0.0, shattered_coast);
@@ -426,25 +569,74 @@ impl Builder {
         let f = self.full;
         let tt = self.temperatures;
         let (fr, un) = (self.frozen, self.unfrozen);
-        let (coast, near, far, inland) = (self.coast, self.near_inland, self.far_inland, self.inland);
+        let (coast, near, far, inland) =
+            (self.coast, self.near_inland, self.far_inland, self.inland);
         let neg = w.max < 0;
-        self.surface(fr, f, coast, join(e[0], e[1]), w, 0.0, if neg { STONY_SHORE } else { FROZEN_RIVER });
-        self.surface(un, f, coast, join(e[0], e[1]), w, 0.0, if neg { STONY_SHORE } else { RIVER });
+        self.surface(
+            fr,
+            f,
+            coast,
+            join(e[0], e[1]),
+            w,
+            0.0,
+            if neg { STONY_SHORE } else { FROZEN_RIVER },
+        );
+        self.surface(
+            un,
+            f,
+            coast,
+            join(e[0], e[1]),
+            w,
+            0.0,
+            if neg { STONY_SHORE } else { RIVER },
+        );
         self.surface(fr, f, near, join(e[0], e[1]), w, 0.0, FROZEN_RIVER);
         self.surface(un, f, near, join(e[0], e[1]), w, 0.0, RIVER);
-        self.surface(fr, f, join(coast, far), join(e[2], e[5]), w, 0.0, FROZEN_RIVER);
+        self.surface(
+            fr,
+            f,
+            join(coast, far),
+            join(e[2], e[5]),
+            w,
+            0.0,
+            FROZEN_RIVER,
+        );
         self.surface(un, f, join(coast, far), join(e[2], e[5]), w, 0.0, RIVER);
         self.surface(fr, f, coast, e[6], w, 0.0, FROZEN_RIVER);
         self.surface(un, f, coast, e[6], w, 0.0, RIVER);
-        self.surface(join(tt[1], tt[2]), f, join(inland, far), e[6], w, 0.0, SWAMP);
-        self.surface(join(tt[3], tt[4]), f, join(inland, far), e[6], w, 0.0, MANGROVE_SWAMP);
+        self.surface(
+            join(tt[1], tt[2]),
+            f,
+            join(inland, far),
+            e[6],
+            w,
+            0.0,
+            SWAMP,
+        );
+        self.surface(
+            join(tt[3], tt[4]),
+            f,
+            join(inland, far),
+            e[6],
+            w,
+            0.0,
+            MANGROVE_SWAMP,
+        );
         self.surface(fr, f, join(inland, far), e[6], w, 0.0, FROZEN_RIVER);
         for ti in 0..5 {
             let t = self.temperatures[ti];
             for hi in 0..5 {
                 let h = self.humidities[hi];
                 let b = pick_middle_or_badlands_if_hot(ti, hi, w);
-                self.surface(t, h, join(self.mid_inland, far), join(e[0], e[1]), w, 0.0, b);
+                self.surface(
+                    t,
+                    h,
+                    join(self.mid_inland, far),
+                    join(e[0], e[1]),
+                    w,
+                    0.0,
+                    b,
+                );
             }
         }
     }
@@ -474,7 +666,11 @@ fn pick_middle_or_badlands_if_hot(t: usize, h: usize, w: Parameter) -> &'static 
     }
 }
 
-fn pick_middle_or_badlands_if_hot_or_slope_if_cold(t: usize, h: usize, w: Parameter) -> &'static str {
+fn pick_middle_or_badlands_if_hot_or_slope_if_cold(
+    t: usize,
+    h: usize,
+    w: Parameter,
+) -> &'static str {
     if t == 0 {
         pick_slope(t, h, w)
     } else {
@@ -482,7 +678,12 @@ fn pick_middle_or_badlands_if_hot_or_slope_if_cold(t: usize, h: usize, w: Parame
     }
 }
 
-fn maybe_windswept_savanna(t: usize, h: usize, w: Parameter, otherwise: &'static str) -> &'static str {
+fn maybe_windswept_savanna(
+    t: usize,
+    h: usize,
+    w: Parameter,
+    otherwise: &'static str,
+) -> &'static str {
     if t > 1 && h < 4 && w.max >= 0 {
         WINDSWEPT_SAVANNA
     } else {
@@ -577,6 +778,12 @@ mod tests {
         assert!(t.len() > 7000, "{} rows", t.len());
         assert_eq!(t[0].biome, MUSHROOM_FIELDS);
         assert_eq!(t.last().unwrap().biome, DEEP_DARK);
-        assert_eq!(t[0].space[2], Parameter { min: -12000, max: -10500 });
+        assert_eq!(
+            t[0].space[2],
+            Parameter {
+                min: -12000,
+                max: -10500
+            }
+        );
     }
 }

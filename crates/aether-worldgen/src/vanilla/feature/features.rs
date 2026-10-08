@@ -13,7 +13,9 @@ use super::super::providers::IntProvider;
 use super::super::rng::Rng;
 use super::super::surface::parse_block_state;
 use super::super::tags::BlockSet;
-use super::blocks::{can_survive, is_water_source, legacy_solid, sturdy, BlockPredicate, RuleTest, StateProvider};
+use super::blocks::{
+    can_survive, is_water_source, legacy_solid, sturdy, BlockPredicate, RuleTest, StateProvider,
+};
 use super::level::{Dir, Heightmap, Pos};
 use super::tree::{self, FallenTree, TreeConfig};
 use super::{place_placed, Ctx, Loader, Placed};
@@ -29,15 +31,34 @@ pub struct OreTarget {
 #[derive(Debug)]
 pub enum Configured {
     /// `simple_block`.
-    SimpleBlock { provider: StateProvider, schedule_tick: bool },
+    SimpleBlock {
+        provider: StateProvider,
+        schedule_tick: bool,
+    },
     /// `random_patch`, `flower`, `no_bonemeal_flower`.
-    RandomPatch { tries: i32, xz: i32, y: i32, feature: Arc<Placed> },
+    RandomPatch {
+        tries: i32,
+        xz: i32,
+        y: i32,
+        feature: Arc<Placed>,
+    },
     /// `ore`.
-    Ore { targets: Vec<OreTarget>, size: i32, discard: f32 },
+    Ore {
+        targets: Vec<OreTarget>,
+        size: i32,
+        discard: f32,
+    },
     /// `scattered_ore`.
-    ScatteredOre { targets: Vec<OreTarget>, size: i32, discard: f32 },
+    ScatteredOre {
+        targets: Vec<OreTarget>,
+        size: i32,
+        discard: f32,
+    },
     /// `random_selector`.
-    RandomSelector { features: Vec<(Arc<Placed>, f32)>, default: Arc<Placed> },
+    RandomSelector {
+        features: Vec<(Arc<Placed>, f32)>,
+        default: Arc<Placed>,
+    },
     /// `simple_random_selector`.
     SimpleRandomSelector(Vec<Arc<Placed>>),
     /// `random_boolean_selector`.
@@ -76,7 +97,10 @@ pub enum Configured {
         valid: BlockSet,
     },
     /// `lake`.
-    Lake { fluid: StateProvider, barrier: StateProvider },
+    Lake {
+        fluid: StateProvider,
+        barrier: StateProvider,
+    },
     /// `bamboo`.
     Bamboo(f32),
     /// `forest_rock` (`BlockBlobFeature`).
@@ -86,21 +110,45 @@ pub enum Configured {
     /// `blue_ice`.
     BlueIce,
     /// `underwater_magma`.
-    UnderwaterMagma { range: i32, radius: i32, probability: f32 },
+    UnderwaterMagma {
+        range: i32,
+        radius: i32,
+        probability: f32,
+    },
     /// `multiface_growth` (no spreading).
-    MultifaceGrowth { block: BlockStateId, search_range: i32, floor: bool, ceiling: bool, wall: bool, spread: f32, on: BlockSet },
+    MultifaceGrowth {
+        block: BlockStateId,
+        search_range: i32,
+        floor: bool,
+        ceiling: bool,
+        wall: bool,
+        spread: f32,
+        on: BlockSet,
+    },
     /// `huge_red_mushroom` / `huge_brown_mushroom`.
-    HugeMushroom { red: bool, cap: StateProvider, stem: StateProvider, radius: i32 },
+    HugeMushroom {
+        red: bool,
+        cap: StateProvider,
+        stem: StateProvider,
+        radius: i32,
+    },
     /// `tree`.
     Tree(Box<TreeConfig>),
     /// `fallen_tree`.
     FallenTree(Box<FallenTree>),
+    /// `vegetation_patch` / `waterlogged_vegetation_patch`.
+    VegetationPatch(Box<super::extra::VegetationPatch>),
+    /// `coral_tree` / `coral_claw` / `coral_mushroom`.
+    Coral(super::extra::Coral, Arc<super::extra::CoralBlocks>),
+    /// `iceberg`.
+    Iceberg(BlockStateId),
     /// A type this port does not place.
     Unsupported(String),
 }
 
 fn get<'j>(j: &'j Json, k: &str) -> Result<&'j Json, BuildError> {
-    j.get(k).ok_or_else(|| BuildError::new(format!("missing `{k}`")))
+    j.get(k)
+        .ok_or_else(|| BuildError::new(format!("missing `{k}`")))
 }
 
 fn state_of(j: &Json, k: &str) -> Result<BlockStateId, BuildError> {
@@ -122,10 +170,16 @@ fn targets(l: &Loader, c: &Json) -> Result<Vec<OreTarget>, BuildError> {
 
 /// Parse a configured feature.
 pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> {
-    let t = j.str_of("type").unwrap_or("").trim_start_matches("minecraft:").to_string();
+    let t = j
+        .str_of("type")
+        .unwrap_or("")
+        .trim_start_matches("minecraft:")
+        .to_string();
     let empty = Json::Obj(Default::default());
     let c = j.get("config").unwrap_or(&empty);
-    let sp = |l: &Loader, k: &str| -> Result<StateProvider, BuildError> { StateProvider::parse(get(c, k)?, &l.noises) };
+    let sp = |l: &Loader, k: &str| -> Result<StateProvider, BuildError> {
+        StateProvider::parse(get(c, k)?, &l.noises)
+    };
     Ok(match t.as_str() {
         "simple_block" => Configured::SimpleBlock {
             provider: sp(l, "to_place")?,
@@ -150,7 +204,10 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
         "random_selector" => {
             let mut features = Vec::new();
             for f in c.get("features").and_then(Json::as_arr).unwrap_or(&[]) {
-                features.push((l.placed(get(f, "feature")?)?, f.f64_or("chance", 0.0) as f32));
+                features.push((
+                    l.placed(get(f, "feature")?)?,
+                    f.f64_or("chance", 0.0) as f32,
+                ));
             }
             Configured::RandomSelector {
                 features,
@@ -170,13 +227,17 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
             }
             Configured::SimpleRandomSelector(v)
         }
-        "random_boolean_selector" => {
-            Configured::RandomBoolean(l.placed(get(c, "feature_true")?)?, l.placed(get(c, "feature_false")?)?)
-        }
+        "random_boolean_selector" => Configured::RandomBoolean(
+            l.placed(get(c, "feature_true")?)?,
+            l.placed(get(c, "feature_false")?)?,
+        ),
         "block_column" => {
             let mut layers = Vec::new();
             for layer in c.get("layers").and_then(Json::as_arr).unwrap_or(&[]) {
-                layers.push((IntProvider::parse(get(layer, "height")?)?, StateProvider::parse(get(layer, "provider")?, &l.noises)?));
+                layers.push((
+                    IntProvider::parse(get(layer, "height")?)?,
+                    StateProvider::parse(get(layer, "provider")?, &l.noises)?,
+                ));
             }
             Configured::BlockColumn {
                 layers,
@@ -191,7 +252,10 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
             let p = get(c, "state_provider")?;
             let mut rules = Vec::new();
             for r in p.get("rules").and_then(Json::as_arr).unwrap_or(&[]) {
-                rules.push((l.predicate(get(r, "if_true")?)?, StateProvider::parse(get(r, "then")?, &l.noises)?));
+                rules.push((
+                    l.predicate(get(r, "if_true")?)?,
+                    StateProvider::parse(get(r, "then")?, &l.noises)?,
+                ));
             }
             Configured::Disk {
                 fallback: StateProvider::parse(get(p, "fallback")?, &l.noises)?,
@@ -213,7 +277,9 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
                 requires_below: c.bool_or("requires_block_below", true),
                 rock_count: c.i32_or("rock_count", 4),
                 hole_count: c.i32_or("hole_count", 1),
-                valid: l.tags.holder_set(c.get("valid_blocks").unwrap_or(&Json::Null)),
+                valid: l
+                    .tags
+                    .holder_set(c.get("valid_blocks").unwrap_or(&Json::Null)),
             }
         }
         "lake" => Configured::Lake {
@@ -237,7 +303,9 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
             ceiling: c.bool_or("can_place_on_ceiling", false),
             wall: c.bool_or("can_place_on_wall", false),
             spread: c.f64_or("chance_of_spreading", 0.5) as f32,
-            on: l.tags.holder_set(c.get("can_be_placed_on").unwrap_or(&Json::Null)),
+            on: l
+                .tags
+                .holder_set(c.get("can_be_placed_on").unwrap_or(&Json::Null)),
         },
         "huge_red_mushroom" | "huge_brown_mushroom" => Configured::HugeMushroom {
             red: t == "huge_red_mushroom",
@@ -247,6 +315,49 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
         },
         "tree" => Configured::Tree(Box::new(tree::parse_tree(l, c)?)),
         "fallen_tree" => Configured::FallenTree(Box::new(tree::parse_fallen(l, c)?)),
+        "vegetation_patch" | "waterlogged_vegetation_patch" => {
+            Configured::VegetationPatch(Box::new(super::extra::VegetationPatch {
+                waterlogged: t == "waterlogged_vegetation_patch",
+                replaceable: l
+                    .tags
+                    .holder_set(c.get("replaceable").unwrap_or(&Json::Null)),
+                ground: sp(l, "ground_state")?,
+                vegetation: l.placed(get(c, "vegetation_feature")?)?,
+                ceiling: c.str_of("surface") == Some("ceiling"),
+                depth: IntProvider::parse(get(c, "depth")?)?,
+                extra_bottom: c.f64_or("extra_bottom_block_chance", 0.0) as f32,
+                vertical_range: c.i32_or("vertical_range", 1),
+                vegetation_chance: c.f64_or("vegetation_chance", 0.0) as f32,
+                xz_radius: IntProvider::parse(get(c, "xz_radius")?)?,
+                extra_edge: c.f64_or("extra_edge_column_chance", 0.0) as f32,
+            }))
+        }
+        "coral_tree" | "coral_claw" | "coral_mushroom" => {
+            let list = |tag: &str| -> Vec<BlockStateId> {
+                l.tags
+                    .block_tag_list(tag)
+                    .into_iter()
+                    .filter_map(|b| {
+                        aether_world::registry::blocks::default_state(
+                            aether_world::registry::blocks::BLOCKS[b as usize].0,
+                        )
+                    })
+                    .collect()
+            };
+            let blocks = Arc::new(super::extra::CoralBlocks {
+                blocks: list("minecraft:coral_blocks"),
+                corals: list("minecraft:corals"),
+                wall_corals: list("minecraft:wall_corals"),
+                corals_set: l.tags.block_tag("minecraft:corals"),
+            });
+            let kind = match t.as_str() {
+                "coral_tree" => super::extra::Coral::Tree,
+                "coral_claw" => super::extra::Coral::Claw,
+                _ => super::extra::Coral::Mushroom,
+            };
+            Configured::Coral(kind, blocks)
+        }
+        "iceberg" => Configured::Iceberg(state_of(c, "state")?),
         other => {
             l.unsupported.insert(format!("feature:{other}"));
             Configured::Unsupported(other.to_string())
@@ -316,7 +427,12 @@ pub(crate) fn place_configured(ctx: &mut Ctx, f: &Configured, pos: Pos) -> bool 
     }
     match f {
         Configured::SimpleBlock { provider, .. } => simple_block(ctx, provider, pos),
-        Configured::RandomPatch { tries, xz, y, feature } => {
+        Configured::RandomPatch {
+            tries,
+            xz,
+            y,
+            feature,
+        } => {
             let mut n = 0;
             let (a, b) = (xz + 1, y + 1);
             for _ in 0..*tries {
@@ -329,12 +445,21 @@ pub(crate) fn place_configured(ctx: &mut Ctx, f: &Configured, pos: Pos) -> bool 
             }
             n > 0
         }
-        Configured::Ore { targets, size, discard } => ore(ctx, targets, *size, *discard, pos),
-        Configured::ScatteredOre { targets, size, discard } => {
+        Configured::Ore {
+            targets,
+            size,
+            discard,
+        } => ore(ctx, targets, *size, *discard, pos),
+        Configured::ScatteredOre {
+            targets,
+            size,
+            discard,
+        } => {
             let n = ctx.r.next_int_bounded(size + 1);
             for i in 0..n {
                 let d = i.min(7);
-                let mut axis = || ((ctx.r.next_float() - ctx.r.next_float()) * d as f32).round() as i32;
+                let mut axis =
+                    || ((ctx.r.next_float() - ctx.r.next_float()) * d as f32).round() as i32;
                 let (dx, dy, dz) = (axis(), axis(), axis());
                 let p = pos.offset(dx, dy, dz);
                 let s = ctx.lv.get(p);
@@ -430,8 +555,17 @@ pub(crate) fn place_configured(ctx: &mut Ctx, f: &Configured, pos: Pos) -> bool 
             if !blockinfo::is_air(here) && !valid.contains(here) {
                 return false;
             }
-            let around = [pos.rel(Dir::West), pos.rel(Dir::East), pos.rel(Dir::North), pos.rel(Dir::South), pos.below(1)];
-            let rocks = around.iter().filter(|p| valid.contains(lv.get(**p))).count() as i32;
+            let around = [
+                pos.rel(Dir::West),
+                pos.rel(Dir::East),
+                pos.rel(Dir::North),
+                pos.rel(Dir::South),
+                pos.below(1),
+            ];
+            let rocks = around
+                .iter()
+                .filter(|p| valid.contains(lv.get(**p)))
+                .count() as i32;
             let holes = around.iter().filter(|p| lv.is_air(**p)).count() as i32;
             if rocks == *rock_count && holes == *hole_count {
                 ctx.lv.set(pos, *state);
@@ -458,10 +592,28 @@ pub(crate) fn place_configured(ctx: &mut Ctx, f: &Configured, pos: Pos) -> bool 
             wall,
             spread,
             on,
-        } => multiface(ctx, *block, *search_range, *floor, *ceiling, *wall, *spread, on, pos),
-        Configured::HugeMushroom { red, cap, stem, radius } => huge_mushroom(ctx, *red, cap, stem, *radius, pos),
+        } => multiface(
+            ctx,
+            *block,
+            *search_range,
+            *floor,
+            *ceiling,
+            *wall,
+            *spread,
+            on,
+            pos,
+        ),
+        Configured::HugeMushroom {
+            red,
+            cap,
+            stem,
+            radius,
+        } => huge_mushroom(ctx, *red, cap, stem, *radius, pos),
         Configured::Tree(cfg) => tree::place_tree(ctx, cfg, pos),
         Configured::FallenTree(cfg) => tree::place_fallen(ctx, cfg, pos),
+        Configured::VegetationPatch(cfg) => super::extra::vegetation_patch(ctx, cfg, pos),
+        Configured::Coral(kind, blocks) => super::extra::coral(ctx, *kind, blocks, pos),
+        Configured::Iceberg(state) => super::extra::iceberg(ctx, *state, pos),
         Configured::Unsupported(name) => {
             ctx.d.note_unsupported(&format!("feature:{name}"));
             false
@@ -556,7 +708,18 @@ fn ore(ctx: &mut Ctx, targets: &[OreTarget], size: i32, discard: f32, pos: Pos) 
     for x in min_x..=min_x + w {
         for z in min_z..=min_z + w {
             if min_y <= ctx.lv.height(Heightmap::OceanFloorWg, x, z) {
-                return ore_place(ctx, targets, size, discard, [x0, x1, z0, z1, y0, y1], min_x, min_y, min_z, w, h);
+                return ore_place(
+                    ctx,
+                    targets,
+                    size,
+                    discard,
+                    [x0, x1, z0, z1, y0, y1],
+                    min_x,
+                    min_y,
+                    min_z,
+                    w,
+                    h,
+                );
             }
         }
     }
@@ -585,7 +748,9 @@ fn ore_place(
         let y = y0 + t as f64 * (y1 - y0);
         let z = z0 + t as f64 * (z1 - z0);
         let s = ctx.r.next_double() * size as f64 / 16.0;
-        let r = ((super::super::mth::sin((std::f32::consts::PI * t) as f64) + 1.0) as f64 * s + 1.0) / 2.0;
+        let r = ((super::super::mth::sin((std::f32::consts::PI * t) as f64) + 1.0) as f64 * s
+            + 1.0)
+            / 2.0;
         balls[k * 4] = x;
         balls[k * 4 + 1] = y;
         balls[k * 4 + 2] = z;
@@ -720,7 +885,11 @@ fn seagrass(ctx: &mut Ctx, prob: f32, pos: Pos) -> bool {
         return false;
     }
     let tall = ctx.r.next_double() < prob as f64;
-    let st = if tall { states().tall_seagrass } else { states().seagrass };
+    let st = if tall {
+        states().tall_seagrass
+    } else {
+        states().seagrass
+    };
     if !can_survive(ctx.lv, ctx.tags(), st, p) {
         return false;
     }
@@ -752,16 +921,20 @@ fn kelp(ctx: &mut Ctx, pos: Pos) -> bool {
         {
             if i == len {
                 let age = ctx.r.next_int_bounded(4) + 20;
-                ctx.lv.set(p, blockinfo::with_prop(st.kelp, "age", &age.to_string()));
+                ctx.lv
+                    .set(p, blockinfo::with_prop(st.kelp, "age", &age.to_string()));
                 placed += 1;
             } else {
                 ctx.lv.set(p, st.kelp_plant);
             }
         } else if i > 0 {
             let b = p.below(1);
-            if can_survive(ctx.lv, ctx.tags(), st.kelp, b) && !is(ctx.lv.get(b.below(1)), "minecraft:kelp") {
+            if can_survive(ctx.lv, ctx.tags(), st.kelp, b)
+                && !is(ctx.lv.get(b.below(1)), "minecraft:kelp")
+            {
                 let age = ctx.r.next_int_bounded(4) + 20;
-                ctx.lv.set(b, blockinfo::with_prop(st.kelp, "age", &age.to_string()));
+                ctx.lv
+                    .set(b, blockinfo::with_prop(st.kelp, "age", &age.to_string()));
                 placed += 1;
             }
             break;
@@ -816,7 +989,10 @@ fn disk(
 /// `Biome.shouldFreeze(level, pos, false)`.
 fn should_freeze(ctx: &Ctx, biome: super::super::biome::BiomeId, p: Pos) -> bool {
     let core = ctx.lv.core;
-    if !core.biomes.cold_enough_to_snow(biome, p.x, p.y, p.z, core.sea_level) {
+    if !core
+        .biomes
+        .cold_enough_to_snow(biome, p.x, p.y, p.z, core.sea_level)
+    {
         return false;
     }
     if ctx.lv.outside_height(p.y) {
@@ -830,14 +1006,19 @@ fn should_freeze(ctx: &Ctx, biome: super::super::biome::BiomeId, p: Pos) -> bool
 fn should_snow(ctx: &Ctx, biome: super::super::biome::BiomeId, p: Pos) -> bool {
     let core = ctx.lv.core;
     let info = core.biomes.get(biome);
-    if !info.has_precipitation || !core.biomes.cold_enough_to_snow(biome, p.x, p.y, p.z, core.sea_level) {
+    if !info.has_precipitation
+        || !core
+            .biomes
+            .cold_enough_to_snow(biome, p.x, p.y, p.z, core.sea_level)
+    {
         return false;
     }
     if ctx.lv.outside_height(p.y) {
         return false;
     }
     let s = ctx.lv.get(p);
-    (blockinfo::is_air(s) || is(s, "minecraft:snow")) && can_survive(ctx.lv, ctx.tags(), states().snow, p)
+    (blockinfo::is_air(s) || is(s, "minecraft:snow"))
+        && can_survive(ctx.lv, ctx.tags(), states().snow, p)
 }
 
 fn freeze_top_layer(ctx: &mut Ctx, pos: Pos) -> bool {
@@ -907,7 +1088,8 @@ fn lake(ctx: &mut Ctx, fluid_p: &StateProvider, barrier_p: &StateProvider, pos: 
             for y in 0..8 {
                 if edge(x, z, y) {
                     let s = ctx.lv.get(base.offset(x as i32, y as i32, z as i32));
-                    if y >= 4 && matches!(blockinfo::name(s), "minecraft:water" | "minecraft:lava") {
+                    if y >= 4 && matches!(blockinfo::name(s), "minecraft:water" | "minecraft:lava")
+                    {
                         return false;
                     }
                     if y < 4 && !legacy_solid(s) && s != fluid {
@@ -924,7 +1106,8 @@ fn lake(ctx: &mut Ctx, fluid_p: &StateProvider, barrier_p: &StateProvider, pos: 
                 if at(x, z, y) {
                     let p = base.offset(x as i32, y as i32, z as i32);
                     if !cannot.contains(ctx.lv.get(p)) {
-                        ctx.lv.set(p, if y >= 4 { states().cave_air } else { fluid });
+                        ctx.lv
+                            .set(p, if y >= 4 { states().cave_air } else { fluid });
                     }
                 }
             }
@@ -932,7 +1115,10 @@ fn lake(ctx: &mut Ctx, fluid_p: &StateProvider, barrier_p: &StateProvider, pos: 
     }
     let barrier = barrier_p.get(ctx.r, base);
     if !blockinfo::is_air(barrier) {
-        let stone_cannot = ctx.d.block_tags.block_tag("minecraft:lava_pool_stone_cannot_replace");
+        let stone_cannot = ctx
+            .d
+            .block_tags
+            .block_tag("minecraft:lava_pool_stone_cannot_replace");
         for x in 0..16 {
             for z in 0..16 {
                 for y in 0..8 {
@@ -1052,7 +1238,10 @@ fn ice_spike(ctx: &mut Ctx, pos: Pos) -> bool {
         p = p.above(10 + ctx.r.next_int_bounded(30));
     }
     let replaceable = |ctx: &Ctx, s: BlockStateId| {
-        blockinfo::is_air(s) || ctx.d.tags.dirt.contains(s) || is(s, "minecraft:snow_block") || is(s, "minecraft:ice")
+        blockinfo::is_air(s)
+            || ctx.d.tags.dirt.contains(s)
+            || is(s, "minecraft:snow_block")
+            || is(s, "minecraft:ice")
     };
     for i in 0..h {
         let f = (1.0 - i as f32 / h as f32) * w as f32;
@@ -1138,8 +1327,15 @@ fn blue_ice(ctx: &mut Ctx, pos: Pos) -> bool {
             let dz = ctx.r.next_int_bounded(range) - ctx.r.next_int_bounded(range);
             let q = pos.offset(dx, dy, dz);
             let s = ctx.lv.get(q);
-            if blockinfo::is_air(s) || is(s, "minecraft:water") || is(s, "minecraft:packed_ice") || is(s, "minecraft:ice") {
-                if Dir::ALL.iter().any(|d| is(ctx.lv.get(q.rel(*d)), "minecraft:blue_ice")) {
+            if blockinfo::is_air(s)
+                || is(s, "minecraft:water")
+                || is(s, "minecraft:packed_ice")
+                || is(s, "minecraft:ice")
+            {
+                if Dir::ALL
+                    .iter()
+                    .any(|d| is(ctx.lv.get(q.rel(*d)), "minecraft:blue_ice"))
+                {
                     ctx.lv.set(q, st.blue_ice);
                 }
             }
@@ -1223,7 +1419,11 @@ fn multiface(
         return true;
     }
     for d in shuffled.clone() {
-        let others: Vec<Dir> = dirs.iter().copied().filter(|x| *x != d.opposite()).collect();
+        let others: Vec<Dir> = dirs
+            .iter()
+            .copied()
+            .filter(|x| *x != d.opposite())
+            .collect();
         let others = shuffle(ctx, &others);
         let mut p = pos;
         for _ in 0..search {
@@ -1240,11 +1440,22 @@ fn multiface(
     false
 }
 
-fn try_multiface(ctx: &mut Ctx, block: BlockStateId, spread: f32, on: &BlockSet, p: Pos, dirs: &[Dir]) -> bool {
+fn try_multiface(
+    ctx: &mut Ctx,
+    block: BlockStateId,
+    spread: f32,
+    on: &BlockSet,
+    p: Pos,
+    dirs: &[Dir],
+) -> bool {
     for d in dirs {
         if on.contains(ctx.lv.get(p.rel(*d))) {
             let here = ctx.lv.get(p);
-            let mut s = if blockinfo::block_of(here) == blockinfo::block_of(block) { here } else { block };
+            let mut s = if blockinfo::block_of(here) == blockinfo::block_of(block) {
+                here
+            } else {
+                block
+            };
             s = blockinfo::with_prop(s, d.name(), "true");
             let wet = is(here, "minecraft:water");
             s = blockinfo::with_prop(s, "waterlogged", if wet { "true" } else { "false" });
@@ -1269,7 +1480,14 @@ pub(crate) fn shuffle<T: Clone>(ctx: &mut Ctx, v: &[T]) -> Vec<T> {
     out
 }
 
-fn huge_mushroom(ctx: &mut Ctx, red: bool, cap: &StateProvider, stem: &StateProvider, radius: i32, pos: Pos) -> bool {
+fn huge_mushroom(
+    ctx: &mut Ctx,
+    red: bool,
+    cap: &StateProvider,
+    stem: &StateProvider,
+    radius: i32,
+    pos: Pos,
+) -> bool {
     let mut height = ctx.r.next_int_bounded(3) + 4;
     if ctx.r.next_int_bounded(12) == 0 {
         height *= 2;
@@ -1300,7 +1518,10 @@ fn huge_mushroom(ctx: &mut Ctx, red: bool, cap: &StateProvider, stem: &StateProv
             }
         }
     }
-    let by_mush = ctx.d.block_tags.block_tag("minecraft:replaceable_by_mushrooms");
+    let by_mush = ctx
+        .d
+        .block_tags
+        .block_tag("minecraft:replaceable_by_mushrooms");
     let put = |ctx: &mut Ctx, p: Pos, s: BlockStateId| {
         let cur = ctx.lv.get(p);
         if blockinfo::is_air(cur) || by_mush.contains(cur) {

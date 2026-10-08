@@ -529,7 +529,9 @@ fn read_parameter(p: &Json, name: &str) -> Result<Parameter, BuildError> {
                 max: quantize(hi as f32),
             })
         }
-        other => Err(BuildError::new(format!("`{name}`: unexpected shape {other:?}"))),
+        other => Err(BuildError::new(format!(
+            "`{name}`: unexpected shape {other:?}"
+        ))),
     }
 }
 

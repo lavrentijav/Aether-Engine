@@ -12,6 +12,8 @@
 //! order chunks were generated in even in vanilla, so 100% is not expected
 //! above ground; below ground it should be close.
 
+#![allow(clippy::type_complexity)]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -22,13 +24,16 @@ use aether_worldgen::vanilla::blockinfo;
 use aether_worldgen::vanilla::generator::{Stage, VanillaGenerator};
 
 fn compound_get<'a>(v: &'a Nbt, key: &str) -> Option<&'a Nbt> {
-    let Nbt::Compound(fields) = v else { return None };
+    let Nbt::Compound(fields) = v else {
+        return None;
+    };
     fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
 fn chunk_payload(data: &[u8], idx: usize) -> Option<Vec<u8>> {
     let e = idx * 4;
-    let offset = ((data[e] as usize) << 16) | ((data[e + 1] as usize) << 8) | (data[e + 2] as usize);
+    let offset =
+        ((data[e] as usize) << 16) | ((data[e + 1] as usize) << 8) | (data[e + 2] as usize);
     if offset == 0 || data[e + 3] == 0 {
         return None;
     }
@@ -50,7 +55,13 @@ fn state_of(entry: &Nbt) -> BlockStateId {
     if let Some(Nbt::Compound(p)) = compound_get(entry, "Properties") {
         let parts: Vec<String> = p
             .iter()
-            .filter_map(|(k, v)| if let Nbt::String(v) = v { Some(format!("{k}={v}")) } else { None })
+            .filter_map(|(k, v)| {
+                if let Nbt::String(v) = v {
+                    Some(format!("{k}={v}"))
+                } else {
+                    None
+                }
+            })
             .collect();
         s = format!("{name}[{}]", parts.join(","));
     }
@@ -59,16 +70,24 @@ fn state_of(entry: &Nbt) -> BlockStateId {
 
 /// The chunk's blocks, `((y + 64) * 16 + z) * 16 + x`.
 fn decode(root: &Nbt) -> Option<Vec<BlockStateId>> {
-    let Nbt::List(list) = compound_get(root, "sections")? else { return None };
+    let Nbt::List(list) = compound_get(root, "sections")? else {
+        return None;
+    };
     let mut out = vec![BlockStateId::AIR; 384 * 256];
     for sec in list {
-        let Some(Nbt::Byte(cy)) = compound_get(sec, "Y") else { continue };
+        let Some(Nbt::Byte(cy)) = compound_get(sec, "Y") else {
+            continue;
+        };
         let cy = *cy as i32;
         if !(-4..20).contains(&cy) {
             continue;
         }
-        let Some(bs) = compound_get(sec, "block_states") else { continue };
-        let Some(Nbt::List(pal)) = compound_get(bs, "palette") else { continue };
+        let Some(bs) = compound_get(sec, "block_states") else {
+            continue;
+        };
+        let Some(Nbt::List(pal)) = compound_get(bs, "palette") else {
+            continue;
+        };
         let palette: Vec<BlockStateId> = pal.iter().map(state_of).collect();
         let base = ((cy + 4) * 16) as usize * 256;
         match compound_get(bs, "data") {
@@ -106,7 +125,9 @@ fn top(blocks: &[BlockStateId], x: usize, z: usize) -> (BlockStateId, i32) {
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     if a.len() < 3 {
-        eprintln!("usage: vanilla_world_compare <pack-root> <seed> <region-dir> [vanilla.ppm ours.ppm]");
+        eprintln!(
+            "usage: vanilla_world_compare <pack-root> <seed> <region-dir> [vanilla.ppm ours.ppm]"
+        );
         std::process::exit(2);
     }
     let seed: i64 = a[1].parse().unwrap();
@@ -115,7 +136,7 @@ fn main() {
     let mut chunks: BTreeMap<(i32, i32), Vec<BlockStateId>> = BTreeMap::new();
     for e in std::fs::read_dir(&dir).expect("region dir") {
         let p = e.unwrap().path();
-        if p.extension().is_none_or(|x| x != "mca") {
+        if p.extension().map_or(true, |x| x != "mca") {
             continue;
         }
         let name = p.file_name().unwrap().to_str().unwrap().to_string();
@@ -123,14 +144,21 @@ fn main() {
         let (rx, rz): (i32, i32) = (parts[1].parse().unwrap(), parts[2].parse().unwrap());
         let data = std::fs::read(&p).unwrap();
         for idx in 0..1024 {
-            let Some(payload) = chunk_payload(&data, idx) else { continue };
-            let Ok(root) = nbt::parse(&payload) else { continue };
+            let Some(payload) = chunk_payload(&data, idx) else {
+                continue;
+            };
+            let Ok(root) = nbt::parse(&payload) else {
+                continue;
+            };
             match compound_get(&root, "Status") {
                 Some(Nbt::String(s)) if s == "minecraft:full" => {}
                 _ => continue,
             }
             if let Some(b) = decode(&root) {
-                chunks.insert((rx * 32 + (idx % 32) as i32, rz * 32 + (idx / 32) as i32), b);
+                chunks.insert(
+                    (rx * 32 + (idx % 32) as i32, rz * 32 + (idx / 32) as i32),
+                    b,
+                );
             }
         }
     }
@@ -142,7 +170,15 @@ fn main() {
     let mut ours: BTreeMap<(i32, i32), Vec<BlockStateId>> = BTreeMap::new();
     let t = std::time::Instant::now();
     for (&(cx, cz), want) in &chunks {
-        let got = gen.chunk_at_stage(cx, cz, if only_carvers { Stage::Carvers } else { Stage::Features });
+        let got = gen.chunk_at_stage(
+            cx,
+            cz,
+            if only_carvers {
+                Stage::Carvers
+            } else {
+                Stage::Features
+            },
+        );
         for i in 0..want.len() {
             total += 1;
             let y = (i / 256) as i32 - 64;
@@ -156,8 +192,12 @@ fn main() {
                 }
             } else {
                 let k = (
-                    blockinfo::name(want[i]).trim_start_matches("minecraft:").to_string(),
-                    blockinfo::name(got[i]).trim_start_matches("minecraft:").to_string(),
+                    blockinfo::name(want[i])
+                        .trim_start_matches("minecraft:")
+                        .to_string(),
+                    blockinfo::name(got[i])
+                        .trim_start_matches("minecraft:")
+                        .to_string(),
                 );
                 *diffs.entry(k).or_default() += 1;
             }
@@ -173,12 +213,72 @@ fn main() {
         ours.insert((cx, cz), got);
     }
     println!("generated in {:?}", t.elapsed());
+    // Trunk bases (a log or stem whose block below is not one): compares
+    // where trees went, independent of their exact shapes.
+    let bases = |src: &BTreeMap<(i32, i32), Vec<BlockStateId>>| {
+        let mut out = std::collections::BTreeSet::new();
+        for (&(cx, cz), b) in src {
+            for i in 256..b.len() {
+                let n = blockinfo::name(b[i]);
+                let log = |n: &str| n.ends_with("_log") || n == "minecraft:mushroom_stem";
+                if log(n) && !log(blockinfo::name(b[i - 256])) {
+                    out.insert((
+                        cx * 16 + (i & 15) as i32,
+                        (i / 256) as i32 - 64,
+                        cz * 16 + ((i >> 4) & 15) as i32,
+                        n,
+                    ));
+                }
+            }
+        }
+        out
+    };
+    let ores = |src: &BTreeMap<(i32, i32), Vec<BlockStateId>>| {
+        let mut out = std::collections::BTreeSet::new();
+        for (&(cx, cz), b) in src {
+            for (i, s) in b.iter().enumerate() {
+                if blockinfo::name(*s).ends_with("_ore") {
+                    out.insert((cx, cz, i));
+                }
+            }
+        }
+        out
+    };
+    let (ov, oo) = (ores(&chunks), ores(&ours));
+    println!(
+        "ore blocks: vanilla {} ours {} common {}",
+        ov.len(),
+        oo.len(),
+        ov.intersection(&oo).count()
+    );
+    let (bv, bo) = (bases(&chunks), bases(&ours));
+    let common = bv.intersection(&bo).count();
+    println!(
+        "trunk bases: vanilla {} ours {} common {}",
+        bv.len(),
+        bo.len(),
+        common
+    );
+    if std::env::var_os("LIST_BASES").is_some() {
+        for b in bv.iter().take(40) {
+            println!("  v {:?} {}", b, if bo.contains(b) { "=" } else { "" });
+        }
+        for b in bo.iter().take(40) {
+            println!("  o {:?} {}", b, if bv.contains(b) { "=" } else { "" });
+        }
+    }
     let pct = |a: usize, b: usize| a as f64 * 100.0 / b.max(1) as f64;
     println!("blocks:        {same} / {total} ({:.3}%)", pct(same, total));
-    println!("below y=0:     {below_same} / {below_total} ({:.3}%)", pct(below_same, below_total));
-    println!("top block:     {top_same} / {cols} ({:.2}%)", pct(top_same, cols));
+    println!(
+        "below y=0:     {below_same} / {below_total} ({:.3}%)",
+        pct(below_same, below_total)
+    );
+    println!(
+        "top block:     {top_same} / {cols} ({:.2}%)",
+        pct(top_same, cols)
+    );
     let mut d: Vec<_> = diffs.into_iter().collect();
-    d.sort_by(|a, b| b.1.cmp(&a.1));
+    d.sort_by_key(|e| std::cmp::Reverse(e.1));
     println!("most common differences (vanilla -> ours):");
     for ((w, g), n) in d.into_iter().take(25) {
         println!("  {n:>7}  {w} -> {g}");
@@ -238,8 +338,14 @@ fn color(n: &str, y: i32) -> [u8; 3] {
             "red_mushroom_block" => [200, 46, 45],
             "brown_mushroom_block" => [149, 111, 81],
             _ => {
-                let h = n.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
-                [(h & 0xff) as u8, ((h >> 8) & 0xff) as u8, ((h >> 16) & 0xff) as u8]
+                let h = n
+                    .bytes()
+                    .fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+                [
+                    (h & 0xff) as u8,
+                    ((h >> 8) & 0xff) as u8,
+                    ((h >> 16) & 0xff) as u8,
+                ]
             }
         }
     };

@@ -31,9 +31,8 @@ fn table() -> &'static [u8] {
             let mut f = 0u8;
             match short {
                 "air" | "cave_air" | "void_air" => f |= AIR,
-                "water" | "bubble_column" | "kelp" | "kelp_plant" | "seagrass" | "tall_seagrass" => {
-                    f |= WATER
-                }
+                "water" | "bubble_column" | "kelp" | "kelp_plant" | "seagrass"
+                | "tall_seagrass" => f |= WATER,
                 "lava" => f |= LAVA,
                 _ => {}
             }
@@ -49,7 +48,10 @@ fn table() -> &'static [u8] {
             let p = blocks::props_of_state(state).unwrap_or_default();
             // `blocksMotion()`: a collision shape, except the two blocks the
             // game singles out.
-            if p.collision && short != "cobweb" && short != "bamboo_sapling" && f & (WATER | LAVA) == 0
+            if p.collision
+                && short != "cobweb"
+                && short != "bamboo_sapling"
+                && f & (WATER | LAVA) == 0
                 || (p.collision && full.contains("waterlogged=true"))
             {
                 f |= MOTION;
@@ -109,7 +111,9 @@ pub fn is_leaves(s: BlockStateId) -> bool {
 
 /// The block name of a state, `minecraft:` prefixed.
 pub fn name(s: BlockStateId) -> &'static str {
-    blocks::block_of_state(s).map(|(_, n)| n).unwrap_or("minecraft:air")
+    blocks::block_of_state(s)
+        .map(|(_, n)| n)
+        .unwrap_or("minecraft:air")
 }
 
 /// The block id (not state) of a state.
@@ -151,7 +155,9 @@ pub fn with_prop(s: BlockStateId, key: &str, value: &str) -> BlockStateId {
     };
     slot.1 = value;
     let owned: Vec<(&str, &str)> = vals.iter().map(|(k, v)| (*k, *v)).collect();
-    props::state_with(block, &owned).map(BlockStateId).unwrap_or(s)
+    props::state_with(block, &owned)
+        .map(BlockStateId)
+        .unwrap_or(s)
 }
 
 /// One property's value.
@@ -178,7 +184,9 @@ mod tests {
         assert!(!blocks_motion(water) && has_water(water) && is_fluid_source(water));
         assert!(!blocks_motion(grass));
         assert!(is_air(air) && !is_air(stone));
-        let leaves = parse_state("minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]").unwrap();
+        let leaves =
+            parse_state("minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]")
+                .unwrap();
         assert!(is_leaves(leaves) && blocks_motion(leaves));
         let log = parse_state("minecraft:oak_log[axis=x]").unwrap();
         assert_eq!(prop(log, "axis"), Some("x"));

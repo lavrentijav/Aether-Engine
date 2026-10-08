@@ -5,7 +5,11 @@ use std::sync::OnceLock;
 
 fn table() -> &'static [f32] {
     static T: OnceLock<Vec<f32>> = OnceLock::new();
-    T.get_or_init(|| (0..65536).map(|i| (i as f64 / 10_430.378_350_470_453).sin() as f32).collect())
+    T.get_or_init(|| {
+        (0..65536)
+            .map(|i| (i as f64 / 10_430.378_350_470_453).sin() as f32)
+            .collect()
+    })
 }
 
 /// `Mth.sin`: a 65536-entry lookup, not `f64::sin`.

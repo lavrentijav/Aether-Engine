@@ -236,7 +236,10 @@ impl WorldgenRandom {
         self.set_seed(level_seed);
         let a = self.next_long() | 1;
         let b = self.next_long() | 1;
-        let s = (x as i64).wrapping_mul(a).wrapping_add((z as i64).wrapping_mul(b)) ^ level_seed;
+        let s = (x as i64)
+            .wrapping_mul(a)
+            .wrapping_add((z as i64).wrapping_mul(b))
+            ^ level_seed;
         self.set_seed(s);
         s
     }

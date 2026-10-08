@@ -22,6 +22,8 @@
 //! *not* by running this crate's own writer backwards. A decoder mirrored off
 //! an encoder agrees with it by construction and proves nothing.
 
+#![allow(clippy::type_complexity)]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -166,8 +168,10 @@ fn main() {
         100.0 * cached_agree as f64 / cells.max(1) as f64
     );
     if agree != cells {
-        println!("of the {} disagreements, {tied_mismatches} sat on an exact distance tie",
-            cells - agree);
+        println!(
+            "of the {} disagreements, {tied_mismatches} sat on an exact distance tie",
+            cells - agree
+        );
         println!("\ntop confusions (vanilla -> ours):");
         let mut v: Vec<_> = confusion.into_iter().collect();
         v.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
@@ -204,7 +208,8 @@ fn region_coords(path: &Path) -> (i32, i32) {
 
 fn chunk_payload(data: &[u8], idx: usize) -> Option<Vec<u8>> {
     let e = idx * 4;
-    let offset = ((data[e] as usize) << 16) | ((data[e + 1] as usize) << 8) | (data[e + 2] as usize);
+    let offset =
+        ((data[e] as usize) << 16) | ((data[e + 1] as usize) << 8) | (data[e + 2] as usize);
     let sectors = data[e + 3] as usize;
     if offset == 0 || sectors == 0 {
         return None;

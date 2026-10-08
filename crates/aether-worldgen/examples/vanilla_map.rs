@@ -9,6 +9,8 @@
 //! Also prints the generation time per column and the feature types the
 //! decorator skipped.
 
+#![allow(clippy::type_complexity)]
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -94,8 +96,14 @@ fn color(name: &str) -> [u8; 3] {
             } else if n.contains("ore") {
                 [150, 150, 150]
             } else {
-                let h = n.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
-                [(h & 0xff) as u8, ((h >> 8) & 0xff) as u8, ((h >> 16) & 0xff) as u8]
+                let h = n
+                    .bytes()
+                    .fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+                [
+                    (h & 0xff) as u8,
+                    ((h >> 8) & 0xff) as u8,
+                    ((h >> 16) & 0xff) as u8,
+                ]
             }
         }
     }
@@ -116,8 +124,13 @@ fn main() {
     let gen = VanillaGenerator::new(&a[0], seed as u64).unwrap_or_else(|e| panic!("{e}"));
     println!("load: {:?}", t0.elapsed());
     let (cx0, cz0) = (x0.div_euclid(16), z0.div_euclid(16));
-    let (cx1, cz1) = ((x0 + size - 1).div_euclid(16), (z0 + size - 1).div_euclid(16));
-    let chunks: Vec<(i32, i32)> = (cz0..=cz1).flat_map(|z| (cx0..=cx1).map(move |x| (x, z))).collect();
+    let (cx1, cz1) = (
+        (x0 + size - 1).div_euclid(16),
+        (z0 + size - 1).div_euclid(16),
+    );
+    let chunks: Vec<(i32, i32)> = (cz0..=cz1)
+        .flat_map(|z| (cx0..=cx1).map(move |x| (x, z)))
+        .collect();
     let next = AtomicUsize::new(0);
     // Per pixel: (top block, its y, water depth above the floor).
     let mut pixels = vec![(BlockStateId::AIR, 0i32, 0i32); (size * size) as usize];
@@ -129,7 +142,9 @@ fn main() {
                     let mut out = Vec::new();
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(&(cx, cz)) = chunks.get(i) else { break };
+                        let Some(&(cx, cz)) = chunks.get(i) else {
+                            break;
+                        };
                         let col = gen.generate_column(cx, cz);
                         let get = |lx: usize, y: i32, lz: usize| -> BlockStateId {
                             let cy = y.div_euclid(16) as i8;
@@ -139,13 +154,26 @@ fn main() {
                                 .map(|(_, sc)| sc.get(lx, y.rem_euclid(16) as usize, lz))
                                 .unwrap_or(BlockStateId::AIR)
                         };
-                        let name = |id: BlockStateId| blocks::block_of_state(id).map(|b| b.1).unwrap_or("minecraft:air");
-                        let top_y = col.sections.last().map(|(c, _)| *c as i32 * 16 + 15).unwrap_or(-64);
+                        let name = |id: BlockStateId| {
+                            blocks::block_of_state(id)
+                                .map(|b| b.1)
+                                .unwrap_or("minecraft:air")
+                        };
+                        let top_y = col
+                            .sections
+                            .last()
+                            .map(|(c, _)| *c as i32 * 16 + 15)
+                            .unwrap_or(-64);
                         for lz in 0..16usize {
                             for lx in 0..16usize {
                                 let mut y = top_y;
                                 while y > -64
-                                    && matches!(name(get(lx, y, lz)), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+                                    && matches!(
+                                        name(get(lx, y, lz)),
+                                        "minecraft:air"
+                                            | "minecraft:cave_air"
+                                            | "minecraft:void_air"
+                                    )
                                 {
                                     y -= 1;
                                 }
@@ -187,7 +215,9 @@ fn main() {
     for pz in 0..size {
         for px in 0..size {
             let (id, y, depth) = pixels[(pz * size + px) as usize];
-            let name = blocks::block_of_state(id).map(|b| b.1).unwrap_or("minecraft:air");
+            let name = blocks::block_of_state(id)
+                .map(|b| b.1)
+                .unwrap_or("minecraft:air");
             let mut c = color(name);
             let shade = if px > 0 && pz > 0 {
                 let (_, yn, _) = pixels[((pz - 1) * size + px - 1) as usize];

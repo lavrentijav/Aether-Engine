@@ -91,10 +91,7 @@ impl DataPack {
     /// operator plausibly has on disk.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, BuildError> {
         let root = root.as_ref();
-        let candidates = [
-            root.join("data/minecraft/worldgen"),
-            root.to_path_buf(),
-        ];
+        let candidates = [root.join("data/minecraft/worldgen"), root.to_path_buf()];
         for c in candidates {
             if c.join("noise_settings").is_dir() && c.join("density_function").is_dir() {
                 return Ok(Self { worldgen: c });
@@ -107,7 +104,10 @@ impl DataPack {
     }
 
     fn read(&self, kind: &str, id: &str) -> Result<Json, BuildError> {
-        let path = self.worldgen.join(kind).join(format!("{}.json", strip_ns(id)));
+        let path = self
+            .worldgen
+            .join(kind)
+            .join(format!("{}.json", strip_ns(id)));
         let text = std::fs::read_to_string(&path)
             .map_err(|e| BuildError(format!("cannot read {}: {e}", path.display())))?;
         Json::parse(&text).map_err(|e| BuildError(format!("{}: {e}", path.display())))
@@ -273,10 +273,7 @@ impl NoiseRegistry {
             .collect();
         let mut r = self.factory.from_hash_of(&key);
         let noise = Arc::new(NormalNoise::create(&mut r, first_octave, &amps));
-        self.cache
-            .lock()
-            .unwrap()
-            .insert(key, Arc::clone(&noise));
+        self.cache.lock().unwrap().insert(key, Arc::clone(&noise));
         Ok(noise)
     }
 }
@@ -667,14 +664,14 @@ impl Node {
                 let z = ctx.z as f64 * xz_scale + shift_z.compute(ctx);
                 noise.get_value(x, y, z)
             }
-            Node::ShiftA(n) => {
-                n.get_value(ctx.x as f64 * 0.25, 0.0, ctx.z as f64 * 0.25) * 4.0
-            }
-            Node::ShiftB(n) => {
-                n.get_value(ctx.z as f64 * 0.25, ctx.x as f64 * 0.25, 0.0) * 4.0
-            }
+            Node::ShiftA(n) => n.get_value(ctx.x as f64 * 0.25, 0.0, ctx.z as f64 * 0.25) * 4.0,
+            Node::ShiftB(n) => n.get_value(ctx.z as f64 * 0.25, ctx.x as f64 * 0.25, 0.0) * 4.0,
             Node::Shift(n) => {
-                n.get_value(ctx.x as f64 * 0.25, ctx.y as f64 * 0.25, ctx.z as f64 * 0.25) * 4.0
+                n.get_value(
+                    ctx.x as f64 * 0.25,
+                    ctx.y as f64 * 0.25,
+                    ctx.z as f64 * 0.25,
+                ) * 4.0
             }
             Node::YClampedGradient {
                 from_y,
@@ -766,8 +763,8 @@ impl Node {
             } => {
                 // The ceiling is snapped *down* to a cell boundary first, so
                 // the scan only ever probes cell corners.
-                let start = (upper_bound.compute(ctx) / *cell_height as f64).floor() as i32
-                    * cell_height;
+                let start =
+                    (upper_bound.compute(ctx) / *cell_height as f64).floor() as i32 * cell_height;
                 if start <= *lower_bound {
                     return *lower_bound as f64;
                 }
@@ -851,15 +848,7 @@ thread_local! {
 /// Pure memoization of a pure function, so it cannot change a result — it is
 /// here only because the corner subtree is the most expensive thing in the
 /// graph.
-fn corners_of(
-    id: u32,
-    inner: &Arc<Node>,
-    x0: i32,
-    y0: i32,
-    z0: i32,
-    w: i32,
-    h: i32,
-) -> [f64; 8] {
+fn corners_of(id: u32, inner: &Arc<Node>, x0: i32, y0: i32, z0: i32, w: i32, h: i32) -> [f64; 8] {
     if let Some(v) = grid_corners(id, inner, x0, y0, z0, w, h) {
         return v;
     }
@@ -882,9 +871,8 @@ fn corners_of(
         return hit;
     }
 
-    let at = |dx: i32, dy: i32, dz: i32| {
-        inner.compute(Ctx::new(x0 + dx * w, y0 + dy * h, z0 + dz * w))
-    };
+    let at =
+        |dx: i32, dy: i32, dz: i32| inner.compute(Ctx::new(x0 + dx * w, y0 + dy * h, z0 + dz * w));
     let v = [
         at(0, 0, 0),
         at(0, 0, 1),
@@ -933,7 +921,14 @@ pub struct ChunkGridGuard(());
 
 impl ChunkGridGuard {
     /// Activate the lattice for one chunk.
-    pub fn enter(chunk_x: i32, chunk_z: i32, min_y: i32, height: i32, cell_width: i32, cell_height: i32) -> Self {
+    pub fn enter(
+        chunk_x: i32,
+        chunk_z: i32,
+        min_y: i32,
+        height: i32,
+        cell_width: i32,
+        cell_height: i32,
+    ) -> Self {
         CHUNK_GRID.with(|g| {
             *g.borrow_mut() = Some(ChunkGrid {
                 x0: chunk_x * 16,
@@ -956,7 +951,15 @@ impl Drop for ChunkGridGuard {
     }
 }
 
-fn grid_corners(id: u32, inner: &Arc<Node>, x0: i32, y0: i32, z0: i32, w: i32, h: i32) -> Option<[f64; 8]> {
+fn grid_corners(
+    id: u32,
+    inner: &Arc<Node>,
+    x0: i32,
+    y0: i32,
+    z0: i32,
+    w: i32,
+    h: i32,
+) -> Option<[f64; 8]> {
     let (idx, nx, ny) = CHUNK_GRID.with(|g| {
         let g = g.borrow();
         let g = g.as_ref()?;
@@ -974,7 +977,16 @@ fn grid_corners(id: u32, inner: &Arc<Node>, x0: i32, y0: i32, z0: i32, w: i32, h
         Some(((ix, iy, iz), g.nx, g.ny))
     })?;
     let at = |dx: usize, dy: usize, dz: usize| ((idx.0 + dx) * ny + idx.1 + dy) * nx + idx.2 + dz;
-    let order = [(0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1), (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1)];
+    let order = [
+        (0, 0, 0),
+        (0, 0, 1),
+        (0, 1, 0),
+        (0, 1, 1),
+        (1, 0, 0),
+        (1, 0, 1),
+        (1, 1, 0),
+        (1, 1, 1),
+    ];
     let mut out = [f64::NAN; 8];
     CHUNK_GRID.with(|g| {
         let mut g = g.borrow_mut();
@@ -994,7 +1006,11 @@ fn grid_corners(id: u32, inner: &Arc<Node>, x0: i32, y0: i32, z0: i32, w: i32, h
     });
     for (k, (dx, dy, dz)) in order.iter().enumerate() {
         if out[k].is_nan() {
-            let c = inner.compute(Ctx::new(x0 + *dx as i32 * w, y0 + *dy as i32 * h, z0 + *dz as i32 * w));
+            let c = inner.compute(Ctx::new(
+                x0 + *dx as i32 * w,
+                y0 + *dy as i32 * h,
+                z0 + *dz as i32 * w,
+            ));
             out[k] = c;
             let i = at(*dx, *dy, *dz);
             CHUNK_GRID.with(|g| {
@@ -1374,7 +1390,11 @@ impl<'a> Builder<'a> {
                 type_1: match v.get("rarity_value_mapper").and_then(Json::as_str) {
                     Some("type_1") => true,
                     Some("type_2") => false,
-                    other => return err(format!("weird_scaled_sampler: bad rarity_value_mapper {other:?}")),
+                    other => {
+                        return err(format!(
+                            "weird_scaled_sampler: bad rarity_value_mapper {other:?}"
+                        ))
+                    }
                 },
             },
             "constant" => Node::Const(Self::num(v, "argument")?),
@@ -1430,7 +1450,9 @@ impl<'a> Builder<'a> {
         match v {
             Json::Num(n) => Ok(SplineValue::Const(*n as f32)),
             Json::Obj(_) => Ok(SplineValue::Nested(self.build_spline(v)?)),
-            other => err(format!("spline value: expected number or spline, got {other:?}")),
+            other => err(format!(
+                "spline value: expected number or spline, got {other:?}"
+            )),
         }
     }
 }

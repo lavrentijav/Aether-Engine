@@ -91,6 +91,20 @@
 //! algorithm. They are read at run time from a copy of the game the operator
 //! already has, and deliberately not vendored into this repository.
 
+// Ports of Java loops read better index-for-index, and the float literals
+// are the game's own constants, spelled as the game spells them.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::excessive_precision,
+    clippy::int_plus_one,
+    clippy::manual_range_contains,
+    clippy::collapsible_if,
+    clippy::assertions_on_constants,
+    clippy::items_after_test_module,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+
 pub mod aquifer;
 pub mod biome;
 pub mod biome_manager;

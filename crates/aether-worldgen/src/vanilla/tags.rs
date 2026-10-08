@@ -24,7 +24,10 @@ impl BlockSet {
     /// Whether a state's block is in the set.
     #[inline]
     pub fn contains(&self, s: BlockStateId) -> bool {
-        self.0.get(blockinfo::block_of(s) as usize).copied().unwrap_or(false)
+        self.0
+            .get(blockinfo::block_of(s) as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Whether a block id is in the set.
@@ -53,7 +56,11 @@ impl Tags {
     /// missing tag is empty.
     pub fn block_tag(&self, id: &str) -> BlockSet {
         let id = id.trim_start_matches('#');
-        let id = if id.contains(':') { id.to_string() } else { format!("minecraft:{id}") };
+        let id = if id.contains(':') {
+            id.to_string()
+        } else {
+            format!("minecraft:{id}")
+        };
         if let Some(s) = self.cache.lock().unwrap().get(&id) {
             return s.clone();
         }
@@ -62,6 +69,39 @@ impl Tags {
         let set = BlockSet(Arc::new(bits));
         self.cache.lock().unwrap().insert(id, set.clone());
         set
+    }
+
+    /// The tag's blocks in the game's order (file order, nested tags
+    /// expanded in place, first occurrence kept) — what
+    /// `getRandomElementOf` indexes into.
+    pub fn block_tag_list(&self, id: &str) -> Vec<u16> {
+        let id = id.trim_start_matches('#');
+        let mut out = Vec::new();
+        self.collect_list(id, &mut out, 0);
+        out
+    }
+
+    fn collect_list(&self, id: &str, out: &mut Vec<u16>, depth: usize) {
+        if depth > 32 {
+            return;
+        }
+        let Some(j) = self.pack.tag_json("block", id) else {
+            return;
+        };
+        for v in j.get("values").and_then(Json::as_arr).unwrap_or(&[]) {
+            let name = match v {
+                Json::Str(s) => s.as_str(),
+                Json::Obj(_) => v.str_of("id").unwrap_or(""),
+                _ => continue,
+            };
+            if let Some(tag) = name.strip_prefix('#') {
+                self.collect_list(tag, out, depth + 1);
+            } else if let Some(b) = blocks::block_id_of(name) {
+                if !out.contains(&b) {
+                    out.push(b);
+                }
+            }
+        }
     }
 
     fn collect(&self, id: &str, bits: &mut [bool], depth: usize) {

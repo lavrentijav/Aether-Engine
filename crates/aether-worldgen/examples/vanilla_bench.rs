@@ -8,6 +8,8 @@
 //! ones before them), then full columns — decoration included — are timed
 //! over a square, the way a joining player's view fills.
 
+#![allow(clippy::type_complexity)]
+
 use std::time::Instant;
 
 use aether_worldgen::vanilla::generator::{Stage, VanillaGenerator};
@@ -36,7 +38,10 @@ fn main() {
         for i in 0..n {
             let _ = gen.proto_chunk(100 + i, 50, stage);
         }
-        println!("{name:>8} (cumulative): {:?} per chunk", t.elapsed() / n as u32);
+        println!(
+            "{name:>8} (cumulative): {:?} per chunk",
+            t.elapsed() / n as u32
+        );
     }
 
     let side = (n as f64).sqrt().ceil() as i32 + 2;

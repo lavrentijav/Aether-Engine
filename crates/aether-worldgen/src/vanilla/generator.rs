@@ -276,7 +276,11 @@ impl VanillaGenerator {
         Self::build(pack_root, biome_source, seed)
     }
 
-    fn build(pack_root: impl AsRef<Path>, biome_source: OverworldBiomeSource, seed: u64) -> Result<Self, BuildError> {
+    fn build(
+        pack_root: impl AsRef<Path>,
+        biome_source: OverworldBiomeSource,
+        seed: u64,
+    ) -> Result<Self, BuildError> {
         let terrain = Terrain::load(&pack_root, seed)?;
         let pack = DataPack::open(&pack_root)?;
         let biomes = BiomeRegistry::load(&pack)?;
@@ -285,9 +289,9 @@ impl VanillaGenerator {
             .entries()
             .iter()
             .map(|e| {
-                biomes
-                    .id(&e.biome)
-                    .ok_or_else(|| BuildError::new(format!("biome table names unknown biome `{}`", e.biome)))
+                biomes.id(&e.biome).ok_or_else(|| {
+                    BuildError::new(format!("biome table names unknown biome `{}`", e.biome))
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let settings_json = pack.noise_settings("minecraft:overworld")?;
@@ -295,9 +299,24 @@ impl VanillaGenerator {
             .get("surface_rule")
             .ok_or_else(|| BuildError::new("overworld noise settings: no `surface_rule`"))?;
         let s = terrain.settings();
-        let surface = SurfaceSystem::load(surface_rule_json, terrain.noises(), &biomes, s.min_y, s.height, s.sea_level)?;
+        let surface = SurfaceSystem::load(
+            surface_rule_json,
+            terrain.noises(),
+            &biomes,
+            s.min_y,
+            s.height,
+            s.sea_level,
+        )?;
         let carvers = Carvers::load(&pack, &biomes, s.min_y, s.height)?;
-        let decorator = Decorator::load(&pack, &biomes, &biome_source, &entry_ids, s.min_y, s.height, terrain.noises())?;
+        let decorator = Decorator::load(
+            &pack,
+            &biomes,
+            &biome_source,
+            &entry_ids,
+            s.min_y,
+            s.height,
+            terrain.noises(),
+        )?;
         let core = Core {
             seed: seed as i64,
             terrain: Arc::new(terrain),
@@ -369,7 +388,11 @@ impl VanillaGenerator {
         for qy in 0..(self.core.height / 4) as usize {
             for qz in 0..4usize {
                 for qx in 0..4usize {
-                    let b = self.core.noise_biome(c.cx * 4 + qx as i32, min_qy + qy as i32, c.cz * 4 + qz as i32);
+                    let b = self.core.noise_biome(
+                        c.cx * 4 + qx as i32,
+                        min_qy + qy as i32,
+                        c.cz * 4 + qz as i32,
+                    );
                     c.set_biome(qx, qy, qz, b);
                 }
             }
@@ -379,7 +402,14 @@ impl VanillaGenerator {
     fn fill_noise(&self, c: &mut ProtoChunk) {
         let core = &self.core;
         let st = core.terrain.settings();
-        let _grid = super::density::ChunkGridGuard::enter(c.cx, c.cz, st.min_y, st.height, st.cell_width, st.cell_height);
+        let _grid = super::density::ChunkGridGuard::enter(
+            c.cx,
+            c.cz,
+            st.min_y,
+            st.height,
+            st.cell_width,
+            st.cell_height,
+        );
         let chunk = core.terrain.chunk(c.cx, c.cz);
         for lz in 0..16usize {
             for lx in 0..16usize {
@@ -412,7 +442,8 @@ impl VanillaGenerator {
             core.surface.build(&mut c, &env, &core.biomes);
             if stage >= Stage::Carvers {
                 let chunk_terrain = core.terrain.chunk(cx, cz);
-                self.carvers.carve(core, &mut c, &chunk_terrain, &quarts, &env);
+                self.carvers
+                    .carve(core, &mut c, &chunk_terrain, &quarts, &env);
             }
         }
         if stage >= Stage::Features {
@@ -428,7 +459,10 @@ impl VanillaGenerator {
     /// floor — the order the parity dumps use.
     pub fn chunk_at_stage(&self, cx: i32, cz: i32, stage: Stage) -> Vec<BlockStateId> {
         let c = self.proto_chunk(cx, cz, stage);
-        c.raw_blocks().iter().map(|v| BlockStateId(*v as u32)).collect()
+        c.raw_blocks()
+            .iter()
+            .map(|v| BlockStateId(*v as u32))
+            .collect()
     }
 
     /// The chunk through carving, cached.
@@ -437,7 +471,10 @@ impl VanillaGenerator {
             return c;
         }
         let c = Arc::new(self.proto_chunk(cx, cz, Stage::Carvers));
-        self.base_cache.lock().unwrap().put((cx, cz), Arc::clone(&c));
+        self.base_cache
+            .lock()
+            .unwrap()
+            .put((cx, cz), Arc::clone(&c));
         c
     }
 
@@ -455,7 +492,10 @@ impl VanillaGenerator {
         }
         let region = region.map(|r| r.map(|c| c.expect("filled")));
         let writes = Arc::new(self.decorator.decorate(&self.core, cx, cz, &region));
-        self.decor_cache.lock().unwrap().put((cx, cz), Arc::clone(&writes));
+        self.decor_cache
+            .lock()
+            .unwrap()
+            .put((cx, cz), Arc::clone(&writes));
         writes
     }
 
@@ -469,7 +509,9 @@ impl VanillaGenerator {
                 let d = self.decoration_of(cx + dx, cz + dz);
                 out.extend(
                     d.iter()
-                        .filter(|(x, _, z, _)| (x0..x0 + 16).contains(x) && (z0..z0 + 16).contains(z))
+                        .filter(|(x, _, z, _)| {
+                            (x0..x0 + 16).contains(x) && (z0..z0 + 16).contains(z)
+                        })
                         .copied(),
                 );
             }
@@ -564,8 +606,11 @@ mod tests {
         assert_eq!(
             p.water,
             BlockStateId(
-                props::state_with(blocks::block_id_of("minecraft:water").unwrap(), &[("level", "0")])
-                    .unwrap()
+                props::state_with(
+                    blocks::block_id_of("minecraft:water").unwrap(),
+                    &[("level", "0")]
+                )
+                .unwrap()
             )
         );
     }

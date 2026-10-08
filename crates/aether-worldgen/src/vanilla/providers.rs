@@ -10,7 +10,9 @@ use super::rng::Rng;
 use super::surface::Anchor;
 
 fn ty(j: &Json) -> &str {
-    j.str_of("type").unwrap_or("").trim_start_matches("minecraft:")
+    j.str_of("type")
+        .unwrap_or("")
+        .trim_start_matches("minecraft:")
 }
 
 /// `Mth.nextInt(r, min, max)`.
@@ -34,7 +36,12 @@ pub enum IntProvider {
     /// `clamped`.
     Clamped(Box<IntProvider>, i32, i32),
     /// `clamped_normal`.
-    ClampedNormal { mean: f32, deviation: f32, min: i32, max: i32 },
+    ClampedNormal {
+        mean: f32,
+        deviation: f32,
+        min: i32,
+        max: i32,
+    },
     /// `weighted_list`.
     Weighted(Vec<(IntProvider, i32)>, i32),
 }
@@ -47,13 +54,17 @@ impl IntProvider {
         }
         Ok(match ty(j) {
             "constant" => IntProvider::Constant(j.i32_or("value", 0)),
-            "uniform" => IntProvider::Uniform(j.i32_or("min_inclusive", 0), j.i32_or("max_inclusive", 0)),
-            "biased_to_bottom" => {
-                IntProvider::BiasedToBottom(j.i32_or("min_inclusive", 0), j.i32_or("max_inclusive", 0))
+            "uniform" => {
+                IntProvider::Uniform(j.i32_or("min_inclusive", 0), j.i32_or("max_inclusive", 0))
             }
+            "biased_to_bottom" => IntProvider::BiasedToBottom(
+                j.i32_or("min_inclusive", 0),
+                j.i32_or("max_inclusive", 0),
+            ),
             "clamped" => IntProvider::Clamped(
                 Box::new(IntProvider::parse(
-                    j.get("source").ok_or_else(|| BuildError::new("clamped int: no source"))?,
+                    j.get("source")
+                        .ok_or_else(|| BuildError::new("clamped int: no source"))?,
                 )?),
                 j.i32_or("min_inclusive", i32::MIN),
                 j.i32_or("max_inclusive", i32::MAX),
@@ -89,7 +100,12 @@ impl IntProvider {
                 a + r.next_int_bounded(n)
             }
             IntProvider::Clamped(s, lo, hi) => s.sample(r).clamp(*lo, *hi),
-            IntProvider::ClampedNormal { mean, deviation, min, max } => {
+            IntProvider::ClampedNormal {
+                mean,
+                deviation,
+                min,
+                max,
+            } => {
                 let v = mean + r.next_gaussian() as f32 * deviation;
                 v.clamp(*min as f32, *max as f32) as i32
             }
@@ -113,7 +129,9 @@ impl IntProvider {
             IntProvider::Uniform(_, b) | IntProvider::BiasedToBottom(_, b) => *b,
             IntProvider::Clamped(s, _, hi) => s.max_value().min(*hi),
             IntProvider::ClampedNormal { max, .. } => *max,
-            IntProvider::Weighted(items, _) => items.iter().map(|(p, _)| p.max_value()).max().unwrap_or(0),
+            IntProvider::Weighted(items, _) => {
+                items.iter().map(|(p, _)| p.max_value()).max().unwrap_or(0)
+            }
         }
     }
 }
@@ -126,7 +144,12 @@ pub enum FloatProvider {
     /// `uniform`: `[min, max)`.
     Uniform(f32, f32),
     /// `clamped_normal`.
-    ClampedNormal { mean: f32, deviation: f32, min: f32, max: f32 },
+    ClampedNormal {
+        mean: f32,
+        deviation: f32,
+        min: f32,
+        max: f32,
+    },
     /// `trapezoid`.
     Trapezoid { min: f32, max: f32, plateau: f32 },
 }
@@ -163,9 +186,12 @@ impl FloatProvider {
         match self {
             FloatProvider::Constant(v) => *v,
             FloatProvider::Uniform(a, b) => r.next_float() * (b - a) + a,
-            FloatProvider::ClampedNormal { mean, deviation, min, max } => {
-                (mean + r.next_gaussian() as f32 * deviation).clamp(*min, *max)
-            }
+            FloatProvider::ClampedNormal {
+                mean,
+                deviation,
+                min,
+                max,
+            } => (mean + r.next_gaussian() as f32 * deviation).clamp(*min, *max),
             FloatProvider::Trapezoid { min, max, plateau } => {
                 let range = max - min;
                 let side = (range - plateau) / 2.0;
@@ -197,37 +223,55 @@ impl HeightProvider {
     /// Parse, resolving anchors for a dimension `min_y .. min_y + height`.
     pub fn parse(j: &Json, min_y: i32, height: i32) -> Result<Self, BuildError> {
         let anchor = |k: &str| -> Result<i32, BuildError> {
-            Ok(Anchor::parse(j.get(k).ok_or_else(|| BuildError::new(format!("height provider: no `{k}`")))?)?
-                .resolve(min_y, height))
+            Ok(Anchor::parse(
+                j.get(k)
+                    .ok_or_else(|| BuildError::new(format!("height provider: no `{k}`")))?,
+            )?
+            .resolve(min_y, height))
         };
         if j.get("type").is_none() {
-            return Ok(HeightProvider::Constant(Anchor::parse(j)?.resolve(min_y, height)));
+            return Ok(HeightProvider::Constant(
+                Anchor::parse(j)?.resolve(min_y, height),
+            ));
         }
         Ok(match ty(j) {
             "constant" => HeightProvider::Constant(anchor("value")?),
-            "uniform" => HeightProvider::Uniform(anchor("min_inclusive")?, anchor("max_inclusive")?),
-            "biased_to_bottom" => {
-                HeightProvider::BiasedToBottom(anchor("min_inclusive")?, anchor("max_inclusive")?, j.i32_or("inner", 1))
+            "uniform" => {
+                HeightProvider::Uniform(anchor("min_inclusive")?, anchor("max_inclusive")?)
             }
+            "biased_to_bottom" => HeightProvider::BiasedToBottom(
+                anchor("min_inclusive")?,
+                anchor("max_inclusive")?,
+                j.i32_or("inner", 1),
+            ),
             "very_biased_to_bottom" => HeightProvider::VeryBiasedToBottom(
                 anchor("min_inclusive")?,
                 anchor("max_inclusive")?,
                 j.i32_or("inner", 1),
             ),
-            "trapezoid" => {
-                HeightProvider::Trapezoid(anchor("min_inclusive")?, anchor("max_inclusive")?, j.i32_or("plateau", 0))
-            }
+            "trapezoid" => HeightProvider::Trapezoid(
+                anchor("min_inclusive")?,
+                anchor("max_inclusive")?,
+                j.i32_or("plateau", 0),
+            ),
             "weighted_list" => {
                 let mut items = Vec::new();
                 let mut total = 0;
                 for e in j.get("distribution").and_then(Json::as_arr).unwrap_or(&[]) {
                     let w = e.i32_or("weight", 1);
                     total += w;
-                    items.push((HeightProvider::parse(e.get("data").unwrap_or(&Json::Null), min_y, height)?, w));
+                    items.push((
+                        HeightProvider::parse(e.get("data").unwrap_or(&Json::Null), min_y, height)?,
+                        w,
+                    ));
                 }
                 HeightProvider::Weighted(items, total)
             }
-            other => return Err(BuildError::new(format!("unknown height provider `{other}`"))),
+            other => {
+                return Err(BuildError::new(format!(
+                    "unknown height provider `{other}`"
+                )))
+            }
         })
     }
 

@@ -134,26 +134,34 @@ pub fn can_survive(lv: &Level, t: &CommonTags, s: BlockStateId, p: Pos) -> bool 
     let short = name.strip_prefix("minecraft:").unwrap_or(name);
     let below = lv.get(p.below(1));
     let upper = prop(s, "half") == Some("upper");
-    let dirt_or_farmland = |b: BlockStateId| t.dirt.contains(b) || blockinfo::name(b) == "minecraft:farmland";
+    let dirt_or_farmland =
+        |b: BlockStateId| t.dirt.contains(b) || blockinfo::name(b) == "minecraft:farmland";
     match short {
         // VegetationBlock and its plain subclasses.
-        "short_grass" | "fern" | "bush" | "firefly_bush" | "sweet_berry_bush" | "pink_petals" | "wildflowers"
-        | "dandelion" | "poppy" | "blue_orchid" | "allium" | "azure_bluet" | "red_tulip" | "orange_tulip"
-        | "white_tulip" | "pink_tulip" | "oxeye_daisy" | "cornflower" | "lily_of_the_valley" | "torchflower"
-        | "open_eyeblossom" | "closed_eyeblossom" | "oak_sapling" | "spruce_sapling" | "birch_sapling"
-        | "jungle_sapling" | "acacia_sapling" | "cherry_sapling" | "dark_oak_sapling" | "pale_oak_sapling" => {
-            dirt_or_farmland(below)
-        }
+        "short_grass" | "fern" | "bush" | "firefly_bush" | "sweet_berry_bush" | "pink_petals"
+        | "wildflowers" | "dandelion" | "poppy" | "blue_orchid" | "allium" | "azure_bluet"
+        | "red_tulip" | "orange_tulip" | "white_tulip" | "pink_tulip" | "oxeye_daisy"
+        | "cornflower" | "lily_of_the_valley" | "torchflower" | "open_eyeblossom"
+        | "closed_eyeblossom" | "oak_sapling" | "spruce_sapling" | "birch_sapling"
+        | "jungle_sapling" | "acacia_sapling" | "cherry_sapling" | "dark_oak_sapling"
+        | "pale_oak_sapling" => dirt_or_farmland(below),
         "wither_rose" => {
             dirt_or_farmland(below)
-                || matches!(blockinfo::name(below), "minecraft:netherrack" | "minecraft:soul_sand" | "minecraft:soul_soil")
+                || matches!(
+                    blockinfo::name(below),
+                    "minecraft:netherrack" | "minecraft:soul_sand" | "minecraft:soul_soil"
+                )
         }
-        "azalea" | "flowering_azalea" => dirt_or_farmland(below) || blockinfo::name(below) == "minecraft:clay",
+        "azalea" | "flowering_azalea" => {
+            dirt_or_farmland(below) || blockinfo::name(below) == "minecraft:clay"
+        }
         // DoublePlantBlock: the lower half is a VegetationBlock, the upper
         // half needs its lower half.
-        "tall_grass" | "large_fern" | "sunflower" | "lilac" | "rose_bush" | "peony" | "pitcher_plant" => {
+        "tall_grass" | "large_fern" | "sunflower" | "lilac" | "rose_bush" | "peony"
+        | "pitcher_plant" => {
             if upper {
-                blockinfo::block_of(below) == blockinfo::block_of(s) && prop(below, "half") == Some("lower")
+                blockinfo::block_of(below) == blockinfo::block_of(s)
+                    && prop(below, "half") == Some("lower")
             } else {
                 dirt_or_farmland(below)
             }
@@ -172,10 +180,13 @@ pub fn can_survive(lv: &Level, t: &CommonTags, s: BlockStateId, p: Pos) -> bool 
                     return false;
                 }
             }
-            (blockinfo::name(below) == "minecraft:cactus" || t.sand.contains(below)) && !blockinfo::has_fluid(lv.get(p.above(1)))
+            (blockinfo::name(below) == "minecraft:cactus" || t.sand.contains(below))
+                && !blockinfo::has_fluid(lv.get(p.above(1)))
         }
         "cactus_flower" => {
-            blockinfo::name(below) == "minecraft:cactus" || blockinfo::name(below) == "minecraft:farmland" || sturdy(below)
+            blockinfo::name(below) == "minecraft:cactus"
+                || blockinfo::name(below) == "minecraft:farmland"
+                || sturdy(below)
         }
         "sugar_cane" => {
             if blockinfo::name(below) == "minecraft:sugar_cane" {
@@ -193,31 +204,39 @@ pub fn can_survive(lv: &Level, t: &CommonTags, s: BlockStateId, p: Pos) -> bool 
             false
         }
         "lily_pad" => {
-            (blockinfo::has_water(below) || t.ice.contains(below)) && !blockinfo::has_fluid(lv.get(p))
+            (blockinfo::has_water(below) || t.ice.contains(below))
+                && !blockinfo::has_fluid(lv.get(p))
         }
         "seagrass" => sturdy(below) && blockinfo::name(below) != "minecraft:magma_block",
         "tall_seagrass" => {
             if upper {
-                blockinfo::name(below) == "minecraft:tall_seagrass" && prop(below, "half") == Some("lower")
+                blockinfo::name(below) == "minecraft:tall_seagrass"
+                    && prop(below, "half") == Some("lower")
             } else {
-                sturdy(below) && blockinfo::name(below) != "minecraft:magma_block" && is_water_source(lv.get(p))
+                sturdy(below)
+                    && blockinfo::name(below) != "minecraft:magma_block"
+                    && is_water_source(lv.get(p))
             }
         }
         "kelp" | "kelp_plant" => {
             let b = blockinfo::name(below);
-            b != "minecraft:magma_block" && (b == "minecraft:kelp" || b == "minecraft:kelp_plant" || sturdy(below))
+            b != "minecraft:magma_block"
+                && (b == "minecraft:kelp" || b == "minecraft:kelp_plant" || sturdy(below))
         }
         "sea_pickle" => sturdy(below) || blockinfo::blocks_motion(below),
-        "tube_coral" | "brain_coral" | "bubble_coral" | "fire_coral" | "horn_coral" | "tube_coral_fan"
-        | "brain_coral_fan" | "bubble_coral_fan" | "fire_coral_fan" | "horn_coral_fan" | "dead_tube_coral"
-        | "dead_brain_coral" | "dead_bubble_coral" | "dead_fire_coral" | "dead_horn_coral" => sturdy(below),
+        "tube_coral" | "brain_coral" | "bubble_coral" | "fire_coral" | "horn_coral"
+        | "tube_coral_fan" | "brain_coral_fan" | "bubble_coral_fan" | "fire_coral_fan"
+        | "horn_coral_fan" | "dead_tube_coral" | "dead_brain_coral" | "dead_bubble_coral"
+        | "dead_fire_coral" | "dead_horn_coral" => sturdy(below),
         "snow" => {
             if t.snow_cannot_survive_on.contains(below) {
                 false
             } else if t.snow_can_survive_on.contains(below) {
                 true
             } else {
-                sturdy(below) || (blockinfo::name(below) == "minecraft:snow" && prop(below, "layers") == Some("8"))
+                sturdy(below)
+                    || (blockinfo::name(below) == "minecraft:snow"
+                        && prop(below, "layers") == Some("8"))
             }
         }
         "leaf_litter" => sturdy(below),
@@ -226,12 +245,15 @@ pub fn can_survive(lv: &Level, t: &CommonTags, s: BlockStateId, p: Pos) -> bool 
             if upper {
                 blockinfo::name(below) == "minecraft:small_dripleaf"
             } else {
-                t.small_dripleaf_placeable.contains(below) || (is_water_source(lv.get(p)) && sturdy(below))
+                t.small_dripleaf_placeable.contains(below)
+                    || (is_water_source(lv.get(p)) && sturdy(below))
             }
         }
         "big_dripleaf" | "big_dripleaf_stem" => {
             let b = blockinfo::name(below);
-            b == "minecraft:big_dripleaf_stem" || b == "minecraft:big_dripleaf" || t.big_dripleaf_placeable.contains(below)
+            b == "minecraft:big_dripleaf_stem"
+                || b == "minecraft:big_dripleaf"
+                || t.big_dripleaf_placeable.contains(below)
         }
         "spore_blossom" | "hanging_roots" => sturdy(lv.get(p.above(1))),
         "cave_vines" | "cave_vines_plant" => {
@@ -282,17 +304,25 @@ impl RuleTest {
                 .and_then(parse_block_state)
                 .ok_or_else(|| BuildError::new(format!("rule test: bad `{k}`")))
         };
-        Ok(match j.str_of("predicate_type").unwrap_or("").trim_start_matches("minecraft:") {
-            "always_true" => RuleTest::Always,
-            "tag_match" => RuleTest::Tag(tags.block_tag(j.str_of("tag").unwrap_or(""))),
-            "block_match" => RuleTest::Block(block("block")?),
-            "blockstate_match" => RuleTest::State(st("block_state")?),
-            "random_block_match" => RuleTest::RandomBlock(block("block")?, j.f64_or("probability", 1.0) as f32),
-            "random_blockstate_match" => {
-                RuleTest::RandomState(st("block_state")?, j.f64_or("probability", 1.0) as f32)
-            }
-            other => return Err(BuildError::new(format!("unknown rule test `{other}`"))),
-        })
+        Ok(
+            match j
+                .str_of("predicate_type")
+                .unwrap_or("")
+                .trim_start_matches("minecraft:")
+            {
+                "always_true" => RuleTest::Always,
+                "tag_match" => RuleTest::Tag(tags.block_tag(j.str_of("tag").unwrap_or(""))),
+                "block_match" => RuleTest::Block(block("block")?),
+                "blockstate_match" => RuleTest::State(st("block_state")?),
+                "random_block_match" => {
+                    RuleTest::RandomBlock(block("block")?, j.f64_or("probability", 1.0) as f32)
+                }
+                "random_blockstate_match" => {
+                    RuleTest::RandomState(st("block_state")?, j.f64_or("probability", 1.0) as f32)
+                }
+                other => return Err(BuildError::new(format!("unknown rule test `{other}`"))),
+            },
+        )
     }
 
     /// `test(state, random)`.
@@ -350,48 +380,68 @@ impl BlockPredicate {
     /// Parse.
     pub fn parse(j: &Json, tags: &Tags) -> Result<Self, BuildError> {
         let off = offset_of(j);
-        Ok(match j.str_of("type").unwrap_or("").trim_start_matches("minecraft:") {
-            "true" => BlockPredicate::True,
-            "matching_blocks" => BlockPredicate::Blocks(off, tags.holder_set(j.get("blocks").unwrap_or(&Json::Null))),
-            "matching_block_tag" => BlockPredicate::Tag(off, tags.block_tag(j.str_of("tag").unwrap_or(""))),
-            "matching_fluids" => {
-                let names: Vec<String> = match j.get("fluids") {
-                    Some(Json::Str(s)) => vec![s.clone()],
-                    Some(Json::Arr(a)) => a.iter().filter_map(Json::as_str).map(str::to_string).collect(),
-                    _ => Vec::new(),
-                };
-                let water = names.iter().any(|n| n.contains("water"));
-                let lava = names.iter().any(|n| n.contains("lava"));
-                BlockPredicate::Fluids(off, water, lava)
-            }
-            "solid" => BlockPredicate::Solid(off),
-            "replaceable" => BlockPredicate::Replaceable(off),
-            "would_survive" => BlockPredicate::WouldSurvive(
-                off,
-                j.get("state")
-                    .and_then(parse_block_state)
-                    .ok_or_else(|| BuildError::new("would_survive: bad state"))?,
-            ),
-            "has_sturdy_face" => BlockPredicate::Sturdy(off),
-            "inside_world_bounds" => BlockPredicate::InsideWorld(off),
-            "unobstructed" => BlockPredicate::Unobstructed,
-            "not" => BlockPredicate::Not(Box::new(BlockPredicate::parse(
-                j.get("predicate").ok_or_else(|| BuildError::new("not: no predicate"))?,
-                tags,
-            )?)),
-            t @ ("all_of" | "any_of") => {
-                let mut v = Vec::new();
-                for p in j.get("predicates").and_then(Json::as_arr).unwrap_or(&[]) {
-                    v.push(BlockPredicate::parse(p, tags)?);
+        Ok(
+            match j
+                .str_of("type")
+                .unwrap_or("")
+                .trim_start_matches("minecraft:")
+            {
+                "true" => BlockPredicate::True,
+                "matching_blocks" => BlockPredicate::Blocks(
+                    off,
+                    tags.holder_set(j.get("blocks").unwrap_or(&Json::Null)),
+                ),
+                "matching_block_tag" => {
+                    BlockPredicate::Tag(off, tags.block_tag(j.str_of("tag").unwrap_or("")))
                 }
-                if t == "all_of" {
-                    BlockPredicate::All(v)
-                } else {
-                    BlockPredicate::Any(v)
+                "matching_fluids" => {
+                    let names: Vec<String> = match j.get("fluids") {
+                        Some(Json::Str(s)) => vec![s.clone()],
+                        Some(Json::Arr(a)) => a
+                            .iter()
+                            .filter_map(Json::as_str)
+                            .map(str::to_string)
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    let water = names.iter().any(|n| n.contains("water"));
+                    let lava = names.iter().any(|n| n.contains("lava"));
+                    BlockPredicate::Fluids(off, water, lava)
                 }
-            }
-            other => return Err(BuildError::new(format!("unknown block predicate `{other}`"))),
-        })
+                "solid" => BlockPredicate::Solid(off),
+                "replaceable" => BlockPredicate::Replaceable(off),
+                "would_survive" => BlockPredicate::WouldSurvive(
+                    off,
+                    j.get("state")
+                        .and_then(parse_block_state)
+                        .ok_or_else(|| BuildError::new("would_survive: bad state"))?,
+                ),
+                "has_sturdy_face" => BlockPredicate::Sturdy(off),
+                "inside_world_bounds" => BlockPredicate::InsideWorld(off),
+                "unobstructed" => BlockPredicate::Unobstructed,
+                "not" => BlockPredicate::Not(Box::new(BlockPredicate::parse(
+                    j.get("predicate")
+                        .ok_or_else(|| BuildError::new("not: no predicate"))?,
+                    tags,
+                )?)),
+                t @ ("all_of" | "any_of") => {
+                    let mut v = Vec::new();
+                    for p in j.get("predicates").and_then(Json::as_arr).unwrap_or(&[]) {
+                        v.push(BlockPredicate::parse(p, tags)?);
+                    }
+                    if t == "all_of" {
+                        BlockPredicate::All(v)
+                    } else {
+                        BlockPredicate::Any(v)
+                    }
+                }
+                other => {
+                    return Err(BuildError::new(format!(
+                        "unknown block predicate `{other}`"
+                    )))
+                }
+            },
+        )
     }
 
     /// `test(level, pos)`.
@@ -399,7 +449,9 @@ impl BlockPredicate {
         let at = |o: &[i32]| p.offset(o[0], o[1], o[2]);
         match self {
             BlockPredicate::True | BlockPredicate::Unobstructed => true,
-            BlockPredicate::Blocks(o, set) | BlockPredicate::Tag(o, set) => set.contains(lv.get(at(o))),
+            BlockPredicate::Blocks(o, set) | BlockPredicate::Tag(o, set) => {
+                set.contains(lv.get(at(o)))
+            }
             BlockPredicate::Fluids(o, water, lava) => {
                 let s = lv.get(at(o));
                 (*water && blockinfo::has_water(s)) || (*lava && blockinfo::is_lava(s))
@@ -428,7 +480,11 @@ pub enum StateProvider {
     /// `rotated_block_provider`.
     Rotated(BlockStateId),
     /// `noise_provider`.
-    Noise { noise: Arc<NormalNoise>, scale: f64, states: Vec<BlockStateId> },
+    Noise {
+        noise: Arc<NormalNoise>,
+        scale: f64,
+        states: Vec<BlockStateId>,
+    },
     /// `noise_threshold_provider`.
     NoiseThreshold {
         noise: Arc<NormalNoise>,
@@ -462,7 +518,10 @@ impl StateProvider {
     /// Parse. `noises` builds the legacy-seeded noises the noise-based
     /// providers carry.
     pub fn parse(j: &Json, noises: &LegacyNoises) -> Result<Self, BuildError> {
-        let ty = j.str_of("type").unwrap_or("").trim_start_matches("minecraft:");
+        let ty = j
+            .str_of("type")
+            .unwrap_or("")
+            .trim_start_matches("minecraft:");
         Ok(match ty {
             "simple_state_provider" => StateProvider::Simple(
                 j.get("state")
@@ -480,13 +539,16 @@ impl StateProvider {
                     }
                 }
                 if v.is_empty() {
-                    return Err(BuildError::new("weighted_state_provider: no usable entries"));
+                    return Err(BuildError::new(
+                        "weighted_state_provider: no usable entries",
+                    ));
                 }
                 StateProvider::Weighted(v, total)
             }
             "randomized_int_state_provider" => StateProvider::RandomizedInt(
                 Box::new(StateProvider::parse(
-                    j.get("source").ok_or_else(|| BuildError::new("randomized_int: no source"))?,
+                    j.get("source")
+                        .ok_or_else(|| BuildError::new("randomized_int: no source"))?,
                     noises,
                 )?),
                 j.str_of("property").unwrap_or("").to_string(),
@@ -515,7 +577,9 @@ impl StateProvider {
                         default: j
                             .get("default_state")
                             .and_then(parse_block_state)
-                            .ok_or_else(|| BuildError::new("noise_threshold_provider: bad default"))?,
+                            .ok_or_else(|| {
+                                BuildError::new("noise_threshold_provider: bad default")
+                            })?,
                         low: state_list(j.get("low_states")),
                         high: state_list(j.get("high_states")),
                     },
@@ -528,7 +592,8 @@ impl StateProvider {
                         StateProvider::DualNoise {
                             noise,
                             scale,
-                            slow: noises.get(seed + 1, j.get("slow_noise").unwrap_or(&Json::Null))?,
+                            slow: noises
+                                .get(seed + 1, j.get("slow_noise").unwrap_or(&Json::Null))?,
                             slow_scale: j.f64_or("slow_scale", 1.0) as f32,
                             variety,
                             states: state_list(j.get("states")),
@@ -566,7 +631,11 @@ impl StateProvider {
                 let axis = ["x", "y", "z"][r.next_int_bounded(3) as usize];
                 blockinfo::with_prop(*s, "axis", axis)
             }
-            StateProvider::Noise { noise, scale, states } => pick(states, noise_at(noise, p, *scale)),
+            StateProvider::Noise {
+                noise,
+                scale,
+                states,
+            } => pick(states, noise_at(noise, p, *scale)),
             StateProvider::NoiseThreshold {
                 noise,
                 scale,
@@ -600,8 +669,13 @@ impl StateProvider {
                         (q.z as f32 * slow_scale) as f64,
                     )
                 };
-                let n = super::super::mth::clamped_map(slow_at(p), -1.0, 1.0, variety.0 as f64, (variety.1 + 1) as f64)
-                    as i32;
+                let n = super::super::mth::clamped_map(
+                    slow_at(p),
+                    -1.0,
+                    1.0,
+                    variety.0 as f64,
+                    (variety.1 + 1) as f64,
+                ) as i32;
                 let mut list = Vec::with_capacity(n.max(0) as usize);
                 for i in 0..n {
                     list.push(pick(states, slow_at(p.offset(i * 54545, 0, i * 34234))));

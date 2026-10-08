@@ -32,10 +32,18 @@ impl OverworldBiomeSource {
     /// Build from an unpacked data pack and a world seed, with the biome
     /// table rebuilt in code ([`super::biome_table`]) — no report needed.
     pub fn new(pack_root: impl AsRef<Path>, seed: u64) -> Result<Self, BuildError> {
-        Self::with_table(pack_root, ParameterList::from_points(super::biome_table::overworld()), seed)
+        Self::with_table(
+            pack_root,
+            ParameterList::from_points(super::biome_table::overworld()),
+            seed,
+        )
     }
 
-    fn with_table(pack_root: impl AsRef<Path>, biomes: ParameterList, seed: u64) -> Result<Self, BuildError> {
+    fn with_table(
+        pack_root: impl AsRef<Path>,
+        biomes: ParameterList,
+        seed: u64,
+    ) -> Result<Self, BuildError> {
         let pack = DataPack::open(pack_root)?;
         let settings = pack.noise_settings("minecraft:overworld")?;
         let router = settings
@@ -134,7 +142,8 @@ impl OverworldBiomeSource {
 
     /// The biome id at a quart position.
     pub fn biome_at(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> &str {
-        self.biomes.find(&self.sampler.sample(quart_x, quart_y, quart_z))
+        self.biomes
+            .find(&self.sampler.sample(quart_x, quart_y, quart_z))
     }
 
     /// The biome id at a quart position, remembering the answer in `cache`.

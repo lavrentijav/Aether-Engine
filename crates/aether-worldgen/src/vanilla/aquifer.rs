@@ -418,14 +418,7 @@ impl<'a> ChunkAquifer<'a> {
     }
 
     /// Deep, isolated aquifers turn to lava.
-    fn compute_fluid_type(
-        &self,
-        x: i32,
-        y: i32,
-        z: i32,
-        global: FluidStatus,
-        level: i32,
-    ) -> Fill {
+    fn compute_fluid_type(&self, x: i32, y: i32, z: i32, global: FluidStatus, level: i32) -> Fill {
         let mut kind = global.kind;
         if level <= -10 && level != WAY_BELOW_MIN_Y && global.kind != Fill::Lava {
             let v = self.cfg.lava.compute(Ctx::new(

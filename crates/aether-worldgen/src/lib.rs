@@ -57,7 +57,9 @@ impl ColumnBiomes {
     pub fn get(&self, cy: i8, qx: usize, qy: usize, qz: usize) -> Option<&str> {
         let i = (cy as i32 - self.min_section_y as i32) as usize;
         let sec = self.sections.get(i)?;
-        self.palette.get(sec[(qy * 4 + qz) * 4 + qx] as usize).map(String::as_str)
+        self.palette
+            .get(sec[(qy * 4 + qz) * 4 + qx] as usize)
+            .map(String::as_str)
     }
 }
 
@@ -228,7 +230,12 @@ impl NoiseGenerator {
     /// interpolated to full block resolution. Evaluating the noise stacks at
     /// grid resolution (5×17×5 = 425 points) rather than every block
     /// (16×128×16 ≈ 33k) is what actually makes this affordable per chunk.
-    fn density_grid(&self, cx: i32, cz: i32) -> [[[f64; GRID_XZ_POINTS]; GRID_Y_POINTS]; GRID_XZ_POINTS] {
+    #[allow(clippy::needless_range_loop)]
+    fn density_grid(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> [[[f64; GRID_XZ_POINTS]; GRID_Y_POINTS]; GRID_XZ_POINTS] {
         let mut grid = [[[0.0; GRID_XZ_POINTS]; GRID_Y_POINTS]; GRID_XZ_POINTS];
         for gx in 0..GRID_XZ_POINTS {
             let wx = cx * 16 + gx as i32 * GRID_XZ_STEP;
@@ -399,7 +406,10 @@ mod tests {
         }
         let min = *heights.iter().min().unwrap();
         let max = *heights.iter().max().unwrap();
-        assert!(max > min, "terrain is perfectly flat across columns: {heights:?}");
+        assert!(
+            max > min,
+            "terrain is perfectly flat across columns: {heights:?}"
+        );
         for &h in &heights {
             assert!(
                 (0..beta::WORLD_HEIGHT).contains(&h),

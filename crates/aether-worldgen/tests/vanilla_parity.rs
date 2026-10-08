@@ -70,7 +70,8 @@ fn biomes_match_the_reference_world() {
     // differ on a handful of tied cells, and that is a known ambiguity rather
     // than a defect.
     assert_eq!(
-        r.cached_agree, r.cells,
+        r.cached_agree,
+        r.cells,
         "{} of {} biome cells disagree with vanilla",
         r.cells - r.cached_agree,
         r.cells
@@ -223,16 +224,12 @@ fn decode_biomes(section: &aether_convert::nbt::Nbt) -> Option<Vec<String>> {
         .collect()
 }
 
-fn get<'a>(
-    v: &'a aether_convert::nbt::Nbt,
-    key: &str,
-) -> Option<&'a aether_convert::nbt::Nbt> {
+fn get<'a>(v: &'a aether_convert::nbt::Nbt, key: &str) -> Option<&'a aether_convert::nbt::Nbt> {
     let aether_convert::nbt::Nbt::Compound(fields) = v else {
         return None;
     };
     fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
-
 
 /// Every block of the noise stage — cell interpolation, aquifers and ore veins
 /// — against a column dump taken from the game's own
@@ -249,8 +246,8 @@ fn terrain_matches_the_reference_columns() {
         eprintln!("skipping: AETHER_VANILLA_COLUMN_DUMP not set");
         return;
     };
-    let dump = std::fs::read_to_string(&dump_path)
-        .unwrap_or_else(|err| panic!("{dump_path}: {err}"));
+    let dump =
+        std::fs::read_to_string(&dump_path).unwrap_or_else(|err| panic!("{dump_path}: {err}"));
     let terrain =
         Terrain::load(&e.pack, e.seed).unwrap_or_else(|err| panic!("cannot load terrain: {err}"));
     let s = terrain.settings();

@@ -41,7 +41,11 @@ pub struct BiomeRegistry {
 
 fn strings(j: Option<&Json>) -> Vec<String> {
     match j {
-        Some(Json::Arr(a)) => a.iter().filter_map(Json::as_str).map(str::to_string).collect(),
+        Some(Json::Arr(a)) => a
+            .iter()
+            .filter_map(Json::as_str)
+            .map(str::to_string)
+            .collect(),
         Some(Json::Str(s)) => vec![s.clone()],
         _ => Vec::new(),
     }
@@ -128,9 +132,15 @@ impl BiomeRegistry {
             .frozen_temperature
             .get_value(x as f64 * 0.05, z as f64 * 0.05, false)
             * 7.0;
-        let b = self.noises.biome_info.get_value(x as f64 * 0.2, z as f64 * 0.2, false);
+        let b = self
+            .noises
+            .biome_info
+            .get_value(x as f64 * 0.2, z as f64 * 0.2, false);
         if a + b < 0.3 {
-            let c = self.noises.biome_info.get_value(x as f64 * 0.09, z as f64 * 0.09, false);
+            let c = self
+                .noises
+                .biome_info
+                .get_value(x as f64 * 0.09, z as f64 * 0.09, false);
             if c < 0.8 {
                 return 0.2;
             }
@@ -144,7 +154,14 @@ impl BiomeRegistry {
     }
 
     /// `Biome.shouldMeltFrozenOceanIcebergSlightly`.
-    pub fn should_melt_iceberg_slightly(&self, id: BiomeId, x: i32, y: i32, z: i32, sea_level: i32) -> bool {
+    pub fn should_melt_iceberg_slightly(
+        &self,
+        id: BiomeId,
+        x: i32,
+        y: i32,
+        z: i32,
+        sea_level: i32,
+    ) -> bool {
         self.temperature_at(id, x, y, z, sea_level) > 0.1
     }
 }

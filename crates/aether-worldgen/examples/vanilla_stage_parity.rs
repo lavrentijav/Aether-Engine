@@ -12,6 +12,8 @@
 //! `docs/KNOWN_ISSUES.md` A.8 for how the measurements were taken. Stages are
 //! `noise`, `surface` and `carvers`; biomes are always checked.
 
+#![allow(clippy::type_complexity)]
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -90,7 +92,8 @@ fn main() {
             };
             let got = gen.chunk_at_stage(cx, cz, stage);
             let mut mismatch = 0usize;
-            let mut examples: BTreeMap<(String, String), (usize, (i32, i32, i32))> = BTreeMap::new();
+            let mut examples: BTreeMap<(String, String), (usize, (i32, i32, i32))> =
+                BTreeMap::new();
             for (i, w) in bytes.chunks_exact(2).enumerate() {
                 let want = &palette[u16::from_le_bytes([w[0], w[1]]) as usize];
                 let got_id = got[i];
@@ -113,12 +116,17 @@ fn main() {
                     let (lx, lz) = (dx.rem_euclid(16) as usize, dz.rem_euclid(16) as usize);
                     for y in (0..384usize).rev() {
                         let i = (y * 16 + lz) * 16 + lx;
-                        let w = &palette[u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]) as usize];
+                        let w =
+                            &palette[u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]) as usize];
                         let g = props::state_name(got[i].0).unwrap_or_default();
                         if w != "minecraft:air" || g != "minecraft:air" {
                             println!("  {stage_name} y={:4} want {w:<36} got {g}", y as i32 - 64);
                         }
-                        if y < 300 && w == "minecraft:stone" && g == "minecraft:stone" && y + 64 < 100 {
+                        if y < 300
+                            && w == "minecraft:stone"
+                            && g == "minecraft:stone"
+                            && y + 64 < 100
+                        {
                             break;
                         }
                     }
@@ -131,7 +139,7 @@ fn main() {
             if mismatch > 0 {
                 println!("chunk {cx},{cz} {stage_name}: {mismatch} / {n} differ");
                 let mut ex: Vec<_> = examples.into_iter().collect();
-                ex.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+                ex.sort_by_key(|e| std::cmp::Reverse(e.1 .0));
                 for ((w, g), (count, pos)) in ex.into_iter().take(6) {
                     println!("    want {w:<40} got {g:<40} x{count} e.g. {pos:?}");
                 }
@@ -139,6 +147,9 @@ fn main() {
         }
     }
     for (k, (ok, n)) in totals {
-        println!("{k:>8}: {ok} / {n} match ({:.4}%)", ok as f64 * 100.0 / n.max(1) as f64);
+        println!(
+            "{k:>8}: {ok} / {n} match ({:.4}%)",
+            ok as f64 * 100.0 / n.max(1) as f64
+        );
     }
 }

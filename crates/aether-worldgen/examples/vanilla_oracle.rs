@@ -14,6 +14,8 @@
 //! `<region-dir>` is the `region/` folder of a generated world — for modern
 //! versions that is `world/dimensions/minecraft/overworld/region`.
 
+#![allow(clippy::type_complexity)]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

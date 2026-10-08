@@ -80,7 +80,12 @@ pub struct Carvers {
 
 impl Carvers {
     /// Read the pack's carvers and biome carver lists.
-    pub fn load(pack: &DataPack, biomes: &BiomeRegistry, min_y: i32, height: i32) -> Result<Self, BuildError> {
+    pub fn load(
+        pack: &DataPack,
+        biomes: &BiomeRegistry,
+        min_y: i32,
+        height: i32,
+    ) -> Result<Self, BuildError> {
         let tags = Tags::new(pack);
         let mut by_name: HashMap<String, Option<Arc<Configured>>> = HashMap::new();
         let mut per_biome = Vec::new();
@@ -102,9 +107,15 @@ impl Carvers {
                 // its slot: the index seeds the next carver's random.
                 list.push(c);
             }
-            per_biome.push(list.into_iter().map(|c| c.unwrap_or_else(|| Arc::new(noop()))).collect());
+            per_biome.push(
+                list.into_iter()
+                    .map(|c| c.unwrap_or_else(|| Arc::new(noop())))
+                    .collect(),
+            );
         }
-        let st = |n: &str| blockinfo::parse_state(n).ok_or_else(|| BuildError::new(format!("no block `{n}`")));
+        let st = |n: &str| {
+            blockinfo::parse_state(n).ok_or_else(|| BuildError::new(format!("no block `{n}`")))
+        };
         Ok(Self {
             per_biome,
             source_biomes: std::sync::Mutex::new(Default::default()),
@@ -178,9 +189,14 @@ fn noop() -> Configured {
 }
 
 fn parse(j: &Json, tags: &Tags, min_y: i32, height: i32) -> Result<Option<Configured>, BuildError> {
-    let cfg = j.get("config").ok_or_else(|| BuildError::new("no config"))?;
+    let cfg = j
+        .get("config")
+        .ok_or_else(|| BuildError::new("no config"))?;
     let fp = |k: &str| -> Result<FloatProvider, BuildError> {
-        FloatProvider::parse(cfg.get(k).ok_or_else(|| BuildError::new(format!("no `{k}`")))?)
+        FloatProvider::parse(
+            cfg.get(k)
+                .ok_or_else(|| BuildError::new(format!("no `{k}`")))?,
+        )
     };
     let kind = match j.str_of("type").unwrap_or("") {
         "minecraft:cave" => Kind::Cave {
@@ -189,9 +205,15 @@ fn parse(j: &Json, tags: &Tags, min_y: i32, height: i32) -> Result<Option<Config
             floor: fp("floor_level")?,
         },
         "minecraft:canyon" => {
-            let shape = cfg.get("shape").ok_or_else(|| BuildError::new("canyon: no shape"))?;
+            let shape = cfg
+                .get("shape")
+                .ok_or_else(|| BuildError::new("canyon: no shape"))?;
             let sp = |k: &str| -> Result<FloatProvider, BuildError> {
-                FloatProvider::parse(shape.get(k).ok_or_else(|| BuildError::new(format!("no `{k}`")))?)
+                FloatProvider::parse(
+                    shape
+                        .get(k)
+                        .ok_or_else(|| BuildError::new(format!("no `{k}`")))?,
+                )
             };
             Kind::Canyon {
                 vertical_rotation: fp("vertical_rotation")?,
@@ -199,8 +221,10 @@ fn parse(j: &Json, tags: &Tags, min_y: i32, height: i32) -> Result<Option<Config
                 thickness: sp("thickness")?,
                 width_smoothness: shape.i32_or("width_smoothness", 3),
                 horizontal_radius_factor: sp("horizontal_radius_factor")?,
-                vertical_radius_default_factor: shape.f64_or("vertical_radius_default_factor", 1.0) as f32,
-                vertical_radius_center_factor: shape.f64_or("vertical_radius_center_factor", 0.0) as f32,
+                vertical_radius_default_factor: shape.f64_or("vertical_radius_default_factor", 1.0)
+                    as f32,
+                vertical_radius_center_factor: shape.f64_or("vertical_radius_center_factor", 0.0)
+                    as f32,
             }
         }
         _ => return Ok(None),
@@ -208,10 +232,17 @@ fn parse(j: &Json, tags: &Tags, min_y: i32, height: i32) -> Result<Option<Config
     Ok(Some(Configured {
         kind,
         probability: cfg.f64_or("probability", 0.0) as f32,
-        y: HeightProvider::parse(cfg.get("y").ok_or_else(|| BuildError::new("no `y`"))?, min_y, height)?,
+        y: HeightProvider::parse(
+            cfg.get("y").ok_or_else(|| BuildError::new("no `y`"))?,
+            min_y,
+            height,
+        )?,
         y_scale: fp("yScale")?,
-        lava_level: Anchor::parse(cfg.get("lava_level").ok_or_else(|| BuildError::new("no `lava_level`"))?)?
-            .resolve(min_y, height),
+        lava_level: Anchor::parse(
+            cfg.get("lava_level")
+                .ok_or_else(|| BuildError::new("no `lava_level`"))?,
+        )?
+        .resolve(min_y, height),
         replaceable: tags.holder_set(cfg.get("replaceable").unwrap_or(&Json::Null)),
     }))
 }
@@ -231,7 +262,14 @@ struct Ctx<'a, E: SurfaceEnv> {
 }
 
 impl<E: SurfaceEnv> Ctx<'_, E> {
-    fn run(&mut self, chunk: &mut ProtoChunk, c: &Configured, r: &mut WorldgenRandom, sx: i32, sz: i32) {
+    fn run(
+        &mut self,
+        chunk: &mut ProtoChunk,
+        c: &Configured,
+        r: &mut WorldgenRandom,
+        sx: i32,
+        sz: i32,
+    ) {
         match &c.kind {
             Kind::Cave {
                 horizontal,
@@ -267,7 +305,10 @@ impl<E: SurfaceEnv> Ctx<'_, E> {
                         }
                         let end = range - r.next_int_bounded(range / 4);
                         let seed = r.next_long();
-                        self.tunnel(chunk, c, seed, x, y, z, hr, vr, thickness, yaw, pitch, 0, end, 1.0, &skip);
+                        self.tunnel(
+                            chunk, c, seed, x, y, z, hr, vr, thickness, yaw, pitch, 0, end, 1.0,
+                            &skip,
+                        );
                     }
                 }
             }
@@ -336,7 +377,9 @@ impl<E: SurfaceEnv> Ctx<'_, E> {
         let mut yaw_v = 0.0f32;
         let mut pitch_v = 0.0f32;
         for i in start..end {
-            let hr = 1.5 + (mth::sin((std::f32::consts::PI * i as f32 / end as f32) as f64) * thickness) as f64;
+            let hr = 1.5
+                + (mth::sin((std::f32::consts::PI * i as f32 / end as f32) as f64) * thickness)
+                    as f64;
             let vr = hr * y_scale;
             let cp = mth::cos(pitch as f64);
             x += (mth::cos(yaw as f64) * cp) as f64;
@@ -352,10 +395,42 @@ impl<E: SurfaceEnv> Ctx<'_, E> {
             if i == branch && thickness > 1.0 {
                 let s1 = r.next_long();
                 let t1 = r.next_float() * 0.5 + 0.5;
-                self.tunnel(chunk, c, s1, x, y, z, hrm, vrm, t1, yaw - (PI / 2.0) as f32, pitch / 3.0, i, end, 1.0, skip);
+                self.tunnel(
+                    chunk,
+                    c,
+                    s1,
+                    x,
+                    y,
+                    z,
+                    hrm,
+                    vrm,
+                    t1,
+                    yaw - (PI / 2.0) as f32,
+                    pitch / 3.0,
+                    i,
+                    end,
+                    1.0,
+                    skip,
+                );
                 let s2 = r.next_long();
                 let t2 = r.next_float() * 0.5 + 0.5;
-                self.tunnel(chunk, c, s2, x, y, z, hrm, vrm, t2, yaw + (PI / 2.0) as f32, pitch / 3.0, i, end, 1.0, skip);
+                self.tunnel(
+                    chunk,
+                    c,
+                    s2,
+                    x,
+                    y,
+                    z,
+                    hrm,
+                    vrm,
+                    t2,
+                    yaw + (PI / 2.0) as f32,
+                    pitch / 3.0,
+                    i,
+                    end,
+                    1.0,
+                    skip,
+                );
                 return;
             }
             if r.next_int_bounded(4) != 0 {
@@ -400,7 +475,9 @@ impl<E: SurfaceEnv> Ctx<'_, E> {
         let mut yaw_v = 0.0f32;
         let mut pitch_v = 0.0f32;
         for i in 0..end {
-            let mut hr = 1.5 + (mth::sin((i as f32 * std::f32::consts::PI / end as f32) as f64) * thickness) as f64;
+            let mut hr = 1.5
+                + (mth::sin((i as f32 * std::f32::consts::PI / end as f32) as f64) * thickness)
+                    as f64;
             let mut vr = hr * y_scale;
             hr *= hrf.sample(&mut r) as f64;
             // updateVerticalRadius
@@ -430,7 +507,17 @@ impl<E: SurfaceEnv> Ctx<'_, E> {
 
     /// `carveEllipsoid`.
     #[allow(clippy::too_many_arguments)]
-    fn ellipsoid(&mut self, chunk: &mut ProtoChunk, c: &Configured, x: f64, y: f64, z: f64, hr: f64, vr: f64, skip: &Skip) {
+    fn ellipsoid(
+        &mut self,
+        chunk: &mut ProtoChunk,
+        c: &Configured,
+        x: f64,
+        y: f64,
+        z: f64,
+        hr: f64,
+        vr: f64,
+        skip: &Skip,
+    ) {
         let mid_x = (chunk.min_x() + 8) as f64;
         let mid_z = (chunk.min_z() + 8) as f64;
         let reach = 16.0 + hr * 2.0;
@@ -477,7 +564,15 @@ impl<E: SurfaceEnv> Ctx<'_, E> {
     }
 
     /// `carveBlock`.
-    fn carve_block(&mut self, chunk: &mut ProtoChunk, c: &Configured, lx: usize, y: i32, lz: usize, hit_grass: &mut bool) {
+    fn carve_block(
+        &mut self,
+        chunk: &mut ProtoChunk,
+        c: &Configured,
+        lx: usize,
+        y: i32,
+        lz: usize,
+        hit_grass: &mut bool,
+    ) {
         let cv = self.carvers;
         let s = chunk.get(lx, y, lz);
         let b = blockinfo::block_of(s);
@@ -501,11 +596,15 @@ impl<E: SurfaceEnv> Ctx<'_, E> {
         chunk.set(lx, y, lz, carved);
         if *hit_grass && blockinfo::block_of(chunk.get(lx, y - 1, lz)) == cv.dirt {
             let fluid = blockinfo::has_fluid(carved);
-            if let Some(top) =
-                self.core
-                    .surface
-                    .top_material(chunk, self.env, &self.core.biomes, wx, y - 1, wz, fluid)
-            {
+            if let Some(top) = self.core.surface.top_material(
+                chunk,
+                self.env,
+                &self.core.biomes,
+                wx,
+                y - 1,
+                wz,
+                fluid,
+            ) {
                 chunk.set(lx, y - 1, lz, top);
             }
         }
