@@ -504,3 +504,80 @@ not per state, so the generated `STATE_PROPS` starts out uniform within a block.
 That is exactly as correct as today and no more. Closing it means asking the
 game itself: the unobfuscated server jar plus a small Java harness, which is the
 technique the worldgen work already uses successfully.
+
+## 10. History at scale, and the History Graph
+
+Two threads of one design: keep the journal cheap however old the world gets, and let
+an operator read it by *object* (this block, this item, this player) as well as by time.
+
+### 10.1 The journal stays the source of truth
+
+Not a DAG of world versions. The journal is already immutable, invertible and indexed
+by column and actor; what it lacked was a bound on what a load reads and on what the
+hot store holds. In order:
+
+1. **Per-column checkpoints** — *landed* (`World::flush`, key `K`+column). A load replays
+   only the events after the column's checkpoint. A sub-chunk snapshot also carries the
+   generator revision it was saved under (`V`+key); a stale one is rebuilt over the fresh
+   terrain, and its column then replays everything.
+2. **Revisions** — group the events of one operation (a dig, an explosion, a craft, one
+   tick of fluid flow) under a revision: id, parent, actor, time, cause, and the
+   per-block `from → to` changes, so it stays invertible. The natural unit of a rollback
+   and of a Safe-Point merge. The format leaves room for several parents, but there is
+   one until regions actually branch and merge.
+3. **Packed segments** — a background pass moves cold history into immutable pack files
+   with their own indexes (column, actor, time, item) addressed by offset and length,
+   published atomically at a Safe Point. A rollback consults the hot journal, then the
+   pack indexes; nothing is unpacked wholesale. A crash mid-pass leaves the old root valid.
+4. **Benchmark** at 1 / 10 / 100 M events: size, write rate, cold column load, rollback
+   by player/region/time, rollback of a rollback, compaction, crash recovery.
+
+### 10.2 The History Graph is derived
+
+> The History Graph is a derived causal graph built from the immutable world journal.
+> It relates players, events, blocks, items, containers and other world objects. It is
+> not world state and does not replace the journal: lose it and it is rebuilt from the
+> journal. It serves provenance queries, object-centric history, relationship analysis
+> and an administrative UI.
+
+Nodes: `Player`, `Event`/`Revision`, `Block(x,y,z)`, `Item(uid)`, `Container(x,y,z)`,
+`Entity`, `Column`, open to more. Edges: *performed*, *modified*, *created / destroyed /
+moved*, *stored in*, *derived from* (crafting), *caused by*, *interacted with*. Many are
+virtual — read off an index rather than stored.
+
+Indexes live in the world's own Fjall store under their own prefix, so object queries
+work on every server, database or not: item uid → events, container → events,
+block → events (from the column index), player ↔ player with counts and the reason.
+Cluster analytics (dense subgraphs, shared containers, transfer volume) run on the
+PostgreSQL history mirror where one exists. Every query takes depth, node, edge and time
+limits — one busy player must not expand into half the server's history.
+
+Analytics produce **signals with their evidence** — "A and B share chest X; diamond #51
+went from A to B" — never a verdict. A dense cluster of accounts around the same
+resources is something for an operator to look at, not an automatic ban.
+
+### 10.3 The gap to close first: the journal does not record most of the graph
+
+Checked against the code: block changes are journalled with actor, time and both sides.
+Item events exist as types (`ItemMint`, `ItemMove`, `ItemDestroy`, with places inventory,
+ground, container) but the survival layer barely writes them — only `/give` and the
+economy do. Picking up, dropping, chests, furnaces, crafting and death drops leave no
+trace; a craft has no record of its inputs, so there is no *derived from*; an event has
+no cause, so an explosion is not tied to whoever lit it; fights and trades between
+players are not recorded at all. A graph built today would hold blocks and little else.
+
+### 10.4 Order of work
+
+| Stage | What |
+|---|---|
+| 0 | Journal the survival layer's item flows (pickup, drop, container put/take, smelting, crafting with its inputs, death drops) and a cause on events |
+| 1 | Revisions (10.1 step 2) |
+| 2 | Graph indexes (item, container, player↔player) and in-game `/history block`, `/history item` |
+| 3 | Read-only Admin API: object timelines, path finder between two nodes, a player's neighbours with the path that links them — loopback by default, token-protected, HTTPS through a reverse proxy |
+| 4 | Web UI: dashboard (players, TPS, tick time, backlog — the status line's numbers), history explorer, node inspector |
+| 5 | Cluster analytics on the PostgreSQL mirror |
+| 6 | State at a moment in time, and rollback from the UI through the existing authoritative rollback (itself an event, so it appears in the graph) |
+
+The admin UI will show addresses, movements and associations of players on a server in
+offline mode, so it ships read-only and loopback-only first; a rollback from the web is a
+separate, confirmed, attributed action.
