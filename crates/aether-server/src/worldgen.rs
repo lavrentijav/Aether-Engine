@@ -34,16 +34,16 @@ pub enum Generator {
 }
 
 impl Generator {
-    /// Load the vanilla generator from `pack_root`, falling back to the noise
-    /// terrain if it cannot be read.
+    /// The generator the configuration asks for: noise terrain when no data
+    /// pack is set, vanilla terrain from it when one is.
     ///
-    /// Falling back rather than refusing to start: the data is the operator's
-    /// own copy of the game and lives outside the repository, so "it is not
-    /// there" is an ordinary state of affairs on a fresh machine — and a world
-    /// that generates is more useful than a server that will not boot.
-    pub fn load(pack_root: &str, biome_report: &str, seed: u64) -> Generator {
+    /// A data pack that is set but unreadable is an error, not a quiet switch
+    /// to noise terrain: a world generated with the wrong generator is
+    /// written to disk as players edit it and cannot be taken back, while a
+    /// server that refuses to start says exactly what is missing.
+    pub fn load(pack_root: &str, biome_report: &str, seed: u64) -> Result<Generator, String> {
         if pack_root.is_empty() {
-            return Generator::Noise(NoiseGenerator::new(seed));
+            return Ok(Generator::Noise(NoiseGenerator::new(seed)));
         }
         let built = if biome_report.is_empty() {
             aether_worldgen::vanilla::generator::VanillaGenerator::new(pack_root, seed)
@@ -54,16 +54,9 @@ impl Generator {
                 seed,
             )
         };
-        match built {
-            Ok(g) => {
-                println!("worldgen   : vanilla (from {pack_root})");
-                Generator::Vanilla(Box::new(g))
-            }
-            Err(e) => {
-                eprintln!("warning: vanilla worldgen unavailable ({e}); using noise terrain");
-                Generator::Noise(NoiseGenerator::new(seed))
-            }
-        }
+        let g = built.map_err(|e| e.to_string())?;
+        crate::log::info(&format!("worldgen   : vanilla (from {pack_root})"));
+        Ok(Generator::Vanilla(Box::new(g)))
     }
 
     /// A one-line description for the console banner.

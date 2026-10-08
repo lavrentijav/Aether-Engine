@@ -108,6 +108,11 @@ impl PacketOut {
         &self.buf
     }
 
+    /// The bytes this packet goes on the wire as, at `threshold`.
+    pub fn frame(&self, threshold: Option<usize>) -> Vec<u8> {
+        frame_packet(&self.buf, threshold)
+    }
+
     /// Frame this packet for `c` and write it.
     pub fn send(&self, c: &mut Conn) -> io::Result<()> {
         let frame = frame_packet(&self.buf, c.threshold);
@@ -191,7 +196,6 @@ impl Conn {
     }
 
     /// The active threshold, if compression is on.
-    #[cfg(test)]
     pub fn threshold(&self) -> Option<usize> {
         self.threshold
     }
@@ -211,6 +215,23 @@ impl Conn {
     /// Set the read timeout on the underlying socket.
     pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         self.stream.set_read_timeout(dur)
+    }
+
+    /// Set the write timeout on the underlying socket. Every handle on the
+    /// socket shares it.
+    pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        self.stream.set_write_timeout(dur)
+    }
+
+    /// Write bytes that are already framed.
+    pub fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.stream.write_all(frame)
+    }
+
+    /// Close the socket in both directions. A thread blocked reading or
+    /// writing it, on any handle, returns at once.
+    pub fn shutdown(&self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 }
 

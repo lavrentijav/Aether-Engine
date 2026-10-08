@@ -117,9 +117,17 @@ impl<G: ChunkGenerator> Cached<G> {
         } else {
             let dir = Path::new(&cfg.root).join(format!("s{seed}-r{GEN_REVISION}"));
             match std::fs::create_dir_all(&dir) {
-                Ok(()) => Some(dir),
+                Ok(()) => {
+                    for old in remove_stale_revisions(Path::new(&cfg.root), seed) {
+                        crate::log::info(&format!(
+                            "column cache: removed `{}`, written by an older generator",
+                            old.display()
+                        ));
+                    }
+                    Some(dir)
+                }
                 Err(e) => {
-                    eprintln!("warning: column cache disabled — cannot use `{cfg:?}`: {e}");
+                    crate::log::warn(&format!("column cache disabled: cannot use `{cfg:?}`: {e}"));
                     None
                 }
             }
@@ -406,19 +414,68 @@ pub fn sweep(dir: &Path, max_entries: usize, ttl: Duration) -> usize {
     removed
 }
 
+/// Delete `root/s{seed}-r{N}` for every revision but [`GEN_REVISION`]: they
+/// are never read again, since the revision is part of the path. Other seeds'
+/// directories are left alone — another world may share the cache root.
+/// Returns what was removed.
+fn remove_stale_revisions(root: &Path, seed: u64) -> Vec<PathBuf> {
+    let prefix = format!("s{seed}-r");
+    let current = format!("{prefix}{GEN_REVISION}");
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut removed = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let stale = name != current
+            && name
+                .strip_prefix(&prefix)
+                .is_some_and(|rev| !rev.is_empty() && rev.bytes().all(|b| b.is_ascii_digit()));
+        if stale && e.path().is_dir() && std::fs::remove_dir_all(e.path()).is_ok() {
+            removed.push(e.path());
+        }
+    }
+    removed
+}
+
 /// Sweep once at startup and hourly after.
 fn spawn_sweeper(dir: PathBuf, max_entries: usize, ttl: Duration, stats: Arc<CacheStats>) {
     std::thread::spawn(move || loop {
         let n = sweep(&dir, max_entries, ttl);
         if n > 0 {
             stats.evicted.fetch_add(n as u64, Ordering::Relaxed);
-            println!(
+            crate::log::info(&format!(
                 "column cache: swept {n} stale entr{}",
                 if n == 1 { "y" } else { "ies" }
-            );
+            ));
         }
         std::thread::sleep(Duration::from_secs(3600));
     });
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+
+    #[test]
+    fn only_this_seeds_older_revisions_are_removed() {
+        let root = std::env::temp_dir().join(format!("gencache-rev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["s42-r1", "s42-r2", "s7-r1", "s42-rx", "notes"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(root.join(format!("s42-r{GEN_REVISION}"))).unwrap();
+        let mut removed: Vec<String> = remove_stale_revisions(&root, 42)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        removed.sort();
+        assert_eq!(removed, ["s42-r1", "s42-r2"]);
+        assert!(root.join(format!("s42-r{GEN_REVISION}")).is_dir());
+        assert!(root.join("s7-r1").is_dir(), "another seed's cache stays");
+        assert!(root.join("s42-rx").is_dir() && root.join("notes").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]

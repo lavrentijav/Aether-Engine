@@ -71,12 +71,17 @@ pub fn serve(
 ) -> io::Result<()> {
     // The handshake is always uncompressed: Set Compression cannot go out
     // before the client has told us which version it speaks.
+    let ip = stream.peer_addr().ok().map(|a| a.ip());
     let mut s = Conn::new(stream);
 
     // Bound the handshake/login phase so a client that connects but never
     // sends anything can't pin a thread forever. The play loop later relaxes
     // this to a short poll interval for keep-alive interleaving.
     s.set_read_timeout(Some(Duration::from_secs(30)))?;
+    // And the writes before the player's own writer thread takes over (the
+    // login burst): a client that stops reading mid-login gives up its
+    // thread after this rather than holding it forever.
+    s.set_write_timeout(Some(crate::outbox::WRITE_TIMEOUT))?;
 
     let Some(hs) = read_packet(&mut s)? else {
         return Ok(());
@@ -93,7 +98,7 @@ pub fn serve(
     match next_state {
         1 => status(&mut s, protocol_id, cfg, registry),
         2 => match protocol::codec_for(protocol_id) {
-            Some(codec) => login_and_play(&mut s, codec, world, cfg, next_eid, registry),
+            Some(codec) => login_and_play(&mut s, ip, codec, world, cfg, next_eid, registry),
             None => protocol::kick_unsupported(&mut s, protocol_id),
         },
         _ => Ok(()),
@@ -143,6 +148,7 @@ fn status(s: &mut Conn, asked: i32, cfg: &Config, registry: &SharedRegistry) -> 
 /// Log a player in and run their play session to disconnect.
 fn login_and_play(
     s: &mut Conn,
+    ip: Option<std::net::IpAddr>,
     codec: &'static dyn ProtocolCodec,
     world: &DemoWorld,
     cfg: &Config,
@@ -152,6 +158,13 @@ fn login_and_play(
     let Some(name) = codec.read_login_start(s)? else {
         return Ok(());
     };
+    if !cfg.may_join(&name) {
+        crate::log::info(&format!(
+            "[x] {name} refused: not on the whitelist ({})",
+            ip.map(|i| i.to_string()).unwrap_or_default()
+        ));
+        return protocol::kick_login(s, "You are not on this server's whitelist.");
+    }
 
     // Between Login Start and Login Success, and nowhere else: every version
     // this server speaks takes Set Compression at login id 0x03, so the switch
@@ -164,6 +177,17 @@ fn login_and_play(
     let eid = next_eid.fetch_add(1, Ordering::Relaxed);
     let world_spawn = world_spawn(world);
     let mut player = Player::spawn(eid, name.clone(), world_spawn);
+    // The same player logging in again — a client that reconnected before
+    // the server noticed the old connection die — replaces the old session,
+    // as in vanilla. Its thread saves the player on the way out; wait for
+    // that before reading the save back.
+    if let Some(old) = registry.by_uuid(player.uuid) {
+        old.disconnect("logged in again from elsewhere");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while registry.by_uuid(player.uuid).is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
     // A returning player comes back where they left, as they left.
     let saved = if codec.full_gameplay() {
         world
@@ -201,13 +225,14 @@ fn login_and_play(
     };
 
     codec.complete_login(s, &params)?;
-    println!(
-        "[+] {} joined (eid {}, {} via {})",
+    crate::log::info(&format!(
+        "[+] {} joined (eid {}, {} via {}, from {})",
         player.name,
         eid,
         player.uuid_hyphenated(),
-        codec.version_name()
-    );
+        codec.version_name(),
+        ip.map(|i| i.to_string()).unwrap_or_else(|| "?".into())
+    ));
 
     // Ground under the player, and no more than that, before the join is
     // finished. Columns go out uncompressed at tens of kilobytes each, so a
@@ -270,7 +295,7 @@ fn login_and_play(
         pitch: player.pitch,
         on_ground: false,
     };
-    let handle = registry.join(eid, player.uuid, player.name.clone(), codec, &*s, pos)?;
+    let handle = registry.join(eid, player.uuid, player.name.clone(), ip, codec, &*s, pos)?;
     // A returning player gets what they had; a new one gets the starter
     // hotbar. Seeding over a restored inventory would overwrite the first nine
     // slots of it, which is the whole hotbar.
@@ -351,6 +376,14 @@ fn login_and_play(
     result
 }
 
+/// How long a client may send nothing before it is dropped, as in vanilla.
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Log a departure with its cause.
+fn log_left(name: &str, reason: &str) {
+    crate::log::info(&format!("[-] {name} left ({reason})"));
+}
+
 /// Keep the connection alive, drain client packets, mirror movement to every
 /// other connected player, and stream chunks in as this player crosses into
 /// view range they don't already have loaded.
@@ -365,6 +398,10 @@ fn play_loop(
     use crate::game::interact;
     s.set_read_timeout(Some(Duration::from_millis(1000)))?;
     let mut last_keepalive = Instant::now();
+    // Anything at all from the client counts: every version answers a
+    // keep-alive within seconds and sends its position at least once a
+    // second, so silence this long means the client is gone.
+    let mut last_heard = Instant::now();
     let mut keepalive_id: i64 = 1;
     let mut last_paid = Instant::now();
     let mut last_saved = Instant::now();
@@ -383,6 +420,19 @@ fn play_loop(
             save_player(handle, world);
         }
 
+        // Disconnected from elsewhere: the writer gave up on the socket, or
+        // someone kicked the player.
+        if let Some(reason) = handle.disconnected() {
+            log_left(&handle.name, &reason);
+            return Ok(());
+        }
+        if last_heard.elapsed() >= CLIENT_TIMEOUT {
+            let reason = format!("timed out (nothing for {}s)", CLIENT_TIMEOUT.as_secs());
+            handle.disconnect(&reason);
+            log_left(&handle.name, &reason);
+            return Ok(());
+        }
+
         // Send a keep-alive roughly every 10s (clients disconnect after ~30s).
         if last_keepalive.elapsed() >= Duration::from_secs(10) {
             handle.emit(&ServerEvent::KeepAlive(keepalive_id), world);
@@ -393,10 +443,6 @@ fn play_loop(
         let pkt = match read_packet(s) {
             Ok(Some(pkt)) => pkt,
             Ok(None) => continue, // read timeout; loop to maybe send keep-alive
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                println!("[-] {} left", handle.name);
-                return Ok(());
-            }
             Err(e)
                 if matches!(
                     e.kind(),
@@ -405,8 +451,22 @@ fn play_loop(
             {
                 continue
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                // A socket shut down by our own writer reads as an error or
+                // an EOF here; the writer's reason is the real one.
+                let reason = handle.disconnected().unwrap_or_else(|| match e.kind() {
+                    io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::BrokenPipe => "disconnected".to_string(),
+                    _ => format!("read failed: {e}"),
+                });
+                handle.disconnect(&reason);
+                log_left(&handle.name, &reason);
+                return Ok(());
+            }
         };
+        last_heard = Instant::now();
         let full = handle.full();
         let dead = full && handle.game().dead;
         match handle.codec.decode(&pkt, handle.pos()) {
@@ -644,7 +704,7 @@ fn play_loop(
                     continue;
                 }
                 let line = format!("<{}> {}", handle.name, text);
-                println!("[chat] {line}");
+                crate::log::info(&format!("[chat] {line}"));
                 let ev = ServerEvent::Chat(line);
                 handle.emit(&ev, world);
                 registry.broadcast_except(handle.entity_id, &ev, world);
@@ -712,7 +772,7 @@ fn play_loop(
             ClientEvent::ChangeGameMode(mode) => {
                 // The switcher is the client asking; only an operator is
                 // answered, the way vanilla gates it on permission level 2.
-                if crate::is_operator(&handle.name) {
+                if crate::is_operator(handle) {
                     interact::set_mode(handle, world, mode);
                 } else {
                     handle.emit(&ServerEvent::Chat("You are not an operator.".into()), world);
@@ -893,11 +953,7 @@ fn after_spawn(
     // Permission level, as an entity event on the player's own entity: 24
     // is level 0, 28 level 4. Without it the client treats an operator as
     // anyone else — the F3+F4 switcher and F3+N refuse to open.
-    let level = if crate::is_operator(&handle.name) {
-        4
-    } else {
-        0
-    };
+    let level = if crate::is_operator(handle) { 4 } else { 0 };
     handle.emit(
         &ServerEvent::EntityStatus {
             entity_id: handle.entity_id,
@@ -1052,7 +1108,7 @@ impl Streamer {
                                     let i = cursor.fetch_add(1, Ordering::Relaxed);
                                     let Some(&(cx, cz)) = batch.get(i) else { break };
                                     let _permit = GenPermit::acquire();
-                                    handle.emit(&ServerEvent::ChunkColumn { cx, cz }, world);
+                                    handle.emit_paced(&ServerEvent::ChunkColumn { cx, cz }, world);
                                 });
                             }
                         });

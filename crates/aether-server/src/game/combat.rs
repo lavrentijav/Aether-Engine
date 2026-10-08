@@ -172,7 +172,7 @@ pub fn die(
     world: &DemoWorld,
 ) {
     let text = death_message(&target.name, source, attacker, registry);
-    println!("[death] {text}");
+    crate::log::info(&format!("[death] {text}"));
     let items: Vec<Stack> = {
         let mut st = target.game();
         st.window = None;

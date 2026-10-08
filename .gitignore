@@ -33,3 +33,6 @@ logs/
 *.log
 nohup.out
 .claude/
+
+# The live server config: machine-specific, copied from aether-server.example.toml
+/aether-server.toml

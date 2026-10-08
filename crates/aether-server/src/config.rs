@@ -33,9 +33,8 @@ pub struct ServerConfig {
     /// Directory holding the game's `data/minecraft/worldgen/`.
     ///
     /// The operator's own copy, read at run time and never vendored into this
-    /// repository. Empty falls back to the engine's built-in noise terrain, as
-    /// does a copy that cannot be read — a world that generates beats a server
-    /// that will not start.
+    /// repository. Empty means the engine's built-in noise terrain; a copy
+    /// that is set but cannot be read stops the server at startup.
     pub worldgen_data: String,
     /// The game's `reports/biome_parameters/minecraft/overworld.json`.
     ///
@@ -51,6 +50,13 @@ pub struct ServerConfig {
     pub world_dir: String,
     /// Seconds between autosaves. Edits are flushed to disk on this tick.
     pub autosave_secs: u64,
+    /// Seconds the game tick may stall before the server exits so a
+    /// supervisor can restart it; a warning is logged long before. 0 only
+    /// warns.
+    pub watchdog_secs: u64,
+    /// Seconds between status lines in the log (players, tick rate, send
+    /// backlog). 0 disables them.
+    pub status_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -68,6 +74,8 @@ impl Default for ServerConfig {
             seed: 42,
             world_dir: "world".to_string(),
             autosave_secs: 30,
+            watchdog_secs: 60,
+            status_secs: 300,
         }
     }
 }
@@ -114,16 +122,95 @@ pub struct Config {
     pub resource_pack: ResourcePackConfig,
     /// Optional history mirror.
     pub database: DatabaseConfig,
-    /// Names allowed to run administrative commands.
+    /// Who may run administrative commands: `name`, or `name@address` to
+    /// require that the player also connects from that IP address.
     ///
     /// Names rather than UUIDs because this server is offline-mode and has no
-    /// UUIDs worth trusting; that is also why the list is empty by default.
-    /// Anyone who can pick a username can claim one on an offline server, so
-    /// filling this in is a decision the operator makes knowingly.
+    /// UUIDs worth trusting — an offline UUID is derived from the name. A bare
+    /// name is therefore a claim anyone can make; bind it to an address on any
+    /// server reachable from outside. See [`Self::is_operator`].
     pub operators: Vec<String>,
+    /// Names allowed to join at all. Empty lets anyone in.
+    pub whitelist: Vec<String>,
     /// The generated-column cache. See [`crate::gencache`].
     #[serde(default)]
     pub cache: CacheSection,
+}
+
+impl Config {
+    /// Whether `name`, connecting from `ip`, is an operator. Names compare
+    /// case-insensitively; an entry with an address also needs that address.
+    pub fn is_operator(&self, name: &str, ip: Option<std::net::IpAddr>) -> bool {
+        self.operators
+            .iter()
+            .any(|entry| match entry.split_once('@') {
+                Some((n, addr)) => {
+                    n.eq_ignore_ascii_case(name)
+                        && ip.is_some_and(|ip| addr.trim().parse::<std::net::IpAddr>() == Ok(ip))
+                }
+                None => entry.eq_ignore_ascii_case(name),
+            })
+    }
+
+    /// Whether `name` may join.
+    pub fn may_join(&self, name: &str) -> bool {
+        self.whitelist.is_empty() || self.whitelist.iter().any(|w| w.eq_ignore_ascii_case(name))
+    }
+
+    /// Whether anyone on the network can reach this server.
+    pub fn is_public(&self) -> bool {
+        !matches!(self.server.host.as_str(), "127.0.0.1" | "localhost" | "::1")
+    }
+
+    /// Operator entries that are a bare name, which anyone can claim on an
+    /// offline server.
+    pub fn unbound_operators(&self) -> Vec<&str> {
+        self.operators
+            .iter()
+            .filter(|o| !o.contains('@'))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Apply the `AETHER_*` environment overrides, so a deployment can keep
+    /// machine-specific values out of the file. Blank values are ignored.
+    pub fn apply_env(&mut self, var: impl Fn(&str) -> Option<String>) -> Result<(), String> {
+        let get = |k: &str| {
+            var(k)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let list = |v: String| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        if let Some(v) = get("AETHER_HOST") {
+            self.server.host = v;
+        }
+        if let Some(v) = get("AETHER_PORT") {
+            self.server.port = v
+                .parse()
+                .map_err(|_| format!("AETHER_PORT: not a port: {v}"))?;
+        }
+        if let Some(v) = get("AETHER_WORLD_DIR") {
+            self.server.world_dir = v;
+        }
+        if let Some(v) = get("AETHER_WORLDGEN_DATA") {
+            self.server.worldgen_data = v;
+        }
+        if let Some(v) = get("AETHER_CACHE_DIR") {
+            self.cache.dir = v;
+        }
+        if let Some(v) = get("AETHER_OPERATORS") {
+            self.operators = list(v);
+        }
+        if let Some(v) = get("AETHER_WHITELIST") {
+            self.whitelist = list(v);
+        }
+        Ok(())
+    }
 }
 
 /// Parse `game_mode` from its name.
@@ -236,11 +323,19 @@ impl CacheSection {
 }
 
 /// Sample written when the config file is missing.
-pub const SAMPLE: &str = r#"# Aether Engine server configuration (Minecraft 1.8.9 / protocol 47).
+pub const SAMPLE: &str = r#"# Aether Engine server configuration.
+#
+# Most settings can also come from the environment, which wins over this file:
+# AETHER_HOST, AETHER_PORT, AETHER_WORLD_DIR, AETHER_WORLDGEN_DATA,
+# AETHER_CACHE_DIR, AETHER_OPERATORS, AETHER_WHITELIST, AETHER_DATABASE_URL.
 
-# Names allowed to run administrative commands (/econ give). Empty by default:
-# this server is offline-mode, so a username is a claim and not an identity.
+# Who may run administrative commands: "name", or "name@1.2.3.4" to also
+# require that address. This server is offline-mode, so a bare name is a claim
+# anyone can make: on a server reachable from outside, bind every operator to
+# an address. AETHER_OPERATORS (comma-separated) overrides this list.
 operators = []
+# Names allowed to join; empty lets anyone in. AETHER_WHITELIST overrides it.
+whitelist = []
 
 [server]
 # Loopback by default: this is an offline, unauthenticated preview server.
@@ -252,9 +347,11 @@ max_players = 20
 view_radius = 8       # chunk radius kept loaded around each player
 compression_threshold = 256  # deflate packets this size or larger; -1 disables
 game_mode = "creative"  # survival: blocks drop and pay; creative: build freely
-# The game's own data pack (data/minecraft/), read at run time. When set,
-# the world is vanilla terrain: biomes, surface, caves, ores, trees and
-# plants. Empty uses the built-in noise terrain.
+# The directory holding the game's data pack (it contains data/minecraft/),
+# read at run time. When set, the world is vanilla terrain: biomes, surface,
+# caves, ores, trees and plants, and the server refuses to start if it cannot
+# read it. Empty uses the built-in noise terrain.
+# tools/fetch-vanilla-data.sh fetches one and prints this line.
 worldgen_data = ""
 # Optional: the game's reports/biome_parameters/minecraft/overworld.json.
 # The biome table is built in; set this only to override it with a report.
@@ -262,6 +359,8 @@ biome_data = ""
 seed = 42             # world seed for the terrain generator
 world_dir = "world"   # persistent world directory, created on first run
 autosave_secs = 30    # how often block edits are flushed to disk
+watchdog_secs = 60    # exit (for a supervisor to restart) if the tick stalls this long; 0 only warns
+status_secs = 300     # a status line in the log this often; 0 disables
 
 [resource_pack]
 # Offered on join so older clients can render blocks their version lacks.
@@ -275,8 +374,8 @@ required = false
 # `--features postgres`). Leave url empty to disable. The mirror is derived
 # from the on-disk journal, so losing it never risks the world.
 #
-# A connection string contains a password and this file is in version control,
-# so prefer the AETHER_DATABASE_URL environment variable, which overrides this.
+# A connection string contains a password, so prefer the AETHER_DATABASE_URL
+# environment variable, which overrides this.
 url = ""
 batch_size = 500        # write as soon as this many events are waiting
 batch_delay_ms = 1000   # ...or this long after the first one arrived
@@ -380,6 +479,54 @@ mod tests {
     }
 
     #[test]
+    fn operators_bound_to_an_address_need_that_address() {
+        let cfg = Config {
+            operators: vec!["Root".into(), "admin@10.0.0.7".into()],
+            ..Default::default()
+        };
+        let ip = |s: &str| Some(s.parse().unwrap());
+        assert!(
+            cfg.is_operator("root", None),
+            "a bare name is enough for a bare entry"
+        );
+        assert!(cfg.is_operator("ADMIN", ip("10.0.0.7")));
+        assert!(
+            !cfg.is_operator("admin", ip("10.0.0.8")),
+            "another address is not"
+        );
+        assert!(!cfg.is_operator("admin", None));
+        assert!(!cfg.is_operator("someone", ip("10.0.0.7")));
+        assert_eq!(cfg.unbound_operators(), vec!["Root"]);
+    }
+
+    #[test]
+    fn an_empty_whitelist_lets_everyone_in() {
+        let mut cfg = Config::default();
+        assert!(cfg.may_join("anyone"));
+        cfg.whitelist = vec!["Alice".into()];
+        assert!(cfg.may_join("alice"));
+        assert!(!cfg.may_join("mallory"));
+    }
+
+    #[test]
+    fn the_environment_overrides_settings_and_ignores_blanks() {
+        let mut cfg = Config::default();
+        let env = |k: &str| match k {
+            "AETHER_PORT" => Some("25999".to_string()),
+            "AETHER_OPERATORS" => Some("a@1.2.3.4, b ,".to_string()),
+            "AETHER_WORLD_DIR" => Some("   ".to_string()),
+            _ => None,
+        };
+        cfg.apply_env(env).unwrap();
+        assert_eq!(cfg.server.port, 25999);
+        assert_eq!(cfg.operators, vec!["a@1.2.3.4", "b"]);
+        assert_eq!(cfg.server.world_dir, "world", "blank is not an override");
+        assert!(cfg
+            .apply_env(|k| (k == "AETHER_PORT").then(|| "x".to_string()))
+            .is_err());
+    }
+
+    #[test]
     fn mirroring_is_off_unless_it_is_configured() {
         // SAFETY: single-threaded test, and the variable is read only here.
         unsafe { std::env::remove_var(DATABASE_URL_ENV) };
@@ -388,14 +535,10 @@ mod tests {
 
     #[test]
     fn the_checked_in_toml_names_every_setting_the_sample_does() {
-        // The two files are deliberately *not* compared byte for byte. The
-        // repo's aether-server.toml is a live file an operator edits — the
-        // running server binds 0.0.0.0, which the sample must not suggest as a
-        // default — so equality would fail forever and stop reporting the
-        // thing that actually matters: a setting added to SAMPLE and forgotten
-        // in the checked-in file, which a fresh checkout would then silently
-        // run without.
-        let checked_in = include_str!("../../../aether-server.toml");
+        // The example is what an operator copies to aether-server.toml (which
+        // is not tracked); a setting added to SAMPLE and forgotten there would
+        // be one a fresh deployment silently runs without.
+        let checked_in = include_str!("../../../aether-server.example.toml");
         let keys = |src: &str| -> Vec<String> {
             src.lines()
                 .map(str::trim)
@@ -406,7 +549,7 @@ mod tests {
         for key in keys(SAMPLE) {
             assert!(
                 keys(checked_in).contains(&key),
-                "aether-server.toml is missing `{key}`, which SAMPLE documents"
+                "aether-server.example.toml is missing `{key}`, which SAMPLE documents"
             );
         }
         // Both must still parse into the same shape.

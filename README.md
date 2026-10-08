@@ -161,43 +161,34 @@ cargo run -p aether-demo --release
 
 ### Join with a Minecraft client — *"can I connect right now?"*
 
-There's an experimental server you can actually **connect to with a vanilla
-client**. It's deliberately minimal — it targets **Minecraft 1.8.9 (protocol
-47)** only, offline mode, no compression/encryption — and drops you into a
-**noise-generated, always-lit (full-bright) creative world** served from the
-engine. Connect more than one client and you'll see each other spawn, move
-and disconnect.
+`aether-server` is a server you can **connect to with a vanilla client**:
+1.8.9, 1.17 through 1.21.11, and 26.1–26.3. On 1.21.11 and 26.x it runs the
+survival game server-side (mobs, combat, items, crafting, chests, furnaces,
+flowing water); older versions get building and seeing each other.
 
 ```bash
-cargo run -p aether-server            # binds 127.0.0.1:25565 (see aether-server.toml)
+cp aether-server.example.toml aether-server.toml   # the live config; git ignores it
+tools/fetch-vanilla-data.sh 1.21.11                # vanilla terrain: prints the worldgen_data line
+cargo build --release -p aether-server --features postgres
+target/release/aether-server aether-server.toml
 ```
 
-Then in a **Minecraft 1.8.9** client: *Multiplayer → Direct Connect →*
-`127.0.0.1`. The server list ping shows the MOTD; connecting spawns you on
-the generated terrain.
+Then *Multiplayer → Direct Connect →* `127.0.0.1`. Drop `--features postgres`
+for a build without the history mirror and economy; a database configured for
+a build without it is refused at startup rather than silently ignored.
 
-Config ([`aether-server.toml`](aether-server.toml)):
+Every `AETHER_*` environment variable listed at the top of the example config
+overrides the file (`AETHER_DATABASE_URL`, `AETHER_HOST`, `AETHER_OPERATORS`,
+…), so machine-specific values and secrets stay out of it. SIGINT or SIGTERM
+saves the players and flushes the world before exiting; a stalled game tick is
+logged and, after `watchdog_secs`, ends the process for a supervisor to
+restart. To run it as a service, see [`deploy/aether.service`](deploy/aether.service).
 
-```toml
-[server]
-host = "127.0.0.1" # loopback only by default — see the warning below
-port = 25565
-motd = "Aether Engine — 1.8.9 demo (full-bright noise terrain)"
-max_players = 20
-view_radius = 5      # chunk radius sent around spawn
-seed = 42             # world seed for the noise terrain generator
-```
-
-> ⚠️ **Do not expose this to the internet.** It runs in **offline mode with no
-> authentication, encryption or compression** — anyone who can reach the port
-> can join under any name. It binds to loopback (`127.0.0.1`) by default for
-> that reason. Only change `host` to `0.0.0.0` on a trusted LAN you control.
->
-> Scope: this is a Phase-3 preview, not a compatible server yet — 1.8.9 only,
-> no gameplay beyond spawning, looking around and seeing other players (no tab
-> list / real skins yet — see [Known Issues](docs/KNOWN_ISSUES.md)), and
-> lighting is the `FullBright` fallback (always max). Newer client versions
-> will be rejected at the handshake.
+> ⚠️ **Offline mode.** There is no authentication: anyone who can reach the
+> port can join under any name, including an operator's. It binds to loopback
+> by default. Before setting `host = "0.0.0.0"`, bind each operator to the
+> address they connect from (`operators = ["name@203.0.113.7"]`) or set a
+> `whitelist`; the server warns at startup when it is exposed without either.
 
 ### Migrate a Vanilla world
 

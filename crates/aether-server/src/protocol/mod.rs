@@ -804,6 +804,16 @@ pub fn json_escape(s: &str) -> String {
     out
 }
 
+/// Refuse a login with a message the client shows.
+///
+/// Login-phase Disconnect (`0x00`) carries a JSON chat string in every
+/// version this server speaks; see [`kick_unsupported`].
+pub fn kick_login(s: &mut Conn, text: &str) -> io::Result<()> {
+    PacketOut::new(0x00)
+        .string(&format!("{{\"text\":\"{}\"}}", json_escape(text)))
+        .send(s)
+}
+
 /// Turn away a client whose protocol this build does not speak.
 ///
 /// Sent as login-phase Disconnect (`0x00`), whose payload is a JSON chat

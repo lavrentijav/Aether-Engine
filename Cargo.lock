@@ -74,6 +74,7 @@ dependencies = [
  "aether-api",
  "aether-world",
  "aether-worldgen",
+ "libc",
  "miniz_oxide",
  "postgres",
  "serde",

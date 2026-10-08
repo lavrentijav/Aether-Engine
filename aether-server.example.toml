@@ -1,29 +1,43 @@
-# Aether Engine server configuration (Minecraft 1.8.9 / protocol 47).
+# Aether Engine server configuration — example.
+#
+# Copy to aether-server.toml (which git ignores) and edit that copy.
+#
+# Most settings can also come from the environment, which wins over this file:
+# AETHER_HOST, AETHER_PORT, AETHER_WORLD_DIR, AETHER_WORLDGEN_DATA,
+# AETHER_CACHE_DIR, AETHER_OPERATORS, AETHER_WHITELIST, AETHER_DATABASE_URL.
 
-# Names allowed to run administrative commands (/econ give). Empty by default:
-# this server is offline-mode, so a username is a claim and not an identity.
-operators = ["_alpha_01"]
+# Who may run administrative commands: "name", or "name@1.2.3.4" to also
+# require that address. This server is offline-mode, so a bare name is a claim
+# anyone can make: on a server reachable from outside, bind every operator to
+# an address. AETHER_OPERATORS (comma-separated) overrides this list.
+operators = []
+# Names allowed to join; empty lets anyone in. AETHER_WHITELIST overrides it.
+whitelist = []
 
 [server]
 # Loopback by default: this is an offline, unauthenticated preview server.
 # Set host = "0.0.0.0" only if you understand it will accept LAN/internet peers.
-host = "0.0.0.0"
+host = "127.0.0.1"
 port = 25565
 motd = "Aether Engine — 1.8.9 demo (full-bright noise terrain)"
 max_players = 20
 view_radius = 8       # chunk radius kept loaded around each player
 compression_threshold = 256  # deflate packets this size or larger; -1 disables
-game_mode = "survival"  # survival: blocks drop and pay; creative: build freely
-# The game's own data pack (data/minecraft/), read at run time. When set,
-# the world is vanilla terrain: biomes, surface, caves, ores, trees and
-# plants. Empty uses the built-in noise terrain.
-worldgen_data = "/tmp/vg"
+game_mode = "creative"  # survival: blocks drop and pay; creative: build freely
+# The directory holding the game's data pack (it contains data/minecraft/),
+# read at run time. When set, the world is vanilla terrain: biomes, surface,
+# caves, ores, trees and plants, and the server refuses to start if it cannot
+# read it. Empty uses the built-in noise terrain.
+# tools/fetch-vanilla-data.sh fetches one and prints this line.
+worldgen_data = ""
 # Optional: the game's reports/biome_parameters/minecraft/overworld.json.
 # The biome table is built in; set this only to override it with a report.
-biome_data = "/tmp/vanilla-ref/generated/reports/biome_parameters/minecraft/overworld.json"
-seed = 42             # world seed for the noise terrain generator
+biome_data = ""
+seed = 42             # world seed for the terrain generator
 world_dir = "world"   # persistent world directory, created on first run
 autosave_secs = 30    # how often block edits are flushed to disk
+watchdog_secs = 60    # exit (for a supervisor to restart) if the tick stalls this long; 0 only warns
+status_secs = 300     # a status line in the log this often; 0 disables
 
 [resource_pack]
 # Offered on join so older clients can render blocks their version lacks.
@@ -37,8 +51,8 @@ required = false
 # `--features postgres`). Leave url empty to disable. The mirror is derived
 # from the on-disk journal, so losing it never risks the world.
 #
-# A connection string contains a password and this file is in version control,
-# so prefer the AETHER_DATABASE_URL environment variable, which overrides this.
+# A connection string contains a password, so prefer the AETHER_DATABASE_URL
+# environment variable, which overrides this.
 url = ""
 batch_size = 500        # write as soon as this many events are waiting
 batch_delay_ms = 1000   # ...or this long after the first one arrived

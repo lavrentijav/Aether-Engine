@@ -41,7 +41,9 @@ pub fn start(registry: SharedRegistry, world: Arc<DemoWorld>) {
             loop {
                 let start = Instant::now();
                 tick_once(&registry, &world, &mut rng);
-                std::thread::sleep(TICK.saturating_sub(start.elapsed()));
+                let took = start.elapsed();
+                super::SLOWEST_TICK_US.fetch_max(took.as_micros() as u64, Ordering::Relaxed);
+                std::thread::sleep(TICK.saturating_sub(took));
             }
         })
         .expect("failed to start the game tick");
@@ -105,11 +107,16 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
     }
 
     if now % 600 == 0 {
-        let mut b = Vec::with_capacity(16);
-        b.extend_from_slice(&now.to_be_bytes());
-        b.extend_from_slice(&super::time_of_day().to_be_bytes());
-        let _ = world.put_meta(TIME_KEY, &b);
+        save_time(world);
     }
+}
+
+/// Persist the world clock.
+pub fn save_time(world: &DemoWorld) {
+    let mut b = Vec::with_capacity(16);
+    b.extend_from_slice(&super::now().to_be_bytes());
+    b.extend_from_slice(&super::time_of_day().to_be_bytes());
+    let _ = world.put_meta(TIME_KEY, &b);
 }
 
 fn apply(a: Action, registry: &SharedRegistry, world: &DemoWorld) {

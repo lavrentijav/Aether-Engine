@@ -3,16 +3,20 @@
 //! players move, join and leave.
 //!
 //! Each connection thread owns its `TcpStream` for *reading*. On join it
-//! hands a `try_clone()`d write half to the registry; every write to that
-//! socket after that point — this player's own keep-alives included — goes
-//! through the handle's mutex so a broadcast from another thread can never
-//! interleave bytes with this connection's own output.
+//! hands a `try_clone()`d write half to the registry, drained by the
+//! connection's own writer thread ([`crate::outbox`]); every write after that
+//! point — this player's own keep-alives included — is a push onto that
+//! queue. An event's packets are queued together, so a broadcast from another
+//! thread never interleaves with this connection's own output, and a push
+//! never waits on the network: a client that stops reading is disconnected
+//! instead of stalling whoever was talking to it.
 //!
 //! A handle also carries the **codec** its client connected with. Broadcasts
 //! therefore take a version-neutral [`ServerEvent`] rather than finished
 //! bytes, and each recipient renders it in their own dialect — which is how
 //! a 1.8 and a 1.21 client can share one world.
 
+use crate::outbox::Outbox;
 use crate::proto::Conn;
 use std::collections::HashMap;
 use std::io;
@@ -36,9 +40,11 @@ pub struct PlayerHandle {
     pub entity_id: i32,
     pub uuid: u128,
     pub name: String,
+    /// The address the client connected from.
+    pub ip: Option<std::net::IpAddr>,
     /// The wire dialect this particular client speaks.
     pub codec: &'static dyn ProtocolCodec,
-    writer: Mutex<Conn>,
+    outbox: Arc<Outbox>,
     pos: Mutex<PosLook>,
     inventory: Mutex<crate::inventory::Inventory>,
     /// Inspection mode and the last query's paged output. See
@@ -153,15 +159,27 @@ impl PlayerHandle {
             .map(|s| s.item.clone())
     }
 
-    /// Render `ev` with this player's codec and write it to their socket.
+    /// Render `ev` with this player's codec and queue it for their socket.
     ///
-    /// Encoding happens outside the lock and the whole event is written under
-    /// a single lock acquisition, so an event that becomes several packets
-    /// cannot be split apart by another thread's broadcast. Write errors are
-    /// swallowed: a dead socket is detected by the owning thread's own read
-    /// loop, which then cleans up the registry — a broadcaster shouldn't tear
-    /// down someone else's connection.
+    /// Encoding and framing happen in the caller and the event's packets are
+    /// queued as one unit, so an event that becomes several packets cannot be
+    /// split apart by another thread's broadcast. Never waits on the network:
+    /// a client too far behind is disconnected by the push (see
+    /// [`crate::outbox`]), and its own thread then cleans up the registry.
     pub fn emit(&self, ev: &ServerEvent, world: &dyn BlockSource) {
+        let frames = self.render(ev, world);
+        self.outbox.push(frames);
+    }
+
+    /// [`Self::emit`] for a sender with a lot to say to this one client — its
+    /// chunk stream — which waits while the client is behind rather than
+    /// queueing without bound.
+    pub fn emit_paced(&self, ev: &ServerEvent, world: &dyn BlockSource) {
+        let frames = self.render(ev, world);
+        self.outbox.push_paced(frames);
+    }
+
+    fn render(&self, ev: &ServerEvent, world: &dyn BlockSource) -> Vec<Vec<u8>> {
         let legacy = if self.full() { None } else { ev.legacy() };
         let packets = match ev {
             // Every codec reads a column block by block; give it a view that
@@ -172,13 +190,24 @@ impl PlayerHandle {
             }
             _ => self.codec.encode(legacy.as_ref().unwrap_or(ev), world),
         };
-        if let Ok(mut w) = self.writer.lock() {
-            for p in &packets {
-                if p.send(&mut w).is_err() {
-                    break;
-                }
-            }
-        }
+        let threshold = self.outbox.threshold();
+        packets.iter().map(|p| p.frame(threshold)).collect()
+    }
+
+    /// Disconnect this player: their socket is shut down and their own thread
+    /// leaves the game. The first reason given is the one logged.
+    pub fn disconnect(&self, reason: &str) {
+        self.outbox.close(reason);
+    }
+
+    /// Why this player was disconnected, if they have been.
+    pub fn disconnected(&self) -> Option<String> {
+        self.outbox.closed()
+    }
+
+    /// Bytes queued for this player's socket and not yet written.
+    pub fn queued_bytes(&self) -> usize {
+        self.outbox.queued()
     }
 }
 
@@ -197,6 +226,7 @@ impl Registry {
         entity_id: i32,
         uuid: u128,
         name: String,
+        ip: Option<std::net::IpAddr>,
         codec: &'static dyn ProtocolCodec,
         stream: &Conn,
         pos: PosLook,
@@ -205,13 +235,14 @@ impl Registry {
         // be framed exactly as the owning thread's own writes are, and the
         // switch has already happened by the time a player reaches the
         // registry.
-        let writer = stream.try_clone()?;
+        let outbox = Outbox::start(stream.try_clone()?, &name)?;
         let handle = Arc::new(PlayerHandle {
             entity_id,
             uuid,
             name,
+            ip,
             codec,
-            writer: Mutex::new(writer),
+            outbox,
             pos: Mutex::new(pos),
             inventory: Mutex::new(crate::inventory::Inventory::new()),
             session: Mutex::new(crate::commands::Session::default()),
