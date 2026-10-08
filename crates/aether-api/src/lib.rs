@@ -254,6 +254,17 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         // authoritative and the next edit would be recorded against the wrong
         // `from` state.
         let mut read_error = false;
+        // Set when a stale snapshot is rebuilt: the checkpoint then no longer
+        // holds, since edits it vouched for may have been dropped with the old
+        // terrain, and the column's whole history is replayed instead.
+        let mut rebuilt = false;
+        let checkpoint = match self.storage.column_checkpoint(cx, cz) {
+            Ok(c) => c.unwrap_or(0),
+            Err(_) => {
+                read_error = true;
+                0
+            }
+        };
 
         // The overlay, in two layers. First the snapshots: sub-chunks that
         // have been edited are written out whole, which is the "last state"
@@ -266,7 +277,10 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
                         None => sc,
                         Some(policy) => match self.storage.revision(key) {
                             Ok(Some(r)) if r == policy.revision => sc,
-                            Ok(_) => self.rebuild_stale(key, &sc, policy),
+                            Ok(_) => {
+                                rebuilt = true;
+                                self.rebuild_stale(key, &sc, policy)
+                            }
                             Err(_) => {
                                 read_error = true;
                                 sc
@@ -280,13 +294,15 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             }
         }
 
-        // Then the journal, replayed forwards over the top. Snapshots and
-        // journal agree in the normal case and this is a no-op; they disagree
-        // exactly when a crash landed between an edit and the next flush, and
-        // there the journal is the one that was written synchronously. Replay
-        // is what turns "we lost the last thirty seconds" into "we lost
-        // nothing".
-        match self.journal.column_events(cx, cz) {
+        // Then the journal, replayed forwards over the top: the events after
+        // the column's checkpoint, which the snapshots may not hold — exactly
+        // those of a crash between an edit and the next flush, where the
+        // journal is the one that was written synchronously. Replay is what
+        // turns "we lost the last thirty seconds" into "we lost nothing", and
+        // the checkpoint is what keeps it from re-reading the column's whole
+        // history on every load, however old the world.
+        let from = if rebuilt { 0 } else { checkpoint };
+        match self.journal.column_events_from(cx, cz, from) {
             Ok(events) => {
                 for e in events {
                     if let EventBody::BlockSet { x, y, z, to, .. } = e.body {
@@ -518,6 +534,10 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
 
     /// Persist every sub-chunk modified since the last flush.
     pub fn flush(&self) -> Result<(), StorageError> {
+        // Read before anything is copied: an edit writes the cache before its
+        // event is numbered, so every event below this is already in the
+        // sections about to be saved. It becomes their columns' checkpoint.
+        let head = self.journal.head();
         let keys: Vec<SubChunkKey> = self.dirty.read().unwrap().iter().copied().collect();
         {
             let cache = self.cache.read().unwrap();
@@ -530,6 +550,15 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
                 }
             }
         }
+        // Every event of a saved column below `head` is in what was just
+        // written: an event dirties its section before it is numbered, so its
+        // section was in `keys`. Written after the sections, so a crash can
+        // lose a checkpoint but never keep one without its snapshots.
+        let columns: HashSet<(i32, i32)> = keys.iter().map(|k| (k.cx, k.cz)).collect();
+        for (cx, cz) in columns {
+            self.storage.save_column_checkpoint(cx, cz, head)?;
+        }
+
         // The name table goes out with the sections, and before the durability
         // flush: the ids just written are meaningless without it.
         self.storage

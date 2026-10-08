@@ -107,6 +107,11 @@ server a vanilla 1.8.9 client can connect to.
 | Gameplay events on the 18 codecs before 1.21.11 (they keep the older subset) | ❌ |
 | Water and lava flow: vanilla delays and levels, falls, slope-seeking, infinite water, lava/water → obsidian/cobblestone/stone | ✅ |
 | Vanilla tags sent in configuration (block, item, fluid, entity type, game event — generated per release by `tools/gen/versions.py`): without the `minecraft:water` fluid tag a 1.21.11 client treats water as air (no swimming, no underwater view); `climbable` and `mineable/*` drive ladders and tool speed | ✅ |
+| Journal checkpoints: a flush records, per column, which events its snapshots already hold, so loading a column replays only the events after that — not its whole history (1000 saved edits + 3 unsaved: 3 events read, was 1003) | ✅ |
+| Snapshots stamped with the generator revision; one saved under an older generator is rebuilt as it loads (fresh terrain, the blocks players placed, then the journal) instead of bringing the old terrain back as a seam | ✅ |
+| One client can no longer stall the server: a bounded outgoing queue and writer thread per connection, 30 s write timeout, clients silent for 30 s dropped, a repeat login replaces the old session, every departure logged with its reason | ✅ |
+| Running as a service: clean stop on SIGINT/SIGTERM (players saved, world flushed), tick watchdog and status line, timestamped logs, `deploy/aether.service`, `AETHER_*` overrides, `tools/fetch-vanilla-data.sh`, operators bound to an address, whitelist | ✅ |
+| Grouped revisions (one revision per operation/tick) and packed, indexed history segments for the cold journal | 📋 |
 | Parallel column generation + encoding on a server-wide pool of one worker per core; sections copied once per encode (cold 289-column join 20 s → 9.5 s on 4 cores, warm 1.8 s) | ✅ |
 | Redstone / async lighting / full staged physics | ❌ Not yet started |
 

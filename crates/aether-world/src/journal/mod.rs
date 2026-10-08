@@ -304,9 +304,24 @@ impl<B: KvBackend> Journal<B> {
     /// This is the read the world does when it materializes a column: generate
     /// the baseline, then replay these over it.
     pub fn column_events(&self, cx: i32, cz: i32) -> Result<Vec<Event>, StorageError> {
+        self.column_events_from(cx, cz, 0)
+    }
+
+    /// The events affecting column `(cx, cz)` numbered `from` or later,
+    /// oldest first — the tail after a checkpoint. Earlier events are skipped
+    /// on their index key alone, without being read.
+    pub fn column_events_from(
+        &self,
+        cx: i32,
+        cz: i32,
+        from: u64,
+    ) -> Result<Vec<Event>, StorageError> {
         let mut out = Vec::new();
         for (k, _) in self.backend.scan_prefix(&column_prefix(cx, cz))? {
             let seq = u64::from_be_bytes(k[9..17].try_into().unwrap());
+            if seq < from {
+                continue;
+            }
             if let Some(e) = self.get(seq)? {
                 out.push(e);
             }

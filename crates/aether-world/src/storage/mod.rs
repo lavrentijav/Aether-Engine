@@ -291,6 +291,16 @@ fn revision_key(key: SubChunkKey) -> [u8; 10] {
     k
 }
 
+/// Key for a column's journal checkpoint: `K`, then the column. Ten bytes,
+/// like a column marker, so never a sub-chunk key.
+fn checkpoint_key(cx: i32, cz: i32) -> [u8; 10] {
+    let mut k = [0u8; 10];
+    k[0] = b'K';
+    k[1..5].copy_from_slice(&cx.to_be_bytes());
+    k[5..9].copy_from_slice(&cz.to_be_bytes());
+    k
+}
+
 /// High-level world storage: sub-chunk `save` / `load` over a [`KvBackend`],
 /// transparently serializing and (de)compressing blobs.
 pub struct WorldStorage<B: KvBackend> {
@@ -351,6 +361,28 @@ impl<B: KvBackend> WorldStorage<B> {
             .backend
             .get(&revision_key(key))?
             .and_then(|b| b.try_into().ok().map(u32::from_be_bytes)))
+    }
+
+    /// Record that every journal event of column `(cx, cz)` numbered below
+    /// `seq` is reflected in its saved snapshots, so loading it need replay
+    /// only the events from `seq` on.
+    ///
+    /// Must be written *after* the snapshots it vouches for: a backend that
+    /// recovers a prefix of its writes after a crash then never holds a
+    /// checkpoint without them.
+    pub fn save_column_checkpoint(&self, cx: i32, cz: i32, seq: u64) -> Result<(), StorageError> {
+        self.backend
+            .put(&checkpoint_key(cx, cz), &seq.to_be_bytes())
+    }
+
+    /// The checkpoint written by [`Self::save_column_checkpoint`]; `None` for
+    /// a column saved before checkpoints existed, whose whole history must be
+    /// replayed.
+    pub fn column_checkpoint(&self, cx: i32, cz: i32) -> Result<Option<u64>, StorageError> {
+        Ok(self
+            .backend
+            .get(&checkpoint_key(cx, cz))?
+            .and_then(|b| b.try_into().ok().map(u64::from_be_bytes)))
     }
 
     /// Record that column `(cx, cz)` has been generated in full.
@@ -432,6 +464,16 @@ impl<B: KvBackend> WorldStorage<B> {
 mod tests {
     use super::*;
     use crate::block::{BlockProperties, BlockStateId};
+
+    #[test]
+    fn column_checkpoints_round_trip() {
+        let storage = WorldStorage::new(MemStore::new());
+        assert_eq!(storage.column_checkpoint(4, -9).unwrap(), None);
+        storage.save_column_checkpoint(4, -9, 1234).unwrap();
+        assert_eq!(storage.column_checkpoint(4, -9).unwrap(), Some(1234));
+        assert_eq!(storage.column_checkpoint(-9, 4).unwrap(), None);
+        assert_ne!(checkpoint_key(1, 2), column_marker_key(1, 2));
+    }
 
     #[test]
     fn revisions_round_trip_per_sub_chunk() {

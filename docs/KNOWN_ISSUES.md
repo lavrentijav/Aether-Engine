@@ -62,6 +62,8 @@
     - **Anti-cheat is minimal**: mining time is checked at half the expected duration, reach at 6 blocks; movement is trusted.
     - **Light is not consulted for spawning**: monsters spawn at night under open sky, or at any time under cover.
 
+12. **The journal keeps every event forever.** Loading a column no longer replays its whole history (per-column checkpoints), but the history itself still grows without bound on disk; grouped revisions and packed cold segments are the plan (ROADMAP, Phase 1 "History at scale"). Fluid flow is written without a journal entry, so in a sub-chunk rebuilt after a generator change, flowing water resets to what the generator made until something disturbs it.
+
 ### B. Known Deviations Registry (Phase 1 — accepted on purpose)
 These are **not bugs** in Phase 1 — they are documented, temporary compatibility gaps that must be recorded in the engine config and closed in Phase 2.
 
