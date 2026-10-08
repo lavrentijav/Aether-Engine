@@ -15,6 +15,7 @@ pub mod fluids;
 pub mod interact;
 pub mod mobs;
 pub mod player;
+pub mod provenance;
 pub mod tables;
 pub mod tick;
 pub mod window;
@@ -28,6 +29,9 @@ use crate::session::DemoWorld;
 static REGISTRY: OnceLock<SharedRegistry> = OnceLock::new();
 static WORLD: OnceLock<Arc<DemoWorld>> = OnceLock::new();
 static AGE: AtomicU64 = AtomicU64::new(0);
+
+/// The slowest tick since the status line last read it, in microseconds.
+pub static SLOWEST_TICK_US: AtomicU64 = AtomicU64::new(0);
 static TIME_OF_DAY: AtomicI64 = AtomicI64::new(1000);
 
 /// The player registry, once the game has started.

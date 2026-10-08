@@ -482,6 +482,8 @@ fn apply(world: &DemoWorld, registry: &SharedRegistry, p: Pos, to: BlockStateId)
                     .into_iter()
                     .map(|(i, n)| crate::inventory::Stack::new(&i, n))
                     .collect(),
+                aether_world::journal::ActorId::SERVER,
+                None,
             );
         }
     }

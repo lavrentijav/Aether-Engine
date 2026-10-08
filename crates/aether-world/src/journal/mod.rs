@@ -264,11 +264,33 @@ impl<B: KvBackend> Journal<B> {
         body: EventBody,
         at_ms: u64,
     ) -> Result<u64, StorageError> {
+        self.append_full(actor, body, None, at_ms)
+    }
+
+    /// Append an event that happened because of event `cause` — a drop out of
+    /// the block break that produced it.
+    pub fn append_caused(
+        &self,
+        actor: ActorId,
+        body: EventBody,
+        cause: Option<u64>,
+    ) -> Result<u64, StorageError> {
+        self.append_full(actor, body, cause, now_ms())
+    }
+
+    fn append_full(
+        &self,
+        actor: ActorId,
+        body: EventBody,
+        cause: Option<u64>,
+        at_ms: u64,
+    ) -> Result<u64, StorageError> {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let e = Event {
             seq,
             at_ms,
             actor,
+            cause,
             body,
         };
         // The payload goes down before either index, so a crash between writes
@@ -304,9 +326,24 @@ impl<B: KvBackend> Journal<B> {
     /// This is the read the world does when it materializes a column: generate
     /// the baseline, then replay these over it.
     pub fn column_events(&self, cx: i32, cz: i32) -> Result<Vec<Event>, StorageError> {
+        self.column_events_from(cx, cz, 0)
+    }
+
+    /// The events affecting column `(cx, cz)` numbered `from` or later,
+    /// oldest first — the tail after a checkpoint. Earlier events are skipped
+    /// on their index key alone, without being read.
+    pub fn column_events_from(
+        &self,
+        cx: i32,
+        cz: i32,
+        from: u64,
+    ) -> Result<Vec<Event>, StorageError> {
         let mut out = Vec::new();
         for (k, _) in self.backend.scan_prefix(&column_prefix(cx, cz))? {
             let seq = u64::from_be_bytes(k[9..17].try_into().unwrap());
+            if seq < from {
+                continue;
+            }
             if let Some(e) = self.get(seq)? {
                 out.push(e);
             }

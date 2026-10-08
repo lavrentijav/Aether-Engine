@@ -85,7 +85,7 @@ fn admin(
     registry: &SharedRegistry,
     econ: &dyn Economy,
 ) -> Reply {
-    if !crate::is_operator(&handle.name) {
+    if !crate::is_operator(handle) {
         return Reply(vec!["that command is for operators".into()]);
     }
     match args {

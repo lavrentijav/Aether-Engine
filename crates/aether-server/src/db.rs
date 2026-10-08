@@ -72,6 +72,10 @@ CREATE INDEX IF NOT EXISTS aether_events_actor_seq ON aether_events (actor, seq 
 CREATE INDEX IF NOT EXISTS aether_events_column    ON aether_events (cx, cz, seq DESC);
 CREATE INDEX IF NOT EXISTS aether_events_at        ON aether_events (at DESC);
 CREATE INDEX IF NOT EXISTS aether_events_item      ON aether_events (item_uid) WHERE item_uid IS NOT NULL;
+ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS cause        BIGINT;
+ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS derived_from UUID[];
+CREATE INDEX IF NOT EXISTS aether_events_cause     ON aether_events (cause) WHERE cause IS NOT NULL;
+CREATE INDEX IF NOT EXISTS aether_events_derived   ON aether_events USING GIN (derived_from) WHERE derived_from IS NOT NULL;
 ";
 
 /// Columns and their types, in the order [`row_values`] produces them.
@@ -83,7 +87,7 @@ CREATE INDEX IF NOT EXISTS aether_events_item      ON aether_events (item_uid) W
 /// One text-shaped row builder plus a cast list is far less code than sixteen
 /// `&dyn ToSql` of four different types per event shape, and Postgres parses
 /// the text exactly as it would a literal.
-const COLUMNS: [(&str, &str); 16] = [
+const COLUMNS: [(&str, &str); 18] = [
     ("seq", "bigint"),
     ("at_ms", "bigint"),
     ("actor", "uuid"),
@@ -100,6 +104,8 @@ const COLUMNS: [(&str, &str); 16] = [
     ("item_count", "integer"),
     ("place_from", "text"),
     ("place_to", "text"),
+    ("cause", "bigint"),
+    ("derived_from", "uuid[]"),
 ];
 /// How many of them.
 const NCOLS: usize = COLUMNS.len();
@@ -189,7 +195,23 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
             v[11] = Some(uuid_text(uid.0));
             v[14] = Some(place_text(from));
         }
+        EventBody::ItemDerive {
+            uid,
+            item,
+            count,
+            to,
+            from,
+        } => {
+            v[3] = Some("item_derive".into());
+            v[11] = Some(uuid_text(uid.0));
+            v[12] = Some(item.clone());
+            v[13] = Some(count.to_string());
+            v[15] = Some(place_text(to));
+            let list: Vec<String> = from.iter().map(|u| uuid_text(u.0)).collect();
+            v[17] = Some(format!("{{{}}}", list.join(",")));
+        }
     }
+    v[16] = e.cause.map(|c| c.to_string());
     v
 }
 
@@ -332,6 +354,7 @@ mod live_tests {
                 seq: BASE as u64,
                 at_ms: 1_700_000_000_000,
                 actor: ActorId(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
+                cause: None,
                 body: EventBody::BlockSet {
                     x: -33,
                     y: 70,
@@ -344,6 +367,7 @@ mod live_tests {
                 seq: BASE as u64 + 1,
                 at_ms: 1_700_000_001_000,
                 actor: ActorId::SERVER,
+                cause: None,
                 body: EventBody::ItemMint {
                     uid: ItemUid(0xdead_beef),
                     item: "minecraft:diamond".into(),
@@ -358,6 +382,7 @@ mod live_tests {
                 seq: BASE as u64 + 2,
                 at_ms: 1_700_000_002_000,
                 actor: ActorId(1),
+                cause: None,
                 body: EventBody::ItemDestroy {
                     uid: ItemUid(0xdead_beef),
                     from: Place::Ground { x: 1, y: 2, z: 3 },
@@ -431,6 +456,7 @@ mod tests {
             seq: 42,
             at_ms: 1_700_000_000_000,
             actor: ActorId(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
+            cause: None,
             body: EventBody::BlockSet {
                 x: -33,
                 y: 70,
@@ -481,6 +507,7 @@ mod tests {
             seq: 7,
             at_ms: 1,
             actor: ActorId(1),
+            cause: None,
             body: EventBody::ItemMint {
                 uid: ItemUid(9),
                 item: "minecraft:diamond".into(),

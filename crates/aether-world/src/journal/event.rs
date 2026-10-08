@@ -74,6 +74,19 @@ pub enum EventBody {
     },
     /// An item instance left the world (used up, burnt, despawned).
     ItemDestroy { uid: ItemUid, from: Place },
+    /// An item instance came into existence *out of* others: the output of a
+    /// craft or a smelt from its inputs, the half split off a stack from the
+    /// stack, what a pickup put in a slot from the stack on the ground. A mint
+    /// with a pedigree — the edge provenance follows backwards.
+    ItemDerive {
+        uid: ItemUid,
+        item: String,
+        count: u8,
+        to: Place,
+        /// The instances it was made from, as they were consumed or reduced
+        /// in the same action.
+        from: Vec<ItemUid>,
+    },
 }
 
 /// One immutable entry in the log.
@@ -86,6 +99,10 @@ pub struct Event {
     pub at_ms: u64,
     pub actor: ActorId,
     pub body: EventBody,
+    /// The event this one happened because of, if any — the block break a
+    /// drop came out of, say. Lets history be followed by cause as well as by
+    /// time.
+    pub cause: Option<u64>,
 }
 
 impl Event {
@@ -99,6 +116,7 @@ impl Event {
             EventBody::ItemMint { to, .. } => to.position(),
             EventBody::ItemMove { to, from, .. } => to.position().or_else(|| from.position()),
             EventBody::ItemDestroy { from, .. } => from.position(),
+            EventBody::ItemDerive { to, .. } => to.position(),
         }
     }
 }
@@ -152,6 +170,10 @@ const TAG_BLOCK_SET: u8 = 1;
 const TAG_ITEM_MINT: u8 = 2;
 const TAG_ITEM_MOVE: u8 = 3;
 const TAG_ITEM_DESTROY: u8 = 4;
+const TAG_ITEM_DERIVE: u8 = 5;
+/// Optional trailer after the body: the cause. Absent in entries written
+/// before causes existed, which therefore decode with none.
+const TRAILER_CAUSE: u8 = 1;
 
 const PLACE_INVENTORY: u8 = 1;
 const PLACE_GROUND: u8 = 2;
@@ -200,6 +222,9 @@ impl<'a> Cur<'a> {
     }
     fn u8(&mut self) -> Result<u8, DecodeError> {
         Ok(self.take(1)?[0])
+    }
+    fn u16(&mut self) -> Result<u16, DecodeError> {
+        Ok(u16::from_be_bytes(self.take(2)?.try_into().unwrap()))
     }
     fn i16(&mut self) -> Result<i16, DecodeError> {
         Ok(i16::from_be_bytes(self.take(2)?.try_into().unwrap()))
@@ -293,6 +318,28 @@ impl Event {
                 out.extend_from_slice(&uid.0.to_be_bytes());
                 put_place(&mut out, from);
             }
+            EventBody::ItemDerive {
+                uid,
+                item,
+                count,
+                to,
+                from,
+            } => {
+                out.push(TAG_ITEM_DERIVE);
+                out.extend_from_slice(&uid.0.to_be_bytes());
+                out.extend_from_slice(&(item.len() as u32).to_be_bytes());
+                out.extend_from_slice(item.as_bytes());
+                out.push(*count);
+                put_place(&mut out, to);
+                out.extend_from_slice(&(from.len() as u16).to_be_bytes());
+                for f in from {
+                    out.extend_from_slice(&f.0.to_be_bytes());
+                }
+            }
+        }
+        if let Some(cause) = self.cause {
+            out.push(TRAILER_CAUSE);
+            out.extend_from_slice(&cause.to_be_bytes());
         }
         out
     }
@@ -331,13 +378,40 @@ impl Event {
                 uid: ItemUid(c.u128()?),
                 from: c.place()?,
             },
+            TAG_ITEM_DERIVE => {
+                let uid = ItemUid(c.u128()?);
+                let item = c.string()?;
+                let count = c.u8()?;
+                let to = c.place()?;
+                let n = c.u16()?;
+                let mut from = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    from.push(ItemUid(c.u128()?));
+                }
+                EventBody::ItemDerive {
+                    uid,
+                    item,
+                    count,
+                    to,
+                    from,
+                }
+            }
             t => return Err(DecodeError::UnknownTag(t)),
+        };
+        let cause = if c.at < c.b.len() {
+            match c.u8()? {
+                TRAILER_CAUSE => Some(c.u64()?),
+                t => return Err(DecodeError::UnknownTag(t)),
+            }
+        } else {
+            None
         };
         Ok(Event {
             seq,
             at_ms,
             actor,
             body,
+            cause,
         })
     }
 }

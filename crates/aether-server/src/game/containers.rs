@@ -147,10 +147,15 @@ pub fn snapshot(world: &DemoWorld, pos: Pos, kind: ContainerKind) -> Container {
     with(world, pos, kind, |c| c.clone())
 }
 
-/// The block at `pos` is gone: forget its container and return the items.
-pub fn remove(world: &DemoWorld, pos: Pos, kind: ContainerKind) -> Vec<Stack> {
+/// The block at `pos` is gone: forget its container and return the items,
+/// each with the slot it was in.
+pub fn remove(world: &DemoWorld, pos: Pos, kind: ContainerKind) -> Vec<(usize, Stack)> {
     let items = with(world, pos, kind, |c| {
-        c.slots.iter_mut().filter_map(Option::take).collect()
+        c.slots
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, s)| s.take().map(|s| (i, s)))
+            .collect()
     });
     all().lock().unwrap().remove(&pos);
     active().lock().unwrap().remove(&pos);
@@ -172,6 +177,9 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
                 active().lock().unwrap().remove(&pos);
                 continue;
             };
+            // Fuel burnt, input smelted, output made: journalled as the
+            // difference, by the server.
+            let before = c.slots.clone();
             let result = c.slots[0]
                 .as_ref()
                 .and_then(|s| super::tables::smelt(&s.item));
@@ -227,6 +235,7 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
             if dirty {
                 let _ = world.put_meta(&key(pos), &encode(c));
             }
+            super::provenance::container_changed(world, pos, &before, &c.slots);
         }
         if idle {
             active().lock().unwrap().remove(&pos);

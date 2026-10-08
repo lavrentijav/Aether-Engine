@@ -34,7 +34,6 @@ use aether_core::math::Vec3;
 use aether_physics::{step, BlockView};
 use aether_world::journal::{ActorId, EventBody, Filter, Journal, Restore};
 use aether_world::registry::BlockRegistry;
-use aether_world::storage::format::SubChunkKey;
 use aether_world::{KvBackend, StorageError, SubChunk, WorldStorage};
 use aether_worldgen::ChunkGenerator;
 
@@ -45,6 +44,7 @@ pub use aether_core::math::{Aabb, Vec3 as Vector3};
 pub use aether_physics::{Body, PhysicsParams};
 pub use aether_world::journal::{ActorId as JournalActor, Anomaly, Event, ItemUid, Ledger, Place};
 pub use aether_world::registry::ids as block_ids;
+pub use aether_world::storage::format::SubChunkKey;
 pub use aether_world::{BlockProperties, BlockStateId, FullBright, LightView, MemStore};
 pub use aether_worldgen::{FlatGenerator, NoiseGenerator};
 pub use player::{GameMode, Player};
@@ -61,6 +61,22 @@ const SCAN_CY_MAX: i8 = 23;
 #[inline]
 fn split(v: i32) -> (i32, usize) {
     (v.div_euclid(16), v.rem_euclid(16) as usize)
+}
+
+/// How a world treats sub-chunk snapshots saved under another revision of its
+/// generator. See [`World::with_snapshot_policy`].
+pub struct SnapshotPolicy {
+    /// The generator's current revision. Snapshots saved from now on are
+    /// stamped with it; any other stamp, or none, marks a snapshot as stale.
+    pub revision: u32,
+    /// Whether a block found in a stale snapshot, where the fresh generator
+    /// put something else, is one a player placed — a block the generator
+    /// that wrote the snapshot could not have produced — and so survives the
+    /// rebuild. Everything else in a stale snapshot is the old terrain and is
+    /// replaced by the new.
+    pub keep: Box<dyn Fn(BlockStateId) -> bool + Send + Sync>,
+    /// Told about each rebuilt sub-chunk and how many of its blocks were kept.
+    pub on_rebuild: Box<dyn Fn(SubChunkKey, usize) + Send + Sync>,
 }
 
 /// A live world: block access, on-demand generation and physics over a
@@ -84,6 +100,7 @@ pub struct World<B: KvBackend, G: ChunkGenerator> {
     /// still generate in parallel.
     columns: RwLock<HashMap<(i32, i32), Arc<Mutex<bool>>>>,
     params: PhysicsParams,
+    snapshots: Option<SnapshotPolicy>,
 }
 
 impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
@@ -139,7 +156,23 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             dirty: RwLock::new(HashSet::new()),
             columns: RwLock::new(HashMap::new()),
             params: PhysicsParams::default(),
+            snapshots: None,
         }
+    }
+
+    /// Stamp snapshots with the generator's revision, and rebuild the stale
+    /// ones as they load instead of trusting them whole.
+    ///
+    /// A snapshot holds a whole sub-chunk — the terrain *and* the edits — so
+    /// one saved before the generator changed brings the old terrain back
+    /// with it, a slab of it between freshly generated neighbours. A stale
+    /// snapshot is therefore rebuilt from the fresh generation, keeping only
+    /// the blocks `policy.keep` calls player-made, and then the journal is
+    /// replayed over it as for any column. The rebuilt section is saved
+    /// (stamped) at the next flush. Without a policy, snapshots load whole.
+    pub fn with_snapshot_policy(mut self, policy: SnapshotPolicy) -> Self {
+        self.snapshots = Some(policy);
+        self
     }
 
     /// Mirror every recorded change into `sink` as well as the journal.
@@ -221,6 +254,17 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         // authoritative and the next edit would be recorded against the wrong
         // `from` state.
         let mut read_error = false;
+        // Set when a stale snapshot is rebuilt: the checkpoint then no longer
+        // holds, since edits it vouched for may have been dropped with the old
+        // terrain, and the column's whole history is replayed instead.
+        let mut rebuilt = false;
+        let checkpoint = match self.storage.column_checkpoint(cx, cz) {
+            Ok(c) => c.unwrap_or(0),
+            Err(_) => {
+                read_error = true;
+                0
+            }
+        };
 
         // The overlay, in two layers. First the snapshots: sub-chunks that
         // have been edited are written out whole, which is the "last state"
@@ -229,6 +273,20 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             let key = SubChunkKey::new(cx, cy, cz);
             match self.storage.load(key) {
                 Ok(Some(sc)) => {
+                    let sc = match &self.snapshots {
+                        None => sc,
+                        Some(policy) => match self.storage.revision(key) {
+                            Ok(Some(r)) if r == policy.revision => sc,
+                            Ok(_) => {
+                                rebuilt = true;
+                                self.rebuild_stale(key, &sc, policy)
+                            }
+                            Err(_) => {
+                                read_error = true;
+                                sc
+                            }
+                        },
+                    };
                     self.cache.write().unwrap().insert(key, sc);
                 }
                 Ok(None) => {}
@@ -236,13 +294,15 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             }
         }
 
-        // Then the journal, replayed forwards over the top. Snapshots and
-        // journal agree in the normal case and this is a no-op; they disagree
-        // exactly when a crash landed between an edit and the next flush, and
-        // there the journal is the one that was written synchronously. Replay
-        // is what turns "we lost the last thirty seconds" into "we lost
-        // nothing".
-        match self.journal.column_events(cx, cz) {
+        // Then the journal, replayed forwards over the top: the events after
+        // the column's checkpoint, which the snapshots may not hold — exactly
+        // those of a crash between an edit and the next flush, where the
+        // journal is the one that was written synchronously. Replay is what
+        // turns "we lost the last thirty seconds" into "we lost nothing", and
+        // the checkpoint is what keeps it from re-reading the column's whole
+        // history on every load, however old the world.
+        let from = if rebuilt { 0 } else { checkpoint };
+        match self.journal.column_events_from(cx, cz, from) {
             Ok(events) => {
                 for e in events {
                     if let EventBody::BlockSet { x, y, z, to, .. } = e.body {
@@ -266,6 +326,33 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         // it holding nothing but generator output, so a later touch must retry
         // rather than be told the cache is authoritative.
         *materialized = !read_error;
+    }
+
+    /// A stale snapshot rebuilt over the fresh generation: see
+    /// [`World::with_snapshot_policy`]. Marked dirty so it is saved, stamped.
+    fn rebuild_stale(&self, key: SubChunkKey, old: &SubChunk, policy: &SnapshotPolicy) -> SubChunk {
+        let mut fresh = self
+            .cache
+            .read()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let mut kept = 0;
+        for y in 0..16 {
+            for z in 0..16 {
+                for x in 0..16 {
+                    let was = old.get(x, y, z);
+                    if was != fresh.get(x, y, z) && (policy.keep)(was) {
+                        fresh.set(x, y, z, was, self.props_of(was));
+                        kept += 1;
+                    }
+                }
+            }
+        }
+        self.dirty.write().unwrap().insert(key);
+        (policy.on_rebuild)(key, kept);
+        fresh
     }
 
     fn key_of(x: i32, y: i32, z: i32) -> Option<(SubChunkKey, usize, usize, usize)> {
@@ -447,15 +534,31 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
 
     /// Persist every sub-chunk modified since the last flush.
     pub fn flush(&self) -> Result<(), StorageError> {
+        // Read before anything is copied: an edit writes the cache before its
+        // event is numbered, so every event below this is already in the
+        // sections about to be saved. It becomes their columns' checkpoint.
+        let head = self.journal.head();
         let keys: Vec<SubChunkKey> = self.dirty.read().unwrap().iter().copied().collect();
         {
             let cache = self.cache.read().unwrap();
             for key in &keys {
                 if let Some(sc) = cache.get(key) {
                     self.storage.save(*key, sc)?;
+                    if let Some(policy) = &self.snapshots {
+                        self.storage.save_revision(*key, policy.revision)?;
+                    }
                 }
             }
         }
+        // Every event of a saved column below `head` is in what was just
+        // written: an event dirties its section before it is numbered, so its
+        // section was in `keys`. Written after the sections, so a crash can
+        // lose a checkpoint but never keep one without its snapshots.
+        let columns: HashSet<(i32, i32)> = keys.iter().map(|k| (k.cx, k.cz)).collect();
+        for (cx, cz) in columns {
+            self.storage.save_column_checkpoint(cx, cz, head)?;
+        }
+
         // The name table goes out with the sections, and before the durability
         // flush: the ids just written are meaningless without it.
         self.storage

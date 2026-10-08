@@ -21,6 +21,9 @@ mod game;
 mod gencache;
 mod ground;
 mod inventory;
+mod log;
+mod ops;
+mod outbox;
 mod placement;
 mod players;
 mod proto;
@@ -42,64 +45,90 @@ use config::Config;
 use players::{Registry, SharedRegistry};
 use session::DemoWorld;
 
-/// Flush dirty sub-chunks to disk every `secs` seconds.
-///
-/// The accept loop never returns and this build has no signal handler, so a
-/// Ctrl-C loses whatever was edited since the last tick. Keeping the interval
-/// short is the whole durability story for now — see the note in the report.
+/// Flush dirty sub-chunks to disk every `secs` seconds. A clean stop
+/// (SIGINT/SIGTERM, see [`ops`]) flushes too; this bounds what a crash loses.
 fn spawn_autosave(world: Arc<DemoWorld>, secs: u64) {
     let period = Duration::from_secs(secs.max(1));
     std::thread::spawn(move || loop {
         std::thread::sleep(period);
         if let Err(e) = world.flush() {
-            eprintln!("autosave failed: {e}");
+            log::error(&format!("autosave failed: {e}"));
         }
     });
+}
+
+/// Refuse to start, saying why.
+fn fail(msg: &str) -> std::process::ExitCode {
+    log::error(msg);
+    std::process::ExitCode::FAILURE
 }
 
 fn main() -> std::process::ExitCode {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "aether-server.toml".to_string());
-    let (cfg, created) = match Config::load_or_init(&path) {
+    let (mut cfg, created) = match Config::load_or_init(&path) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("config error: {e}");
-            return std::process::ExitCode::FAILURE;
-        }
+        Err(e) => return fail(&format!("config error: {e}")),
     };
     if created {
-        println!("No config at `{path}` — wrote a sample there; using defaults.\n");
+        log::warn(&format!(
+            "no config at `{path}`: wrote a sample there (see aether-server.example.toml); using defaults"
+        ));
+    }
+    if let Err(e) = cfg.apply_env(|k| std::env::var(k).ok()) {
+        return fail(&format!("config error: {e}"));
+    }
+    #[cfg(not(feature = "postgres"))]
+    if !cfg.database.connection_url().is_empty() {
+        return fail(
+            "a database is configured ([database] url or AETHER_DATABASE_URL) but this build \
+             has no database support: rebuild with `--features postgres`, or unset it",
+        );
     }
 
     let store = match FjallStore::open(&cfg.server.world_dir) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "error: cannot open world at `{}`: {e}",
+            return fail(&format!(
+                "cannot open world at `{}`: {e}",
                 cfg.server.world_dir
-            );
-            return std::process::ExitCode::FAILURE;
+            ))
         }
     };
-    let generator = worldgen::Generator::load(
+    let generator = match worldgen::Generator::load(
         &cfg.server.worldgen_data,
         &cfg.server.biome_data,
         cfg.server.seed,
-    );
+    ) {
+        Ok(g) => g,
+        Err(e) => {
+            return fail(&format!(
+                "worldgen_data `{}` is set but unusable: {e}. Fetch the game's data pack with \
+                 tools/fetch-vanilla-data.sh, or set worldgen_data = \"\" for noise terrain",
+                cfg.server.worldgen_data
+            ))
+        }
+    };
     let described = generator.describe(cfg.server.seed);
+    let revision = generator.revision();
     // The generator is deterministic, so its output is a cache and never a
     // source of truth: see `gencache`. Edits still live in the journal.
-    let generator = gencache::Cached::new(generator, cfg.server.seed, &cfg.cache.to_config());
-    let mut world = World::new(store, generator);
+    let generator = gencache::Cached::with_revision(
+        generator,
+        cfg.server.seed,
+        revision,
+        &cfg.cache.to_config(),
+    );
+    let mut world = World::new(store, generator).with_snapshot_policy(snapshot_policy(revision));
     if let Some(sink) = open_history_mirror(&cfg.database) {
         world = world.with_journal_sink(sink);
     }
     let world: Arc<DemoWorld> = Arc::new(world);
     economy::install(open_economy(&cfg.database));
-    let _ = OPERATORS.set(cfg.operators.clone());
     let _ = GAME_MODE.set(cfg.server.game_mode);
     let cfg = Arc::new(cfg);
+    let _ = CONFIG.set(Arc::clone(&cfg));
     let next_eid = Arc::new(AtomicI32::new(1));
     let registry: SharedRegistry = Arc::new(Registry::default());
     // The world ticks on its own thread, independently of whether anyone is
@@ -109,10 +138,7 @@ fn main() -> std::process::ExitCode {
     let addr = format!("{}:{}", cfg.server.host, cfg.server.port);
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
-        Err(e) => {
-            eprintln!("error: cannot bind {addr}: {e}");
-            return std::process::ExitCode::FAILURE;
-        }
+        Err(e) => return fail(&format!("cannot bind {addr}: {e}")),
     };
 
     let versions: Vec<String> = protocol::codecs()
@@ -120,19 +146,31 @@ fn main() -> std::process::ExitCode {
         .map(|c| format!("{} ({})", c.version_name(), c.protocol_id()))
         .collect();
 
-    println!("╔══════════════════════════════════════════════╗");
-    println!("║           Aether Engine — server             ║");
-    println!("╚══════════════════════════════════════════════╝");
-    println!("listening  : {addr}");
-    println!("protocols  : {}", versions.join(", "));
-    println!("world      : {described}, {:?}", cfg.server.game_mode);
-    println!(
+    log::info(&format!(
+        "Aether Engine server {}",
+        env!("CARGO_PKG_VERSION")
+    ));
+    log::info(&format!("listening  : {addr}"));
+    log::info(&format!("protocols  : {}", versions.join(", ")));
+    log::info(&format!(
+        "world      : {described}, {:?}",
+        cfg.server.game_mode
+    ));
+    log::info(&format!(
         "saved to   : {} (autosave every {}s)",
         cfg.server.world_dir, cfg.server.autosave_secs
-    );
-    println!("Ctrl-C to stop.\n");
+    ));
+    warn_if_exposed(&cfg);
 
     spawn_autosave(Arc::clone(&world), cfg.server.autosave_secs);
+    ops::install_signal_handlers();
+    ops::spawn_shutdown(Arc::clone(&registry), Arc::clone(&world));
+    ops::spawn_monitor(
+        Arc::clone(&registry),
+        cfg.server.watchdog_secs,
+        cfg.server.status_secs,
+    );
+    log::info("ready (SIGINT or SIGTERM stops cleanly)");
 
     for stream in listener.incoming() {
         match stream {
@@ -145,15 +183,81 @@ fn main() -> std::process::ExitCode {
                     let peer = s.peer_addr().map(|a| a.to_string()).unwrap_or_default();
                     if let Err(e) = session::serve(s, &world, &cfg, &next_eid, &registry) {
                         if e.kind() != io::ErrorKind::UnexpectedEof {
-                            eprintln!("[{peer}] disconnected: {e}");
+                            log::info(&format!("[{peer}] connection ended: {e}"));
                         }
                     }
                 });
             }
-            Err(e) => eprintln!("accept error: {e}"),
+            Err(e) => log::warn(&format!("accept failed: {e}")),
         }
     }
     std::process::ExitCode::SUCCESS
+}
+
+/// Sub-chunk snapshots carry the generator revision they were saved under;
+/// a stale one is rebuilt over the fresh terrain as it loads (see
+/// [`World::with_snapshot_policy`]). Without this, sub-chunks edited under an
+/// older generator kept its terrain whole — bare stone between neighbours the
+/// new one had given grass and trees.
+fn snapshot_policy(revision: u32) -> aether_api::SnapshotPolicy {
+    aether_api::SnapshotPolicy {
+        revision,
+        keep: Box::new(|id| !is_generated_terrain(id)),
+        on_rebuild: Box::new(|key, kept| {
+            log::info(&format!(
+                "rebuilt sub-chunk ({}, {}, {}) saved by an older generator; kept {kept} placed block(s)",
+                key.cx, key.cy, key.cz
+            ))
+        }),
+    }
+}
+
+/// Whether a block is terrain a generator lays down — rock, soil, fluid, air
+/// — rather than something a player is likely to have placed. In a stale
+/// snapshot these are the old generator's output and give way to the new
+/// one's; everything else is kept. Edits the journal recorded are replayed
+/// afterwards either way, so a placed block of stone or dirt still returns.
+fn is_generated_terrain(id: aether_api::BlockStateId) -> bool {
+    let Some((_, name)) = aether_world::registry::blocks::block_of_state(id) else {
+        return false;
+    };
+    matches!(
+        name.trim_start_matches("minecraft:"),
+        "air"
+            | "cave_air"
+            | "void_air"
+            | "bedrock"
+            | "stone"
+            | "deepslate"
+            | "tuff"
+            | "granite"
+            | "diorite"
+            | "andesite"
+            | "calcite"
+            | "dirt"
+            | "coarse_dirt"
+            | "rooted_dirt"
+            | "grass_block"
+            | "podzol"
+            | "mycelium"
+            | "mud"
+            | "clay"
+            | "gravel"
+            | "sand"
+            | "red_sand"
+            | "sandstone"
+            | "red_sandstone"
+            | "terracotta"
+            | "snow"
+            | "snow_block"
+            | "powder_snow"
+            | "ice"
+            | "packed_ice"
+            | "water"
+            | "lava"
+            | "netherrack"
+            | "end_stone"
+    )
 }
 
 /// Start the history mirror, if one is configured and compiled in.
@@ -178,22 +282,21 @@ fn open_history_mirror(
     {
         match db::PostgresSink::connect(&url) {
             Ok(sink) => {
-                println!("history    : mirroring to PostgreSQL");
+                log::info("history    : mirroring to PostgreSQL");
                 return Some(aether_world::journal::BatchingSink::start(sink, batch));
             }
             Err(e) => {
-                eprintln!("warning: history mirror disabled — cannot reach the database: {e}");
+                log::warn(&format!(
+                    "history mirror disabled: cannot reach the database: {e}"
+                ));
                 return None;
             }
         }
     }
     #[cfg(not(feature = "postgres"))]
     {
+        // Refused at startup; see `main`.
         let _ = batch;
-        eprintln!(
-            "warning: [database] url is set but this build has no database support \
-             (rebuild with `--features postgres`)"
-        );
         None
     }
 }
@@ -212,11 +315,11 @@ fn open_economy(cfg: &config::DatabaseConfig) -> Option<Box<dyn economy::Economy
     {
         match economy::pg::PgEconomy::connect(&url) {
             Ok(e) => {
-                println!("economy    : PostgreSQL");
+                log::info("economy    : PostgreSQL");
                 return Some(Box::new(e));
             }
             Err(e) => {
-                eprintln!("warning: economy disabled — {e}");
+                log::warn(&format!("economy disabled: {e}"));
                 return None;
             }
         }
@@ -225,18 +328,39 @@ fn open_economy(cfg: &config::DatabaseConfig) -> Option<Box<dyn economy::Economy
     None
 }
 
-/// The operator list, installed at startup.
-static OPERATORS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+/// The configuration, installed at startup.
+static CONFIG: std::sync::OnceLock<Arc<Config>> = std::sync::OnceLock::new();
 
-/// Whether `name` may run administrative commands.
-///
-/// Case-insensitive, and false for everyone when the list is empty — the safe
-/// default for an offline-mode server, where a username is a claim rather than
-/// an identity.
-pub fn is_operator(name: &str) -> bool {
-    OPERATORS
+/// Whether this player may run administrative commands: their name is an
+/// operator entry, and if the entry names an address, they connected from it.
+/// False for everyone when the list is empty — the safe default for an
+/// offline-mode server, where a username is a claim rather than an identity.
+pub fn is_operator(handle: &players::PlayerHandle) -> bool {
+    CONFIG
         .get()
-        .is_some_and(|ops| ops.iter().any(|o| o.eq_ignore_ascii_case(name)))
+        .is_some_and(|c| c.is_operator(&handle.name, handle.ip))
+}
+
+/// Say so, loudly, when a server anyone can reach trusts names alone.
+fn warn_if_exposed(cfg: &Config) {
+    if !cfg.is_public() {
+        return;
+    }
+    let unbound = cfg.unbound_operators();
+    if cfg.whitelist.is_empty() && !unbound.is_empty() {
+        log::warn(&format!(
+            "listening on {} in offline mode with operators bound to no address ({}): \
+             anyone who joins under one of those names is an operator. Write them as \
+             \"name@address\", or set a whitelist",
+            cfg.server.host,
+            unbound.join(", ")
+        ));
+    } else if cfg.whitelist.is_empty() {
+        log::warn(&format!(
+            "listening on {} in offline mode with no whitelist: anyone can join under any name",
+            cfg.server.host
+        ));
+    }
 }
 
 /// The mode this server runs, installed at startup.

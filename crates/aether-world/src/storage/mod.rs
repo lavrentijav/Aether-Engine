@@ -280,6 +280,27 @@ fn column_marker_key(cx: i32, cz: i32) -> [u8; 10] {
     k
 }
 
+/// Key for a sub-chunk snapshot's generator revision.
+///
+/// Ten bytes, `V` then the sub-chunk key: never a sub-chunk key (nine bytes)
+/// and never a column marker (`C`).
+fn revision_key(key: SubChunkKey) -> [u8; 10] {
+    let mut k = [0u8; 10];
+    k[0] = b'V';
+    k[1..].copy_from_slice(&key.encode());
+    k
+}
+
+/// Key for a column's journal checkpoint: `K`, then the column. Ten bytes,
+/// like a column marker, so never a sub-chunk key.
+fn checkpoint_key(cx: i32, cz: i32) -> [u8; 10] {
+    let mut k = [0u8; 10];
+    k[0] = b'K';
+    k[1..5].copy_from_slice(&cx.to_be_bytes());
+    k[5..9].copy_from_slice(&cz.to_be_bytes());
+    k
+}
+
 /// High-level world storage: sub-chunk `save` / `load` over a [`KvBackend`],
 /// transparently serializing and (de)compressing blobs.
 pub struct WorldStorage<B: KvBackend> {
@@ -318,6 +339,50 @@ impl<B: KvBackend> WorldStorage<B> {
     /// Delete the sub-chunk at `key`.
     pub fn delete(&self, key: SubChunkKey) -> Result<(), StorageError> {
         self.backend.delete(&key.encode())
+    }
+
+    /// Record which revision of the generator the snapshot at `key` was taken
+    /// over.
+    ///
+    /// A snapshot is a whole sub-chunk: the generator's output with the edits
+    /// on top. When the generator changes, a snapshot taken under the old one
+    /// still carries the old terrain, and loading it whole leaves a seam
+    /// against its freshly generated neighbours. The revision is what lets a
+    /// loader tell such a snapshot apart and rebuild it.
+    pub fn save_revision(&self, key: SubChunkKey, revision: u32) -> Result<(), StorageError> {
+        self.backend
+            .put(&revision_key(key), &revision.to_be_bytes())
+    }
+
+    /// The revision recorded by [`Self::save_revision`] for `key`; `None` for
+    /// a snapshot saved before revisions were recorded.
+    pub fn revision(&self, key: SubChunkKey) -> Result<Option<u32>, StorageError> {
+        Ok(self
+            .backend
+            .get(&revision_key(key))?
+            .and_then(|b| b.try_into().ok().map(u32::from_be_bytes)))
+    }
+
+    /// Record that every journal event of column `(cx, cz)` numbered below
+    /// `seq` is reflected in its saved snapshots, so loading it need replay
+    /// only the events from `seq` on.
+    ///
+    /// Must be written *after* the snapshots it vouches for: a backend that
+    /// recovers a prefix of its writes after a crash then never holds a
+    /// checkpoint without them.
+    pub fn save_column_checkpoint(&self, cx: i32, cz: i32, seq: u64) -> Result<(), StorageError> {
+        self.backend
+            .put(&checkpoint_key(cx, cz), &seq.to_be_bytes())
+    }
+
+    /// The checkpoint written by [`Self::save_column_checkpoint`]; `None` for
+    /// a column saved before checkpoints existed, whose whole history must be
+    /// replayed.
+    pub fn column_checkpoint(&self, cx: i32, cz: i32) -> Result<Option<u64>, StorageError> {
+        Ok(self
+            .backend
+            .get(&checkpoint_key(cx, cz))?
+            .and_then(|b| b.try_into().ok().map(u64::from_be_bytes)))
     }
 
     /// Record that column `(cx, cz)` has been generated in full.
@@ -399,6 +464,28 @@ impl<B: KvBackend> WorldStorage<B> {
 mod tests {
     use super::*;
     use crate::block::{BlockProperties, BlockStateId};
+
+    #[test]
+    fn column_checkpoints_round_trip() {
+        let storage = WorldStorage::new(MemStore::new());
+        assert_eq!(storage.column_checkpoint(4, -9).unwrap(), None);
+        storage.save_column_checkpoint(4, -9, 1234).unwrap();
+        assert_eq!(storage.column_checkpoint(4, -9).unwrap(), Some(1234));
+        assert_eq!(storage.column_checkpoint(-9, 4).unwrap(), None);
+        assert_ne!(checkpoint_key(1, 2), column_marker_key(1, 2));
+    }
+
+    #[test]
+    fn revisions_round_trip_per_sub_chunk() {
+        let storage = WorldStorage::new(MemStore::new());
+        let a = SubChunkKey::new(1, 2, 3);
+        let b = SubChunkKey::new(1, 3, 3);
+        assert_eq!(storage.revision(a).unwrap(), None, "unrecorded");
+        storage.save_revision(a, 7).unwrap();
+        assert_eq!(storage.revision(a).unwrap(), Some(7));
+        assert_eq!(storage.revision(b).unwrap(), None);
+        assert_eq!(revision_key(a).len(), 10);
+    }
 
     #[test]
     fn column_markers_round_trip_and_never_collide_with_sections() {

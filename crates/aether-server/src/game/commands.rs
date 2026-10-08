@@ -18,7 +18,7 @@ pub fn dispatch(
     registry: &SharedRegistry,
     world: &DemoWorld,
 ) -> Option<Vec<String>> {
-    let op = crate::is_operator(&handle.name);
+    let op = crate::is_operator(handle);
     let deny = || Some(vec!["You are not an operator.".to_string()]);
     Some(match cmd {
         "gamemode" | "gm" => {

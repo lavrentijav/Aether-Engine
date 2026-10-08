@@ -29,6 +29,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - 📋 **Lighting**: async cell-based flood-fill with safe-point merges. A `FullBright` fallback (always max light) ships in the meantime so worlds render.
 - 🚧 **Entities/AI**: ECS storage, Flow-Field navigation, cached A\*, batched spawner. The preview server now runs server-side mobs (eight kinds, straight-line AI, batched spawner) and item/arrow entities on 1.21.11 and 26.1–26.3; ECS storage and Flow-Field navigation remain.
 - ✅ **Storage**: Fjall KV backend, Zstandard sub-chunk blobs, order-preserving keys (+ in-memory backend for tests). [Design Notes §5](DESIGN_NOTES.md#5-git-like-immutable-chunk-storage-instant-save--rollback) sketches a Git-like immutable/CoW write path (instant save & rollback) on top of this backend — not yet a committed plan, needs a design spike first.
+- 🚧 **History at scale**: per-column journal checkpoints, so a load replays only the tail ✅; next, grouped revisions (one per operation/tick, the natural rollback and Safe-Point unit, with room for several parents should regions ever branch and merge), then packed, indexed segments for the cold journal with atomic publication at a Safe Point, and a benchmark at 1/10/100 M events.
 - 📋 **World Engine** process model (one OS process per world).
 - 📋 Work-stealing scheduler for generation / save / lighting off the main tick.
 
@@ -55,7 +56,8 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - 📋 **Plugin API**: Native C-ABI tier + WebAssembly (Wasmtime) sandbox + `engine.supports()` capability checks.
 - 🚧 **Aether-Convert**: parallel Anvil `.mca` → KV migration with audit trail & checksums. **Pulled forward** — an initial version shipped alongside Phase 1 storage (both as the `aether-convert` crate and the standalone [Aether-Convert](https://github.com/lavrentijav/Aether-Convert) repo); Phase 4 hardens it (full block-state mapping, gzip/LZ4 chunks, resumable runs).
 - 📋 In-game `/aether profile` visual sub-tick profiler.
-- 📋 Ops hardening: graceful restart, backups, Grafana dashboards.
+- 🚧 **History Graph + Web Admin**: a derived causal graph over the journal (players, events, blocks, items, containers) for object-centric history, provenance, path finding and relationship analysis, with a read-only admin web UI first. Stage 0, journalling the survival layer's item flows with derivation and causes, has landed; next are revisions. See [Design Notes §10](DESIGN_NOTES.md#10-history-at-scale-and-the-history-graph).
+- 🚧 Ops hardening: clean stop on SIGINT/SIGTERM, tick watchdog, status line, systemd unit and environment overrides ✅; backups and Grafana dashboards 📋.
 
 ### Cross-cutting / continuous
 - 🚧 Runnable demo (`aether-demo`) that exercises worldgen + physics + storage + telemetry end-to-end.

@@ -61,6 +61,9 @@ pub struct Instance {
     /// Every place it has been, oldest first — the provenance trail a human
     /// actually reads when investigating.
     pub trail: Vec<(u64, Place)>,
+    /// The instances it was made from (a craft's inputs, the stack it was
+    /// split off); empty for one minted from nothing.
+    pub derived_from: Vec<ItemUid>,
     destroyed: bool,
 }
 
@@ -91,26 +94,14 @@ impl Ledger {
                 item,
                 count,
                 to,
-            } => {
-                if self.items.contains_key(uid) {
-                    self.anomalies.push(Anomaly::MintedTwice {
-                        uid: *uid,
-                        seq: e.seq,
-                    });
-                    return;
-                }
-                self.items.insert(
-                    *uid,
-                    Instance {
-                        item: item.clone(),
-                        count: *count,
-                        at: *to,
-                        minted_at: e.seq,
-                        trail: vec![(e.seq, *to)],
-                        destroyed: false,
-                    },
-                );
-            }
+            } => self.mint(e.seq, *uid, item, *count, *to, Vec::new()),
+            EventBody::ItemDerive {
+                uid,
+                item,
+                count,
+                to,
+                from,
+            } => self.mint(e.seq, *uid, item, *count, *to, from.clone()),
             EventBody::ItemMove {
                 uid,
                 from,
@@ -175,6 +166,33 @@ impl Ledger {
                 inst.trail.push((e.seq, Place::Nowhere));
             }
         }
+    }
+
+    fn mint(
+        &mut self,
+        seq: u64,
+        uid: ItemUid,
+        item: &str,
+        count: u8,
+        to: Place,
+        derived_from: Vec<ItemUid>,
+    ) {
+        if self.items.contains_key(&uid) {
+            self.anomalies.push(Anomaly::MintedTwice { uid, seq });
+            return;
+        }
+        self.items.insert(
+            uid,
+            Instance {
+                item: item.to_owned(),
+                count,
+                at: to,
+                minted_at: seq,
+                trail: vec![(seq, to)],
+                derived_from,
+                destroyed: false,
+            },
+        );
     }
 
     /// What is known about one uid.

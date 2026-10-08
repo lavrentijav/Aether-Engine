@@ -1,0 +1,46 @@
+# systemd unit for aether-server.
+#
+#   sudo useradd --system --home /opt/aether --shell /usr/sbin/nologin aether
+#   sudo install -d -o aether -g aether /opt/aether
+#   sudo install -m 755 target/release/aether-server /opt/aether/
+#   sudo install -o aether -m 640 aether-server.example.toml /opt/aether/aether-server.toml
+#   sudo install -m 600 deploy/aether.env.example /etc/aether.env   # then edit it
+#   sudo install -m 644 deploy/aether.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now aether
+#
+# Logs: journalctl -u aether -f. Stop: systemctl stop aether (SIGINT: the
+# server saves its players and flushes the world before exiting).
+
+[Unit]
+Description=Aether Engine Minecraft server
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aether
+Group=aether
+WorkingDirectory=/opt/aether
+# Machine-specific settings and secrets (AETHER_DATABASE_URL, AETHER_HOST,
+# AETHER_OPERATORS, ...) live here rather than in the config file.
+EnvironmentFile=-/etc/aether.env
+ExecStart=/opt/aether/aether-server /opt/aether/aether-server.toml
+
+# A clean stop: SIGINT saves and flushes. Give it time before SIGKILL.
+KillSignal=SIGINT
+TimeoutStopSec=60
+
+# Restart after a crash, and after the tick watchdog exits (watchdog_secs).
+Restart=on-failure
+RestartSec=5
+
+# The world and its cache are the only things it writes.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/aether
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

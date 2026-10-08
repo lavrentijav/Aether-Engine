@@ -25,6 +25,11 @@ serde = { workspace = true }
 miniz_oxide = { workspace = true }
 postgres = { version = "0.19.10", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+# SIGINT/SIGTERM, for a clean shutdown. Already in the dependency tree (via the
+# storage crates), so this adds no new code to the build.
+libc = "0.2"
+
 [[bin]]
 name = "aether-server"
 path = "src/main.rs"

@@ -14,11 +14,13 @@ use std::sync::{Mutex, OnceLock};
 use aether_api::{Body, Vector3};
 
 use super::mobs::{self, Mob};
+use super::provenance;
 use super::tables::Rng;
 use crate::inventory::Stack;
 use crate::players::{PlayerHandle, SharedRegistry};
 use crate::protocol::{MetaValue, ServerEvent};
 use crate::session::DemoWorld;
+use aether_world::journal::ActorId;
 
 /// How far, in blocks, a client is told about an entity.
 pub const TRACK_RANGE: f64 = 72.0;
@@ -50,6 +52,9 @@ pub struct ItemEnt {
     /// not loot. `None` for ordinary drops.
     pub owner: Option<u128>,
     pub pickup_delay: u32,
+    /// Where the journal knows this stack to be: the block it landed at
+    /// first, kept while it lies there (see [`super::provenance`]).
+    pub ground: aether_world::journal::Place,
 }
 
 /// An arrow in flight or stuck in a block.
@@ -209,6 +214,7 @@ pub fn spawn_item(
             stack,
             owner,
             pickup_delay,
+            ground: provenance::ground_place(pos.x, pos.y, pos.z),
         }),
     )
 }
@@ -223,11 +229,71 @@ pub fn throw_from(handle: &PlayerHandle, stack: Stack) {
         -pitch.sin() * speed + 0.1,
         yaw.cos() * pitch.cos() * speed,
     );
-    spawn_item(Vector3::new(p.x, p.y + 1.32, p.z), stack, vel, 40, None);
+    let at = Vector3::new(p.x, p.y + 1.32, p.z);
+    if let Some(world) = super::world() {
+        provenance::note_thrown(
+            world,
+            ActorId(handle.uuid),
+            &stack,
+            provenance::ground_place(at.x, at.y, at.z),
+        );
+    }
+    spawn_item(at, stack, vel, 40, None);
 }
 
-/// Scatter what a broken block dropped around its centre.
-pub fn drop_at_block(x: i32, y: i32, z: i32, items: Vec<Stack>) {
+/// Scatter what a broken block dropped around its centre. The stacks are new:
+/// they are minted on the ground, attributed to `actor`, with the event that
+/// produced them (the break) as cause.
+pub fn drop_at_block(
+    x: i32,
+    y: i32,
+    z: i32,
+    items: Vec<Stack>,
+    actor: ActorId,
+    cause: Option<u64>,
+) {
+    scatter(x, y, z, items, |world, s, at| {
+        provenance::mint_on_ground(world, actor, s, at, cause)
+    });
+}
+
+/// Spill a broken container's contents around its block: the stacks keep
+/// their identity and move from their slot to the ground.
+pub fn spill(x: i32, y: i32, z: i32, items: Vec<(usize, Stack)>, actor: ActorId) {
+    let mut slots = std::collections::HashMap::new();
+    let stacks = items
+        .into_iter()
+        .map(|(slot, s)| {
+            slots.insert(s.uid, slot as i16);
+            s
+        })
+        .collect();
+    scatter(x, y, z, stacks, |world, s, at| {
+        let from = aether_world::journal::Place::Container {
+            x,
+            y,
+            z,
+            slot: slots.get(&s.uid).copied().unwrap_or(-1),
+        };
+        let _ = world.journal().append(
+            actor,
+            aether_world::journal::EventBody::ItemMove {
+                uid: s.uid,
+                from,
+                to: at,
+                count: s.count,
+            },
+        );
+    });
+}
+
+fn scatter(
+    x: i32,
+    y: i32,
+    z: i32,
+    items: Vec<Stack>,
+    journal: impl Fn(&DemoWorld, &Stack, aether_world::journal::Place),
+) {
     for s in items {
         let (dx, dz, vx, vz) = with_rng(|r| {
             (
@@ -237,13 +303,11 @@ pub fn drop_at_block(x: i32, y: i32, z: i32, items: Vec<Stack>) {
                 r.f64() * 0.2 - 0.1,
             )
         });
-        spawn_item(
-            Vector3::new(x as f64 + 0.5 + dx, y as f64 + 0.25, z as f64 + 0.5 + dz),
-            s,
-            Vector3::new(vx, 0.2, vz),
-            10,
-            None,
-        );
+        let at = Vector3::new(x as f64 + 0.5 + dx, y as f64 + 0.25, z as f64 + 0.5 + dz);
+        if let Some(world) = super::world() {
+            journal(world, &s, provenance::ground_place(at.x, at.y, at.z));
+        }
+        spawn_item(at, s, Vector3::new(vx, 0.2, vz), 10, None);
     }
 }
 
@@ -413,6 +477,8 @@ pub fn interact(id: i32, item: Option<&str>) -> Option<Interaction> {
                 pos.y.floor() as i32 + 1,
                 pos.z.floor() as i32,
                 vec![Stack::new(&wool, n)],
+                ActorId::SERVER,
+                None,
             );
             Some(Interaction::Wear)
         }
@@ -711,12 +777,22 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                             continue;
                         }
                         let before = it.stack.count;
+                        let mut scope = provenance::Scope::begin(handle, world);
+                        scope.takes_from_ground(&it.stack, it.ground);
                         let rest = handle.inventory().insert(it.stack.clone());
                         let left = rest.map(|r| r.count).unwrap_or(0);
                         if left == before {
+                            // Nothing fitted: nothing happened. Report the
+                            // stack as still lying where it was.
+                            scope.leaves_on_ground(&it.stack, it.ground);
+                            drop(scope);
                             continue;
                         }
                         it.stack.count = left;
+                        if left > 0 {
+                            scope.leaves_on_ground(&it.stack, it.ground);
+                        }
+                        drop(scope);
                         let gone_now = left == 0;
                         actions.push(Action::Picked {
                             item: id,
@@ -772,6 +848,13 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
         all.retain(|e| {
             if e.dead {
                 gone.push(e.id);
+                // A stack that leaves with items still in it was not picked
+                // up or merged — it expired or fell out of the world.
+                if let Kind::Item(it) = &e.kind {
+                    if it.stack.count > 0 {
+                        provenance::ground_changed(world, it.stack.uid, it.ground, 0);
+                    }
+                }
             }
             !e.dead
         });
@@ -821,6 +904,10 @@ fn merge_items(all: &mut [Entity], actions: &mut Vec<Action>) {
             }
             a.stack.count += n;
             b.stack.count -= n;
+            if let Some(world) = super::world() {
+                provenance::ground_changed(world, a.stack.uid, a.ground, a.stack.count);
+                provenance::ground_changed(world, b.stack.uid, b.ground, b.stack.count);
+            }
             let id_a = left[i].id;
             actions.push(Action::Tracked(
                 id_a,

@@ -654,6 +654,7 @@ mod tests {
                 7,
                 0x1234,
                 "tester".into(),
+                None,
                 &Codec,
                 &client,
                 PosLook {

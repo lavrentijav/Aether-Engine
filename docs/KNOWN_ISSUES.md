@@ -62,6 +62,10 @@
     - **Anti-cheat is minimal**: mining time is checked at half the expected duration, reach at 6 blocks; movement is trusted.
     - **Light is not consulted for spawning**: monsters spawn at night under open sky, or at any time under cover.
 
+12. **The journal keeps every event forever.** Loading a column no longer replays its whole history (per-column checkpoints), but the history itself still grows without bound on disk; grouped revisions and packed cold segments are the plan (ROADMAP, Phase 1 "History at scale"). Fluid flow is written without a journal entry, so in a sub-chunk rebuilt after a generator change, flowing water resets to what the generator made until something disturbs it.
+
+13. **Item provenance has known blind spots.** A stack that merges into one already in a slot ends there (its uid is destroyed and the other's count grows), so that hop has no *derived from* edge; events are per click, not per operation, until revisions group them; the economy still journals its own moves with uids of their own beside the real ones; items in inventories from before this change were never minted, so their first event reads as an anomaly in `/audit`; fights and trades between players are not recorded yet.
+
 ### B. Known Deviations Registry (Phase 1 — accepted on purpose)
 These are **not bugs** in Phase 1 — they are documented, temporary compatibility gaps that must be recorded in the engine config and closed in Phase 2.
 
