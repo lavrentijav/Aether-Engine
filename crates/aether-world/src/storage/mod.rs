@@ -266,6 +266,8 @@ const MARKER_VERSION: u8 = 1;
 /// Three bytes, where sub-chunk keys are nine and column markers ten, so it
 /// cannot collide with either.
 const REGISTRY_KEY: &[u8] = b"REG";
+/// Key holding the world's item-name table. Three bytes, like [`REGISTRY_KEY`].
+const ITEM_REGISTRY_KEY: &[u8] = b"ITM";
 const REGISTRY_VERSION: u8 = 1;
 
 /// Key for a column-generated marker.
@@ -410,46 +412,77 @@ impl<B: KvBackend> WorldStorage<B> {
     /// reopened world would read those ids against whatever order the new
     /// session happened to intern in, silently turning one block into another.
     pub fn save_registry(&self, names: &[String]) -> Result<(), StorageError> {
+        self.save_name_table(REGISTRY_KEY, names)
+    }
+
+    /// Read back the table written by [`Self::save_registry`].
+    ///
+    /// `Ok(None)` means this world has none yet. A table that is there but
+    /// cannot be read is an **error**, never `None`: it used to read as
+    /// `None`, and the caller then kept a default registry, reading every
+    /// stored id against a different table — one block silently became
+    /// another.
+    pub fn load_registry(&self) -> Result<Option<Vec<String>>, StorageError> {
+        self.load_name_table(REGISTRY_KEY)
+    }
+
+    /// Store the item-name table (interned, non-vanilla items) whose ids the
+    /// saved inventories and events use. See [`crate::ItemRegistry`].
+    pub fn save_item_registry(&self, names: &[String]) -> Result<(), StorageError> {
+        self.save_name_table(ITEM_REGISTRY_KEY, names)
+    }
+
+    /// Read back the table written by [`Self::save_item_registry`], with the
+    /// same rule as [`Self::load_registry`]: absent is `None`, unreadable is
+    /// an error.
+    pub fn load_item_registry(&self) -> Result<Option<Vec<String>>, StorageError> {
+        self.load_name_table(ITEM_REGISTRY_KEY)
+    }
+
+    fn save_name_table(&self, key: &[u8], names: &[String]) -> Result<(), StorageError> {
         let mut blob = vec![REGISTRY_VERSION];
         blob.extend_from_slice(&(names.len() as u32).to_be_bytes());
         for name in names {
             blob.extend_from_slice(&(name.len() as u32).to_be_bytes());
             blob.extend_from_slice(name.as_bytes());
         }
-        self.backend.put(REGISTRY_KEY, &blob)
+        self.backend.put(key, &blob)
     }
 
-    /// Read back the table written by [`Self::save_registry`].
-    ///
-    /// `Ok(None)` means this world has none yet — either it predates the table
-    /// or nothing has been saved. A blob that is truncated or of an unknown
-    /// version also reads as `None`: the caller then keeps its default
-    /// registry, which is right for a world that only ever used seeded blocks
-    /// and no worse than guessing for one that did not.
-    pub fn load_registry(&self) -> Result<Option<Vec<String>>, StorageError> {
-        let Some(blob) = self.backend.get(REGISTRY_KEY)? else {
+    fn load_name_table(&self, key: &[u8]) -> Result<Option<Vec<String>>, StorageError> {
+        let Some(blob) = self.backend.get(key)? else {
             return Ok(None);
         };
-        if blob.first() != Some(&REGISTRY_VERSION) || blob.len() < 5 {
-            return Ok(None);
+        let what = String::from_utf8_lossy(key).into_owned();
+        let bad = |why: &str| StorageError::Codec(format!("name table {what}: {why}"));
+        if blob.first() != Some(&REGISTRY_VERSION) {
+            return Err(bad("unknown format version"));
         }
-        let count = u32::from_be_bytes(blob[1..5].try_into().unwrap()) as usize;
-        let mut names = Vec::with_capacity(count);
+        let count = blob
+            .get(1..5)
+            .map(|b| u32::from_be_bytes(b.try_into().unwrap()) as usize)
+            .ok_or_else(|| bad("truncated header"))?;
+        // Each entry needs at least its four length bytes, so a count beyond
+        // that is corrupt — and must not size an allocation.
+        let mut names = Vec::with_capacity(count.min((blob.len() - 5) / 4));
         let mut pos = 5usize;
-        for _ in 0..count {
-            if pos + 4 > blob.len() {
-                return Ok(None);
-            }
-            let len = u32::from_be_bytes(blob[pos..pos + 4].try_into().unwrap()) as usize;
+        for i in 0..count {
+            let len = blob
+                .get(pos..pos + 4)
+                .map(|b| u32::from_be_bytes(b.try_into().unwrap()) as usize)
+                .ok_or_else(|| bad(&format!("truncated at entry {i}")))?;
             pos += 4;
-            let Some(bytes) = blob.get(pos..pos + len) else {
-                return Ok(None);
-            };
-            let Ok(name) = std::str::from_utf8(bytes) else {
-                return Ok(None);
-            };
+            let bytes = pos
+                .checked_add(len)
+                .and_then(|end| blob.get(pos..end))
+                .ok_or_else(|| bad(&format!("truncated at entry {i}")))?;
+            let name =
+                std::str::from_utf8(bytes).map_err(|_| bad(&format!("entry {i} is not UTF-8")))?;
             names.push(name.to_owned());
             pos += len;
+        }
+        if pos != blob.len() {
+            return Err(bad("trailing bytes after the last entry"));
         }
         Ok(Some(names))
     }
@@ -583,5 +616,53 @@ mod tests {
         let loaded = storage.load(key).unwrap().expect("persisted");
         assert_eq!(loaded.solid_mask(), sc.solid_mask());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_item_table_round_trips_beside_the_block_table() {
+        let storage = WorldStorage::new(MemStore::new());
+        assert_eq!(
+            storage.load_item_registry().unwrap(),
+            None,
+            "a fresh world has none"
+        );
+        let items = vec!["mymod:gizmo".to_string(), "mymod:widget".to_string()];
+        let blocks = vec!["mymod:block".to_string()];
+        storage.save_item_registry(&items).unwrap();
+        storage.save_registry(&blocks).unwrap();
+        assert_eq!(storage.load_item_registry().unwrap(), Some(items));
+        assert_eq!(storage.load_registry().unwrap(), Some(blocks));
+    }
+
+    #[test]
+    fn an_unreadable_name_table_is_an_error_not_a_missing_one() {
+        // Reading a damaged table as "none" made the caller fall back to a
+        // default registry and reinterpret every stored id.
+        let good = {
+            let s = WorldStorage::new(MemStore::new());
+            s.save_registry(&["a:b".to_string(), "c:d".to_string()])
+                .unwrap();
+            s.backend().get(REGISTRY_KEY).unwrap().unwrap()
+        };
+        let mut wrong_version = good.clone();
+        wrong_version[0] = REGISTRY_VERSION + 1;
+        let mut huge_count = good.clone();
+        huge_count[1..5].copy_from_slice(&u32::MAX.to_be_bytes());
+        let mut trailing = good.clone();
+        trailing.push(0);
+        let cases: [(&str, Vec<u8>); 5] = [
+            ("empty", vec![]),
+            ("wrong version", wrong_version),
+            ("truncated", good[..good.len() - 1].to_vec()),
+            ("count beyond the data", huge_count),
+            ("trailing bytes", trailing),
+        ];
+        for (what, blob) in cases {
+            let s = WorldStorage::new(MemStore::new());
+            s.backend().put(REGISTRY_KEY, &blob).unwrap();
+            s.backend().put(ITEM_REGISTRY_KEY, &blob).unwrap();
+            assert!(s.load_registry().is_err(), "block table, {what}");
+            assert!(s.load_item_registry().is_err(), "item table, {what}");
+        }
     }
 }
