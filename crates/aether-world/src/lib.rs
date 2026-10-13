@@ -39,6 +39,7 @@ pub use cell::AvxCell;
 pub use journal::{ActorId, Event, EventBody, Filter, ItemUid, Journal, Ledger, Place};
 pub use light::{FullBright, LightView, MAX_LIGHT};
 pub use palette::{PackedArray, Palette};
+pub use registry::items::{ItemRegistry, ItemTypeId};
 pub use registry::BlockRegistry;
 pub use storage::format::{FormatError, SubChunkKey};
 pub use storage::{KvBackend, MemStore, StorageError, WorldStorage};

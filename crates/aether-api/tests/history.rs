@@ -57,9 +57,9 @@ fn walking_across_an_untouched_world_writes_nothing() {
         }
     }
     world.flush().unwrap();
-    // `flush` writes the block-name table, and nothing else may join it.
+    // Name tables are written only when they grow, and nothing here grew.
     assert!(
-        counter.puts() <= 1,
+        counter.puts() == 0,
         "an untouched world stored {} blob(s) across 49 columns",
         counter.puts()
     );

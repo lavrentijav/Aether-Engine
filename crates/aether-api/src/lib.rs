@@ -33,7 +33,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use aether_core::math::Vec3;
 use aether_physics::{step, BlockView};
 use aether_world::journal::{ActorId, EventBody, Filter, Journal, Restore};
+pub use aether_world::registry::items::ItemIdsExhausted;
 use aether_world::registry::BlockRegistry;
+pub use aether_world::{ItemRegistry, ItemTypeId};
 use aether_world::{KvBackend, StorageError, SubChunk, WorldStorage};
 use aether_worldgen::ChunkGenerator;
 
@@ -91,6 +93,8 @@ pub struct World<B: KvBackend, G: ChunkGenerator> {
     /// runtime — a player placing something the generator never emits — and
     /// interning it needs to mutate the table through a shared `&World`.
     registry: RwLock<BlockRegistry>,
+    /// Item names ⇄ ids for this world. See [`ItemRegistry`].
+    items: RwLock<ItemRegistry>,
     cache: RwLock<HashMap<SubChunkKey, SubChunk>>,
     dirty: RwLock<HashSet<SubChunkKey>>,
     /// Per-column materialization latch. The `bool` is "this column is in the
@@ -147,11 +151,25 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             // damage.
             Err(e) => panic!("world block table is unreadable: {e}"),
         };
+        // The same rule for items: absent is a fresh world, anything else that
+        // cannot be restored refuses to open rather than renumbering.
+        let items = match storage.load_item_registry() {
+            Ok(None) => ItemRegistry::new(),
+            Ok(Some(table)) => ItemRegistry::restore(&table).unwrap_or_else(|e| {
+                panic!(
+                    "world item table cannot be restored ({e}). Opening it would silently \
+                     reinterpret every stored item id. Move the world directory aside, or \
+                     restore a build whose item table matches."
+                )
+            }),
+            Err(e) => panic!("world item table is unreadable: {e}"),
+        };
         Self {
             storage,
             journal,
             generator,
             registry: RwLock::new(registry),
+            items: RwLock::new(items),
             cache: RwLock::new(HashMap::new()),
             dirty: RwLock::new(HashSet::new()),
             columns: RwLock::new(HashMap::new()),
@@ -206,8 +224,46 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
     /// New ids are appended, never renumbered, and the whole table is written
     /// out by [`World::flush`], so a saved world always reads back with the
     /// same ids it was written with.
+    ///
+    /// A *new* name is written to the store before its id is returned: the
+    /// id may go into a journal event at once, and an event naming an id the
+    /// saved table lacks would read back as some other block after a crash.
     pub fn intern_block(&self, name: &str) -> (BlockStateId, BlockProperties) {
-        self.registry.write().unwrap().intern_full(name)
+        let mut reg = self.registry.write().unwrap();
+        let before = reg.names().len();
+        let out = reg.intern_full(name);
+        if reg.names().len() != before {
+            self.storage
+                .save_registry(reg.names())
+                .unwrap_or_else(|e| panic!("cannot persist new block name {name}: {e}"));
+        }
+        out
+    }
+
+    /// The id of an item name, if this world knows it (vanilla or interned).
+    pub fn item_id(&self, name: &str) -> Option<ItemTypeId> {
+        self.items.read().unwrap().get(name)
+    }
+
+    /// The id of an item name, interning it if this world has never seen it.
+    ///
+    /// As with blocks, a new name is persisted before its id escapes into an
+    /// inventory or an event. `Err` only when all 65,536 ids are taken.
+    pub fn intern_item(&self, name: &str) -> Result<ItemTypeId, ItemIdsExhausted> {
+        let mut reg = self.items.write().unwrap();
+        let before = reg.names().len();
+        let id = reg.intern(name)?;
+        if reg.names().len() != before {
+            self.storage
+                .save_item_registry(reg.names())
+                .unwrap_or_else(|e| panic!("cannot persist new item name {name}: {e}"));
+        }
+        Ok(id)
+    }
+
+    /// The name of an item id in this world.
+    pub fn item_name(&self, id: ItemTypeId) -> Option<String> {
+        self.items.read().unwrap().name(id).map(str::to_owned)
     }
 
     /// Every block name the registry holds, in id order.
@@ -559,10 +615,9 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             self.storage.save_column_checkpoint(cx, cz, head)?;
         }
 
-        // The name table goes out with the sections, and before the durability
-        // flush: the ids just written are meaningless without it.
-        self.storage
-            .save_registry(self.registry.read().unwrap().names())?;
+        // No name tables here: each one is written the moment it grows (see
+        // `intern_block` / `intern_item`), before any id from it can reach a
+        // section, an inventory or an event — so it is already on disk.
 
         // Only commit the durability flush, then clear exactly the keys we
         // saved — not the whole set — so keys dirtied concurrently survive and a
@@ -673,6 +728,37 @@ mod tests {
                 Some("minecraft:oak_planks")
             );
         }
+    }
+
+    #[test]
+    fn a_new_item_name_survives_a_crash_before_any_flush() {
+        // The id can reach an inventory or an event the moment it is handed
+        // out; if the table only went to disk on flush, a crash in between
+        // would leave stored ids naming nothing — or, once re-interned in
+        // another order, naming the wrong item.
+        let dir = scratch_dir("items");
+        let (gizmo, widget) = {
+            let world = World::new(FjallStore::open(&dir).unwrap(), FlatGenerator::classic());
+            let g = world.intern_item("mymod:gizmo").unwrap();
+            let w = world.intern_item("mymod:widget").unwrap();
+            world.journal().backend().flush().unwrap(); // the store's own durability, not World::flush
+            (g, w)
+        };
+        let world = World::new(FjallStore::open(&dir).unwrap(), FlatGenerator::classic());
+        // Ask for the second first: a fresh table would hand it the first's id.
+        assert_eq!(world.intern_item("mymod:widget").unwrap(), widget);
+        assert_eq!(world.item_id("mymod:gizmo"), Some(gizmo));
+        assert_eq!(world.item_name(gizmo).as_deref(), Some("mymod:gizmo"));
+        assert_eq!(world.item_id("minecraft:stone"), Some(ItemTypeId(1)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[should_panic(expected = "item table is unreadable")]
+    fn a_damaged_item_table_refuses_to_open_the_world() {
+        let store = MemStore::new();
+        store.put(b"ITM", &[0xFF, 0, 0]).unwrap();
+        let _ = World::new(store, FlatGenerator::classic());
     }
 
     #[test]

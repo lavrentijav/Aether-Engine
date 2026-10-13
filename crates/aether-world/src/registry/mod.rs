@@ -31,6 +31,8 @@ use crate::block::{BlockProperties, BlockStateId};
 use std::collections::HashMap;
 
 pub mod blocks;
+mod item_names;
+pub mod items;
 pub mod props;
 
 pub mod ids {
