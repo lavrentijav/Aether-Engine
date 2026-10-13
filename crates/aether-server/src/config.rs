@@ -15,6 +15,14 @@ pub struct ServerConfig {
     pub motd: String,
     /// Reported max player slots.
     pub max_players: u32,
+    /// Concurrent TCP connections the accept loop will serve at once. This
+    /// bounds idle sockets — one thread is spawned per connection — separately
+    /// from the game's player cap. `0` means "auto": see
+    /// [`Self::connection_limit`].
+    pub max_connections: u32,
+    /// Concurrent connections allowed from a single address. `0` disables the
+    /// per-address limit; the total cap still applies.
+    pub max_connections_per_ip: u32,
     /// Chunk radius kept loaded around each player (a `(2r+1)²` grid).
     pub view_radius: i32,
     /// Body size, in bytes, at or above which a packet is deflated.
@@ -66,6 +74,8 @@ impl Default for ServerConfig {
             port: 25565,
             motd: "Aether Engine — 1.8.9 demo (full-bright noise terrain)".to_string(),
             max_players: 20,
+            max_connections: 0,
+            max_connections_per_ip: 8,
             view_radius: 8,
             compression_threshold: 256,
             game_mode: crate::protocol::GameMode::Creative,
@@ -85,6 +95,25 @@ impl ServerConfig {
     /// compression is switched off.
     pub fn compression(&self) -> Option<usize> {
         usize::try_from(self.compression_threshold).ok()
+    }
+
+    /// The total concurrent-connection cap the accept loop should use.
+    ///
+    /// An explicit `max_connections` wins; `0` ("auto") resolves to double the
+    /// player slots plus a margin, so that a full server can still answer
+    /// status pings and take a reconnect before the old socket is noticed dead.
+    pub fn connection_limit(&self) -> u32 {
+        if self.max_connections == 0 {
+            self.max_players.saturating_mul(2).saturating_add(16)
+        } else {
+            self.max_connections
+        }
+    }
+
+    /// The per-address connection cap the accept loop should use. `0` in the
+    /// config means no per-address limit, so it passes through unchanged.
+    pub fn per_ip_connection_limit(&self) -> u32 {
+        self.max_connections_per_ip
     }
 }
 
@@ -344,6 +373,8 @@ host = "127.0.0.1"
 port = 25565
 motd = "Aether Engine — 1.8.9 demo (full-bright noise terrain)"
 max_players = 20
+max_connections = 0   # concurrent connections to serve; 0 = max_players*2+16
+max_connections_per_ip = 8  # per-address cap; 0 disables it
 view_radius = 8       # chunk radius kept loaded around each player
 compression_threshold = 256  # deflate packets this size or larger; -1 disables
 game_mode = "creative"  # survival: blocks drop and pay; creative: build freely
@@ -449,6 +480,33 @@ mod tests {
         assert_eq!(cfg.server.host, "127.0.0.1");
         assert_eq!(cfg.server.world_dir, "world");
         assert_eq!(cfg.server.autosave_secs, 30);
+    }
+
+    #[test]
+    fn the_connection_cap_defaults_to_double_the_slots_plus_a_margin() {
+        let mut server = ServerConfig::default();
+        assert_eq!(server.max_connections, 0, "the default is 'auto'");
+        assert_eq!(server.connection_limit(), 20 * 2 + 16);
+        server.max_players = 3;
+        assert_eq!(server.connection_limit(), 3 * 2 + 16, "follows max_players");
+        server.max_connections = 100;
+        assert_eq!(server.connection_limit(), 100, "an explicit cap wins");
+    }
+
+    #[test]
+    fn the_connection_caps_are_read_from_the_file() {
+        let cfg: Config =
+            toml::from_str("[server]\nmax_connections = 64\nmax_connections_per_ip = 2\n").unwrap();
+        assert_eq!(cfg.server.max_connections, 64);
+        assert_eq!(cfg.server.connection_limit(), 64);
+        assert_eq!(cfg.server.per_ip_connection_limit(), 2);
+    }
+
+    #[test]
+    fn the_per_ip_cap_defaults_to_eight_and_zero_disables_it() {
+        assert_eq!(ServerConfig::default().per_ip_connection_limit(), 8);
+        let cfg: Config = toml::from_str("[server]\nmax_connections_per_ip = 0\n").unwrap();
+        assert_eq!(cfg.server.per_ip_connection_limit(), 0);
     }
 
     #[test]
