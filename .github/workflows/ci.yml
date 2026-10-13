@@ -30,6 +30,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.99.0
           components: rustfmt, clippy
 
       - name: Cache cargo registry & target
@@ -44,6 +45,9 @@ jobs:
 
       - name: Formatting
         run: cargo fmt --all -- --check
+
+      - name: Cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2
 
       - name: Clippy (all targets)
         run: cargo clippy --workspace --all-targets -- -D warnings
