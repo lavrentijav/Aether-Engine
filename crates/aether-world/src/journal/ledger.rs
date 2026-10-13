@@ -22,7 +22,10 @@
 //! dupe, and destroying items on a guess is worse than the dupe.
 
 use super::event::{Event, EventBody, ItemUid, Place};
+use crate::storage::{KvBackend, StorageError};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// Something the history says that cannot be true.
 #[derive(Debug, Clone, PartialEq)]
@@ -232,28 +235,120 @@ impl Ledger {
     }
 }
 
-/// Mint a fresh, unguessable item uid.
+/// Mint a fresh item uid from the process-wide allocator.
 ///
-/// Randomness matters here for a reason that is easy to miss: uids leave the
-/// server inside no packet, but they *do* end up in logs and rollback reports.
-/// A counter would let anyone who saw two uids infer how much had been created
-/// in between, and — worse — would collide across a restart that lost its
-/// counter. 128 random bits collide never and infer nothing.
+/// See [`install_allocator`] and [`UidAllocator`] for why ids are allocated
+/// rather than random: they order, they fit in eight bytes, and the reservation
+/// bound makes reuse impossible across a restart rather than merely unlikely.
+///
+/// # Panics
+///
+/// If an allocator is installed and its backend cannot be written, this panics.
+/// A server that cannot persist the next reservation bound cannot hand out an
+/// id without risking a duplicate later, and there is no safe value to return
+/// instead — a wrong uid corrupts the ledger. Failing loudly is the bug
+/// response; the test-only fallback below is not, because silently switching
+/// to it on a real server would reintroduce the collision this design removes.
 pub fn mint_uid() -> ItemUid {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    // Two independently-seeded hashers, each contributing 64 bits. `RandomState`
-    // is seeded from the OS on first use, which is the only entropy source
-    // available without adding a dependency to this crate.
-    let hi = {
-        let mut h = RandomState::new().build_hasher();
-        h.write_u64(super::now_ms());
-        h.finish()
-    };
-    let lo = {
-        let mut h = RandomState::new().build_hasher();
-        h.write_usize(&hi as *const u64 as usize);
-        h.finish()
-    };
-    ItemUid(((hi as u128) << 64) | lo as u128)
+    match ALLOCATOR.get() {
+        Some(alloc) => alloc.next().expect(
+            "the item uid allocator could not persist its next reservation block; \
+             the storage backend is failing and the uid counter cannot continue safely",
+        ),
+        None => ItemUid(TEST_UID.fetch_add(1, Ordering::SeqCst)),
+    }
+}
+
+/// Key holding the item-uid reservation bound: every uid below it may have
+/// been handed out, none at or above it has. Written *before* any id from the
+/// block it covers is returned, so a restart resumes at the bound and never
+/// reuses an id — even after a crash between an id and its event.
+const K_UID: &[u8] = b"U";
+/// How many ids one reservation write covers. The bound is written once per
+/// block rather than once per id; the price is a gap of up to this many unused
+/// ids after a crash, which nothing depends on. Matches the journal's own
+/// sequence reservation in spirit (see [`super`]).
+pub const UID_BLOCK: u64 = 65_536;
+
+/// The process-wide allocator, installed once at startup.
+///
+/// `None` in unit tests, where [`mint_uid`] falls back to a process-local
+/// counter (see [`TEST_UID`]).
+static ALLOCATOR: OnceLock<UidAllocator> = OnceLock::new();
+
+/// A process-local counter used only when no allocator is installed.
+///
+/// Unit tests and short-lived tools call [`mint_uid`] with no world behind
+/// them: there is no backend to reserve against and no restart to survive, so
+/// a plain `fetch_add` is enough. Starting at `1 << 62` keeps these ids clear
+/// of any real world's numbering (which begins at 1) if both live in one
+/// process. The server always installs an allocator and never takes this path.
+static TEST_UID: AtomicU64 = AtomicU64::new(1 << 62);
+
+/// Hand out item instance ids, monotonically, reserving blocks so that no id
+/// is ever reused.
+///
+/// The hot path is one `fetch_add`; the backend is touched only when the
+/// counter reaches the persisted bound, and the raised bound is durable before
+/// any id from the new block is returned. This is the journal's own sequence
+/// reservation ([`super::Journal`]) applied to item identity. The backend is
+/// stored boxed so the process-wide instance has one concrete type while
+/// [`UidAllocator::open`] still accepts whatever backend a world uses.
+pub struct UidAllocator {
+    backend: Box<dyn KvBackend>,
+    /// The next id to hand out.
+    next: AtomicU64,
+    /// The persisted reservation bound ([`K_UID`]). Only raised, and only
+    /// under this lock, so two callers can never write it backwards.
+    reserved: Mutex<u64>,
+}
+
+impl UidAllocator {
+    /// Open an allocator over `backend`, resuming its numbering.
+    ///
+    /// A bound of 0 (a corrupt or truncated value) is treated as absent: id 0
+    /// is reserved as "no id", so the first id handed out is never 0.
+    pub fn open<B: KvBackend + 'static>(backend: B) -> Result<Self, StorageError> {
+        let next = super::read_u64(backend.get(K_UID)?).unwrap_or(1).max(1);
+        Ok(Self {
+            backend: Box::new(backend),
+            next: AtomicU64::new(next),
+            reserved: Mutex::new(next),
+        })
+    }
+
+    /// The id the next call to [`Self::next`] would return.
+    pub fn head(&self) -> u64 {
+        self.next.load(Ordering::SeqCst)
+    }
+
+    /// Mint the next id.
+    pub fn next(&self) -> Result<ItemUid, StorageError> {
+        let v = self.next.fetch_add(1, Ordering::SeqCst);
+        self.reserve(v)?;
+        Ok(ItemUid(v))
+    }
+
+    /// Make sure `v` lies below the persisted reservation bound, raising the
+    /// bound by whole blocks if it does not. The bound is durable before the
+    /// id that needs it is returned.
+    fn reserve(&self, v: u64) -> Result<(), StorageError> {
+        let mut bound = self.reserved.lock().unwrap();
+        if v < *bound {
+            return Ok(());
+        }
+        let new = (v / UID_BLOCK + 1) * UID_BLOCK;
+        self.backend.put(K_UID, &new.to_be_bytes())?;
+        *bound = new;
+        Ok(())
+    }
+}
+
+/// Install the process-wide allocator used by [`mint_uid`].
+///
+/// Called once by the server before it accepts connections. A second call is
+/// ignored: the first allocator owns the reservation bound, and swapping it
+/// out under already-minted ids would break the one guarantee ids make.
+pub fn install_allocator(alloc: UidAllocator) {
+    let _ = ALLOCATOR.set(alloc);
 }

@@ -20,7 +20,7 @@
 //! listing rather than at the moment of sale. Anything else lets one stack be
 //! listed on four offers at once, which is a duplication with extra steps.
 
-use aether_world::journal::{now_ms, ActorId, EventBody, ItemUid, Place};
+use aether_world::journal::{now_ms, ActorId, EventBody, Place};
 
 use super::model::{Money, TradeError};
 use super::{Economy, MarketFilter};
@@ -267,7 +267,7 @@ fn journal_move(world: &DemoWorld, actor: ActorId, item: &str, count: u64, from:
             // A trade moves a *quantity*, not one tracked stack: the seller may
             // have taken it from several slots. A fresh uid marks the parcel
             // that moved, and the count is what an audit reads.
-            uid: ItemUid(aether_world::journal::ledger::mint_uid().0),
+            uid: aether_world::journal::ledger::mint_uid(),
             from,
             to,
             count: count.min(u8::MAX as u64) as u8,

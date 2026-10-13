@@ -43,7 +43,7 @@ take from it, what we change, and in what order it lands. Where this file and th
 | 0 | Correctness of today's code: unreadable save never becomes empty (C01), journal seq reservation (C01), connection limits (T02), repo hygiene (T01) | Claude / opencode |
 | 1 | Registries: `ItemTypeId u16`, append-only name tables, replace item `String`s in hot structs and events | split |
 | 2 | Journal v2 format: batched segments with CRC, group fsync off-tick, `journal.level`, retention by days | Claude (format) + opencode (tests, tooling) |
-| 3 | `ItemInstanceId u64` allocator (block reservation) replacing random `u128` uids | opencode |
+| 3 | `ItemInstanceId u64` allocator (block reservation) replacing random `u128` uids — **landed (T03)** | opencode |
 | 4 | Cross-domain atomic ops (block ↔ inventory in one journal record) + idempotent replay on startup | Claude |
 | 5 | Guarded rollback (CAS on post-image), conflict report, tainted policy | Claude |
 | 6 | ClickHouse exporter + verification + `/history` cold queries | opencode (+ review) |

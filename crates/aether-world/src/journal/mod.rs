@@ -58,7 +58,7 @@ pub mod sink;
 mod tests;
 
 pub use event::{ActorId, DecodeError, Event, EventBody, ItemUid, Place};
-pub use ledger::{Anomaly, Ledger};
+pub use ledger::{install_allocator, Anomaly, Ledger, UidAllocator};
 pub use sink::{BatchConfig, BatchingSink, EventSink, SinkStats};
 
 use crate::storage::{KvBackend, StorageError};
