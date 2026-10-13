@@ -26,8 +26,12 @@ impl ActorId {
 /// Not an item type: two stacks of 64 stone are two different uids, and
 /// splitting a stack mints a new uid for the half that moved. Identity is what
 /// makes duplication visible — see [`super::ledger`].
+///
+/// Sixty-four bits, handed out once by the allocator in [`super::ledger`] and
+/// never reused. Unlike a random id it orders: a smaller uid was born before a
+/// larger one, which "the last ten minutes" reasoning already leans on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ItemUid(pub u128);
+pub struct ItemUid(pub u64);
 
 /// Where an item instance sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,7 +142,7 @@ impl Place {
 /// Bumped whenever the layout below changes. A blob whose first byte is not
 /// this is refused rather than guessed at: a misread journal would undo the
 /// wrong blocks, which is worse than refusing to undo anything.
-pub const FORMAT_VERSION: u8 = 1;
+pub const FORMAT_VERSION: u8 = 2;
 
 /// Errors from [`Event::decode`].
 #[derive(Debug, PartialEq)]
@@ -363,30 +367,30 @@ impl Event {
                 to: BlockStateId(c.u32()?),
             },
             TAG_ITEM_MINT => EventBody::ItemMint {
-                uid: ItemUid(c.u128()?),
+                uid: ItemUid(c.u64()?),
                 item: c.string()?,
                 count: c.u8()?,
                 to: c.place()?,
             },
             TAG_ITEM_MOVE => EventBody::ItemMove {
-                uid: ItemUid(c.u128()?),
+                uid: ItemUid(c.u64()?),
                 count: c.u8()?,
                 from: c.place()?,
                 to: c.place()?,
             },
             TAG_ITEM_DESTROY => EventBody::ItemDestroy {
-                uid: ItemUid(c.u128()?),
+                uid: ItemUid(c.u64()?),
                 from: c.place()?,
             },
             TAG_ITEM_DERIVE => {
-                let uid = ItemUid(c.u128()?);
+                let uid = ItemUid(c.u64()?);
                 let item = c.string()?;
                 let count = c.u8()?;
                 let to = c.place()?;
                 let n = c.u16()?;
                 let mut from = Vec::with_capacity(n as usize);
                 for _ in 0..n {
-                    from.push(ItemUid(c.u128()?));
+                    from.push(ItemUid(c.u64()?));
                 }
                 EventBody::ItemDerive {
                     uid,

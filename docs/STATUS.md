@@ -45,7 +45,7 @@ server a vanilla 1.8.9 client can connect to.
 | Block-change acknowledgement (1.19+ prediction sequence) — without it a client's placement predictions are never released | ✅ |
 | World history (`aether-world::journal`): append-only event log, deterministic generator as the baseline, so unedited columns are never stored | ✅ |
 | Rollback by player / radius / time / everything, itself recorded so it can be undone (`/rollback`) | ✅ |
-| Item provenance: 128-bit uid per item instance, ledger + duplication report (`/audit`) | ✅ |
+| Item provenance: 64-bit uid per item instance (allocated from a block-reserving counter, never reused), ledger + duplication report (`/audit`) | ✅ |
 | Inspect mode (`/inspect`): hitting a block reports its history instead of changing it | ✅ |
 | Filter language shared by `/lookup` and `/rollback` (`player:` `time:` `block:` `action:` `radius:`) + paged chat output (`/page`) | ✅ |
 | Recovery stash: a rollback returns what was *placed* (not the world's current content), grouped by block + state tags | ✅ |

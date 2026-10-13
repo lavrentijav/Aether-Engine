@@ -53,6 +53,44 @@ fn the_encoded_header_is_the_layout_the_docs_describe() {
 }
 
 #[test]
+fn an_item_uid_is_eight_bytes_after_the_header() {
+    // Header: version(1) + seq(8) + at_ms(8) + actor(16) = 33 bytes, then the
+    // mint tag and the uid. Read by hand so an encoder and decoder that shared
+    // a wrong width could not agree with each other and still pass.
+    let e = Event {
+        seq: 1,
+        at_ms: 2,
+        actor: alice(),
+        cause: None,
+        body: EventBody::ItemMint {
+            uid: ItemUid(0x0102_0304_0506_0708),
+            item: String::new(),
+            count: 0,
+            to: Place::Nowhere,
+        },
+    };
+    let b = e.encode();
+    assert_eq!(b[34..42], [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+}
+
+#[test]
+fn a_blob_from_before_64_bit_uids_is_refused_not_reinterpreted() {
+    // The v1 layout put 16-byte uids where this version puts 8, so a v1 blob
+    // read as v2 would shift every field after the uid. Refusing is the only
+    // safe answer.
+    let mut b = Event {
+        seq: 1,
+        at_ms: 1,
+        actor: alice(),
+        cause: None,
+        body: set(0, 0, 0, DIRT, STONE),
+    }
+    .encode();
+    b[0] = 1;
+    assert_eq!(Event::decode(&b), Err(DecodeError::Version(1)));
+}
+
+#[test]
 fn a_blob_from_another_format_version_is_refused_not_guessed_at() {
     let mut b = Event {
         seq: 1,
@@ -364,7 +402,7 @@ fn an_empty_filter_selects_everything_and_a_narrow_one_selects_nothing() {
 
 // ---------------------------------------------------------------------------
 
-fn mint(uid: u128, to: Place) -> EventBody {
+fn mint(uid: u64, to: Place) -> EventBody {
     EventBody::ItemMint {
         uid: ItemUid(uid),
         item: "minecraft:diamond".into(),
@@ -573,6 +611,96 @@ fn minted_uids_do_not_repeat() {
     for _ in 0..1_000 {
         assert!(seen.insert(ledger::mint_uid()), "uid repeated");
     }
+}
+
+#[test]
+fn the_allocator_hands_out_strictly_increasing_ids_and_never_zero() {
+    let store = std::sync::Arc::new(MemStore::new());
+    let a = ledger::UidAllocator::open(std::sync::Arc::clone(&store)).unwrap();
+    let mut last = 0u64;
+    for _ in 0..1_000 {
+        let u = a.next().unwrap().0;
+        assert_ne!(u, 0, "id 0 is reserved for 'no id'");
+        assert!(u > last, "ids must increase: {u} came after {last}");
+        last = u;
+    }
+}
+
+#[test]
+fn the_reservation_is_written_once_per_block_not_per_id() {
+    let store = std::sync::Arc::new(MemStore::new());
+    let a = ledger::UidAllocator::open(std::sync::Arc::clone(&store)).unwrap();
+    for _ in 0..100 {
+        a.next().unwrap();
+    }
+    let bound = u64::from_be_bytes(store.get(b"U").unwrap().unwrap().try_into().unwrap());
+    assert_eq!(
+        bound,
+        ledger::UID_BLOCK,
+        "a hundred ids fit in the first block"
+    );
+}
+
+#[test]
+fn the_bound_advances_by_a_whole_block_when_the_counter_reaches_it() {
+    let store = std::sync::Arc::new(MemStore::new());
+    let a = ledger::UidAllocator::open(std::sync::Arc::clone(&store)).unwrap();
+    // The id UID_BLOCK is the first that does not lie below the initial bound,
+    // so it is the one that must raise the bound to the next block.
+    for _ in 0..=ledger::UID_BLOCK {
+        a.next().unwrap();
+    }
+    let bound = u64::from_be_bytes(store.get(b"U").unwrap().unwrap().try_into().unwrap());
+    assert_eq!(bound, 2 * ledger::UID_BLOCK);
+}
+
+#[test]
+fn a_reopened_allocator_resumes_at_or_after_the_persisted_bound() {
+    // The failure this guards against is silent: an allocator that restarted
+    // its numbering would hand a new stack the uid of an old one, and the
+    // ledger would call the second mint of that uid a dupe long after the
+    // fact.
+    let store = std::sync::Arc::new(MemStore::new());
+    let mut max = 0u64;
+    {
+        let a = ledger::UidAllocator::open(std::sync::Arc::clone(&store)).unwrap();
+        for _ in 0..10_000 {
+            max = max.max(a.next().unwrap().0);
+        }
+    }
+    let a = ledger::UidAllocator::open(std::sync::Arc::clone(&store)).unwrap();
+    let first = a.next().unwrap().0;
+    assert!(
+        first > max,
+        "reopened allocator returned {first}, at or below an id already used ({max})"
+    );
+}
+
+#[test]
+fn concurrent_allocations_never_duplicate_an_id() {
+    let store = std::sync::Arc::new(MemStore::new());
+    let a = ledger::UidAllocator::open(std::sync::Arc::clone(&store)).unwrap();
+    let per_thread = 2_000;
+    let ids = std::sync::Mutex::new(Vec::with_capacity(8 * per_thread));
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            let a = &a;
+            let ids = &ids;
+            s.spawn(move || {
+                let mut mine = Vec::with_capacity(per_thread);
+                for _ in 0..per_thread {
+                    mine.push(a.next().unwrap().0);
+                }
+                ids.lock().unwrap().extend(mine);
+            });
+        }
+    });
+    let mut ids = ids.into_inner().unwrap();
+    ids.sort_unstable();
+    let total = ids.len();
+    ids.dedup();
+    assert_eq!(total, 8 * per_thread);
+    assert_eq!(ids.len(), total, "an id was handed out twice");
 }
 
 #[test]

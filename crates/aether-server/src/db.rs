@@ -43,8 +43,10 @@ use aether_world::journal::{Event, EventBody, Place};
 ///
 /// Column choices worth naming:
 /// * `seq` is the primary key, which is what makes a retried batch harmless.
-/// * actors and item uids are `uuid` rather than a numeric: they *are* UUIDs,
-///   and Postgres indexes and prints them properly.
+/// * actors are `uuid` and item uids are `bigint`: an actor *is* a UUID, while
+///   an item uid is a 64-bit allocated counter (see
+///   [`aether_world::journal::event::ItemUid`]), which Postgres prints and
+///   ranges over as a number far more usefully than as a UUID.
 /// * `cx`/`cz` are stored, not computed, because `x >> 4` is not what
 ///   Postgres' `>>` does for negative numbers — it has no arithmetic shift —
 ///   and an index on a subtly wrong expression is worse than no index.
@@ -62,7 +64,7 @@ CREATE TABLE IF NOT EXISTS aether_events (
     cz          INTEGER,
     block_from  BIGINT,
     block_to    BIGINT,
-    item_uid    UUID,
+    item_uid    BIGINT,
     item_name   TEXT,
     item_count  INTEGER,
     place_from  TEXT,
@@ -73,7 +75,7 @@ CREATE INDEX IF NOT EXISTS aether_events_column    ON aether_events (cx, cz, seq
 CREATE INDEX IF NOT EXISTS aether_events_at        ON aether_events (at DESC);
 CREATE INDEX IF NOT EXISTS aether_events_item      ON aether_events (item_uid) WHERE item_uid IS NOT NULL;
 ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS cause        BIGINT;
-ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS derived_from UUID[];
+ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS derived_from BIGINT[];
 CREATE INDEX IF NOT EXISTS aether_events_cause     ON aether_events (cause) WHERE cause IS NOT NULL;
 CREATE INDEX IF NOT EXISTS aether_events_derived   ON aether_events USING GIN (derived_from) WHERE derived_from IS NOT NULL;
 ";
@@ -99,19 +101,19 @@ const COLUMNS: [(&str, &str); 18] = [
     ("cz", "integer"),
     ("block_from", "bigint"),
     ("block_to", "bigint"),
-    ("item_uid", "uuid"),
+    ("item_uid", "bigint"),
     ("item_name", "text"),
     ("item_count", "integer"),
     ("place_from", "text"),
     ("place_to", "text"),
     ("cause", "bigint"),
-    ("derived_from", "uuid[]"),
+    ("derived_from", "bigint[]"),
 ];
 /// How many of them.
 const NCOLS: usize = COLUMNS.len();
 
-/// Render a `u128` as a UUID string. Actors already are UUIDs; item uids are
-/// 128 random bits, which is the same thing.
+/// Render a `u128` as a UUID string. Actors are UUIDs; this is the one
+/// spelling of an actor the mirror and the economy agree on.
 pub fn uuid_text(v: u128) -> String {
     let b = v.to_be_bytes();
     let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
@@ -123,6 +125,15 @@ pub fn uuid_text(v: u128) -> String {
         &hex[16..20],
         &hex[20..32]
     )
+}
+
+/// Render an item uid as its decimal string.
+///
+/// Item uids are a 64-bit allocated counter now, not UUIDs: the column is a
+/// `bigint`, and there is exactly one spelling — decimal — so the mirror, the
+/// economy and `/audit` all compare and sort the same way.
+pub fn uid_text(u: u64) -> String {
+    u.to_string()
 }
 
 /// Render a [`Place`] as a short, greppable string.
@@ -173,7 +184,7 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
             to,
         } => {
             v[3] = Some("item_mint".into());
-            v[11] = Some(uuid_text(uid.0));
+            v[11] = Some(uid_text(uid.0));
             v[12] = Some(item.clone());
             v[13] = Some(count.to_string());
             v[15] = Some(place_text(to));
@@ -185,14 +196,14 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
             count,
         } => {
             v[3] = Some("item_move".into());
-            v[11] = Some(uuid_text(uid.0));
+            v[11] = Some(uid_text(uid.0));
             v[13] = Some(count.to_string());
             v[14] = Some(place_text(from));
             v[15] = Some(place_text(to));
         }
         EventBody::ItemDestroy { uid, from } => {
             v[3] = Some("item_destroy".into());
-            v[11] = Some(uuid_text(uid.0));
+            v[11] = Some(uid_text(uid.0));
             v[14] = Some(place_text(from));
         }
         EventBody::ItemDerive {
@@ -203,11 +214,11 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
             from,
         } => {
             v[3] = Some("item_derive".into());
-            v[11] = Some(uuid_text(uid.0));
+            v[11] = Some(uid_text(uid.0));
             v[12] = Some(item.clone());
             v[13] = Some(count.to_string());
             v[15] = Some(place_text(to));
-            let list: Vec<String> = from.iter().map(|u| uuid_text(u.0)).collect();
+            let list: Vec<String> = from.iter().map(|u| uid_text(u.0)).collect();
             v[17] = Some(format!("{{{}}}", list.join(",")));
         }
     }
@@ -481,6 +492,14 @@ mod tests {
     }
 
     #[test]
+    fn an_item_uid_renders_as_decimal_not_a_uuid() {
+        // The column is a bigint now: a decimal spelling is what sorts and
+        // ranges the way `/audit` and analytics expect.
+        assert_eq!(uid_text(0), "0");
+        assert_eq!(uid_text(0xdead_beef), "3735928559");
+    }
+
+    #[test]
     fn the_chunk_columns_use_an_arithmetic_shift() {
         // Postgres has no arithmetic right shift, so this must be computed in
         // Rust. -33 >> 4 is -3, not 268435453 — getting it wrong would file
@@ -520,6 +539,7 @@ mod tests {
         };
         let v = row_values(&e);
         assert_eq!(v[3].as_deref(), Some("item_mint"));
+        assert_eq!(v[11].as_deref(), Some("9"), "item uid, decimal");
         assert_eq!(v[12].as_deref(), Some("minecraft:diamond"));
         assert_eq!(v[13].as_deref(), Some("64"));
         assert!(v[15].as_deref().unwrap().starts_with("inv:"));
@@ -587,6 +607,7 @@ mod tests {
         assert!(sql.contains("$1::text::bigint"), "seq");
         assert!(sql.contains("$3::text::uuid"), "actor");
         assert!(sql.contains("$5::text::integer"), "x");
+        assert!(sql.contains("$12::text::bigint"), "item_uid");
         assert!(sql.contains("$16::text::text"), "place_to");
         for n in 1..=NCOLS {
             assert!(

@@ -127,6 +127,18 @@ fn main() -> std::process::ExitCode {
         world = world.with_journal_sink(sink);
     }
     let world: Arc<DemoWorld> = Arc::new(world);
+    // Item instance ids come from one process-wide allocator over the same KV
+    // backend as the journal, installed here — before the listener exists, so
+    // no connection can ever mint an id. Opening it reads the reservation
+    // bound, so a restart resumes above every id the previous run handed out:
+    // an id is never reused, which is the guarantee the ledger's dupes rest on.
+    match aether_world::journal::UidAllocator::open(Arc::clone(world.journal().backend())) {
+        Ok(alloc) => {
+            log::info(&format!("item uids  : next id {}", alloc.head()));
+            aether_world::journal::install_allocator(alloc);
+        }
+        Err(e) => return fail(&format!("cannot open the item uid allocator: {e}")),
+    }
     economy::install(open_economy(&cfg.database));
     let _ = GAME_MODE.set(cfg.server.game_mode);
     let cfg = Arc::new(cfg);

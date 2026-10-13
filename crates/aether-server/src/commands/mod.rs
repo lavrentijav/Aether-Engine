@@ -209,15 +209,15 @@ fn describe_body(
             to,
             count,
         } => Some(format!(
-            "  {ago} {} moved {count}x item {:08x}… {} → {}  #{}",
+            "  {ago} {} moved {count}x item {:016x} {} → {}  #{}",
             actor_name(e.actor.0),
-            (uid.0 >> 96) as u32,
+            uid.0,
             short_place(from),
             short_place(to),
             e.seq
         )),
         EventBody::ItemDestroy { uid, .. } => {
-            Some(format!("  {ago} item {:032x} destroyed  #{}", uid.0, e.seq))
+            Some(format!("  {ago} item {:016x} destroyed  #{}", uid.0, e.seq))
         }
         EventBody::ItemDerive {
             item, count, from, ..
@@ -414,10 +414,8 @@ fn inventory(handle: &PlayerHandle) -> Reply {
         // The uid is shown, short: it is the handle an operator needs to
         // follow this exact stack through /audit.
         lines.push(format!(
-            "  {where_}: {}x {}  [{:08x}]",
-            stack.count,
-            stack.item,
-            (stack.uid.0 >> 96) as u32
+            "  {where_}: {}x {}  [{:016x}]",
+            stack.count, stack.item, stack.uid.0
         ));
     }
     // Anything of theirs on the floor is part of the answer to "what do I

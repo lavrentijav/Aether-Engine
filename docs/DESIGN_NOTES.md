@@ -125,7 +125,8 @@ rollback is itself recorded and can be rolled back) and instant save (the journa
 already durable; `flush` only writes the snapshot layer that makes loading O(1) in
 history length rather than O(edits)).
 
-Item provenance came along with it: every item *instance* carries a 128-bit uid, so a
+Item provenance came along with it: every item *instance* carries a 64-bit uid
+from a block-reserving allocator (never reused, and ordered), so a
 duplication shows up as one uid in two places rather than as a suspicious total.
 
 ## 6. Cell-granularity copy-on-write for zero-freeze autosave

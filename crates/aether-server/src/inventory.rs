@@ -361,7 +361,12 @@ impl SlotChange {
 /// Bumped whenever the layout below changes. A blob that does not start with
 /// this is refused rather than guessed at: a misread inventory would hand a
 /// player somebody else's items.
-pub const FORMAT_VERSION: u8 = 2;
+///
+/// Version 3 narrowed item uids from 16 bytes to 8 (see
+/// [`aether_world::journal::event::ItemUid`]); version 2 added the wear field.
+/// There is no backwards compatibility branch: old worlds are wiped, and
+/// guessing at an old layout risks handing a player the wrong items.
+pub const FORMAT_VERSION: u8 = 3;
 
 /// Serialize for the KV store.
 pub fn encode(inv: &Inventory) -> Vec<u8> {
@@ -390,9 +395,8 @@ pub fn decode(blob: &[u8]) -> Option<Inventory> {
         c = end;
         Some(s)
     };
-    // Version 1 is version 2 without the wear field.
     let version = take(1)?[0];
-    if version != FORMAT_VERSION && version != 1 {
+    if version != FORMAT_VERSION {
         return None;
     }
     let held = take(1)?[0];
@@ -402,12 +406,8 @@ pub fn decode(blob: &[u8]) -> Option<Inventory> {
     for _ in 0..n {
         let slot = take(1)?[0] as usize;
         let count = take(1)?[0];
-        let uid = u128::from_be_bytes(take(16)?.try_into().ok()?);
-        let damage = if version >= 2 {
-            u16::from_be_bytes(take(2)?.try_into().ok()?)
-        } else {
-            0
-        };
+        let uid = u64::from_be_bytes(take(8)?.try_into().ok()?);
+        let damage = u16::from_be_bytes(take(2)?.try_into().ok()?);
         let len = u16::from_be_bytes(take(2)?.try_into().ok()?) as usize;
         let item = std::str::from_utf8(take(len)?).ok()?.to_owned();
         if slot < SLOTS && count > 0 {
@@ -616,11 +616,31 @@ mod tests {
     }
 
     #[test]
+    fn an_item_uid_is_eight_bytes_on_the_wire() {
+        // One stack: version, held, count u16, then slot, count, uid, damage,
+        // name length, name. Read by hand so the width is pinned by value.
+        let mut inv = Inventory::new();
+        inv.set(36, Some(("minecraft:stone", 64)));
+        inv.slot_mut(36).unwrap().as_mut().unwrap().uid = ItemUid(0x0102_0304_0506_0708);
+        let b = encode(&inv);
+        assert_eq!(b[0], FORMAT_VERSION);
+        assert_eq!(&b[6..14], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
     fn a_blob_from_another_version_is_refused() {
         let mut b = encode(&Inventory::new());
         b[0] = FORMAT_VERSION.wrapping_add(1);
         assert_eq!(decode(&b), None);
         b[0] = 0;
+        assert_eq!(decode(&b), None);
+        // Version 2 stored 16-byte uids where this version stores 8; reading
+        // one as the other would shift every field after the first uid.
+        b[0] = 2;
+        assert_eq!(decode(&b), None);
+        // Version 1 is also refused now: old worlds are wiped, and there is no
+        // compatibility branch to guess with.
+        b[0] = 1;
         assert_eq!(decode(&b), None);
     }
 
