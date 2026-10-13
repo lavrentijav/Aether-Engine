@@ -31,6 +31,7 @@ mod protocol;
 mod rewards;
 mod session;
 mod stash;
+mod stored;
 mod worldgen;
 
 use std::io;
