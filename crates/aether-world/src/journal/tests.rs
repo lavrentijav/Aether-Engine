@@ -891,3 +891,14 @@ fn append_caused_records_the_cause() {
     assert_eq!(j.get(drop).unwrap().unwrap().cause, Some(brk));
     assert_eq!(j.get(brk).unwrap().unwrap().cause, None);
 }
+
+#[test]
+fn a_malformed_reservation_bound_refuses_to_open_rather_than_restart_numbering() {
+    // Read as "absent", a damaged bound would restart the uid counter at 1 and
+    // hand every id out again; for the journal it would discard the bound.
+    let store = std::sync::Arc::new(MemStore::new());
+    store.put(b"U", &[1, 2, 3]).unwrap();
+    assert!(ledger::UidAllocator::open(std::sync::Arc::clone(&store)).is_err());
+    store.put(b"N", &[0; 5]).unwrap();
+    assert!(Journal::open(std::sync::Arc::clone(&store)).is_err());
+}

@@ -210,9 +210,8 @@ pub struct Restore {
 pub struct Journal<B: KvBackend> {
     backend: B,
     next_seq: AtomicU64,
-    /// The persisted reservation bound ([`K_RESERVED`]). Only raised, and
-    /// only under this lock, so two appenders can never write it backwards.
-    reserved: Mutex<u64>,
+    /// The persisted reservation bound ([`K_RESERVED`]).
+    reserved: Reservation,
     /// Optional mirror into an external database. See [`sink`].
     sink: Option<BatchingSink>,
 }
@@ -222,10 +221,74 @@ fn read_u64(v: Option<Vec<u8>>) -> Option<u64> {
         .map(|v| u64::from_be_bytes(v.try_into().unwrap()))
 }
 
+/// Read a persisted reservation bound: `None` when absent, an error when
+/// present but malformed. A malformed bound must never read as absent — for a
+/// counter with nothing else to resume from, "absent" means "start at 1", which
+/// would hand out every number again.
+pub(crate) fn read_bound<B: KvBackend + ?Sized>(
+    backend: &B,
+    key: &[u8],
+) -> Result<Option<u64>, StorageError> {
+    match backend.get(key)? {
+        None => Ok(None),
+        Some(v) if v.len() == 8 => Ok(Some(u64::from_be_bytes(v.try_into().unwrap()))),
+        Some(v) => Err(StorageError::Codec(format!(
+            "reservation bound {} is {} bytes, not 8",
+            String::from_utf8_lossy(key),
+            v.len()
+        ))),
+    }
+}
+
+/// A persisted "no number at or above this has been handed out" bound for a
+/// monotonic counter, raised a whole block at a time.
+///
+/// The common case — the number is below the bound — is one atomic load and
+/// no lock. Raising takes the lock, re-checks, and makes the new bound durable
+/// *before* publishing it, so no caller can return a number the store does
+/// not already cover; two raisers can never write the bound backwards.
+pub(crate) struct Reservation {
+    key: &'static [u8],
+    block: u64,
+    bound: AtomicU64,
+    raise: Mutex<()>,
+}
+
+impl Reservation {
+    /// A reservation whose persisted bound is `start` (nothing reserved above it).
+    pub(crate) fn new(key: &'static [u8], block: u64, start: u64) -> Self {
+        Self {
+            key,
+            block,
+            bound: AtomicU64::new(start),
+            raise: Mutex::new(()),
+        }
+    }
+
+    /// Make sure `v` lies below the persisted bound.
+    pub(crate) fn ensure<B: KvBackend + ?Sized>(
+        &self,
+        backend: &B,
+        v: u64,
+    ) -> Result<(), StorageError> {
+        if v < self.bound.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _raising = self.raise.lock().unwrap();
+        if v < self.bound.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let new = (v / self.block + 1) * self.block;
+        backend.put(self.key, &new.to_be_bytes())?;
+        self.bound.store(new, Ordering::Release);
+        Ok(())
+    }
+}
+
 impl<B: KvBackend> Journal<B> {
     /// Open a journal on `backend`, continuing its sequence numbering.
     pub fn open(backend: B) -> Result<Self, StorageError> {
-        let next = match read_u64(backend.get(K_RESERVED)?) {
+        let next = match read_bound(&backend, K_RESERVED)? {
             Some(bound) => bound,
             // No reservation: a journal from before reservations, or one that
             // lost the key. Resume above both the old head and the highest
@@ -244,23 +307,15 @@ impl<B: KvBackend> Journal<B> {
             next_seq: AtomicU64::new(next),
             // Nothing at or above `next` is reserved yet; the first append
             // writes a bound before it writes an event.
-            reserved: Mutex::new(next),
+            reserved: Reservation::new(K_RESERVED, SEQ_BLOCK, next),
             sink: None,
         })
     }
 
-    /// Make sure `seq` lies below the persisted reservation bound, raising
-    /// the bound by whole blocks if it does not. The bound is durable before
-    /// the event that needs it is written.
+    /// Make sure `seq` lies below the persisted reservation bound. The bound
+    /// is durable before the event that needs it is written.
     fn reserve(&self, seq: u64) -> Result<(), StorageError> {
-        let mut bound = self.reserved.lock().unwrap();
-        if seq < *bound {
-            return Ok(());
-        }
-        let new = (seq / SEQ_BLOCK + 1) * SEQ_BLOCK;
-        self.backend.put(K_RESERVED, &new.to_be_bytes())?;
-        *bound = new;
-        Ok(())
+        self.reserved.ensure(&self.backend, seq)
     }
 
     /// Mirror every appended event into `sink` as well.

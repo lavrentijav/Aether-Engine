@@ -25,7 +25,7 @@ use super::event::{Event, EventBody, ItemUid, Place};
 use crate::storage::{KvBackend, StorageError};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 /// Something the history says that cannot be true.
 #[derive(Debug, Clone, PartialEq)]
@@ -298,22 +298,22 @@ pub struct UidAllocator {
     backend: Box<dyn KvBackend>,
     /// The next id to hand out.
     next: AtomicU64,
-    /// The persisted reservation bound ([`K_UID`]). Only raised, and only
-    /// under this lock, so two callers can never write it backwards.
-    reserved: Mutex<u64>,
+    /// The persisted reservation bound ([`K_UID`]).
+    reserved: super::Reservation,
 }
 
 impl UidAllocator {
     /// Open an allocator over `backend`, resuming its numbering.
     ///
-    /// A bound of 0 (a corrupt or truncated value) is treated as absent: id 0
-    /// is reserved as "no id", so the first id handed out is never 0.
+    /// Absent bound: a fresh world, start at 1 (id 0 means "no id"). A bound
+    /// that is present but malformed is an error, not "absent": starting
+    /// again at 1 would hand out every id a second time.
     pub fn open<B: KvBackend + 'static>(backend: B) -> Result<Self, StorageError> {
-        let next = super::read_u64(backend.get(K_UID)?).unwrap_or(1).max(1);
+        let next = super::read_bound(&backend, K_UID)?.unwrap_or(1).max(1);
         Ok(Self {
             backend: Box::new(backend),
             next: AtomicU64::new(next),
-            reserved: Mutex::new(next),
+            reserved: super::Reservation::new(K_UID, UID_BLOCK, next),
         })
     }
 
@@ -333,14 +333,7 @@ impl UidAllocator {
     /// bound by whole blocks if it does not. The bound is durable before the
     /// id that needs it is returned.
     fn reserve(&self, v: u64) -> Result<(), StorageError> {
-        let mut bound = self.reserved.lock().unwrap();
-        if v < *bound {
-            return Ok(());
-        }
-        let new = (v / UID_BLOCK + 1) * UID_BLOCK;
-        self.backend.put(K_UID, &new.to_be_bytes())?;
-        *bound = new;
-        Ok(())
+        self.reserved.ensure(&*self.backend, v)
     }
 }
 
