@@ -1,0 +1,31 @@
+# cargo-deny configuration for the Aether Engine workspace.
+# Run with `cargo deny check` (also wired into CI).
+
+[licenses]
+# Permissive licenses present in the dependency tree. Workspace crates are
+# `MIT OR Apache-2.0`, so both are listed here.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "Unicode-3.0",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+]
+confidence-threshold = 0.8
+
+[advisories]
+# Defaults: deny known vulnerabilities, warn on unmaintained/yanked.
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies inside this workspace are declared without a version on
+# purpose; do not flag them as wildcard requirements.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -48,7 +48,6 @@ version = "0.1.0"
 dependencies = [
  "aether-api",
  "aether-core",
- "aether-physics",
  "aether-telemetry",
  "aether-world",
  "aether-worldgen",
@@ -100,7 +99,6 @@ name = "aether-worldgen"
 version = "0.1.0"
 dependencies = [
  "aether-convert",
- "aether-core",
  "aether-world",
  "miniz_oxide",
 ]
