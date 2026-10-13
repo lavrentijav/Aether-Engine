@@ -15,6 +15,7 @@
 
 mod commands;
 mod config;
+mod connections;
 mod db;
 mod economy;
 mod game;
@@ -172,14 +173,30 @@ fn main() -> std::process::ExitCode {
     );
     log::info("ready (SIGINT or SIGTERM stops cleanly)");
 
+    // One thread per connection is the whole cost model, so cap how many we
+    // will run at once. A refusal drops the socket here, before any thread
+    // exists, and is logged sparingly so a flood cannot bury the log.
+    let limiter = connections::Limiter::new(
+        cfg.server.connection_limit() as usize,
+        cfg.server.per_ip_connection_limit() as usize,
+    );
+
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
+                let ip = s.peer_addr().ok().map(|a| a.ip());
+                let Some(guard) = limiter.try_acquire(ip) else {
+                    limiter.warn_refused(ip);
+                    continue;
+                };
                 let world = Arc::clone(&world);
                 let cfg = Arc::clone(&cfg);
                 let next_eid = Arc::clone(&next_eid);
                 let registry = Arc::clone(&registry);
                 std::thread::spawn(move || {
+                    // Held for the connection's whole life; the thread ending
+                    // — normally or by panic — drops it and frees the slot.
+                    let _guard = guard;
                     let peer = s.peer_addr().map(|a| a.to_string()).unwrap_or_default();
                     if let Err(e) = session::serve(s, &world, &cfg, &next_eid, &registry) {
                         if e.kind() != io::ErrorKind::UnexpectedEof {

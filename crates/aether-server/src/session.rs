@@ -165,6 +165,18 @@ fn login_and_play(
         ));
         return protocol::kick_login(s, "You are not on this server's whitelist.");
     }
+    // The ping only *reports* `max_players`; this is what enforces it. Count
+    // the registry rather than trusting a slot tally, and let operators in even
+    // when it is full so an admin can still reach a server nobody else can.
+    let online = registry.snapshot().len();
+    if online >= cfg.server.max_players as usize && !cfg.is_operator(&name, ip) {
+        crate::log::info(&format!(
+            "[x] {name} refused: server full ({online}/{}) ({})",
+            cfg.server.max_players,
+            ip.map(|i| i.to_string()).unwrap_or_default()
+        ));
+        return protocol::kick_login(s, "The server is full.");
+    }
 
     // Between Login Start and Login Success, and nowhere else: every version
     // this server speaks takes Set Compression at login id 0x03, so the switch
