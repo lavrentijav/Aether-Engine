@@ -18,6 +18,7 @@ use crate::config::Config;
 use crate::players::{PosLook, SharedRegistry};
 use crate::proto::{read_packet, Conn};
 use crate::protocol::{self, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
+use crate::stored::{self, Stored};
 
 /// The world type this server runs: noise terrain over a persistent store, so
 /// terrain and player builds survive a restart.
@@ -200,16 +201,38 @@ fn login_and_play(
             std::thread::sleep(Duration::from_millis(50));
         }
     }
-    // A returning player comes back where they left, as they left.
+    // A returning player comes back where they left, as they left. Both
+    // records are read here, still in the login state, because this is the
+    // last point a refusal costs nothing: a record that exists but cannot be
+    // read must not become a fresh start, or the first save would write that
+    // fresh start over it. See `crate::stored`.
     let saved = if codec.full_gameplay() {
-        world
-            .get_meta(&crate::game::player::key(player.uuid))
-            .ok()
-            .flatten()
-            .and_then(|b| crate::game::player::decode(&b))
+        stored::classify(
+            world.get_meta(&crate::game::player::key(player.uuid)),
+            crate::game::player::decode,
+        )
     } else {
-        None
+        Stored::Missing
     };
+    let saved_inventory = stored::classify(
+        world.get_meta(&crate::inventory::key(player.uuid)),
+        crate::inventory::decode,
+    );
+    for (what, record) in [
+        ("player state", saved.unreadable()),
+        ("inventory", saved_inventory.unreadable()),
+    ] {
+        if let Some(why) = record {
+            crate::log::warn(&format!(
+                "[x] {name} refused: saved {what} is unreadable ({why}); left untouched for an operator"
+            ));
+            return protocol::kick_login(
+                s,
+                "Your saved data could not be read. Nothing was changed; ask an operator.",
+            );
+        }
+    }
+    let saved = saved.into_option();
     let spawn = saved
         .as_ref()
         .map(|s| Vector3::new(s.pos.0, s.pos.1, s.pos.2))
@@ -311,7 +334,7 @@ fn login_and_play(
     // A returning player gets what they had; a new one gets the starter
     // hotbar. Seeding over a restored inventory would overwrite the first nine
     // slots of it, which is the whole hotbar.
-    match load_inventory(player.uuid, world) {
+    match saved_inventory.into_option() {
         Some(saved) => handle.restore_inventory(saved),
         // A full-game client starts with nothing, as in vanilla; the older
         // ones are handed something to build with.
@@ -1315,12 +1338,6 @@ fn record_slot_change(
 pub(crate) fn save_inventory(handle: &crate::players::PlayerHandle, world: &DemoWorld) {
     let blob = crate::inventory::encode(&handle.inventory());
     let _ = world.put_meta(&crate::inventory::key(handle.uuid), &blob);
-}
-
-/// Read back a player's saved inventory, if there is one.
-fn load_inventory(uuid: u128, world: &DemoWorld) -> Option<crate::inventory::Inventory> {
-    let blob = world.get_meta(&crate::inventory::key(uuid)).ok()??;
-    crate::inventory::decode(&blob)
 }
 
 /// Credit one interval of connected time.

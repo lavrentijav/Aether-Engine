@@ -142,12 +142,14 @@ fn sequence_numbers_continue_across_a_reopen() {
     }
     let j = Journal::open(&store).unwrap();
     let seq = j.append(alice(), set(2, 64, 0, DIRT, STONE)).unwrap();
-    assert_eq!(seq, 3);
+    // Numbering resumes at the reservation bound, so it may skip ahead; what
+    // matters is that it moves forward and nothing was overwritten.
+    assert!(seq > 2, "resumed at {seq}, at or below an existing event");
     assert_eq!(j.all_events().unwrap().len(), 3);
 }
 
 #[test]
-fn a_lost_head_marker_still_resumes_above_the_last_event() {
+fn a_lost_reservation_still_resumes_above_the_last_event() {
     let store = MemStore::new();
     {
         let j = Journal::open(&store).unwrap();
@@ -155,9 +157,79 @@ fn a_lost_head_marker_still_resumes_above_the_last_event() {
             j.append(alice(), set(i, 64, 0, DIRT, STONE)).unwrap();
         }
     }
-    store.delete(b"H").unwrap();
+    store.delete(b"N").unwrap();
     let j = Journal::open(&store).unwrap();
     assert_eq!(j.head(), 6, "must resume above the highest stored event");
+}
+
+#[test]
+fn an_old_head_marker_behind_a_stored_event_does_not_cause_an_overwrite() {
+    // A journal from before reservations crashed after writing event 3 but
+    // before moving its head past 2. Resuming at head + 1 would overwrite 3.
+    let store = MemStore::new();
+    {
+        let j = Journal::open(&store).unwrap();
+        for i in 0..3 {
+            j.append(alice(), set(i, 64, 0, DIRT, STONE)).unwrap();
+        }
+    }
+    store.delete(b"N").unwrap();
+    store.put(b"H", &2u64.to_be_bytes()).unwrap();
+    let j = Journal::open(&store).unwrap();
+    assert_eq!(j.head(), 4);
+    j.append(bob(), set(9, 64, 0, DIRT, STONE)).unwrap();
+    assert_eq!(
+        j.get(3).unwrap().unwrap().actor,
+        alice(),
+        "event 3 was overwritten"
+    );
+}
+
+#[test]
+fn the_reservation_is_written_once_per_block_not_per_event() {
+    let store = MemStore::new();
+    let j = Journal::open(&store).unwrap();
+    for i in 0..10 {
+        j.append(alice(), set(i, 64, 0, DIRT, STONE)).unwrap();
+    }
+    let bound = u64::from_be_bytes(store.get(b"N").unwrap().unwrap().try_into().unwrap());
+    assert_eq!(bound, SEQ_BLOCK, "ten events fit in the first block");
+}
+
+#[test]
+fn concurrent_appends_then_a_reopen_never_reuse_a_sequence_number() {
+    // Appends that finish out of order used to be able to write the head
+    // marker backwards, so a restart resumed below events already stored.
+    let store = std::sync::Arc::new(MemStore::new());
+    let total = 8 * 600;
+    {
+        let j = Journal::open(std::sync::Arc::clone(&store)).unwrap();
+        std::thread::scope(|s| {
+            for t in 0..8u128 {
+                let j = &j;
+                s.spawn(move || {
+                    for i in 0..600 {
+                        j.append(ActorId(t), set(i, 64, t as i32, DIRT, STONE))
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(j.all_events().unwrap().len(), total);
+    }
+    let j = Journal::open(std::sync::Arc::clone(&store)).unwrap();
+    let max = j.all_events().unwrap().iter().map(|e| e.seq).max().unwrap();
+    assert!(
+        j.head() > max,
+        "resumed at {} with event {max} stored",
+        j.head()
+    );
+    j.append(alice(), set(0, 0, 0, DIRT, STONE)).unwrap();
+    assert_eq!(
+        j.all_events().unwrap().len(),
+        total + 1,
+        "an append overwrote history"
+    );
 }
 
 #[test]
