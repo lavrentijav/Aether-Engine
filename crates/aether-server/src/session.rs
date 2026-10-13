@@ -166,19 +166,6 @@ fn login_and_play(
         ));
         return protocol::kick_login(s, "You are not on this server's whitelist.");
     }
-    // The ping only *reports* `max_players`; this is what enforces it. Count
-    // the registry rather than trusting a slot tally, and let operators in even
-    // when it is full so an admin can still reach a server nobody else can.
-    let online = registry.snapshot().len();
-    if online >= cfg.server.max_players as usize && !cfg.is_operator(&name, ip) {
-        crate::log::info(&format!(
-            "[x] {name} refused: server full ({online}/{}) ({})",
-            cfg.server.max_players,
-            ip.map(|i| i.to_string()).unwrap_or_default()
-        ));
-        return protocol::kick_login(s, "The server is full.");
-    }
-
     // Between Login Start and Login Success, and nowhere else: every version
     // this server speaks takes Set Compression at login id 0x03, so the switch
     // belongs here rather than repeated in nineteen codecs. Both directions
@@ -200,6 +187,19 @@ fn login_and_play(
         while registry.by_uuid(player.uuid).is_some() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+    // The ping only *reports* `max_players`; this is what enforces it. Counted
+    // after a reconnecting player's old session has left, or a full server
+    // would refuse someone whose own seat it is. Operators get in regardless,
+    // so an admin can still reach a server nobody else can.
+    let online = registry.snapshot().len();
+    if online >= cfg.server.max_players as usize && !cfg.is_operator(&name, ip) {
+        crate::log::info(&format!(
+            "[x] {name} refused: server full ({online}/{}) ({})",
+            cfg.server.max_players,
+            ip.map(|i| i.to_string()).unwrap_or_default()
+        ));
+        return protocol::kick_login(s, "The server is full.");
     }
     // A returning player comes back where they left, as they left. Both
     // records are read here, still in the login state, because this is the
