@@ -8,6 +8,9 @@
 //! `tools/gen/versions.py`; the layout differences are written out in the
 //! codec, each with the release that introduced it.
 
+use std::sync::OnceLock;
+
+use aether_world::registry::items::{ItemTypeId, ITEM_BEYOND, ITEM_NAMES};
 use aether_world::BlockStateId;
 
 use crate::protocol::nbt::Nbt;
@@ -132,6 +135,38 @@ pub enum Registries {
     },
 }
 
+/// The two item-id tables of one version, built once from its name table.
+///
+/// The codec's hot path — decoding a client's carried/clicked item, encoding
+/// one back — is a wire id ⇄ engine id lookup, not a name compare or a scan.
+/// Both directions are two array indexes, so they are built once and cached
+/// rather than searched per packet.
+struct ItemTables {
+    /// Engine id → this version's wire id, `-1` where this version has no item
+    /// with that engine name. Indexed by `ItemTypeId.0`, so it covers the
+    /// vanilla ids `0..ITEM_BEYOND`; a modded item has no wire id at all and
+    /// is never looked up here.
+    // Read only through `wire_item`, which no non-test code calls until P1b
+    // moves the wire path onto ids.
+    #[allow(dead_code)]
+    to_wire: Vec<i32>,
+    /// This version's wire id → engine id, `ItemTypeId::AIR` where the version
+    /// has an item the engine's registry lacks. That is not an error: the
+    /// engine's registry is pinned to an older release, so a newer item has no
+    /// engine id — it just renders as nothing. Nothing is logged: a client
+    /// merely named an item this build does not know.
+    // Read only through `engine_item`, which no non-test code calls until P1b
+    // moves the wire path onto ids.
+    #[allow(dead_code)]
+    from_wire: Vec<ItemTypeId>,
+    /// Wire id → this version's own name, read straight from `items`. Kept
+    /// apart from `from_wire` so `item_name` stays exact even for an item the
+    /// engine cannot represent: a 26.3 client's new item must still be *named*
+    /// correctly on the way in, or it would look like air and vanish. `None`
+    /// for a wire id the version does not have.
+    names_by_wire: Vec<Option<&'static str>>,
+}
+
 /// One protocol version.
 pub struct Version {
     pub name: &'static str,
@@ -144,6 +179,9 @@ pub struct Version {
     /// Block states in this version, for the direct palette's width.
     pub state_count: u32,
     pub items: &'static [(&'static str, u16)],
+    /// The hot-path id tables, built on first use from `items` (see
+    /// [`ItemTables`]). Private: callers go through the methods on this type.
+    item_ids: OnceLock<ItemTables>,
     pub entity_types: &'static [(&'static str, u16)],
     pub menu_chest: i32,
     pub menu_double_chest: i32,
@@ -177,6 +215,32 @@ impl Version {
         (32 - (self.state_count - 1).leading_zeros()) as u8
     }
 
+    /// The lazily built id tables, from this version's name table.
+    fn item_tables(&self) -> &ItemTables {
+        self.item_ids.get_or_init(|| {
+            // Engine ids are the vanilla 1.21.11 ids, so a walk of ITEM_NAMES
+            // gives every id its wire id in this version, or -1 if it is new
+            // here or already gone.
+            let to_wire = ITEM_NAMES
+                .iter()
+                .map(|name| self.item_id(name).unwrap_or(-1))
+                .collect();
+            // Wire ids are dense from 0 within a version: index the reverse
+            // tables by the id the version itself declares.
+            let mut from_wire = vec![ItemTypeId::AIR; self.items.len()];
+            let mut names_by_wire = vec![None; self.items.len()];
+            for (name, wire) in self.items {
+                from_wire[*wire as usize] = ItemTypeId::vanilla(name).unwrap_or(ItemTypeId::AIR);
+                names_by_wire[*wire as usize] = Some(*name);
+            }
+            ItemTables {
+                to_wire,
+                from_wire,
+                names_by_wire,
+            }
+        })
+    }
+
     /// This version's id for an item, by name.
     pub fn item_id(&self, name: &str) -> Option<i32> {
         self.items
@@ -185,12 +249,42 @@ impl Version {
             .map(|i| self.items[i].1 as i32)
     }
 
-    /// The name of an item id.
+    /// This version's wire id for an engine item, if the version has it.
+    ///
+    /// `None` for an item the version lacks and for a modded item
+    /// (`id >= ITEM_BEYOND`): a modded item has no wire id in any vanilla
+    /// release, so callers fall back to their own "unknown item" id.
+    // The existing name-based call sites switch to this in P1b.
+    #[allow(dead_code)]
+    pub fn wire_item(&self, id: ItemTypeId) -> Option<i32> {
+        if id.0 >= ITEM_BEYOND {
+            return None;
+        }
+        match self.item_tables().to_wire[id.0 as usize] {
+            -1 => None,
+            wire => Some(wire),
+        }
+    }
+
+    /// The engine item a wire id names, `None` if this version has no such id.
+    ///
+    /// A wire id this version has but the engine's registry lacks answers
+    /// `Some(ItemTypeId::AIR)`: it is expressible on the wire but has no engine
+    /// item to become.
+    // The existing name-based call sites switch to this in P1b.
+    #[allow(dead_code)]
+    pub fn engine_item(&self, wire: i32) -> Option<ItemTypeId> {
+        usize::try_from(wire)
+            .ok()
+            .and_then(|i| self.item_tables().from_wire.get(i).copied())
+    }
+
+    /// The name of a wire id, this version's real name even for an item the
+    /// engine's registry lacks. O(1): a lookup in `names_by_wire`, not a scan
+    /// of `items` and not routed through the engine registry.
     pub fn item_name(&self, id: i32) -> Option<&'static str> {
-        self.items
-            .iter()
-            .find(|(_, i)| *i as i32 == id)
-            .map(|(n, _)| *n)
+        let i = usize::try_from(id).ok()?;
+        self.item_tables().names_by_wire.get(i).copied().flatten()
     }
 
     /// This version's id for an entity type.
@@ -255,6 +349,7 @@ macro_rules! version {
             state_runs: super::gen::$m::STATE_RUNS,
             state_count: super::gen::$m::STATE_COUNT,
             items: super::gen::$m::ITEMS,
+            item_ids: OnceLock::new(),
             entity_types: super::gen::$m::ENTITY_TYPES,
             menu_chest: super::gen::$m::MENU_GENERIC_9X3,
             menu_double_chest: super::gen::$m::MENU_GENERIC_9X6,
@@ -361,6 +456,84 @@ mod tests {
                 v.biome("minecraft:plains"),
                 v.biome("minecraft:no_such_biome")
             );
+        }
+    }
+
+    /// The O(n) scan `item_name` used to be, kept only to check the table.
+    fn item_name_linear(v: &Version, id: i32) -> Option<&'static str> {
+        v.items
+            .iter()
+            .find(|(_, i)| *i as i32 == id)
+            .map(|(n, _)| *n)
+    }
+
+    #[test]
+    fn every_version_item_round_trips_through_its_id_tables() {
+        for v in [&V1_21_11, &V26_1, &V26_2, &V26_3] {
+            for (name, wire) in v.items {
+                let wire = *wire as i32;
+                match ItemTypeId::vanilla(name) {
+                    Some(engine) => {
+                        assert_eq!(v.wire_item(engine), Some(wire), "{}: {name}", v.name);
+                        assert_eq!(v.engine_item(wire), Some(engine), "{}: {name}", v.name);
+                        assert_eq!(v.item_name(wire), Some(*name), "{}: {name}", v.name);
+                    }
+                    // The engine's registry is pinned to 1.21.11, so an item
+                    // only 26.x has has no engine id: it becomes air there, but
+                    // its name still comes back exactly — routing the name
+                    // through the engine would read the client's new item as
+                    // air and drop it.
+                    None => {
+                        assert_eq!(
+                            v.engine_item(wire),
+                            Some(ItemTypeId::AIR),
+                            "{}: {name}",
+                            v.name
+                        );
+                        assert_eq!(v.item_name(wire), Some(*name), "{}: {name}", v.name);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_tables_say_how_many_items_the_engine_registry_lacks() {
+        // 1.21.11 is the engine's own pin, so it lacks nothing. 26.1 added an
+        // item, 26.2 grew the block set, 26.3 more still; the exact counts are
+        // pinned so a data change (or an engine repin) shows up here.
+        let missing = |v: &Version| {
+            v.items
+                .iter()
+                .filter(|&&(n, _)| ItemTypeId::vanilla(n).is_none())
+                .count()
+        };
+        assert_eq!(missing(&V1_21_11), 0, "1.21.11 is the engine's pin");
+        assert_eq!(missing(&V26_1), 1);
+        assert_eq!(missing(&V26_2), 32);
+        assert_eq!(missing(&V26_3), 153);
+    }
+
+    #[test]
+    fn ids_outside_a_versions_tables_are_none() {
+        for v in [&V1_21_11, &V26_1, &V26_2, &V26_3] {
+            for beyond in [ITEM_BEYOND, ITEM_BEYOND + 1, u16::MAX] {
+                assert_eq!(v.wire_item(ItemTypeId(beyond)), None, "{}", v.name);
+            }
+            assert_eq!(v.engine_item(-1), None, "{}", v.name);
+            assert_eq!(v.engine_item(v.items.len() as i32), None, "{}", v.name);
+            assert_eq!(v.engine_item(i32::MAX), None, "{}", v.name);
+        }
+    }
+
+    #[test]
+    fn item_name_matches_the_old_linear_scan_for_every_wire_id() {
+        for v in [&V1_21_11, &V26_1, &V26_2, &V26_3] {
+            // Every wire id the version has, a couple it does not, and the
+            // bounds around them — identical to the O(n) scan, no exceptions.
+            for id in (0..=v.items.len() as i32).chain([-1, i32::MAX]) {
+                assert_eq!(v.item_name(id), item_name_linear(v, id), "{}: {id}", v.name);
+            }
         }
     }
 }
