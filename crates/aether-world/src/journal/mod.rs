@@ -64,13 +64,23 @@ pub use sink::{BatchConfig, BatchingSink, EventSink, SinkStats};
 use crate::storage::{KvBackend, StorageError};
 use crate::BlockStateId;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 const K_EVENT: u8 = b'E';
 const K_COLUMN: u8 = b'X';
 const K_ACTOR: u8 = b'P';
-/// Key holding the high-water sequence number, so a restart does not reuse
-/// sequence numbers and silently overwrite history.
+/// Key written by earlier versions: the last sequence number used. Read only,
+/// to resume a journal that predates [`K_RESERVED`].
 const K_HEAD: &[u8] = b"H";
+/// Key holding the reservation bound: every sequence number below it may
+/// have been handed out, none at or above it has. A restart resumes *at* the
+/// bound, so no number is ever reused — not after a crash between an event
+/// and any bookkeeping, and not when concurrent appends finish out of order.
+const K_RESERVED: &[u8] = b"N";
+/// How many sequence numbers one reservation write covers. The bound is
+/// written once per block rather than once per event; the price is a gap of
+/// up to this many unused numbers after a restart, which nothing depends on.
+const SEQ_BLOCK: u64 = 4096;
 
 fn event_key(seq: u64) -> [u8; 9] {
     let mut k = [0u8; 9];
@@ -200,29 +210,57 @@ pub struct Restore {
 pub struct Journal<B: KvBackend> {
     backend: B,
     next_seq: AtomicU64,
+    /// The persisted reservation bound ([`K_RESERVED`]). Only raised, and
+    /// only under this lock, so two appenders can never write it backwards.
+    reserved: Mutex<u64>,
     /// Optional mirror into an external database. See [`sink`].
     sink: Option<BatchingSink>,
+}
+
+fn read_u64(v: Option<Vec<u8>>) -> Option<u64> {
+    v.filter(|v| v.len() == 8)
+        .map(|v| u64::from_be_bytes(v.try_into().unwrap()))
 }
 
 impl<B: KvBackend> Journal<B> {
     /// Open a journal on `backend`, continuing its sequence numbering.
     pub fn open(backend: B) -> Result<Self, StorageError> {
-        let next = match backend.get(K_HEAD)? {
-            Some(v) if v.len() == 8 => u64::from_be_bytes(v.try_into().unwrap()) + 1,
-            // No head, or a head we cannot read: fall back to the highest
-            // event actually present. Resuming below an existing event would
+        let next = match read_u64(backend.get(K_RESERVED)?) {
+            Some(bound) => bound,
+            // No reservation: a journal from before reservations, or one that
+            // lost the key. Resume above both the old head and the highest
+            // event actually present — resuming below an existing event would
             // overwrite history, which is the one thing this layer must not do.
-            _ => backend
-                .scan_prefix(&[K_EVENT])?
-                .last()
-                .map(|(k, _)| u64::from_be_bytes(k[1..9].try_into().unwrap()) + 1)
-                .unwrap_or(1),
+            None => {
+                let head = read_u64(backend.get(K_HEAD)?).map_or(1, |h| h + 1);
+                let last = backend.scan_prefix(&[K_EVENT])?.last().map_or(1, |(k, _)| {
+                    u64::from_be_bytes(k[1..9].try_into().unwrap()) + 1
+                });
+                head.max(last)
+            }
         };
         Ok(Self {
             backend,
             next_seq: AtomicU64::new(next),
+            // Nothing at or above `next` is reserved yet; the first append
+            // writes a bound before it writes an event.
+            reserved: Mutex::new(next),
             sink: None,
         })
+    }
+
+    /// Make sure `seq` lies below the persisted reservation bound, raising
+    /// the bound by whole blocks if it does not. The bound is durable before
+    /// the event that needs it is written.
+    fn reserve(&self, seq: u64) -> Result<(), StorageError> {
+        let mut bound = self.reserved.lock().unwrap();
+        if seq < *bound {
+            return Ok(());
+        }
+        let new = (seq / SEQ_BLOCK + 1) * SEQ_BLOCK;
+        self.backend.put(K_RESERVED, &new.to_be_bytes())?;
+        *bound = new;
+        Ok(())
     }
 
     /// Mirror every appended event into `sink` as well.
@@ -286,6 +324,7 @@ impl<B: KvBackend> Journal<B> {
         at_ms: u64,
     ) -> Result<u64, StorageError> {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
+        self.reserve(seq)?;
         let e = Event {
             seq,
             at_ms,
@@ -302,7 +341,6 @@ impl<B: KvBackend> Journal<B> {
             self.backend.put(&column_key(x >> 4, z >> 4, seq), &[])?;
         }
         self.backend.put(&actor_key(actor, seq), &[])?;
-        self.backend.put(K_HEAD, &seq.to_be_bytes())?;
         // After the durable write, never before: the mirror must not be able
         // to show an event the journal does not have.
         if let Some(sink) = &self.sink {
