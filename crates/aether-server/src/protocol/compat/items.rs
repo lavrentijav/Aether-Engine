@@ -363,6 +363,37 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_block_item_follows_its_blocks_item_name() {
+        // F7: on 1.8 a few blocks have no item of the same name. The sign and
+        // banner blocks are placed by `sign`/`banner`, so a held sign must be
+        // that item — stone was a generic fallback the `ITEM_FALLBACKS` test
+        // could not see (stone is not a fallback, and the item *does* have a
+        // stand-in).
+        // The engine is 1.21.11, which has no generic `sign`/`banner` item, so
+        // the assertion is on the *version* name the wire id carries.
+        let t = &V1_8;
+        for name in [
+            "minecraft:oak_sign",
+            "minecraft:spruce_sign",
+            "minecraft:dark_oak_hanging_sign",
+        ] {
+            let w = t
+                .wire(id(name))
+                .unwrap_or_else(|| panic!("{name} stand-in"));
+            assert!(w.disguised, "{name}");
+            assert_eq!(t.name(w.id), Some("minecraft:sign"), "{name}");
+        }
+        for name in ["minecraft:white_banner", "minecraft:red_banner"] {
+            let w = t.wire(id(name)).unwrap();
+            assert_eq!(t.name(w.id), Some("minecraft:banner"), "{name}");
+        }
+        // The one case with no item at all: 1.8 has no `fire` item, so a
+        // campfire can only be shown as stone. Documented, not a regression.
+        let campfire = t.wire(id("minecraft:campfire")).unwrap();
+        assert_eq!(t.name(campfire.id), Some("minecraft:stone"));
+    }
+
+    #[test]
     fn a_block_item_follows_its_blocks_substitution_not_the_item_rules() {
         // F5 (HIGH): a name that is both a block item and had an item rule was
         // resolved by the item rule first, so the held icon and the placed

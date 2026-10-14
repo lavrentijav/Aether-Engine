@@ -82,6 +82,37 @@ const ENGINE_ITEMS = BASE_ITEMS.length
 // *block item*, so it follows the block rules rather than the item rules.
 const BASE_BLOCKS = new Set(base.blocksArray.map(b => b.name))
 
+// A few 1.8 blocks have no item of the same name — the item that places them
+// goes by another name (the sign and banner blocks against `sign`/`banner`,
+// lit/state variants against their base). Map the legacy block name to its
+// item so a block item follows its block (F7) instead of falling to stone.
+// Anything not here and without a same-named item (fire, water, portal) has no
+// item at all and stays stone.
+const LEGACY_BLOCK_ITEMS = {
+  standing_sign: 'sign',
+  wall_sign: 'sign',
+  standing_banner: 'banner',
+  wall_banner: 'banner',
+  lit_furnace: 'furnace',
+  unlit_redstone_torch: 'redstone_torch',
+  lit_redstone_ore: 'redstone_ore',
+  unpowered_repeater: 'repeater',
+  powered_repeater: 'repeater',
+  unpowered_comparator: 'comparator',
+  powered_comparator: 'comparator',
+  lit_redstone_lamp: 'redstone_lamp',
+  daylight_detector_inverted: 'daylight_detector',
+  piston_head: 'piston',
+  piston_extension: 'piston',
+  double_stone_slab: 'stone_slab',
+  double_wooden_slab: 'wooden_slab',
+  double_stone_slab2: 'stone_slab',
+  carrots: 'carrot',
+  potatoes: 'potato',
+  tripwire: 'string',
+  redstone_wire: 'redstone',
+}
+
 function buildItems(mcVersion, itemRules, blockRules) {
   const t = d(mcVersion)
   const byName = {}
@@ -116,7 +147,12 @@ function buildItems(mcVersion, itemRules, blockRules) {
       let sub
       if (BASE_BLOCKS.has(name)) {
         const block = resolveBlock(name)?.name ?? null
-        sub = (block && names.has(block) ? block : null) ?? stone
+        // The resolved block's item: the same name, or the legacy alias when
+        // the block has no same-named item (F7).
+        const alias = block ? LEGACY_BLOCK_ITEMS[block] : null
+        const itemName =
+          block && names.has(block) ? block : alias && names.has(alias) ? alias : null
+        sub = itemName ?? stone
       } else {
         sub = resolveItem(name)?.name ?? null
       }
