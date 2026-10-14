@@ -510,6 +510,10 @@ pub enum Menu {
     LargeChest,
     /// A furnace.
     Furnace,
+    /// A hopper, 5 slots.
+    Hopper,
+    /// A dispenser or dropper, 9 slots.
+    Dispenser,
 }
 
 /// Flag on an [`ServerEvent::EntityMeta`] index: the field belongs to a

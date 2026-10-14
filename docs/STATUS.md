@@ -112,7 +112,8 @@ modern versions run a server-side survival game).
 | Combat: 1.9 attack cooldown, critical hits, knockback, armour reduction and wear, tool durability, PvP | ✅ |
 | Item entities: block drops from loot tables, Q / drop stack, pickup with the collect animation, merging, 5-minute expiry | ✅ |
 | Experience orbs: ores, mob kills and smelting drop `minecraft:experience_orb` entities instead of crediting the killer; they drift to a nearby player, merge up to the orb cap, and are picked up with vanilla's ladder of orb values | ✅ |
-| Server-authoritative windows: every click mode, 2×2 and 3×3 crafting over all 1,359 shaped + shapeless recipes, single and **double chests** (54 slots, `type=left`/`right`) and furnaces persisted as block entities, smelting + fuel + stored experience released on taking the output | ✅ |
+| Server-authoritative windows: every click mode, 2×2 and 3×3 crafting over all 1,359 shaped + shapeless recipes, single and **double chests** (54 slots, `type=left`/`right`), furnaces and **hoppers/droppers/dispensers** persisted as block entities, smelting + fuel + stored experience released on taking the output | ✅ |
+| Hoppers move items on the block-tick scheduler: one every eight ticks, pull from the container above, push into the container they face (`game/blockticks/hopper.rs`); the `enabled` redstone property is ignored (always on) | 🚧 Preview |
 | Survival mining: vanilla dig times, harvest tools, tool wear; placement consumes items; buckets, hoes, flint and steel, beds (spawn point, skip night), eating, bows | ✅ |
 | Entity tracker: entities spawn/despawn per client by range, updates only to those tracking them | ✅ |
 | Player state persisted (position, health, food, XP, mode, spawn, active status effects — save format 2, version 1 still read); gameplay commands `/gamemode /time /give /summon /tp /heal /food /killall /kill /spawn /block` | ✅ |

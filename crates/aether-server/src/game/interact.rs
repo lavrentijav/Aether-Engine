@@ -246,6 +246,14 @@ pub fn use_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i3
             window::open(handle, world, WindowKind::Furnace { pos: (x, y, z) });
             return true;
         }
+        Some(ContainerKind::Hopper) => {
+            window::open(handle, world, WindowKind::Hopper { pos: (x, y, z) });
+            return true;
+        }
+        Some(ContainerKind::Dispenser) => {
+            window::open(handle, world, WindowKind::Dispenser { pos: (x, y, z) });
+            return true;
+        }
         None => {}
     }
     if short.ends_with("_bed") {

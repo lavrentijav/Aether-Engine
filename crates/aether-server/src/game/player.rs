@@ -33,6 +33,10 @@ pub enum WindowKind {
     },
     /// A furnace at a position.
     Furnace { pos: (i32, i32, i32) },
+    /// A hopper at a position.
+    Hopper { pos: (i32, i32, i32) },
+    /// A dispenser or dropper at a position.
+    Dispenser { pos: (i32, i32, i32) },
 }
 
 /// A drag in progress (click mode 5).

@@ -16,6 +16,8 @@ fn menu_id(v: &Version, m: Menu) -> i32 {
         Menu::LargeChest => v.menu_double_chest,
         Menu::Crafting => v.menu_crafting,
         Menu::Furnace => v.menu_furnace,
+        Menu::Hopper => v.menu_hopper,
+        Menu::Dispenser => v.menu_dispenser,
     }
 }
 
