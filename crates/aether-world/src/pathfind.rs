@@ -234,7 +234,10 @@ fn neighbors<N: Nav + ?Sized>(nav: &N, p: [i32; 3]) -> Vec<([i32; 3], f64)> {
 
 /// The cell a mob reaches stepping `(dx, dz)` from `from`: the same level,
 /// else one up, else the first standable drop within [`MAX_DROP`].
-fn step<N: Nav + ?Sized>(nav: &N, from: [i32; 3], dx: i32, dz: i32) -> Option<[i32; 3]> {
+///
+/// Public so the server's straight-line fallback can refuse exactly the drops
+/// the search would, instead of keeping a second, looser rule.
+pub fn step<N: Nav + ?Sized>(nav: &N, from: [i32; 3], dx: i32, dz: i32) -> Option<[i32; 3]> {
     let (x, y, z) = (from[0], from[1], from[2]);
     let (nx, nz) = (x + dx, z + dz);
     if standable(nav, nx, y, nz) {
@@ -488,5 +491,18 @@ mod tests {
         );
         let r = search(&blocked, [0, 1, 0], [4, 1, 0], 0.0, 4096);
         assert!(!r.reached, "a head-height slab blocks a one-wide corridor");
+    }
+
+    #[test]
+    fn a_drop_beyond_the_limit_is_refused() {
+        let mut grid = Grid::floor(3, 1);
+        // The floor from x = 1 on is gone; the ground is four below.
+        grid.solid.remove(&[1, 0, 0]);
+        grid.solid.remove(&[2, 0, 0]);
+        grid.solid.insert([1, -4, 0]);
+        grid.solid.insert([2, -4, 0]);
+        // From the high side a step lands at feet y = -3 (support -4): a drop
+        // of four, one past MAX_DROP, so there is no step to take.
+        assert!(step(&grid, [0, 1, 0], 1, 0).is_none());
     }
 }

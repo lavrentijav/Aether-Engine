@@ -361,6 +361,39 @@ fn standable_at(world: &DemoWorld, w: [i32; 3]) -> bool {
     pathfind::standable(&WorldNav { world }, w[0], w[1], w[2])
 }
 
+/// Whether the straight-line fallback may step toward `(dx, dz)` from cell
+/// `from`: some cell directly ahead — same level, one up, or a drop within
+/// [`pathfind::MAX_DROP`] — must be standable. A cached path needs no such
+/// check, because the search already refused those drops and hazards.
+fn can_advance<N: pathfind::Nav + ?Sized>(nav: &N, from: [i32; 3], dx: f64, dz: f64) -> bool {
+    let sx = if dx > 1e-6 {
+        1
+    } else if dx < -1e-6 {
+        -1
+    } else {
+        0
+    };
+    let sz = if dz > 1e-6 {
+        1
+    } else if dz < -1e-6 {
+        -1
+    } else {
+        0
+    };
+    if sx == 0 && sz == 0 {
+        return true;
+    }
+    if pathfind::step(nav, from, sx, sz).is_some() {
+        return true;
+    }
+    if sx != 0 && sz != 0 {
+        // A diagonal may be walled one way but open the other; try each axis.
+        return pathfind::step(nav, from, sx, 0).is_some()
+            || pathfind::step(nav, from, 0, sz).is_some();
+    }
+    false
+}
+
 /// Solve a path from `pos` to a point, charged against the tick budget.
 fn find_path(ctx: &Ctx, pos: Vector3, goal: (f64, f64, f64)) -> Option<Vec<[i32; 3]>> {
     let remaining = ctx.nav.remaining();
@@ -474,10 +507,6 @@ fn yaw_to(dx: f64, dz: f64) -> f32 {
     (-dx).atan2(dz).to_degrees() as f32
 }
 
-fn solid(world: &DemoWorld, x: i32, y: i32, z: i32) -> bool {
-    world.props_of(world.get_block(x, y, z)).collision
-}
-
 fn is_water(world: &DemoWorld, x: i32, y: i32, z: i32) -> bool {
     crate::game::block_name(world, world.get_block(x, y, z))
         .is_some_and(|n| n == "minecraft:water" || n == "minecraft:lava")
@@ -486,11 +515,6 @@ fn is_water(world: &DemoWorld, x: i32, y: i32, z: i32) -> bool {
 /// Whether nothing but air is above `(x, y, z)` for a good while.
 pub fn sky_above(world: &DemoWorld, x: i32, y: i32, z: i32) -> bool {
     (y..(y + 48).min(384)).all(|yy| world.get_block(x, yy, z) == aether_api::block_ids::AIR)
-}
-
-/// Whether there is ground within three blocks below `(x, y, z)`.
-fn ground_below(world: &DemoWorld, x: i32, y: i32, z: i32) -> bool {
-    (1..=3).any(|d| solid(world, x, y - d, z) || is_water(world, x, y - d, z))
 }
 
 /// Step one mob. Returns `true` when it should be removed.
@@ -800,8 +824,9 @@ pub fn tick(
     // straight line to the goal is the fallback when no path was found.
     let mut want = (0.0, 0.0);
     if let Some(g) = &goal {
-        let target = follow_path(m, pos, (g.x, g.y, g.z), ctx).unwrap_or((g.x, g.z));
-        let (dx, dz) = (target.0 - pos.x, target.1 - pos.z);
+        let waypoint = follow_path(m, pos, (g.x, g.y, g.z), ctx);
+        let (tx, tz) = waypoint.unwrap_or((g.x, g.z));
+        let (dx, dz) = (tx - pos.x, tz - pos.z);
         let len = (dx * dx + dz * dz).sqrt();
         if len > 0.3 {
             want = (dx / len * g.speed, dz / len * g.speed);
@@ -809,15 +834,15 @@ pub fn tick(
                 *yaw = yaw_to(dx, dz);
                 *pitch = 0.0;
             }
-            // Do not walk off a drop the mob cannot climb back up.
-            let ahead_x = (pos.x + dx / len * 0.8).floor() as i32;
-            let ahead_z = (pos.z + dz / len * 0.8).floor() as i32;
-            if !solid(world, ahead_x, by, ahead_z)
-                && !ground_below(world, ahead_x, by + 1, ahead_z)
-                && m.target.is_none()
-            {
+            // Only the straight-line fallback needs the drop guard, and it
+            // applies to every mob: a hostile whose search failed must not
+            // walk off a cliff either. A mob with a path can trust it, since
+            // the search used the same drop limit.
+            if waypoint.is_none() && !can_advance(&WorldNav { world }, [bx, by, bz], dx, dz) {
                 want = (0.0, 0.0);
-                m.wander = None;
+                if m.target.is_none() {
+                    m.wander = None;
+                }
             }
         }
     }
@@ -1019,6 +1044,7 @@ fn spawn_height(world: &DemoWorld, x: i32, near_y: i32, z: i32) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn every_mob_is_a_real_entity_type() {
@@ -1073,5 +1099,49 @@ mod tests {
         assert!(!note_progress(&mut m, 0.1, 0.09));
         assert_eq!(m.stuck, 0);
         assert!(!m.path.is_empty(), "the path survives a moving mob");
+    }
+
+    /// A plain grid of full cubes, for the fallback guard.
+    struct BlockGrid(HashSet<[i32; 3]>);
+
+    impl BlockGrid {
+        fn new() -> Self {
+            Self(HashSet::new())
+        }
+        fn put(mut self, x: i32, y: i32, z: i32) -> Self {
+            self.0.insert([x, y, z]);
+            self
+        }
+    }
+
+    impl pathfind::Nav for BlockGrid {
+        fn boxes(&self, x: i32, y: i32, z: i32) -> &'static [Box6] {
+            const FULL: [Box6; 1] = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+            const NONE: [Box6; 0] = [];
+            if self.0.contains(&[x, y, z]) {
+                &FULL
+            } else {
+                &NONE
+            }
+        }
+        fn hazard(&self, _x: i32, _y: i32, _z: i32) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn the_fallback_guard_follows_the_pathfinder_drop_limit() {
+        // Floor at y = 0 up to x = 0, then a shelf two lower.
+        let shallow = BlockGrid::new().put(0, 0, 0).put(1, -2, 0);
+        assert!(
+            can_advance(&shallow, [0, 1, 0], 1.0, 0.0),
+            "a two-block drop is within MAX_DROP and must be walked"
+        );
+        // The same, four lower: past MAX_DROP, so the fallback refuses.
+        let deep = BlockGrid::new().put(0, 0, 0).put(1, -4, 0);
+        assert!(
+            !can_advance(&deep, [0, 1, 0], 1.0, 0.0),
+            "a four-block drop must be refused"
+        );
     }
 }
