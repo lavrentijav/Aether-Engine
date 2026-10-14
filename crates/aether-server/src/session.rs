@@ -354,6 +354,8 @@ fn login_and_play(
             st.food = s.food;
             st.saturation = s.saturation;
             st.xp_total = s.xp_total;
+            st.effects = crate::game::effects::Effects::from_list(s.effects.clone());
+            st.absorption = st.effects.absorption_amount();
         }
     }
 
@@ -655,7 +657,7 @@ fn play_loop(
                     // here, from the slot and creative-slot reports, and wins.
                     let held_item = handle.held_item();
                     let held = held_item
-                        .as_deref()
+                        .and_then(|id| id.vanilla_name())
                         .and_then(|item| handle.codec.block_for_item(item));
                     let chosen = if full {
                         held
@@ -694,8 +696,10 @@ fn play_loop(
                             let clicked =
                                 crate::game::block_name(world, world.get_block(tx, ty, tz))
                                     .unwrap_or_default();
-                            let tool = held_item.clone().unwrap_or_default();
-                            if let Some(to) = interact::item_on_block(&tool, &clicked) {
+                            let tool = held_item
+                                .and_then(|id| id.vanilla_name())
+                                .unwrap_or_default();
+                            if let Some(to) = interact::item_on_block(tool, &clicked) {
                                 if let Some(state) =
                                     aether_world::registry::blocks::default_state(to)
                                 {
@@ -959,7 +963,7 @@ fn place_block(
 /// after a respawn: health, inventory, time, experience.
 fn after_spawn(
     handle: &crate::players::PlayerHandle,
-    _registry: &SharedRegistry,
+    registry: &SharedRegistry,
     world: &DemoWorld,
 ) {
     if !handle.full() {
@@ -989,6 +993,16 @@ fn after_spawn(
         world,
     );
     handle.emit(&ServerEvent::GameModeChange(mode), world);
+    // Effects restored from the save, before the health that the client
+    // draws its absorption hearts over.
+    let effects: Vec<crate::game::effects::Effect> =
+        handle.game().effects.iter().copied().collect();
+    for e in &effects {
+        handle.emit(&crate::game::effects::event(handle.entity_id, *e), world);
+    }
+    if !effects.is_empty() {
+        crate::game::effects::sync_movement(handle, registry, world);
+    }
     handle.emit(
         &ServerEvent::Health {
             health,
@@ -1039,6 +1053,7 @@ pub(crate) fn save_player(handle: &crate::players::PlayerHandle, world: &DemoWor
         xp_total: st.xp_total,
         mode: st.mode,
         spawn: st.spawn,
+        effects: st.effects.all().to_vec(),
     };
     let pos = if st.dead { st.spawn } else { saved.pos };
     drop(st);
@@ -1298,7 +1313,7 @@ fn record_slot_change(
     handle: &crate::players::PlayerHandle,
     world: &DemoWorld,
     slot: i16,
-    item: Option<String>,
+    item: Option<aether_world::ItemTypeId>,
     count: u8,
 ) {
     let change = handle.set_creative_slot(slot, item, count);
@@ -1398,7 +1413,9 @@ fn on_block_broken(
     // from the loot tables (see `game::interact::on_broken`); the others
     // keep the older shortcut of the block going straight to them.
     if !handle.full() && crate::server_game_mode().server_grants_drops() {
-        crate::ground::give_or_drop(handle, registry, world, &name, 1);
+        if let Some(item) = aether_world::ItemTypeId::vanilla(&name) {
+            crate::ground::give_or_drop(handle, registry, world, item, 1);
+        }
     }
 
     if !crate::rewards::is_payable(&name) {

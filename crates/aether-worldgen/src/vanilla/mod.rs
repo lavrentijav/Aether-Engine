@@ -54,7 +54,9 @@
 //! game's seeding (`setDecorationSeed` / `setFeatureSeed`) and feature order;
 //! it is vanilla-like rather than exact, because vanilla's own result depends
 //! on the order in which neighbouring chunks were decorated. Not generated:
-//! structures, geodes, dungeons, fossils, dripstone, sculk, desert wells.
+//! structures, sculk, root systems. Desert wells, dungeons (`monster_room`),
+//! geodes, fossils, pointed dripstone and multiface spreading (glow lichen)
+//! are ported.
 //!
 //! ## The one place parity is ambiguous
 //!
@@ -124,6 +126,7 @@ pub mod providers;
 pub mod random;
 pub mod rng;
 pub mod simplex;
+pub mod structure;
 pub mod surface;
 pub mod tags;
 pub mod terrain;

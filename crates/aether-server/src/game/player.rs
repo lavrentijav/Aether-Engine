@@ -1,6 +1,7 @@
 //! One player's survival state: health, hunger, the window they have open
 //! and the stack on their cursor.
 
+use super::effects::{Effect, Effects};
 use crate::inventory::Stack;
 use crate::protocol::GameMode;
 
@@ -24,8 +25,12 @@ pub enum WindowKind {
     /// A crafting table. The grid belongs to the window, not the table, and
     /// is handed back when it closes.
     Crafting { grid: Vec<Option<Stack>> },
-    /// A chest at a position.
-    Chest { pos: (i32, i32, i32) },
+    /// A chest at a position — a double chest's left half (slots 0–26) and,
+    /// when doubled, its right.
+    Chest {
+        left: (i32, i32, i32),
+        right: Option<(i32, i32, i32)>,
+    },
     /// A furnace at a position.
     Furnace { pos: (i32, i32, i32) },
 }
@@ -47,6 +52,11 @@ pub struct PlayerState {
     pub saturation: f32,
     pub exhaustion: f32,
     pub dead: bool,
+    /// The status effects running on this player.
+    pub effects: Effects,
+    /// Absorption hearts left, spent before health. Driven by the absorption
+    /// effect; the client draws its own from that effect's icon.
+    pub absorption: f32,
     /// The highest point since last on the ground, for fall damage.
     pub fall_peak: Option<f64>,
     pub hurt_cooldown: u32,
@@ -87,6 +97,8 @@ impl PlayerState {
             saturation: 5.0,
             exhaustion: 0.0,
             dead: false,
+            effects: Effects::default(),
+            absorption: 0.0,
             fall_peak: None,
             hurt_cooldown: 0,
             food_timer: 0,
@@ -182,9 +194,16 @@ pub struct Saved {
     pub xp_total: i32,
     pub mode: GameMode,
     pub spawn: (f64, f64, f64),
+    /// Status effects still running when the player left.
+    pub effects: Vec<Effect>,
 }
 
-const SAVE_VERSION: u8 = 1;
+/// The version 1 layout, without effects. Still read, so a player who last
+/// logged in before effects existed is not locked out of their save.
+const LEGACY_LEN: usize = 1 + 6 * 8 + 4 * 4 + 4 + 4 + 1;
+
+/// 2 added the active effects.
+const SAVE_VERSION: u8 = 2;
 
 /// KV key for a player's saved state.
 pub fn key(uuid: u128) -> [u8; 17] {
@@ -205,21 +224,63 @@ pub fn encode(s: &Saved) -> Vec<u8> {
     out.extend_from_slice(&s.food.to_be_bytes());
     out.extend_from_slice(&s.xp_total.to_be_bytes());
     out.push(s.mode.wire());
+    out.push(s.effects.len().min(255) as u8);
+    for e in s.effects.iter().take(255) {
+        out.push(e.id);
+        out.push(e.amplifier);
+        out.extend_from_slice(&e.duration.to_be_bytes());
+        let flags = (e.ambient as u8) | ((e.visible as u8) << 1) | ((e.show_icon as u8) << 2);
+        out.push(flags);
+    }
     out
 }
 
 pub fn decode(b: &[u8]) -> Option<Saved> {
-    if b.len() != 1 + 6 * 8 + 4 * 4 + 4 + 4 + 1 || b[0] != SAVE_VERSION {
+    if b.len() < LEGACY_LEN {
         return None;
+    }
+    match b[0] {
+        1 | 2 => {}
+        _ => return None,
     }
     let f64_at = |i: usize| f64::from_be_bytes(b[1 + i * 8..9 + i * 8].try_into().unwrap());
     let base = 1 + 48;
     let f32_at =
         |i: usize| f32::from_be_bytes(b[base + i * 4..base + 4 + i * 4].try_into().unwrap());
     let i32_at = |o: usize| i32::from_be_bytes(b[o..o + 4].try_into().unwrap());
-    let mode = match b[b.len() - 1] {
+    let mode = match b[LEGACY_LEN - 1] {
         1 => GameMode::Creative,
         _ => GameMode::Survival,
+    };
+    let effects = if b[0] == 2 {
+        let mut at = LEGACY_LEN;
+        let n = *b.get(at)? as usize;
+        at += 1;
+        let mut list = Vec::with_capacity(n);
+        for _ in 0..n {
+            let id = *b.get(at)?;
+            let amplifier = *b.get(at + 1)?;
+            let duration = i32::from_be_bytes(b.get(at + 2..at + 6)?.try_into().ok()?);
+            let flags = *b.get(at + 6)?;
+            at += 7;
+            list.push(Effect {
+                id,
+                amplifier,
+                duration,
+                ambient: flags & 1 != 0,
+                visible: flags & 2 != 0,
+                show_icon: flags & 4 != 0,
+            });
+        }
+        if at != b.len() {
+            return None;
+        }
+        list
+    } else {
+        if b.len() != LEGACY_LEN {
+            return None;
+        }
+        Vec::new()
     };
     Some(Saved {
         pos: (f64_at(0), f64_at(1), f64_at(2)),
@@ -231,6 +292,7 @@ pub fn decode(b: &[u8]) -> Option<Saved> {
         food: i32_at(base + 16),
         xp_total: i32_at(base + 20),
         mode,
+        effects,
     })
 }
 
@@ -250,8 +312,36 @@ mod tests {
             xp_total: 321,
             mode: GameMode::Creative,
             spawn: (8.5, 70.0, 8.5),
+            effects: vec![
+                Effect::new(crate::game::effects::SPEED, 1, 200),
+                Effect::new(crate::game::effects::ABSORPTION, 0, 2400).hidden(),
+            ],
         };
         assert_eq!(decode(&encode(&s)), Some(s));
+    }
+
+    #[test]
+    fn a_version_1_save_still_loads_without_effects() {
+        let legacy = {
+            let s = Saved {
+                pos: (0.0, 64.0, 0.0),
+                yaw: 0.0,
+                pitch: 0.0,
+                health: 20.0,
+                food: 20,
+                saturation: 5.0,
+                xp_total: 0,
+                mode: GameMode::Survival,
+                spawn: (8.5, 80.0, 8.5),
+                effects: Vec::new(),
+            };
+            let mut out = vec![1u8];
+            out.extend_from_slice(&encode(&s)[1..LEGACY_LEN]);
+            out
+        };
+        let decoded = decode(&legacy).expect("a version 1 save loads");
+        assert!(decoded.effects.is_empty());
+        assert_eq!(decoded.food, 20);
     }
 
     #[test]

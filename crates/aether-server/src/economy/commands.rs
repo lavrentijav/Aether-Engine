@@ -63,7 +63,7 @@ pub fn dispatch(
         "balance" | "bal" | "money" => balance(args, handle, registry, econ),
         "pay" => pay(args, handle, registry, econ),
         "sell" => sell(args, handle, world, econ),
-        "market" => market(args, handle, registry, econ),
+        "market" => market(args, handle, registry, world, econ),
         "buy" => buy(args, handle, registry, world, econ),
         "listings" => listings(handle, econ),
         "unlist" => unlist(args, handle, registry, world, econ),
@@ -217,24 +217,26 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
     let Some(item) = handle.held_item() else {
         return Reply(vec!["you are not holding anything".into()]);
     };
+    let item_name = world
+        .item_name(item)
+        .unwrap_or_else(|| format!("item#{}", item.0));
 
     // Checked before anything moves, so a short seller gets a message rather
     // than a partly-emptied inventory that has to be put back.
-    let have = handle.inventory().count_of(&item);
+    let have = handle.inventory().count_of(item);
     if have < count {
-        return Reply(vec![format!("you have {have} of {item}, not {count}")]);
+        return Reply(vec![format!("you have {have} of {item_name}, not {count}")]);
     }
     // Taken from the inventory *before* the listing exists. The other order
     // leaves a window in which the same stack backs two offers.
-    handle.inventory().take(&item, count);
+    handle.inventory().take(item, count);
     handle.sync_inventory(world);
 
-    match econ.list(ActorId(handle.uuid), &item, count, price, expires) {
+    match econ.list(ActorId(handle.uuid), item, count, price, expires) {
         Ok(id) => {
             journal_move(
                 world,
                 ActorId(handle.uuid),
-                &item,
                 count,
                 Place::Inventory {
                     owner: ActorId(handle.uuid),
@@ -243,7 +245,7 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
                 Place::Nowhere,
             );
             Reply(vec![format!(
-                "listed {count}x {item} at {price} each — #{id}"
+                "listed {count}x {item_name} at {price} each — #{id}"
             )])
         }
         Err(e) => {
@@ -251,7 +253,7 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
             // database hiccup eats the seller's items.
             handle
                 .inventory()
-                .give(&item, count.min(u8::MAX as u64) as u8);
+                .give(item, count.min(u8::MAX as u64) as u8);
             handle.sync_inventory(world);
             err(e)
         }
@@ -260,7 +262,7 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
 
 /// Record an item leaving or arriving somewhere, so the ledger keeps up with
 /// trades as well as with slot edits.
-fn journal_move(world: &DemoWorld, actor: ActorId, item: &str, count: u64, from: Place, to: Place) {
+fn journal_move(world: &DemoWorld, actor: ActorId, count: u64, from: Place, to: Place) {
     let _ = world.journal().append(
         actor,
         EventBody::ItemMove {
@@ -273,13 +275,13 @@ fn journal_move(world: &DemoWorld, actor: ActorId, item: &str, count: u64, from:
             count: count.min(u8::MAX as u64) as u8,
         },
     );
-    let _ = item;
 }
 
 fn market(
     args: &[&str],
     handle: &PlayerHandle,
     registry: &SharedRegistry,
+    world: &DemoWorld,
     econ: &dyn Economy,
 ) -> Reply {
     let mut filter = MarketFilter {
@@ -292,11 +294,15 @@ fn market(
         };
         match key {
             "item" | "i" => {
-                filter.item = Some(if value.contains(':') {
+                let name = if value.contains(':') {
                     value.to_string()
                 } else {
                     format!("minecraft:{value}")
-                })
+                };
+                match world.item_id(&name) {
+                    Some(id) => filter.item = Some(id),
+                    None => return Reply(vec![format!("unknown item `{name}`")]),
+                }
             }
             "seller" | "s" => match registry.uuid_of(value) {
                 Some(u) => filter.seller = Some(ActorId(u)),
@@ -360,11 +366,10 @@ fn buy(
             // between the committed transaction and the inventory is
             // survivable rather than merely reported.
             let (_, dropped) =
-                crate::ground::give_or_drop(handle, registry, world, &p.item, p.count);
+                crate::ground::give_or_drop(handle, registry, world, p.item, p.count);
             journal_move(
                 world,
                 me,
-                &p.item,
                 p.count,
                 Place::Nowhere,
                 Place::Inventory {
@@ -372,7 +377,10 @@ fn buy(
                     slot: -1,
                 },
             );
-            let mut lines = vec![format!("bought {}x {} for {}", p.count, p.item, p.paid)];
+            let name = world
+                .item_name(p.item)
+                .unwrap_or_else(|| format!("item#{}", p.item.0));
+            let mut lines = vec![format!("bought {}x {} for {}", p.count, name, p.paid)];
             if dropped > 0 {
                 lines.push(format!("{dropped} would not fit and fell at your feet"));
             }
@@ -416,11 +424,10 @@ fn unlist(
         Ok(l) => {
             let me = ActorId(handle.uuid);
             let (_, dropped) =
-                crate::ground::give_or_drop(handle, registry, world, &l.item, l.count);
+                crate::ground::give_or_drop(handle, registry, world, l.item, l.count);
             journal_move(
                 world,
                 me,
-                &l.item,
                 l.count,
                 Place::Nowhere,
                 Place::Inventory {
@@ -428,7 +435,10 @@ fn unlist(
                     slot: -1,
                 },
             );
-            let mut lines = vec![format!("withdrew #{id}: {}x {}", l.count, l.item)];
+            let name = world
+                .item_name(l.item)
+                .unwrap_or_else(|| format!("item#{}", l.item.0));
+            let mut lines = vec![format!("withdrew #{id}: {}x {}", l.count, name)];
             if dropped > 0 {
                 lines.push(format!("{dropped} would not fit and fell at your feet"));
             }

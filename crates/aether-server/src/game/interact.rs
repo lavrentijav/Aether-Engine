@@ -38,10 +38,10 @@ pub fn start_dig(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i3
     if !st.survival() {
         return true;
     }
-    let held = handle.held_item();
+    let held = handle.held_item().and_then(|i| i.vanilla_name());
     let pos = handle.pos();
     let in_water = entities::in_water(world, Vector3::new(pos.x, pos.y + 1.5, pos.z));
-    match tables::dig_ticks(&name, held.as_deref(), pos.on_ground, in_water) {
+    match tables::dig_ticks(&name, held, pos.on_ground, in_water) {
         None => false,
         Some(0) => true,
         Some(ticks) => {
@@ -180,19 +180,33 @@ pub fn on_broken(
         return;
     }
     let held = handle.held_item();
-    let drops = entities::with_rng(|r| tables::block_drops(&name, held.as_deref(), r));
+    let held_name = held.and_then(|i| i.vanilla_name());
+    let drops = entities::with_rng(|r| tables::block_drops(&name, held_name, r));
     entities::drop_at_block(
         x,
         y,
         z,
-        drops.into_iter().map(|(i, n)| Stack::new(&i, n)).collect(),
+        drops
+            .into_iter()
+            .map(|(i, n)| Stack::named(&i, n))
+            .collect(),
         aether_world::journal::ActorId(handle.uuid),
         cause,
     );
+    // Ores drop experience as orbs, on the ground, regardless of the tool.
+    if let Some((min, max)) = tables::block_xp(&name) {
+        let xp = entities::with_rng(|r| r.range(min as i32, max as i32));
+        if xp > 0 {
+            entities::award_xp(
+                Vector3::new(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5),
+                xp,
+            );
+        }
+    }
     handle.game().exhaust(0.005);
     let hard = tables::block_info(&name).map(|i| i.hardness).unwrap_or(0.0);
     if hard > 0.0 {
-        let n = if held.as_deref().is_some_and(|h| h.ends_with("_sword")) {
+        let n = if held_name.is_some_and(|h| h.ends_with("_sword")) {
             2
         } else {
             1
@@ -221,7 +235,11 @@ pub fn use_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i3
     }
     match ContainerKind::of_block(&name) {
         Some(ContainerKind::Chest) => {
-            window::open(handle, world, WindowKind::Chest { pos: (x, y, z) });
+            let state = world.get_block(x, y, z);
+            let (left, right) = crate::placement::chest_halves(state, x, y, z, &|nx, ny, nz| {
+                world.get_block(nx, ny, nz)
+            });
+            window::open(handle, world, WindowKind::Chest { left, right });
             return true;
         }
         Some(ContainerKind::Furnace) => {
@@ -280,8 +298,12 @@ pub fn consumed_by_placement(handle: &PlayerHandle, world: &DemoWorld) {
         let Some(Some(s)) = inv.slot_mut(i) else {
             return;
         };
-        if s.item.ends_with("_bucket") && s.item != "minecraft:milk_bucket" {
-            *s = Stack::new("minecraft:bucket", 1);
+        if s.item
+            .vanilla_name()
+            .is_some_and(|n| n.ends_with("_bucket"))
+            && s.item != crate::inventory::item("minecraft:milk_bucket")
+        {
+            *s = Stack::named("minecraft:bucket", 1);
         } else {
             s.count -= 1;
             if s.count == 0 {
@@ -343,63 +365,58 @@ pub fn use_item(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWo
         } else {
             inv.held_index()
         };
-        inv.slot(slot).map(|s| s.item.clone())
+        inv.slot(slot).map(|s| s.item)
     };
     let Some(item) = item else { return };
     let now = super::now();
-    if let Some(_food) = tables::food(&item) {
+    if tables::food_id(item).is_some() {
         let mut st = handle.game();
-        let always = matches!(
-            item.as_str(),
-            "minecraft:golden_apple"
-                | "minecraft:enchanted_golden_apple"
-                | "minecraft:chorus_fruit"
-        );
+        let always = item == crate::inventory::item("minecraft:golden_apple")
+            || item == crate::inventory::item("minecraft:enchanted_golden_apple")
+            || item == crate::inventory::item("minecraft:chorus_fruit");
         if st.food < 20 || always || !st.survival() {
             st.eating = Some((now, hand));
         }
         return;
     }
-    match item.as_str() {
-        "minecraft:milk_bucket" => {
-            handle.game().eating = Some((now, hand));
+    if item == crate::inventory::item("minecraft:milk_bucket") {
+        handle.game().eating = Some((now, hand));
+    } else if item == crate::inventory::item("minecraft:bow") {
+        let has_arrow = !handle.game().survival()
+            || handle
+                .inventory()
+                .count_of(crate::inventory::item("minecraft:arrow"))
+                > 0;
+        if has_arrow {
+            handle.game().drawing = Some(now);
         }
-        "minecraft:bow" => {
-            let has_arrow =
-                !handle.game().survival() || handle.inventory().count_of("minecraft:arrow") > 0;
-            if has_arrow {
-                handle.game().drawing = Some(now);
-            }
-        }
-        "minecraft:bucket" => {
-            let hit = raycast(handle, 5.0, |x, y, z| {
-                world.get_block(x, y, z) != block_ids::AIR
-            });
-            let Some(((x, y, z), _)) = hit else { return };
-            let name = block_name(world, x, y, z);
-            let filled = match name.as_str() {
-                "minecraft:water" => "minecraft:water_bucket",
-                "minecraft:lava" => "minecraft:lava_bucket",
-                _ => return,
-            };
-            crate::session::set_and_broadcast(world, registry, handle, x, y, z, block_ids::AIR);
-            if handle.game().survival() {
-                let mut inv = handle.inventory();
-                let i = inv.held_index();
-                let one = inv.slot(i).map(|s| s.count).unwrap_or(0) == 1;
-                if one {
-                    inv.put_slot(i, Some(Stack::new(filled, 1)));
-                } else {
-                    inv.consume_held();
-                    if let Some(rest) = inv.insert(Stack::new(filled, 1)) {
-                        drop(inv);
-                        entities::throw_from(handle, rest);
-                    }
+    } else if item == crate::inventory::item("minecraft:bucket") {
+        let hit = raycast(handle, 5.0, |x, y, z| {
+            world.get_block(x, y, z) != block_ids::AIR
+        });
+        let Some(((x, y, z), _)) = hit else { return };
+        let name = block_name(world, x, y, z);
+        let filled = match name.as_str() {
+            "minecraft:water" => "minecraft:water_bucket",
+            "minecraft:lava" => "minecraft:lava_bucket",
+            _ => return,
+        };
+        crate::session::set_and_broadcast(world, registry, handle, x, y, z, block_ids::AIR);
+        if handle.game().survival() {
+            let mut inv = handle.inventory();
+            let i = inv.held_index();
+            let one = inv.slot(i).map(|s| s.count).unwrap_or(0) == 1;
+            if one {
+                inv.put_slot(i, Some(Stack::named(filled, 1)));
+            } else {
+                inv.consume_held();
+                if let Some(rest) = inv.insert(Stack::named(filled, 1)) {
+                    drop(inv);
+                    entities::throw_from(handle, rest);
                 }
             }
-            handle.sync_inventory(world);
         }
-        _ => {}
+        handle.sync_inventory(world);
     }
 }
 
@@ -417,7 +434,12 @@ pub fn release_use(handle: &PlayerHandle, world: &DemoWorld) {
         return;
     }
     let survival = handle.game().survival();
-    if survival && handle.inventory().take("minecraft:arrow", 1) == 0 {
+    if survival
+        && handle
+            .inventory()
+            .take(crate::inventory::item("minecraft:arrow"), 1)
+            == 0
+    {
         return;
     }
     let p = handle.pos();
@@ -492,7 +514,7 @@ pub fn pick_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i
     let name = block_name(world, x, y, z);
     let item = crate::protocol::modern::items::item_for_block(&name)
         .and_then(crate::protocol::modern::items::name_of)
-        .map(str::to_owned);
+        .map(crate::inventory::item);
     let Some(item) = item else { return };
     let creative = !handle.game().survival();
     let select = {
@@ -511,7 +533,7 @@ pub fn pick_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i
                 .find(|h| inv.slot(36 + h).is_none())
                 .map(|h| h as u8)
                 .unwrap_or(inv.held_slot());
-            inv.put_slot(36 + target as usize, Some(Stack::new(&item, 1)));
+            inv.put_slot(36 + target as usize, Some(Stack::new(item, 1)));
             Some(target)
         } else {
             None
@@ -527,7 +549,7 @@ pub fn pick_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i
 /// Right-click on an entity.
 pub fn use_entity(handle: &PlayerHandle, world: &DemoWorld, target: i32) {
     let held = handle.held_item();
-    match entities::interact(target, held.as_deref()) {
+    match entities::interact(target, held) {
         Some(entities::Interaction::Replace(with)) => {
             {
                 let mut inv = handle.inventory();

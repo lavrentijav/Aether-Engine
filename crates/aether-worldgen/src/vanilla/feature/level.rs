@@ -34,6 +34,10 @@ impl Pos {
     pub fn offset(self, dx: i32, dy: i32, dz: i32) -> Self {
         Self::new(self.x + dx, self.y + dy, self.z + dz)
     }
+    /// `atY(y)`.
+    pub fn at_y(self, y: i32) -> Self {
+        Self::new(self.x, y, self.z)
+    }
     /// `above(n)`.
     pub fn above(self, n: i32) -> Self {
         self.offset(0, n, 0)

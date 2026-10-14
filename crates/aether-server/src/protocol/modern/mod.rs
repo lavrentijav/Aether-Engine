@@ -350,7 +350,7 @@ impl ProtocolCodec for Codec {
                 meta.var_int(*entity_id)
                     .u8(ITEM_DATA_INDEX)
                     .var_int(META_ITEM_STACK);
-                match self.0.item_id(item) {
+                match self.0.wire_item(*item) {
                     Some(id) => inventory::write_item(&mut meta, id, *count as i32),
                     None => inventory::write_empty(&mut meta),
                 }
@@ -504,10 +504,13 @@ impl ProtocolCodec for Codec {
                 let (item, count) = match pin.var_int() {
                     Ok(0) | Err(_) => (None, 0),
                     Ok(n) => (
+                        // An id this version has but the engine does not maps
+                        // to `AIR`, i.e. nothing: the item renders as air on
+                        // the way out, so it must not enter the inventory.
                         pin.var_int()
                             .ok()
-                            .and_then(|id| self.0.item_name(id))
-                            .map(str::to_owned),
+                            .and_then(|id| self.0.engine_item(id))
+                            .filter(|id| *id != aether_world::ItemTypeId::AIR),
                         n.clamp(0, u8::MAX as i32) as u8,
                     ),
                 };
@@ -1051,7 +1054,7 @@ mod tests {
                 x: 1.0,
                 y: 2.0,
                 z: 3.0,
-                item: "minecraft:stone".into(),
+                item: crate::inventory::item("minecraft:stone"),
                 count: 1,
             },
             &Empty,
@@ -1172,7 +1175,7 @@ mod tests {
         match C.decode(&pkt, any_pos()) {
             ClientEvent::CreativeSlot { slot, item, count } => {
                 assert_eq!(slot, 36);
-                assert_eq!(item.as_deref(), Some("minecraft:stone"));
+                assert_eq!(item, Some(crate::inventory::item("minecraft:stone")));
                 assert_eq!(count, 1);
             }
             _ => panic!("a creative-slot packet must decode as one"),
@@ -1347,7 +1350,7 @@ mod tests {
                 x: 1.0,
                 y: 2.0,
                 z: 3.0,
-                item: "minecraft:diamond".into(),
+                item: crate::inventory::item("minecraft:diamond"),
                 count: 200,
             },
             &Empty,
@@ -1454,5 +1457,94 @@ mod tests {
         // A sword must not become a block, however the chain falls through.
         assert_eq!(C.block_for_item("minecraft:diamond_sword"), None);
         assert_eq!(C.block_for_item("minecraft:stick"), None);
+    }
+
+    /// Decode a whole single-packet event the way the client does: frame
+    /// length, packet id, then the body fields.
+    fn one_packet(ev: &ServerEvent) -> (i32, Vec<u8>) {
+        let world = chunk::tests_support::Empty;
+        let pkts = C.encode(ev, &world);
+        assert_eq!(pkts.len(), 1);
+        let body = pkts[0].body().to_vec();
+        let mut pin = crate::proto::PacketIn::new(&body);
+        let id = pin.var_int().unwrap();
+        (id, body)
+    }
+
+    #[test]
+    fn update_mob_effect_carries_id_amplifier_duration_and_flags() {
+        let (id, body) = one_packet(&ServerEvent::UpdateMobEffect {
+            entity_id: 7,
+            effect: 20,
+            amplifier: 2,
+            duration: 300,
+            ambient: false,
+            visible: true,
+            show_icon: true,
+        });
+        assert_eq!(id, version::V1_21_11.packets.cb_update_mob_effect);
+        let mut p = crate::proto::PacketIn::new(&body);
+        assert_eq!(p.var_int().unwrap(), id, "the id is the first field");
+        assert_eq!(p.var_int().unwrap(), 7);
+        assert_eq!(p.var_int().unwrap(), 20);
+        assert_eq!(p.var_int().unwrap(), 2);
+        assert_eq!(p.var_int().unwrap(), 300);
+        assert_eq!(p.u8().unwrap(), 0b110, "visible | show_icon");
+    }
+
+    #[test]
+    fn remove_mob_effect_names_the_entity_and_effect() {
+        let (id, body) = one_packet(&ServerEvent::RemoveMobEffect {
+            entity_id: 7,
+            effect: 20,
+        });
+        assert_eq!(id, version::V1_21_11.packets.cb_remove_mob_effect);
+        let mut p = crate::proto::PacketIn::new(&body);
+        assert_eq!(p.var_int().unwrap(), id);
+        assert_eq!(p.var_int().unwrap(), 7);
+        assert_eq!(p.var_int().unwrap(), 20);
+    }
+
+    #[test]
+    fn update_attributes_carries_the_movement_modifier() {
+        let (id, body) = one_packet(&ServerEvent::UpdateAttributes {
+            entity_id: 7,
+            properties: vec![(20, 0.1, vec![("minecraft:effect.speed".to_owned(), 0.4, 2)])],
+        });
+        assert_eq!(id, version::V1_21_11.packets.cb_update_attributes);
+        let mut p = crate::proto::PacketIn::new(&body);
+        assert_eq!(p.var_int().unwrap(), id);
+        assert_eq!(p.var_int().unwrap(), 7);
+        assert_eq!(p.var_int().unwrap(), 1, "one property");
+        assert_eq!(p.var_int().unwrap(), 20, "movement_speed");
+        assert!((p.f64().unwrap() - 0.1).abs() < 1e-12);
+        assert_eq!(p.var_int().unwrap(), 1, "one modifier");
+        assert_eq!(p.string().unwrap(), "minecraft:effect.speed");
+        assert!((p.f64().unwrap() - 0.4).abs() < 1e-12);
+        assert_eq!(p.u8().unwrap(), 2, "ADD_MULTIPLIED_TOTAL");
+    }
+
+    /// Every release this codec speaks must have an id for all three, and
+    /// 26.3's differ from 1.21.11's — the point of the per-version table.
+    #[test]
+    fn every_modern_version_has_the_effect_packets() {
+        for v in [
+            &version::V1_21_11,
+            &version::V26_1,
+            &version::V26_2,
+            &version::V26_3,
+        ] {
+            assert!(v.packets.cb_update_mob_effect > 0, "{}", v.name);
+            assert!(v.packets.cb_remove_mob_effect > 0, "{}", v.name);
+            assert!(v.packets.cb_update_attributes > 0, "{}", v.name);
+        }
+        assert_eq!(version::V26_3.packets.cb_update_mob_effect, 135);
+        assert_eq!(version::V26_3.packets.cb_remove_mob_effect, 79);
+        // 26.2 shares 26.1's numbering here; the effects packet first moved
+        // in 26.3.
+        assert_eq!(
+            version::V26_1.packets.cb_update_mob_effect,
+            version::V26_2.packets.cb_update_mob_effect
+        );
     }
 }

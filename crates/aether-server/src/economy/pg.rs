@@ -14,6 +14,8 @@
 //! money.
 
 use aether_world::journal::ActorId;
+use aether_world::registry::items::{display_name, id_of};
+use aether_world::ItemTypeId;
 use postgres::{Client, NoTls, Transaction};
 
 use super::model::{price_purchase, validate_offer, Listing, Money, TradeError};
@@ -233,7 +235,7 @@ fn listing_from_row(row: &postgres::Row) -> Listing {
         id: row.get::<_, i64>("id"),
         seller: ActorId(uuid_to_u128(row.get::<_, uuid_shim::Uuid>("seller"))),
         seller_name: row.get::<_, String>("seller_name"),
-        item: row.get::<_, String>("item"),
+        item: id_of(&row.get::<_, String>("item")).unwrap_or(ItemTypeId::AIR),
         count: row.get::<_, i64>("count").max(0) as u64,
         unit_price: Money(row.get::<_, i64>("unit_price")),
         created_ms: row.get::<_, i64>("created_ms").max(0) as u64,
@@ -314,7 +316,7 @@ impl Economy for PgEconomy {
     fn list(
         &self,
         seller: ActorId,
-        item: &str,
+        item: ItemTypeId,
         count: u64,
         price: Money,
         expires_in_secs: Option<u64>,
@@ -322,6 +324,9 @@ impl Economy for PgEconomy {
         validate_offer(count, price)?;
         let now = aether_world::journal::now_ms();
         let expires = expires_in_secs.map(|s| now + s * 1000);
+        // The database column keeps the name so an archive stays readable
+        // across builds; only the in-memory listing carries the id.
+        let item = display_name(item);
         self.with(|c| {
             let row = c
                 .query_one(
@@ -376,15 +381,8 @@ impl Economy for PgEconomy {
                 &[&id.to_string(), &count.to_string()],
             )
             .map_err(db_fail)?;
-            transfer(
-                &mut tx,
-                buyer,
-                listing.seller,
-                cost,
-                "buy",
-                Some(id),
-                &listing.item,
-            )?;
+            let note = display_name(listing.item);
+            transfer(&mut tx, buyer, listing.seller, cost, "buy", Some(id), &note)?;
             tx.commit().map_err(db_fail)?;
             Ok(Purchase {
                 listing: id,
@@ -433,6 +431,7 @@ impl Economy for PgEconomy {
     fn market(&self, filter: &MarketFilter) -> Result<Vec<Listing>, TradeError> {
         let now = aether_world::journal::now_ms();
         let limit = filter.limit.clamp(1, 500);
+        let filter_item = filter.item.map(display_name);
         self.with(|c| {
             let rows = c
                 .query(
@@ -447,7 +446,7 @@ impl Economy for PgEconomy {
                     ),
                     &[
                         &now.to_string(),
-                        &filter.item,
+                        &filter_item,
                         &filter.seller.map(|s| uuid_text(s.0)),
                         &filter.max_price.map(|p| p.0.to_string()),
                         &limit.to_string(),
@@ -553,7 +552,13 @@ mod live_tests {
         let (seller, buyer) = (player(6), player(7));
         e.mint(buyer, Money::coins(100), "test").unwrap();
         let id = e
-            .list(seller, "minecraft:diamond", 10, Money::coins(3), None)
+            .list(
+                seller,
+                crate::inventory::item("minecraft:diamond"),
+                10,
+                Money::coins(3),
+                None,
+            )
             .unwrap();
         let p = e.buy(buyer, id, 4).unwrap();
         assert_eq!(p.paid, Money::coins(12));
@@ -577,7 +582,13 @@ mod live_tests {
             e.mint(b2, Money::coins(100), "test").unwrap();
         }
         let id = econ()
-            .list(seller, "minecraft:beacon", 1, Money::coins(5), None)
+            .list(
+                seller,
+                crate::inventory::item("minecraft:beacon"),
+                1,
+                Money::coins(5),
+                None,
+            )
             .unwrap();
 
         let start = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -614,7 +625,13 @@ mod live_tests {
         let (seller, buyer) = (player(11), player(12));
         e.mint(buyer, Money::coins(100), "test").unwrap();
         let id = e
-            .list(seller, "minecraft:emerald", 5, Money::coins(1), None)
+            .list(
+                seller,
+                crate::inventory::item("minecraft:emerald"),
+                5,
+                Money::coins(1),
+                None,
+            )
             .unwrap();
         let back = e.cancel(seller, id).unwrap();
         assert_eq!(back.count, 5, "the seller gets the remainder back");
@@ -634,7 +651,13 @@ mod live_tests {
         let e = econ();
         let (seller, other) = (player(13), player(14));
         let id = e
-            .list(seller, "minecraft:apple", 1, Money::coins(1), None)
+            .list(
+                seller,
+                crate::inventory::item("minecraft:apple"),
+                1,
+                Money::coins(1),
+                None,
+            )
             .unwrap();
         assert!(matches!(e.cancel(other, id), Err(TradeError::NotYours(_))));
         e.cancel(seller, id).unwrap();
@@ -646,19 +669,37 @@ mod live_tests {
         let e = econ();
         let seller = player(15);
         let cheap = e
-            .list(seller, "minecraft:test_item", 1, Money::coins(1), None)
+            .list(
+                seller,
+                crate::inventory::item("minecraft:test_item"),
+                1,
+                Money::coins(1),
+                None,
+            )
             .unwrap();
         let dear = e
-            .list(seller, "minecraft:test_item", 1, Money::coins(9), None)
+            .list(
+                seller,
+                crate::inventory::item("minecraft:test_item"),
+                1,
+                Money::coins(9),
+                None,
+            )
             .unwrap();
         let gone = e
-            .list(seller, "minecraft:test_item", 1, Money::coins(5), None)
+            .list(
+                seller,
+                crate::inventory::item("minecraft:test_item"),
+                1,
+                Money::coins(5),
+                None,
+            )
             .unwrap();
         e.cancel(seller, gone).unwrap();
 
         let rows = e
             .market(&MarketFilter {
-                item: Some("minecraft:test_item".into()),
+                item: Some(crate::inventory::item("minecraft:test_item")),
                 limit: 50,
                 ..Default::default()
             })

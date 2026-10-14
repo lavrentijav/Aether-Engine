@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use aether_api::Vector3;
 
+use super::effects::{self, Effect, TickEvent};
 use super::entities::{self, Action, PlayerView};
 use super::{combat, containers, mobs, tables, window};
 use crate::inventory::Stack;
@@ -225,6 +226,30 @@ fn apply(a: Action, registry: &SharedRegistry, world: &DemoWorld) {
                 crate::session::save_inventory(&p, world);
             }
         }
+        Action::XpPicked {
+            orb,
+            collector,
+            value,
+        } => {
+            // Vanilla answers an orb pickup with a TakeItemEntity of amount 0;
+            // the client has usually predicted it already.
+            let ev = ServerEvent::Collect {
+                item: orb,
+                collector,
+                count: 0,
+            };
+            for p in registry.snapshot() {
+                if p.entity_id == collector || p.tracked().contains(&orb) {
+                    p.emit(&ev, world);
+                }
+                if p.tracked().remove(&orb) {
+                    p.emit(&ServerEvent::DespawnEntity(orb), world);
+                }
+            }
+            if let Some(p) = registry.by_entity(collector) {
+                combat::give_xp(&p, world, value);
+            }
+        }
         Action::Tracked(id, ev) => registry.broadcast_tracking(id, &ev, world),
     }
 }
@@ -232,8 +257,13 @@ fn apply(a: Action, registry: &SharedRegistry, world: &DemoWorld) {
 /// One player's tick: eating, hunger, regeneration, the void.
 fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now: u64) {
     let pos = p.pos();
-    let mut hurt: Option<(f32, &'static str)> = None;
+    let mut hurts: Vec<(f32, &'static str)> = Vec::new();
     let mut ate = false;
+    // Effects to apply and to take away, and a milk bucket that clears them
+    // all; all three are sent after the game lock is dropped.
+    let mut applied: Vec<Effect> = Vec::new();
+    let mut removed: Vec<u8> = Vec::new();
+    let mut milk = false;
     let health_msg;
     {
         let mut st = p.game();
@@ -251,15 +281,20 @@ fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now:
                     inv.held_index()
                 };
                 if let Some(food) = inv.slot(slot).cloned() {
-                    if let Some(f) = tables::food(&food.item) {
+                    if let Some(f) = tables::food_id(food.item) {
                         st.food = (st.food + f.nutrition as i32).min(20);
                         st.saturation = (st.saturation + f.saturation).min(st.food as f32);
-                        consume_one(&mut inv, slot, &food.item, st.survival());
+                        consume_one(&mut inv, slot, food.item, st.survival());
+                        applied = food.item.vanilla_name().map_or_else(Vec::new, |n| {
+                            entities::with_rng(|r| effects::food_effects(n, r))
+                        });
                         ate = true;
-                    } else if food.item == "minecraft:milk_bucket" {
+                    } else if food.item == crate::inventory::item("minecraft:milk_bucket") {
+                        // Milk cures every effect, as vanilla's does.
                         if st.survival() {
-                            inv.put_slot(slot, Some(Stack::new("minecraft:bucket", 1)));
+                            inv.put_slot(slot, Some(Stack::named("minecraft:bucket", 1)));
                         }
+                        milk = true;
                         ate = true;
                     }
                 }
@@ -284,7 +319,7 @@ fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now:
                 if st.food_timer >= 80 {
                     st.food_timer = 0;
                     if st.health > 1.0 {
-                        hurt = Some((1.0, "minecraft:starve"));
+                        hurts.push((1.0, "minecraft:starve"));
                     }
                 }
             } else {
@@ -295,7 +330,7 @@ fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now:
             if st.env_timer >= 10 {
                 st.env_timer = 0;
                 if pos.y < -128.0 {
-                    hurt = Some((4.0, "minecraft:out_of_world"));
+                    hurts.push((4.0, "minecraft:out_of_world"));
                 } else {
                     let feet = world.get_block(
                         pos.x.floor() as i32,
@@ -303,8 +338,45 @@ fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now:
                         pos.z.floor() as i32,
                     );
                     if crate::game::block_name(world, feet).is_some_and(|n| n == "minecraft:lava") {
-                        hurt = Some((4.0, "minecraft:lava"));
+                        hurts.push((4.0, "minecraft:lava"));
                     }
+                }
+            }
+        }
+        // Status effects advance for every player, so they still run out in
+        // creative; only a survival player feels them.
+        for ev in st.effects.tick() {
+            match ev {
+                TickEvent::Heal(h) => {
+                    if st.survival() && st.health < 20.0 {
+                        st.health = (st.health + h).min(20.0);
+                    }
+                }
+                TickEvent::Damage { amount, lethal } => {
+                    if st.survival() {
+                        let damage = effects::tick_damage(st.health, amount, lethal);
+                        if damage > 0.0 {
+                            hurts.push((
+                                damage,
+                                if lethal {
+                                    "minecraft:wither"
+                                } else {
+                                    "minecraft:magic"
+                                },
+                            ));
+                        }
+                    }
+                }
+                TickEvent::Exhaust(x) => {
+                    if st.survival() {
+                        st.exhaust(x);
+                    }
+                }
+                TickEvent::Removed(id) => {
+                    if id == effects::ABSORPTION {
+                        st.absorption = 0.0;
+                    }
+                    removed.push(id);
                 }
             }
         }
@@ -335,44 +407,71 @@ fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now:
             world,
         );
     }
-    if let Some((amount, source)) = hurt {
+    // Milk first, then what the food left: a cured player is not re-poisoned
+    // by the same bite.
+    if milk {
+        effects::clear(p, registry, world);
+    }
+    effects::give_all(p, registry, world, &applied);
+    for id in removed {
+        let ev = ServerEvent::RemoveMobEffect {
+            entity_id: p.entity_id,
+            effect: id,
+        };
+        p.emit(&ev, world);
+        registry.broadcast_except(p.entity_id, &ev, world);
+        // A speed or slowness effect that ran out has to take its movement
+        // modifier off the client too.
+        if id == effects::SPEED || id == effects::SLOWNESS {
+            effects::sync_movement(p, registry, world);
+        }
+    }
+    for (amount, source) in hurts {
         combat::hurt_player(p, amount, source, None, registry, world);
     }
 }
 
 /// Use up one of `item` from `slot`, leaving a bowl or bottle where vanilla
 /// does.
-fn consume_one(inv: &mut crate::inventory::Inventory, slot: usize, item: &str, survival: bool) {
+fn consume_one(
+    inv: &mut crate::inventory::Inventory,
+    slot: usize,
+    item: aether_world::ItemTypeId,
+    survival: bool,
+) {
     if !survival {
         return;
     }
-    let remainder = match item {
-        "minecraft:mushroom_stew"
-        | "minecraft:rabbit_stew"
-        | "minecraft:beetroot_soup"
-        | "minecraft:suspicious_stew" => Some("minecraft:bowl"),
-        "minecraft:honey_bottle" => Some("minecraft:glass_bottle"),
-        _ => None,
+    let remainder = if item == crate::inventory::item("minecraft:mushroom_stew")
+        || item == crate::inventory::item("minecraft:rabbit_stew")
+        || item == crate::inventory::item("minecraft:beetroot_soup")
+        || item == crate::inventory::item("minecraft:suspicious_stew")
+    {
+        Some("minecraft:bowl")
+    } else if item == crate::inventory::item("minecraft:honey_bottle") {
+        Some("minecraft:glass_bottle")
+    } else {
+        None
     };
     if let Some(Some(s)) = inv.slot_mut(slot) {
         s.count -= 1;
         if s.count == 0 {
-            inv.put_slot(slot, remainder.map(|r| Stack::new(r, 1)));
+            inv.put_slot(slot, remainder.map(|r| Stack::named(r, 1)));
             return;
         }
     }
     if let Some(r) = remainder {
-        if let Some(left) = inv.insert(Stack::new(r, 1)) {
+        if let Some(left) = inv.insert(Stack::named(r, 1)) {
             let _ = left;
         }
     }
 }
 
-type Gear = Vec<(u8, Option<(String, u16)>)>;
+type Gear = Vec<(u8, Option<(aether_world::ItemTypeId, u16)>)>;
 
 fn worn(p: &PlayerHandle) -> Gear {
     let inv = p.inventory();
-    let at = |i: usize| inv.slot(i).map(|s| (s.item.clone(), s.damage));
+    let at = |i: usize| inv.slot(i).map(|s| (s.item, s.damage));
     vec![
         (0, at(inv.held_index())),
         (1, at(crate::inventory::OFFHAND)),

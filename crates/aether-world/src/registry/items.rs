@@ -54,6 +54,52 @@ fn vanilla_lookup() -> &'static HashMap<&'static str, ItemTypeId> {
     })
 }
 
+/// The world's name for an id, installed at startup.
+///
+/// The journal stores two-byte ids, but the surfaces a human reads — chat,
+/// `/audit`, the PostgreSQL mirror — must show names, and a modded item's name
+/// lives in the world that interned it and nowhere a library can see. The
+/// server therefore hands the world's registry in once (the same shape as
+/// [`crate::journal::install_allocator`]); a library with no world falls back
+/// to the vanilla table.
+static NAME_RESOLVER: OnceLock<Box<dyn Fn(ItemTypeId) -> Option<String> + Send + Sync>> =
+    OnceLock::new();
+
+/// The world's id for a name, installed at startup. See [`NAME_RESOLVER`].
+static ID_RESOLVER: OnceLock<Box<dyn Fn(&str) -> Option<ItemTypeId> + Send + Sync>> =
+    OnceLock::new();
+
+/// Install the world's item name ⇄ id resolvers. Only the first call counts.
+pub fn install_resolvers(
+    name: Box<dyn Fn(ItemTypeId) -> Option<String> + Send + Sync>,
+    id: Box<dyn Fn(&str) -> Option<ItemTypeId> + Send + Sync>,
+) {
+    let _ = NAME_RESOLVER.set(name);
+    let _ = ID_RESOLVER.set(id);
+}
+
+/// The display name of an item id: the world's registry if one is installed,
+/// else the vanilla table, else `item#N` so a log line never says nothing.
+pub fn display_name(id: ItemTypeId) -> String {
+    if let Some(f) = NAME_RESOLVER.get() {
+        if let Some(n) = f(id) {
+            return n;
+        }
+    }
+    id.vanilla_name()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("item#{}", id.0))
+}
+
+/// The id of an item name: the world's registry if one is installed, else the
+/// vanilla table.
+pub fn id_of(name: &str) -> Option<ItemTypeId> {
+    ID_RESOLVER
+        .get()
+        .and_then(|f| f(name))
+        .or_else(|| ItemTypeId::vanilla(name))
+}
+
 /// Maps item names ⇄ ids for one world: the vanilla table plus whatever this
 /// world has interned beyond it.
 #[derive(Debug, Clone, Default)]

@@ -170,6 +170,18 @@ impl DataPack {
     pub fn noise_parameters(&self, id: &str) -> Result<Json, BuildError> {
         self.read("noise", id)
     }
+
+    /// The bytes of `structure/<id>.nbt` — structure templates live beside
+    /// `worldgen/`, not under it.
+    pub fn read_structure(&self, id: &str) -> Result<Vec<u8>, BuildError> {
+        let path = self
+            .worldgen
+            .parent()
+            .ok_or_else(|| BuildError::new("pack root has no parent"))?
+            .join("structure")
+            .join(format!("{}.nbt", strip_ns(id)));
+        std::fs::read(&path).map_err(|e| BuildError(format!("cannot read {}: {e}", path.display())))
+    }
 }
 
 /// `minecraft:foo/bar` → `foo/bar`. Unnamespaced ids are already relative.

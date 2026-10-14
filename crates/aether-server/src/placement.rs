@@ -1013,6 +1013,96 @@ fn with_props(state: BlockStateId, changes: &[(&str, &str)]) -> BlockStateId {
         .unwrap_or(state)
 }
 
+/// The direction 90 degrees clockwise, looking down.
+fn clock_wise(d: &str) -> &'static str {
+    match d {
+        "north" => "east",
+        "east" => "south",
+        "south" => "west",
+        _ => "north",
+    }
+}
+
+/// Blocks that double up into a two-chest window. Copper chests are not
+/// containers in this engine yet, so pairing them would draw a double chest
+/// that cannot be opened.
+fn is_chest(name: &str) -> bool {
+    name == "minecraft:chest" || name == "minecraft:trapped_chest"
+}
+
+/// Whether `other` is a chest that may double with a `name`/`facing` one.
+fn chest_matches(other: BlockStateId, name: &str, facing: &str) -> bool {
+    block_name(other) == name && prop_of(other, "facing") == Some(facing)
+}
+
+/// A chest's `type` from its neighbours, the way `ChestBlock` settles it.
+///
+/// Two chests of the same block and facing that touch along the axis across
+/// their front form a double: the one whose counter-clockwise side holds the
+/// partner is the `right` half, the one whose clockwise side does is `left`
+/// (`ChestBlock.getConnectedDirection`). A neighbour already reaching away on
+/// that side — `right` towards us from the counter-clockwise cell, `left`
+/// from the clockwise one — does not want us, which is what keeps a run of
+/// three chests from chaining into overlapping pairs.
+fn chest_shape(state: BlockStateId, x: i32, y: i32, z: i32, get: &Neighbours<'_>) -> BlockStateId {
+    let name = block_name(state);
+    let Some(facing) = prop_of(state, "facing") else {
+        return state;
+    };
+    let (dx, dz) = step(counter_clockwise(facing));
+    let n_ccw = get(x + dx, y, z + dz);
+    let (dx, dz) = step(clock_wise(facing));
+    let n_cw = get(x + dx, y, z + dz);
+    let pair_ccw = chest_matches(n_ccw, name, facing) && prop_of(n_ccw, "type") != Some("right");
+    let pair_cw = chest_matches(n_cw, name, facing) && prop_of(n_cw, "type") != Some("left");
+    let want = match (pair_ccw, pair_cw) {
+        (true, false) => "right",
+        (false, true) => "left",
+        // Both neighbours want us: keep a connection we already have, and
+        // otherwise take the counter-clockwise one, which is the side
+        // vanilla's placement checks first.
+        (true, true) => match prop_of(state, "type") {
+            Some("left") => "left",
+            _ => "right",
+        },
+        (false, false) => "single",
+    };
+    with_props(state, &[("type", want)])
+}
+
+/// The cell of the other half of a double chest, if `state` is one.
+pub fn chest_partner(state: BlockStateId, x: i32, y: i32, z: i32) -> Option<(i32, i32, i32)> {
+    let facing = prop_of(state, "facing")?;
+    let dir = match prop_of(state, "type")? {
+        "left" => clock_wise(facing),
+        "right" => counter_clockwise(facing),
+        _ => return None,
+    };
+    let (dx, dz) = step(dir);
+    Some((x + dx, y, z + dz))
+}
+
+/// The window's two halves of the chest at `(x, y, z)`: the **left** half
+/// first, its slots 0–26, then the right when it is doubled — the order
+/// `CompoundContainer` presents them in.
+pub fn chest_halves(
+    state: BlockStateId,
+    x: i32,
+    y: i32,
+    z: i32,
+    get: &Neighbours<'_>,
+) -> ((i32, i32, i32), Option<(i32, i32, i32)>) {
+    let this = (x, y, z);
+    let name = block_name(state);
+    let partner =
+        chest_partner(state, x, y, z).filter(|&(px, py, pz)| block_name(get(px, py, pz)) == name);
+    match (prop_of(state, "type"), partner) {
+        (Some("left"), Some(p)) => (this, Some(p)),
+        (Some("right"), Some(p)) => (p, Some(this)),
+        _ => (this, None),
+    }
+}
+
 fn is_fence(name: &str) -> bool {
     name.ends_with("_fence")
 }
@@ -1121,6 +1211,9 @@ const HORIZONTAL: [&str; 4] = ["north", "east", "south", "west"];
 /// their neighbours, which is nearly all of them.
 pub fn reshape(state: BlockStateId, x: i32, y: i32, z: i32, get: &Neighbours<'_>) -> BlockStateId {
     let name = block_name(state);
+    if is_chest(name) {
+        return chest_shape(state, x, y, z, get);
+    }
     if is_stairs(state) {
         return stair_shape(state, x, y, z, get);
     }
@@ -1382,5 +1475,79 @@ mod neighbour_tests {
         m.insert((1, 0, 0), b("minecraft:dirt"));
         let w = W(m);
         assert!(neighbour_updates(1, 0, 0, &w.get()).is_empty());
+    }
+
+    fn chest(ty: &str) -> BlockStateId {
+        with_props(b("minecraft:chest"), &[("type", ty)])
+    }
+
+    #[test]
+    fn two_chests_take_left_and_right_halves() {
+        // The default chest faces north: its counter-clockwise side is west,
+        // its clockwise side east. With a second chest to the east, the
+        // eastern one holds the partner on its west (counter-clockwise) side
+        // and is the right half; the western one is the left.
+        let mut m = HashMap::new();
+        m.insert((0, 0, 0), b("minecraft:chest"));
+        m.insert((1, 0, 0), b("minecraft:chest"));
+        let w = W(m);
+        assert_eq!(
+            prop_of(reshape(b("minecraft:chest"), 1, 0, 0, &w.get()), "type"),
+            Some("right")
+        );
+        assert_eq!(
+            prop_of(reshape(b("minecraft:chest"), 0, 0, 0, &w.get()), "type"),
+            Some("left")
+        );
+    }
+
+    #[test]
+    fn a_third_chest_in_a_row_stays_single() {
+        // Two already paired; the next one along sees a partner that already
+        // reaches away, so it does not chain into a second overlapping pair.
+        let mut m = HashMap::new();
+        m.insert((0, 0, 0), chest("left"));
+        m.insert((1, 0, 0), chest("right"));
+        m.insert((2, 0, 0), b("minecraft:chest"));
+        let w = W(m);
+        assert_eq!(
+            prop_of(reshape(b("minecraft:chest"), 2, 0, 0, &w.get()), "type"),
+            Some("single")
+        );
+    }
+
+    #[test]
+    fn breaking_one_half_leaves_the_other_single() {
+        let mut m = HashMap::new();
+        m.insert((0, 0, 0), chest("left"));
+        // (1,0,0) was the right half and is now air.
+        let w = W(m);
+        assert_eq!(
+            prop_of(reshape(chest("left"), 0, 0, 0, &w.get()), "type"),
+            Some("single")
+        );
+    }
+
+    #[test]
+    fn a_double_chest_reads_its_halves_left_first() {
+        let mut m = HashMap::new();
+        m.insert((0, 0, 0), chest("left"));
+        m.insert((1, 0, 0), chest("right"));
+        let w = W(m);
+        let (left, right) = chest_halves(chest("left"), 0, 0, 0, &w.get());
+        assert_eq!(left, (0, 0, 0));
+        assert_eq!(right, Some((1, 0, 0)));
+        // Opened from the right half, the order is the same.
+        let (left, right) = chest_halves(chest("right"), 1, 0, 0, &w.get());
+        assert_eq!(left, (0, 0, 0));
+        assert_eq!(right, Some((1, 0, 0)));
+        // A lone chest has no partner.
+        let mut m = HashMap::new();
+        m.insert((0, 0, 0), b("minecraft:chest"));
+        let w = W(m);
+        assert_eq!(
+            chest_halves(b("minecraft:chest"), 0, 0, 0, &w.get()),
+            ((0, 0, 0), None)
+        );
     }
 }

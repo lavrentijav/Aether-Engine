@@ -34,6 +34,8 @@ const ITEM_PHYSICS: aether_api::PhysicsParams = aether_api::PhysicsParams {
     vertical_drag: 0.98,
     ground_friction: 0.588,
     air_friction: 0.98,
+    // An item does not step over anything: it is not a walking entity.
+    step_height: 0.0,
 };
 
 /// Ticks between position syncs for items and arrows, which the client
@@ -67,12 +69,24 @@ pub struct Arrow {
     pub stuck_ticks: u32,
 }
 
+/// A ball of experience on the ground.
+#[derive(Debug, Clone)]
+pub struct XpOrb {
+    /// The experience this orb carries when picked up.
+    pub value: i32,
+}
+
+/// The entity-metadata index of an experience orb's value — `ExperienceOrb`'s
+/// `DATA_VALUE`, after the base `Entity` fields (indices 0–7).
+const ORB_VALUE_INDEX: u8 = 8;
+
 /// What an entity is.
 #[derive(Debug, Clone)]
 pub enum Kind {
     Item(ItemEnt),
     Mob(Mob),
     Arrow(Arrow),
+    XpOrb(XpOrb),
 }
 
 /// One entity.
@@ -104,6 +118,7 @@ impl Entity {
             Kind::Item(_) => "minecraft:item",
             Kind::Mob(m) => m.def.kind,
             Kind::Arrow(_) => "minecraft:arrow",
+            Kind::XpOrb(_) => "minecraft:experience_orb",
         }
     }
 
@@ -146,6 +161,10 @@ impl Entity {
                 }
             }
             Kind::Arrow(_) => {}
+            Kind::XpOrb(o) => out.push(ServerEvent::EntityMeta {
+                entity_id: self.id,
+                entries: vec![(ORB_VALUE_INDEX, MetaValue::VarInt(o.value))],
+            }),
         }
         out
     }
@@ -217,6 +236,42 @@ pub fn spawn_item(
             ground: provenance::ground_place(pos.x, pos.y, pos.z),
         }),
     )
+}
+
+/// The orb value vanilla splits an outstanding amount of experience into:
+/// the largest of a fixed ladder of sizes that fits, down to `1`.
+fn orb_value(xp: i32) -> i32 {
+    for t in [2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3] {
+        if xp >= t {
+            return t;
+        }
+    }
+    1
+}
+
+/// `amount` experience as the orb values vanilla's `award` loop produces.
+fn split_xp(mut amount: i32) -> Vec<i32> {
+    let mut out = Vec::new();
+    while amount > 0 {
+        let v = orb_value(amount);
+        amount -= v;
+        out.push(v);
+    }
+    out
+}
+
+/// Drop `amount` experience as orbs at `pos`, the way a mob's death or a
+/// broken ore does — `ExperienceOrb.award`.
+pub fn award_xp(pos: Vector3, amount: i32) {
+    if amount <= 0 {
+        return;
+    }
+    for value in split_xp(amount) {
+        let (vx, vy, vz) = with_rng(|r| (r.f64() * 0.2 - 0.1, r.f64() * 0.2, r.f64() * 0.2 - 0.1));
+        let mut body = Body::sized(pos, 0.5, 0.5);
+        body.velocity = Vector3::new(vx, vy, vz);
+        push(body, 0.0, Kind::XpOrb(XpOrb { value }));
+    }
 }
 
 /// Throw a stack from a player's hand, the way pressing Q does.
@@ -374,14 +429,14 @@ pub fn mob_count() -> usize {
 
 /// Items on the ground owned by `owner`, for `/inv`: `(item, count, pos,
 /// seconds left)`.
-pub fn owned_items(owner: u128) -> Vec<(String, u8, Vector3, u32)> {
+pub fn owned_items(owner: u128) -> Vec<(aether_world::ItemTypeId, u8, Vector3, u32)> {
     entities()
         .lock()
         .unwrap()
         .iter()
         .filter_map(|e| match &e.kind {
             Kind::Item(it) if it.owner == Some(owner) => Some((
-                it.stack.item.clone(),
+                it.stack.item,
                 it.stack.count,
                 e.pos(),
                 ITEM_LIFETIME.saturating_sub(e.age) / 20,
@@ -418,6 +473,8 @@ pub fn hurt_mob(
     if m.death.is_some() || m.hurt_cd > 0 {
         return None;
     }
+    // Resistance turns part of the blow away, as it does for a player.
+    let amount = amount * (1.0 - m.effects.resistance_fraction());
     m.health -= amount;
     m.hurt_cd = 10;
     m.meta_dirty = true;
@@ -455,7 +512,7 @@ pub fn hurt_mob(
 
 /// Use (right-click) an entity with `item`. Returns what the player gets in
 /// exchange for what they held, if anything happened.
-pub fn interact(id: i32, item: Option<&str>) -> Option<Interaction> {
+pub fn interact(id: i32, item: Option<aether_world::ItemTypeId>) -> Option<Interaction> {
     let mut all = entities().lock().unwrap();
     let e = all.iter_mut().find(|e| e.id == id && !e.dead)?;
     let pos = e.pos();
@@ -463,10 +520,12 @@ pub fn interact(id: i32, item: Option<&str>) -> Option<Interaction> {
         return None;
     };
     match (m.def.kind, item) {
-        ("minecraft:cow", Some("minecraft:bucket")) => {
-            Some(Interaction::Replace("minecraft:milk_bucket"))
-        }
-        ("minecraft:sheep", Some("minecraft:shears")) if !m.sheared => {
+        ("minecraft:cow", Some(id)) if id == crate::inventory::item("minecraft:bucket") => Some(
+            Interaction::Replace(crate::inventory::item("minecraft:milk_bucket")),
+        ),
+        ("minecraft:sheep", Some(id))
+            if id == crate::inventory::item("minecraft:shears") && !m.sheared =>
+        {
             m.sheared = true;
             m.meta_dirty = true;
             let n = with_rng(|r| r.range(1, 3)) as u8;
@@ -476,7 +535,7 @@ pub fn interact(id: i32, item: Option<&str>) -> Option<Interaction> {
                 pos.x.floor() as i32,
                 pos.y.floor() as i32 + 1,
                 pos.z.floor() as i32,
-                vec![Stack::new(&wool, n)],
+                vec![Stack::named(&wool, n)],
                 ActorId::SERVER,
                 None,
             );
@@ -489,7 +548,7 @@ pub fn interact(id: i32, item: Option<&str>) -> Option<Interaction> {
 /// The outcome of using an entity.
 pub enum Interaction {
     /// Swap the held item for this one (a bucket of milk).
-    Replace(&'static str),
+    Replace(aether_world::ItemTypeId),
     /// The held tool takes a point of wear.
     Wear,
 }
@@ -578,6 +637,12 @@ pub enum Action {
         collector: i32,
         count: u8,
         gone: bool,
+    },
+    /// A player picked up experience orb `orb`, worth `value`.
+    XpPicked {
+        orb: i32,
+        collector: i32,
+        value: i32,
     },
     /// An event for everyone tracking an entity.
     Tracked(i32, ServerEvent<'static>),
@@ -671,6 +736,38 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                         e.dead = true;
                     }
                 }
+                Kind::XpOrb(_) => {
+                    if e.age >= ITEM_LIFETIME {
+                        e.dead = true;
+                        continue;
+                    }
+                    // Drift towards the nearest living player within eight
+                    // blocks, vanilla's pull, so a ball of experience does
+                    // not sit where it fell.
+                    let nearest = views
+                        .iter()
+                        .filter(|v| v.alive)
+                        .map(|v| {
+                            let p = v.pos;
+                            let d2 = (p.x - pos.x).powi(2)
+                                + (p.y - pos.y).powi(2)
+                                + (p.z - pos.z).powi(2);
+                            (d2, p)
+                        })
+                        .filter(|(d2, _)| *d2 < 64.0)
+                        .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|(_, p)| p);
+                    if let Some(p) = nearest {
+                        let (dx, dy, dz) = (p.x - pos.x, p.y + 0.5 - pos.y, p.z - pos.z);
+                        let d = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-4);
+                        let f = (1.0 - d / 8.0).max(0.0);
+                        let a = f * f * 0.1;
+                        e.body.velocity.x += dx / d * a;
+                        e.body.velocity.y += dy / d * a;
+                        e.body.velocity.z += dz / d * a;
+                    }
+                    world.step_body_with(&mut e.body, ITEM_PHYSICS);
+                }
                 Kind::Mob(m) => {
                     let ctx = mobs::Ctx {
                         world,
@@ -717,10 +814,15 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                 let (sx, sy, sz, syaw) = e.sent;
                 let moved = (p.x - sx).abs() + (p.y - sy).abs() + (p.z - sz).abs();
                 let is_mob = matches!(e.kind, Kind::Mob(_));
+                let is_orb = matches!(e.kind, Kind::XpOrb(_));
                 let v = e.body.velocity;
                 let resting = v.x.abs() + v.y.abs() + v.z.abs() < 1e-3;
                 let due = if is_mob {
                     now % 2 == 0 && (moved > 0.01 || (e.yaw - syaw).abs() > 2.0)
+                } else if is_orb {
+                    // The server drives an orb's drift, so the client needs
+                    // its position often or the ball lags behind the player.
+                    moved > 0.01 && (now % 2 == 0 || (resting && !e.rested))
                 } else {
                     moved > 0.01 && (e.age as u64 % PROJECTILE_SYNC == 0 || (resting && !e.rested))
                 };
@@ -820,7 +922,7 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                             && near_player(view.pos, ib, 1.0, 0.5)
                             && handle
                                 .inventory()
-                                .insert(Stack::new("minecraft:arrow", 1))
+                                .insert(Stack::named("minecraft:arrow", 1))
                                 .is_none()
                         {
                             {
@@ -836,13 +938,29 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                         }
                     }
                 }
+                Kind::XpOrb(o) => {
+                    let value = o.value;
+                    for view in views.iter() {
+                        if view.alive && near_player(view.pos, ib, 1.0, 0.5) {
+                            actions.push(Action::XpPicked {
+                                orb: id,
+                                collector: view.eid,
+                                value,
+                            });
+                            e.dead = true;
+                            break;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
 
-        // Merge item stacks lying next to each other, a second at a time.
+        // Merge item stacks and experience orbs lying next to each other, a
+        // second at a time.
         if now % 20 == 0 {
             merge_items(&mut all, &mut actions);
+            merge_orbs(&mut all, &mut actions);
         }
 
         all.retain(|e| {
@@ -919,6 +1037,50 @@ fn merge_items(all: &mut [Entity], actions: &mut Vec<Action>) {
             if b.stack.count == 0 {
                 right[0].dead = true;
             }
+        }
+    }
+}
+
+/// Merge experience orbs lying next to each other, the way vanilla's
+/// `tryMergeToExisting` does, while the sum still fits an orb.
+fn merge_orbs(all: &mut [Entity], actions: &mut Vec<Action>) {
+    for i in 0..all.len() {
+        if all[i].dead {
+            continue;
+        }
+        let Kind::XpOrb(a) = &all[i].kind else {
+            continue;
+        };
+        if a.value >= 32767 {
+            continue;
+        }
+        let pa = all[i].pos();
+        for j in i + 1..all.len() {
+            if all[j].dead {
+                continue;
+            }
+            let pb = all[j].pos();
+            if (pa.x - pb.x).abs() > 1.0 || (pa.y - pb.y).abs() > 1.0 || (pa.z - pb.z).abs() > 1.0 {
+                continue;
+            }
+            let (left, right) = all.split_at_mut(j);
+            let (Kind::XpOrb(a), Kind::XpOrb(b)) = (&mut left[i].kind, &mut right[0].kind) else {
+                continue;
+            };
+            if a.value + b.value > 32767 {
+                continue;
+            }
+            a.value += b.value;
+            b.value = 0;
+            let id_a = left[i].id;
+            actions.push(Action::Tracked(
+                id_a,
+                ServerEvent::EntityMeta {
+                    entity_id: id_a,
+                    entries: vec![(ORB_VALUE_INDEX, MetaValue::VarInt(a.value))],
+                },
+            ));
+            right[0].dead = true;
         }
     }
 }
@@ -1042,6 +1204,11 @@ pub fn update_tracking(registry: &SharedRegistry, world: &DemoWorld) {
         let mut evs = Vec::new();
         let mut tracked = p.tracked();
         for e in all.iter() {
+            // Experience orbs exist only for clients running the full game;
+            // an older codec has no entity type for them.
+            if !p.full() && matches!(e.kind, Kind::XpOrb(_)) {
+                continue;
+            }
             let ep = e.pos();
             let near = (ep.x - pos.x).abs() <= TRACK_RANGE && (ep.z - pos.z).abs() <= TRACK_RANGE;
             let has = tracked.contains(&e.id);
@@ -1056,7 +1223,7 @@ pub fn update_tracking(registry: &SharedRegistry, world: &DemoWorld) {
                         x: ep.x,
                         y: ep.y,
                         z: ep.z,
-                        item: it.stack.item.clone(),
+                        item: it.stack.item,
                         count: it.stack.count as u64,
                     });
                 }
@@ -1103,5 +1270,80 @@ mod tests {
         assert!(!near_player(feet, item(1.6, 64.0), 1.0, 0.5));
         assert!(near_player(feet, item(0.0, 63.6), 1.0, 0.5));
         assert!(!near_player(feet, item(0.0, 63.2), 1.0, 0.5));
+    }
+
+    #[test]
+    fn experience_splits_into_vanilla_orb_sizes() {
+        assert_eq!(split_xp(0), Vec::<i32>::new());
+        assert_eq!(split_xp(1), vec![1]);
+        assert_eq!(split_xp(3), vec![3]);
+        assert_eq!(split_xp(5), vec![3, 1, 1]);
+        assert_eq!(split_xp(7), vec![7]);
+        assert_eq!(split_xp(10), vec![7, 3]);
+        assert_eq!(split_xp(2477), vec![2477]);
+        assert_eq!(split_xp(2478), vec![2477, 1]);
+    }
+
+    #[test]
+    fn awarding_experience_leaves_orbs_on_the_ground() {
+        let before = entities().lock().unwrap().len();
+        award_xp(Vector3::new(0.0, 64.0, 0.0), 5);
+        let all = entities().lock().unwrap();
+        let values: Vec<i32> = all[before..]
+            .iter()
+            .map(|e| match &e.kind {
+                Kind::XpOrb(o) => o.value,
+                _ => -1,
+            })
+            .collect();
+        assert_eq!(values, vec![3, 1, 1]);
+    }
+
+    fn an_orb(x: f64, value: i32) -> Entity {
+        Entity {
+            id: next_id(),
+            uuid: 0,
+            body: Body::sized(Vector3::new(x, 64.0, 0.0), 0.5, 0.5),
+            yaw: 0.0,
+            pitch: 0.0,
+            age: 0,
+            kind: Kind::XpOrb(XpOrb { value }),
+            sent: (x, 64.0, 0.0, 0.0),
+            dead: false,
+            rested: false,
+        }
+    }
+
+    #[test]
+    fn nearby_orbs_merge_and_the_emptied_one_dies() {
+        let mut all = vec![an_orb(0.0, 3), an_orb(0.6, 4)];
+        let mut actions = Vec::new();
+        merge_orbs(&mut all, &mut actions);
+        let values: Vec<i32> = all
+            .iter()
+            .map(|e| match &e.kind {
+                Kind::XpOrb(o) => o.value,
+                _ => -1,
+            })
+            .collect();
+        assert_eq!(values, vec![7, 0]);
+        assert!(all[1].dead);
+        assert_eq!(actions.len(), 1);
+    }
+
+    #[test]
+    fn orbs_too_far_apart_do_not_merge() {
+        let mut all = vec![an_orb(0.0, 3), an_orb(1.5, 4)];
+        let mut actions = Vec::new();
+        merge_orbs(&mut all, &mut actions);
+        let values: Vec<i32> = all
+            .iter()
+            .map(|e| match &e.kind {
+                Kind::XpOrb(o) => o.value,
+                _ => -1,
+            })
+            .collect();
+        assert_eq!(values, vec![3, 4]);
+        assert!(actions.is_empty());
     }
 }

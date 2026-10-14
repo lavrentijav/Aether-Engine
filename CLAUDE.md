@@ -18,9 +18,12 @@ Authoritative docs:
 ## Working rules
 
 ### CI / pull-request watching
-- **When GitHub Actions are added to this repo, do NOT re-check / re-poll the pull request
-  on every run once a build has succeeded.** A green build is a sufficient signal — stop
-  re-inspecting the PR after a successful build instead of checking it each time.
+- CI runs on every push to `main` and on every pull request (`.github/workflows/ci.yml`:
+  `cargo fmt`, `cargo-deny`, `clippy`, build, `cargo test`, `--no-default-features` test,
+  on the pinned 1.99.0 toolchain).
+- **Do NOT re-check / re-poll the pull request once a build has succeeded.** A green build
+  is a sufficient signal — stop re-inspecting the PR after a successful build instead of
+  checking it each time.
 
 ### Docs & compatibility
 - Keep `docs/STATUS.md` and `docs/ROADMAP.md` in sync when a feature lands or a plan changes.

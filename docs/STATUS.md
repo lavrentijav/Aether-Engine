@@ -6,19 +6,25 @@
 >
 > Legend: ✅ done · 🚧 in progress · 📋 planned · ❄️ deferred · ❌ cancelled.
 >
-> Last reviewed: 2026-10-08 · Spec: v1.1
+> Last reviewed: 2026-10-14 · Spec: v1.1
 >
 > Forward-looking architecture ideas not yet built (SIMD cell format refinements, 2D
 > heightmap skipping, LOD/Ultra-Full render modes, a Surface API for LOD mods, Git-like
 > CoW chunk storage, tiered block-property cache) live in [DESIGN_NOTES.md](DESIGN_NOTES.md)
 > — don't read them as commitments until they show up here.
+>
+> The accepted direction for the storage/journal rework lives in
+> [storage-v2/README.md](storage-v2/README.md) (journal as the single commit point,
+> stores as materialized views, guarded rollback, `ItemTypeId`/instance ids). It is a
+> plan, not a status report — the phases are only done when they appear below.
 
 ---
 
 ### ✅ What exists today
 The project has left pure design: **Phase 0 is implemented**, several Phase 1
-subsystems have landed, and there is now a runnable demo plus an experimental
-server a vanilla 1.8.9 client can connect to.
+subsystems have landed, and there is now a runnable demo plus `aether-server`,
+which a vanilla client can join from 1.8.9 through 1.21.11 and 26.1–26.3 (the
+modern versions run a server-side survival game).
 
 | Item | State |
 |------|-------|
@@ -38,14 +44,17 @@ server a vanilla 1.8.9 client can connect to.
 | Chunk generation: flat + value-noise terrain (`aether-worldgen`) | ✅ |
 | Core API: `World` facade over storage/generation/physics (`aether-api`) | ✅ |
 | Runnable demo: `aether` binary (worldgen + physics + storage + telemetry) with TOML config | ✅ |
-| Player entity + `FullBright` lighting fallback (always max light) | ✅ |
-| Experimental join server `aether-server` (1.8.9 / protocol 47, noise terrain, creative, full-bright) — protocol verified against a raw socket client, **not yet against a live client** | 🚧 Preview |
-| Multiplayer visibility on `aether-server`: connected players spawn, move and despawn for each other (no tab list / skins yet — see [Known Issues](KNOWN_ISSUES.md)) | ✅ |
+| Player entity; the 1.8.9 codec and the demo read `FullBright` (always max light), while 1.21.11 and 26.x compute real light (below) | ✅ |
+| Experimental join server `aether-server`, first landed as a 1.8.9 / protocol 47 preview (noise terrain, creative, full-bright); the 1.8.9 framing is verified against a raw socket client, **not yet against a live 1.8.9 client** — see the 1.21.11 and 26.x rows below | 🚧 Preview |
+| Multiplayer visibility on `aether-server`: connected players spawn, move and despawn for each other, and each is added to the tab list on join (Player List Item 0x38, binary UUID + empty GameProfile properties) and removed on leave — emitted before its Spawn Player, which a 1.8 client otherwise drops | ✅ |
 | Packet compression (zlib, `Set Compression`, per-connection threshold) — a spawn column drops ~45 KB → ~0.2 KB | ✅ |
 | Block-change acknowledgement (1.19+ prediction sequence) — without it a client's placement predictions are never released | ✅ |
 | World history (`aether-world::journal`): append-only event log, deterministic generator as the baseline, so unedited columns are never stored | ✅ |
 | Rollback by player / radius / time / everything, itself recorded so it can be undone (`/rollback`) | ✅ |
 | Item provenance: 64-bit uid per item instance (allocated from a block-reserving counter, never reused), ledger + duplication report (`/audit`) | ✅ |
+| Item types as a 2-byte `ItemTypeId(u16)` (`aether-world::registry::items`): engine ids are vanilla's 1.21.11 ids, modded names interned from `ITEM_BEYOND`; a persisted per-world name table that **fails loud** when present but unreadable | ✅ |
+| Journal event numbers are reserved in blocks (write-ahead bound, key `N`): a crash or an out-of-order append cannot reuse a number that was already saved | ✅ |
+| A saved record that exists but cannot be read **refuses login** and is left untouched, instead of reading as empty and being overwritten by the first save (`server::stored`) | ✅ |
 | Inspect mode (`/inspect`): hitting a block reports its history instead of changing it | ✅ |
 | Filter language shared by `/lookup` and `/rollback` (`player:` `time:` `block:` `action:` `radius:`) + paged chat output (`/page`) | ✅ |
 | Recovery stash: a rollback returns what was *placed* (not the world's current content), grouped by block + state tags | ✅ |
@@ -63,7 +72,7 @@ server a vanilla 1.8.9 client can connect to.
 | The vanilla generator serves a live join — 289 columns in ~21 s cold at view radius 8, inside five seconds once cached | ✅ |
 | Vanilla surface rules interpreted from the pack, all conditions including `temperature`, `steep`, `hole` and badlands banding — 99.9998% of blocks against the game's own surface stage | ✅ |
 | Vanilla carvers (caves, canyons, extra-underground caves) — matched against the game's carver stage | ✅ |
-| Vanilla decoration from the pack's placed features: ores, trees, grass and flowers, sugar cane, kelp and seagrass, lakes, springs, corals, icebergs… — vanilla-like, 99.7% of blocks against a vanilla server world, not position-exact | 🚧 Preview |
+| Vanilla decoration from the pack's placed features: ores, trees, grass and flowers, sugar cane, kelp and seagrass, lakes, springs, corals, icebergs, desert wells, dungeons, geodes, fossils, dripstone and glow lichen spreading… — vanilla-like, 99.7% of blocks against a vanilla server world, not position-exact | 🚧 Preview |
 | Per-section biome ids (4×4×4 quart grid) exposed on `GeneratedColumn` and kept by the column cache; the overworld biome table is built in, `biome_data` optional | ✅ |
 | Biomes on the wire (1.21.11): all 65 biomes registered, per-section paletted biome containers; block containers widen past 4 bits / go direct | ✅ |
 | Disk cache for unmodified generated columns, aged out after a day and swept above a cap — never a source of truth, every entry reproducible from the seed (`/cache`) | ✅ |
@@ -80,11 +89,13 @@ server a vanilla 1.8.9 client can connect to.
 | Placement chooses a state from yaw, pitch, clicked face and cursor: stair/door/gate facing, slab and stair halves, log axis, button attachment, waterlogging | ✅ |
 | Two-block placements (doors, tall plants) place both halves with matching properties | ✅ |
 | Interaction before placement: doors, trapdoors and fence gates toggle instead of being built against; both door halves move together; sneaking still builds | ✅ |
+| **Per-state collision shapes** (`registry/shapes`, generated by `tools/gen/collisions.js` from `minecraft-data` `blockCollisionShapes`): slabs are half cells, stairs stepped, fences 1.5 tall, open doors/gates passable; physics resolves an AABB against the box list and grounded entities step up a slab | ✅ |
 | Stair corner shapes (`inner_left`/`outer_right`/…), transcribed from the game's own bytecode, settled at placement as vanilla does | ✅ |
 | World height is `-64..=383` (448 blocks, taller than vanilla's 384); 1.17+ clients that cannot hold a negative Y are **shifted** by 64 and see the whole range as `0..=447` | ✅ |
 | 1.8.9 is the one version that cannot be widened: its section bitmask is a `u16`, so 256 blocks is a protocol limit. Shifted, it shows `-64..=191` | ⚠️ Limit |
 | Heightmap entry width derived from the world height instead of a literal 8 — at 384 tall it needs 9 bits, and the literal silently truncated everything above 255 | ✅ |
-| Neighbour-dependent states — fence/wall/pane connections, redstone shape, chest doubling, door hinge — and *re-*computing a stair's shape when a neighbour changes: **need a block-update pass, not built**. See [Known Issues A.6](KNOWN_ISSUES.md) | ❌ |
+| 1.17 / 1.17.1 chunk sections carry a non-air count and a **4-bit indirect** palette, and an all-air section is omitted from the bitmask (the single-valued form the encoder used is a 1.18 addition a 1.17 client reads as a length). See [Known Issues A.7](KNOWN_ISSUES.md) | ✅ |
+| Neighbour-dependent states for **shape** — fence/wall/pane connections, stair corners and **chest doubling** (`type=left`/`right`) — re-settle when a neighbour changes (`placement::neighbour_updates`). Redstone wire shape and door hinge still need a wider propagation pass. See [Known Issues A.6](KNOWN_ISSUES.md) | 🚧 |
 | **Real lighting**: sky and block light by level-by-level mask dilation, verified against a reference flood fill; live client reads 15 in air, 14 at the water surface, 11 three metres down | ✅ |
 | Uniform light sections + the protocol's empty bitsets: block light now sends **0** sections per join instead of 2,890; sky light 1,726 instead of 2,890 | ✅ |
 | Light caching, relight on block change, and propagation across column edges — see [DESIGN_NOTES §8.10](DESIGN_NOTES.md) | ❌ |
@@ -92,17 +103,19 @@ server a vanilla 1.8.9 client can connect to.
 | Economy in PostgreSQL — balances, `/pay`, listings, auction (`/sell` `/market` `/buy` `/listings` `/unlist`), operator grants (`/econ give`) | ✅ |
 | Economy integrity: every trade in one transaction, `SELECT … FOR UPDATE` on listings, `CHECK (balance >= 0)` | ✅ |
 | Vanilla terrain generation — noise stage bit-exact against the game (1,179,648/1,179,648 blocks); the default whenever `worldgen_data` is set, ~45 ms noise + ~170 ms per full decorated column | ✅ |
-| Structures, geodes, dungeons, fossils, dripstone and sculk are not generated. See [Known Issues A.8](KNOWN_ISSUES.md) | ❌ |
-| CI (build/test/clippy/fmt) + Criterion bench harness | ✅ |
+| Structures and sculk are not generated. See [Known Issues A.8](KNOWN_ISSUES.md) | ❌ |
+| CI (build/test/clippy/fmt + `cargo-deny`) on a pinned toolchain + Criterion bench harness | ✅ |
 | **Clients 26.1.x, 26.2 and 26.3** (protocols 775–777) with the full survival game: one modern codec parameterized by per-release tables generated from the game's own reports (`tools/gen/versions.py` — packet ids, block states, items, entity types, menus, registries, tags) plus each release's layout changes (world clocks, the `attack` packet, section fluid counts, the swing packet, byte-array bitsets). Registries go by known pack with the overworld's height overridden, or with full data to a client without the pack. Every packet is checked by decoding it with the release's own codecs (`tools/wire`) | ✅ |
 | **Survival gameplay on 1.21.11 and 26.1–26.3** (`game/`): 20 TPS world tick, day/night, hunger, regeneration, starvation, fall/void/lava damage, death screen, inventory dropped on death, respawn | ✅ |
+| Status effects (`game/effects.rs`): Update / Remove Mob Effect on 1.21.11 and 26.1–26.3; golden/enchanted apples, poisonous potato, spider eye, pufferfish, rotten flesh and suspicious stew; regeneration, poison (never below one heart), wither, hunger, absorption, resistance, fire resistance and speed/slowness (movement-speed attribute); tick, expire, milk cures, saved with the player | ✅ |
 | Mobs: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider — natural spawning, wander/flee/chase AI, melee, skeleton arrows, creeper explosions, undead burn in daylight, loot and XP | 🚧 Preview |
 | Combat: 1.9 attack cooldown, critical hits, knockback, armour reduction and wear, tool durability, PvP | ✅ |
 | Item entities: block drops from loot tables, Q / drop stack, pickup with the collect animation, merging, 5-minute expiry | ✅ |
-| Server-authoritative windows: every click mode, 2×2 and 3×3 crafting over all 1,359 shaped + shapeless recipes, chests and furnaces persisted as block entities, smelting + fuel | ✅ |
+| Experience orbs: ores, mob kills and smelting drop `minecraft:experience_orb` entities instead of crediting the killer; they drift to a nearby player, merge up to the orb cap, and are picked up with vanilla's ladder of orb values | ✅ |
+| Server-authoritative windows: every click mode, 2×2 and 3×3 crafting over all 1,359 shaped + shapeless recipes, single and **double chests** (54 slots, `type=left`/`right`) and furnaces persisted as block entities, smelting + fuel + stored experience released on taking the output | ✅ |
 | Survival mining: vanilla dig times, harvest tools, tool wear; placement consumes items; buckets, hoes, flint and steel, beds (spawn point, skip night), eating, bows | ✅ |
 | Entity tracker: entities spawn/despawn per client by range, updates only to those tracking them | ✅ |
-| Player state persisted (position, health, food, XP, mode, spawn); gameplay commands `/gamemode /time /give /summon /tp /heal /food /killall /kill /spawn /block` | ✅ |
+| Player state persisted (position, health, food, XP, mode, spawn, active status effects — save format 2, version 1 still read); gameplay commands `/gamemode /time /give /summon /tp /heal /food /killall /kill /spawn /block` | ✅ |
 | Chunks stream on a per-player thread — input is read while the horizon generates | ✅ |
 | Gameplay events on the 18 codecs before 1.21.11 (they keep the older subset) | ❌ |
 | Water and lava flow: vanilla delays and levels, falls, slope-seeking, infinite water, lava/water → obsidian/cobblestone/stone | ✅ |
@@ -110,11 +123,12 @@ server a vanilla 1.8.9 client can connect to.
 | Journal checkpoints: a flush records, per column, which events its snapshots already hold, so loading a column replays only the events after that — not its whole history (1000 saved edits + 3 unsaved: 3 events read, was 1003) | ✅ |
 | Snapshots stamped with the generator revision; one saved under an older generator is rebuilt as it loads (fresh terrain, the blocks players placed, then the journal) instead of bringing the old terrain back as a seam | ✅ |
 | One client can no longer stall the server: a bounded outgoing queue and writer thread per connection, 30 s write timeout, clients silent for 30 s dropped, a repeat login replaces the old session, every departure logged with its reason | ✅ |
+| Connection limits: `max_players` enforced at login (operators exempt), `max_connections` caps the connections served (`0` = `max_players*2 + 16`), `max_connections_per_ip` caps each address (`0` disables) | ✅ |
 | Running as a service: clean stop on SIGINT/SIGTERM (players saved, world flushed), tick watchdog and status line, timestamped logs, `deploy/aether.service`, `AETHER_*` overrides, `tools/fetch-vanilla-data.sh`, operators bound to an address, whitelist | ✅ |
 | Item provenance from the survival layer: pickups, drops, chests, furnaces, crafting (output derived from its inputs), eating, death drops and block drops (with the break as cause) are journalled, by diffing what a player can reach around each action; `/audit` replays them with no anomalies in a full live session | ✅ |
 | Grouped revisions (one revision per operation/tick) and packed, indexed history segments for the cold journal | 📋 |
 | Parallel column generation + encoding on a server-wide pool of one worker per core; sections copied once per encode (cold 289-column join 20 s → 9.5 s on 4 cores, warm 1.8 s) | ✅ |
-| Redstone / async lighting / full staged physics | ❌ Not yet started |
+| Redstone / incremental relight / full staged physics | ❌ Not yet started |
 
 ### 📋 What is planned
 Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
@@ -122,7 +136,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 **Phase 0 — Foundations**
 - ✅ Cargo workspace + crate skeletons
 - ✅ Runtime SIMD dispatch trait & backends
-- ✅ CI (build, test, clippy, fmt) + Criterion benches
+- ✅ CI (build, test, clippy, fmt, `cargo-deny`) on the pinned 1.99.0 toolchain + Criterion benches
 - 🚧 Telemetry hooks (Prometheus exporter ✅; Tracy client stubbed behind a feature)
 
 **Phase 1 — Core Engine MVP (70–75% Vanilla)**
@@ -130,7 +144,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 - ✅ Palette compression (u4/u8/u16 auto-expand) — Block-Entity arena still 📋
 - 🚧 Physics pipeline (basic collision + gravity ✅; SIMD broad-phase, cached environment 📋)
 - 📋 Graph-based redstone (DDG)
-- 📋 Async lighting (cell flood-fill) — `FullBright` fallback ships in the meantime
+- 🚧 Lighting: real block/sky light by mask dilation ships on 1.21.11 and 26.x; incremental relight, caching and cross-column propagation still 📋 (the demo and 1.8.9 codec keep the `FullBright` fallback)
 - 🚧 Entities + AI — server-side mobs with straight-line AI ship on 1.21.11 and 26.1–26.3; ECS storage + Flow-Field still 📋
 - ✅ KV storage (Fjall + Zstd)
 - 📋 Per-world process isolation + work-stealing scheduler
@@ -141,7 +155,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 
 **Phase 3 — Network & multi-world**
 - 📋 Network Gateway, Internal Binary Protocol, seamless hand-off, Vanilla protocol
-- 🚧 Experimental 1.8.9 join server (`aether-server`) as an early preview of the Vanilla-protocol layer
+- 🚧 `aether-server` as an early preview of the Vanilla-protocol layer: 1.8.9 through 1.21.11 and 26.1–26.3, survival on the modern versions
 
 **Phase 4 — Extensibility & ops**
 - 📋 Native C-ABI + WASM plugin API

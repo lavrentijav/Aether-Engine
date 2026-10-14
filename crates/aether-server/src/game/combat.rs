@@ -22,12 +22,24 @@ fn bypasses_armor(source: &str) -> bool {
     )
 }
 
+/// Damage sources fire resistance turns away.
+fn is_fire(source: &str) -> bool {
+    matches!(
+        source,
+        "minecraft:in_fire"
+            | "minecraft:on_fire"
+            | "minecraft:lava"
+            | "minecraft:hot_floor"
+            | "minecraft:campfire"
+    )
+}
+
 /// Armour points and toughness a player is wearing.
 fn worn_armor(handle: &PlayerHandle) -> (f32, f32) {
     let inv = handle.inventory();
     (5..=8)
         .filter_map(|i| inv.slot(i))
-        .map(|s| tables::armor_points(&s.item))
+        .map(|s| tables::armor_points_id(s.item))
         .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1))
 }
 
@@ -38,7 +50,7 @@ fn wear_armor(handle: &PlayerHandle, damage: f32) {
     for i in 5..=8 {
         if let Some(slot) = inv.slot_mut(i) {
             if let Some(s) = slot {
-                let max = tables::max_durability(&s.item);
+                let max = tables::max_durability_id(s.item);
                 if max > 0 {
                     s.damage += wear;
                     if s.damage >= max {
@@ -48,6 +60,18 @@ fn wear_armor(handle: &PlayerHandle, damage: f32) {
             }
         }
     }
+}
+
+/// The damage that reaches health after resistance and absorption, spending
+/// absorption as it soaks.
+fn after_effects(dealt: f32, resistance: f32, absorption: &mut f32) -> f32 {
+    let mut damage = dealt * (1.0 - resistance).max(0.0);
+    if *absorption > 0.0 {
+        let soaked = damage.min(*absorption);
+        *absorption -= soaked;
+        damage -= soaked;
+    }
+    damage
 }
 
 /// Hurt a player. Returns whether the hit landed.
@@ -74,6 +98,13 @@ pub fn hurt_player(
         {
             return false;
         }
+        // Fire resistance: the blow never lands at all.
+        if is_fire(source) && st.effects.fire_resistant() {
+            return false;
+        }
+        // Resistance turns a fraction of the blow away, then absorption
+        // soaks what is left before health.
+        let dealt = after_effects(dealt, st.effects.resistance_fraction(), &mut st.absorption);
         st.hurt_cooldown = HURT_COOLDOWN;
         st.health -= dealt;
         st.exhaust(0.1);
@@ -173,12 +204,16 @@ pub fn die(
 ) {
     let text = death_message(&target.name, source, attacker, registry);
     crate::log::info(&format!("[death] {text}"));
+    // Death clears every effect; tell the client before the respawn screen
+    // takes over.
+    super::effects::clear(target, registry, world);
     // Everything the player held goes to the ground, each stack keeping its
     // identity; the scope journals the moves when it ends.
     let _scope = super::provenance::Scope::begin(target, world);
     let items: Vec<Stack> = {
         let mut st = target.game();
         st.window = None;
+        st.absorption = 0.0;
         let mut items: Vec<Stack> = st.cursor.take().into_iter().collect();
         st.xp_total = 0;
         let mut inv = target.inventory();
@@ -237,7 +272,7 @@ pub fn player_attack(
         return;
     }
     let held = attacker.held_item();
-    let (base, speed) = tables::weapon(held.as_deref());
+    let (base, speed) = tables::weapon_id(held);
     let pos = attacker.pos();
     let from = Vector3::new(pos.x, pos.y, pos.z);
     let (scale, crit) = {
@@ -347,9 +382,12 @@ pub fn on_mob_hurt(
         world,
     );
     let drops = entities::with_rng(|r| tables::mob_drops(hit.kind, killer.is_some(), r));
-    let mut stacks: Vec<Stack> = drops.into_iter().map(|(i, n)| Stack::new(&i, n)).collect();
+    let mut stacks: Vec<Stack> = drops
+        .into_iter()
+        .map(|(i, n)| Stack::named(&i, n))
+        .collect();
     if hit.kind == "minecraft:sheep" {
-        stacks.push(Stack::new("minecraft:white_wool", 1));
+        stacks.push(Stack::named("minecraft:white_wool", 1));
     }
     entities::drop_at_block(
         hit.pos.x.floor() as i32,
@@ -361,8 +399,12 @@ pub fn on_mob_hurt(
             .unwrap_or(aether_world::journal::ActorId::SERVER),
         None,
     );
-    if let Some(k) = killer {
-        give_xp(k, world, hit.xp);
+    // Experience is left on the ground for whoever is near, not credited to
+    // the killer: `LivingEntity.dropExperience`. Mobs only pay it out when a
+    // player did the kill (`lastHurtByPlayer`), so an arrow from one mob into
+    // another drops none.
+    if killer.is_some() {
+        entities::award_xp(hit.pos, hit.xp);
     }
 }
 
@@ -384,7 +426,7 @@ pub fn wear_held(handle: &PlayerHandle, world: &DemoWorld, n: u16) {
         let i = inv.held_index();
         let Some(slot) = inv.slot_mut(i) else { return };
         let Some(s) = slot else { return };
-        let max = tables::max_durability(&s.item);
+        let max = tables::max_durability_id(s.item);
         if max == 0 {
             return;
         }
@@ -527,7 +569,10 @@ pub fn explode(pos: Vector3, radius: f32, registry: &SharedRegistry, world: &Dem
                 *x,
                 *y,
                 *z,
-                drops.into_iter().map(|(i, n)| Stack::new(&i, n)).collect(),
+                drops
+                    .into_iter()
+                    .map(|(i, n)| Stack::named(&i, n))
+                    .collect(),
                 actor,
                 seq,
             );
@@ -590,5 +635,31 @@ mod tests {
     fn mob_names_read_as_names() {
         assert_eq!(pretty("minecraft:cave_spider"), "Cave Spider");
         assert_eq!(pretty("minecraft:zombie"), "Zombie");
+    }
+
+    #[test]
+    fn resistance_and_absorption_cut_the_blow_before_health() {
+        // Resistance I turns a fifth away.
+        let mut absorb = 0.0;
+        assert!((after_effects(10.0, 0.2, &mut absorb) - 8.0).abs() < 1e-6);
+        // Absorption soaks what is left and is spent.
+        let mut absorb = 20.0;
+        assert_eq!(after_effects(10.0, 0.0, &mut absorb), 0.0);
+        assert_eq!(absorb, 10.0);
+        // A blow larger than the absorption leaves the rest for health.
+        let mut absorb = 3.0;
+        assert_eq!(after_effects(10.0, 0.0, &mut absorb), 7.0);
+        assert_eq!(absorb, 0.0);
+        // Full resistance takes nothing.
+        let mut absorb = 0.0;
+        assert_eq!(after_effects(10.0, 1.0, &mut absorb), 0.0);
+    }
+
+    #[test]
+    fn fire_sources_are_recognised() {
+        assert!(is_fire("minecraft:lava"));
+        assert!(is_fire("minecraft:on_fire"));
+        assert!(!is_fire("minecraft:player_attack"));
+        assert!(!is_fire("minecraft:fall"));
     }
 }

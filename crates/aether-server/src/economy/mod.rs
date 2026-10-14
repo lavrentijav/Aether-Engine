@@ -39,6 +39,7 @@ pub mod pg;
 pub use model::{Listing, Money, TradeError};
 
 use aether_world::journal::ActorId;
+use aether_world::ItemTypeId;
 
 /// What the server can ask of an economy backend.
 ///
@@ -60,7 +61,7 @@ pub trait Economy: Send + Sync {
     fn list(
         &self,
         seller: ActorId,
-        item: &str,
+        item: ItemTypeId,
         count: u64,
         price: Money,
         expires_in_secs: Option<u64>,
@@ -86,7 +87,7 @@ pub trait Economy: Send + Sync {
 pub struct Purchase {
     pub listing: i64,
     pub seller: ActorId,
-    pub item: String,
+    pub item: ItemTypeId,
     pub count: u64,
     /// Total paid, not the unit price.
     pub paid: Money,
@@ -96,7 +97,7 @@ pub struct Purchase {
 #[derive(Debug, Clone, Default)]
 pub struct MarketFilter {
     /// Only this item.
-    pub item: Option<String>,
+    pub item: Option<ItemTypeId>,
     /// Only this seller.
     pub seller: Option<ActorId>,
     /// Only at or below this unit price.

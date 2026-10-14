@@ -55,11 +55,14 @@ pub struct Packets {
     pub cb_set_time: i32,
     pub cb_sound: i32,
     pub cb_take_item_entity: i32,
+    pub cb_update_attributes: i32,
+    pub cb_update_mob_effect: i32,
     pub cb_keep_alive: i32,
     pub cb_login: i32,
     pub cb_player_info_update: i32,
     pub cb_player_info_remove: i32,
     pub cb_remove_entities: i32,
+    pub cb_remove_mob_effect: i32,
     pub cb_system_chat: i32,
     pub cb_commands: i32,
     pub sb_accept_teleportation: i32,
@@ -146,24 +149,19 @@ struct ItemTables {
     /// with that engine name. Indexed by `ItemTypeId.0`, so it covers the
     /// vanilla ids `0..ITEM_BEYOND`; a modded item has no wire id at all and
     /// is never looked up here.
-    // Read only through `wire_item`, which no non-test code calls until P1b
-    // moves the wire path onto ids.
-    #[allow(dead_code)]
     to_wire: Vec<i32>,
     /// This version's wire id → engine id, `ItemTypeId::AIR` where the version
     /// has an item the engine's registry lacks. That is not an error: the
     /// engine's registry is pinned to an older release, so a newer item has no
     /// engine id — it just renders as nothing. Nothing is logged: a client
     /// merely named an item this build does not know.
-    // Read only through `engine_item`, which no non-test code calls until P1b
-    // moves the wire path onto ids.
-    #[allow(dead_code)]
     from_wire: Vec<ItemTypeId>,
     /// Wire id → this version's own name, read straight from `items`. Kept
     /// apart from `from_wire` so `item_name` stays exact even for an item the
     /// engine cannot represent: a 26.3 client's new item must still be *named*
     /// correctly on the way in, or it would look like air and vanish. `None`
     /// for a wire id the version does not have.
+    #[allow(dead_code)]
     names_by_wire: Vec<Option<&'static str>>,
 }
 
@@ -254,7 +252,6 @@ impl Version {
     /// `None` for an item the version lacks and for a modded item
     /// (`id >= ITEM_BEYOND`): a modded item has no wire id in any vanilla
     /// release, so callers fall back to their own "unknown item" id.
-    // The existing name-based call sites switch to this in P1b.
     #[allow(dead_code)]
     pub fn wire_item(&self, id: ItemTypeId) -> Option<i32> {
         if id.0 >= ITEM_BEYOND {
@@ -271,7 +268,6 @@ impl Version {
     /// A wire id this version has but the engine's registry lacks answers
     /// `Some(ItemTypeId::AIR)`: it is expressible on the wire but has no engine
     /// item to become.
-    // The existing name-based call sites switch to this in P1b.
     #[allow(dead_code)]
     pub fn engine_item(&self, wire: i32) -> Option<ItemTypeId> {
         usize::try_from(wire)
@@ -282,6 +278,9 @@ impl Version {
     /// The name of a wire id, this version's real name even for an item the
     /// engine's registry lacks. O(1): a lookup in `names_by_wire`, not a scan
     /// of `items` and not routed through the engine registry.
+    // Retained past P1b: the wire path decodes to engine ids now, but this
+    // stays the exact per-version name for tooling and the codec's own tests.
+    #[allow(dead_code)]
     pub fn item_name(&self, id: i32) -> Option<&'static str> {
         let i = usize::try_from(id).ok()?;
         self.item_tables().names_by_wire.get(i).copied().flatten()

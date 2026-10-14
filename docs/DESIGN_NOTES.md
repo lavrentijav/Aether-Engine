@@ -163,7 +163,10 @@ for itself if the hash lookup it replaces is actually showing up hot in profiles
 
 ## 8. Lighting, shaped around this engine's layout
 
-A plan, not an implementation. `FullBright` is still what runs.
+Steps 1–4 of the plan below have landed — `aether_world::light` computes real block and
+sky light and the 1.21 chunk encoder sends uniform sections (§8.9). The demo and the
+1.8.9 codec still read `FullBright`, and §8.10 lists what is implemented but unverified
+or missing (no incremental relight, no cross-column propagation, no caching).
 
 The reason to write it down now: the registry gained real `light_emission` and
 `light_opacity` for all 1166 vanilla blocks, so for the first time there is
@@ -498,18 +501,33 @@ generator code keeps compiling and gets more correct rather than less.
 3. Older codecs' `state -> state` tables.
 4. Block-update pass for (c).
 
-**Not addressed:** per-state *properties* that differ from their block's. An
-open door does not collide, a lit redstone lamp emits 15, a double slab is a
-full opaque cube — `minecraft-data` publishes light and bounding box per block,
-not per state, so the generated `STATE_PROPS` starts out uniform within a block.
-That is exactly as correct as today and no more. Closing it means asking the
-game itself: the unobfuscated server jar plus a small Java harness, which is the
-technique the worldgen work already uses successfully.
+**Not addressed:** per-state *properties* that differ from their block's. A lit
+redstone lamp emits 15, a double slab is a full opaque cube — `minecraft-data`
+publishes light and occlusion per block, not per state, so the generated
+`STATE_PROPS` starts out uniform within a block. That is exactly as correct as
+today and no more. Closing it means asking the game itself: the unobfuscated
+server jar plus a small Java harness, which is the technique the worldgen work
+already uses successfully.
+
+**The one exception: collision.** `minecraft-data` *does* publish bounding boxes
+per state in `blockCollisionShapes.json`, so a slab's half cell, a stair's step,
+a fence's 1.5-tall rails and an open door's empty shape are all available.
+`tools/gen/collisions.js` turns that into `registry/shapes.rs` — a shape table
+plus a `STATE_SHAPE` map from every flattened state id — exactly as
+`registry/blocks.rs` is generated from the same version and block order. Only
+the physics layer reads it; `STATE_PROPS`' `collision` bit stays the coarse
+per-block answer that the SoA mask and the AI heuristics use.
 
 ## 10. History at scale, and the History Graph
 
 Two threads of one design: keep the journal cheap however old the world gets, and let
 an operator read it by *object* (this block, this item, this player) as well as by time.
+
+The accepted, ordered direction for the journal and storage rework now lives in
+[storage-v2/README.md](storage-v2/README.md) (journal as the single commit point,
+stores as materialized views, guarded rollback, `ItemTypeId`/instance ids, and a
+ClickHouse history archive). Where this note and that file disagree, **that file wins**;
+the sections below remain as the reasoning and the details behind it.
 
 ### 10.1 The journal stays the source of truth
 
@@ -557,15 +575,16 @@ Analytics produce **signals with their evidence** — "A and B share chest X; di
 went from A to B" — never a verdict. A dense cluster of accounts around the same
 resources is something for an operator to look at, not an automatic ban.
 
-### 10.3 The gap to close first: the journal does not record most of the graph
+### 10.3 The gap that remains: what the journal still does not record
 
-Checked against the code: block changes are journalled with actor, time and both sides.
-Item events exist as types (`ItemMint`, `ItemMove`, `ItemDestroy`, with places inventory,
-ground, container) but the survival layer barely writes them — only `/give` and the
-economy do. Picking up, dropping, chests, furnaces, crafting and death drops leave no
-trace; a craft has no record of its inputs, so there is no *derived from*; an event has
-no cause, so an explosion is not tied to whoever lit it; fights and trades between
-players are not recorded at all. A graph built today would hold blocks and little else.
+Checked against the code: block changes are journalled with actor, time and both sides,
+and since Stage 0 the survival layer journals its item flows too — `game/provenance.rs`
+emits `ItemMint`, `ItemMove`, `ItemDerive` and `ItemDestroy` (inventory, ground and
+container places) with an `Event::cause`, so a craft records its inputs. What is still
+missing: events are per click rather than per
+operation (revisions would group them); a stack merging into one already in a slot
+destroys its uid and leaves no *derived from* edge; fights and trades between players are
+not recorded at all.
 
 ### 10.4 Order of work
 

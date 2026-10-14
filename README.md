@@ -64,7 +64,7 @@ The **AVX-Cell** (32 blocks × `u16` = **64 bytes**) is the atomic unit of memor
 - **Redstone** — a compiled **Directed Dependency Graph (DDG)**: zero spatial queries when nothing changes.
 - **Lighting** — asynchronous cell-based flood-fill with safe-point merges.
 - **Entities / AI** — ECS storage + Flow-Field navigation (O(1) pathing for crowds) with cached A\* for singles.
-- **Storage** — KV database (RocksDB / Fjall), Zstandard-compressed sub-chunk blobs.
+- **Storage** — KV database (Fjall, with an in-memory backend for tests), Zstandard-compressed sub-chunk blobs.
 - **Telemetry** — Tracy zones per tick phase + Prometheus exporter + in-game `/aether profile`.
 
 ## Documentation
@@ -79,20 +79,25 @@ The **AVX-Cell** (32 blocks × `u16` = **64 bytes**) is the atomic unit of memor
 ## Project status
 
 Aether is in **early alpha**. **Phase 0 is done** (Cargo workspace, runtime SIMD
-dispatch, telemetry, CI, Criterion benches) and several Phase 1 subsystems have
-landed: the **SoA world model + KV/Zstd storage**, basic physics, chunk
-generation, the core API, BaseProxy and the **`aether-convert`** Anvil migration
-tool. There's a runnable demo (`aether`) and an experimental 1.8.9 join server.
-Gameplay subsystems (redstone, lighting, entities, the full physics pipeline)
-are still ahead. See [`docs/STATUS.md`](docs/STATUS.md) for the authoritative
-feature checklist.
+dispatch, telemetry, CI with `cargo-deny`, Criterion benches) and several Phase 1
+subsystems have landed: the **SoA world model + KV/Zstd storage**, basic physics,
+chunk generation, the core API, BaseProxy and the **`aether-convert`** Anvil
+migration tool. There's a runnable demo (`aether`) and `aether-server`, which a
+vanilla client can join from 1.8.9 through 1.21.11 and the 26.x line — on 1.21.11
+and 26.1–26.3 it runs a server-side survival game. Engine-level gameplay
+(redstone, async lighting, the full physics pipeline) is still ahead. See
+[`docs/STATUS.md`](docs/STATUS.md) for the authoritative feature checklist.
 
 ### Build & test
+
+The toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml): Rust
+**1.99.0** with `rustfmt` and `clippy`, picked up by `rustup` automatically.
 
 ```bash
 cargo build --workspace        # build every crate
 cargo test  --workspace        # run the test suite
 cargo bench -p aether-core     # Criterion micro-benchmarks
+cargo deny check               # licenses, advisories, bans, unknown sources
 ```
 
 ### Run the demo — *"does it work yet?"*
@@ -162,7 +167,8 @@ cargo run -p aether-demo --release
 ### Join with a Minecraft client — *"can I connect right now?"*
 
 `aether-server` is a server you can **connect to with a vanilla client**:
-1.8.9, 1.17 through 1.21.11, and 26.1–26.3. On 1.21.11 and 26.x it runs the
+1.8.9, 1.17 through 1.21.11 (1.20.2–1.20.4 are not served — see
+[Known Issues](docs/KNOWN_ISSUES.md)), and 26.1–26.3. On 1.21.11 and 26.x it runs the
 survival game server-side (mobs, combat, items, crafting, chests, furnaces,
 flowing water); older versions get building and seeing each other.
 
@@ -173,9 +179,12 @@ cargo build --release -p aether-server --features postgres
 target/release/aether-server aether-server.toml
 ```
 
-Then *Multiplayer → Direct Connect →* `127.0.0.1`. Drop `--features postgres`
-for a build without the history mirror and economy; a database configured for
-a build without it is refused at startup rather than silently ignored.
+Then *Multiplayer → Direct Connect →* `127.0.0.1`. The `[server]` block caps the
+room: `max_players` is enforced at login, `max_connections` limits the
+connections served (`0` means `max_players*2 + 16`) and `max_connections_per_ip`
+caps each address (`0` disables it). Drop `--features postgres` for a build
+without the history mirror and economy; a database configured for a build
+without it is refused at startup rather than silently ignored.
 
 Every `AETHER_*` environment variable listed at the top of the example config
 overrides the file (`AETHER_DATABASE_URL`, `AETHER_HOST`, `AETHER_OPERATORS`,

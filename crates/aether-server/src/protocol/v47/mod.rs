@@ -495,4 +495,68 @@ mod tests {
         let s = hyphenated(0xc1bb91ad_ab62_3f9f_8ab7_78f49746acf0);
         assert_eq!(s, "c1bb91ad-ab62-3f9f-8ab7-78f49746acf0");
     }
+
+    /// A registered player backed by a real loopback socket, since
+    /// `PlayerHandle` owns an `Outbox` and has no public constructor.
+    fn loopback_player(uuid: u128, name: &str) -> std::sync::Arc<PlayerHandle> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client =
+            Conn::new(std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        let _server_side = listener.accept().unwrap();
+        crate::players::Registry::default()
+            .join(
+                7,
+                uuid,
+                name.into(),
+                None,
+                &Codec,
+                &client,
+                PosLook {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    on_ground: true,
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn player_list_add_writes_the_exact_1_8_layout() {
+        // wiki.vg, protocol 47, Player List Item (0x38), action 0:
+        //   VarInt action, VarInt count, then per player
+        //   UUID (16 raw bytes) · String name · VarInt property count ·
+        //   VarInt gamemode · VarInt ping · Boolean display-name.
+        // The UUID is *binary* here; Login Success uses the hyphenated string
+        // for the same value, and Spawn Player raw bytes again.
+        let uuid = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeff;
+        let handle = loopback_player(uuid, "tester");
+        let pkt = player_list_add_packet(&handle);
+
+        let mut want = vec![
+            0x38, // packet id
+            0x00, // action: add player
+            0x01, // number of players
+        ];
+        want.extend_from_slice(&uuid.to_be_bytes()); // binary UUID
+        want.push(0x06); // name length
+        want.extend_from_slice(b"tester");
+        want.push(0x00); // no profile properties (offline: no skin)
+        want.push(0x01); // game mode: creative
+        want.push(0x00); // ping
+        want.push(0x00); // no display-name override
+        assert_eq!(pkt.body(), want.as_slice());
+    }
+
+    #[test]
+    fn player_list_remove_writes_the_exact_1_8_layout() {
+        // Action 4 carries only the binary UUID — no name, no profile.
+        let uuid = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeff;
+        let pkt = player_list_remove_packet(uuid);
+        let mut want = vec![0x38, 0x04, 0x01];
+        want.extend_from_slice(&uuid.to_be_bytes());
+        assert_eq!(pkt.body(), want.as_slice());
+    }
 }

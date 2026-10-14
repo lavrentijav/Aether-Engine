@@ -11,7 +11,7 @@
 //! [`ServerEvent::SpawnPlayer`] is encoded separately for a 1.8 viewer and a
 //! 1.21 viewer, from the same source of truth.
 
-use aether_world::BlockStateId;
+use aether_world::{BlockStateId, ItemTypeId};
 use std::io;
 
 use crate::players::{PlayerHandle, PosLook};
@@ -296,8 +296,8 @@ pub enum ServerEvent<'a> {
         x: f64,
         y: f64,
         z: f64,
-        /// `minecraft:`-qualified item name.
-        item: String,
+        /// The item type, resolved per codec to that version's own id.
+        item: ItemTypeId,
         /// May exceed a stack: see [`ContainerSlot::count`].
         count: u64,
     },
@@ -392,6 +392,28 @@ pub enum ServerEvent<'a> {
         entity_id: i32,
         slots: Vec<(u8, Option<crate::inventory::Stack>)>,
     },
+    /// A status effect was applied or changed on an entity: the client shows
+    /// its icon and, if visible, its particles.
+    UpdateMobEffect {
+        entity_id: i32,
+        /// `minecraft:mob_effect` registry id.
+        effect: u8,
+        amplifier: u8,
+        /// Ticks remaining, `-1` for infinite.
+        duration: i32,
+        ambient: bool,
+        visible: bool,
+        show_icon: bool,
+    },
+    /// A status effect ran out or was removed.
+    RemoveMobEffect { entity_id: i32, effect: u8 },
+    /// An entity's attributes changed — the movement-speed modifier a
+    /// speed or slowness effect puts on.
+    UpdateAttributes {
+        entity_id: i32,
+        /// `(attribute registry id, base value, [(modifier id, amount, operation)])`.
+        properties: Vec<(i32, f64, Vec<(String, f64, i8)>)>,
+    },
     /// The player's own health and hunger.
     Health {
         health: f32,
@@ -484,6 +506,8 @@ pub enum Menu {
     Crafting,
     /// A single chest, 27 slots.
     Chest,
+    /// A double chest, 54 slots.
+    LargeChest,
     /// A furnace.
     Furnace,
 }
@@ -546,13 +570,13 @@ pub enum ClientEvent {
     /// In creative the client fills a slot itself and reports it here, which
     /// is how the server learns about items it never handed out.
     ///
-    /// The item is named, not numbered: item ids differ between versions, and
-    /// the inventory this feeds has to mean the same thing on all of them —
-    /// the same anchoring the block events use. `item` is `None` when the slot
-    /// was emptied.
+    /// The item arrives as the engine's own type id: item ids differ between
+    /// versions, and the inventory this feeds has to mean the same thing on all
+    /// of them — the same anchoring the block events use. `item` is `None` when
+    /// the slot was emptied, or names an item this build does not know.
     CreativeSlot {
         slot: i16,
-        item: Option<String>,
+        item: Option<ItemTypeId>,
         count: u8,
     },
     /// The player closed the open container.

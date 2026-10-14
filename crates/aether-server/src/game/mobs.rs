@@ -170,6 +170,8 @@ pub struct Mob {
     pub meta_dirty: bool,
     /// Ticks the current target has been in view (negative: out of view).
     pub see_time: i32,
+    /// Status effects running on this mob.
+    pub effects: super::effects::Effects,
 }
 
 impl Mob {
@@ -207,6 +209,7 @@ impl Mob {
             sheared: false,
             meta_dirty: false,
             see_time: 0,
+            effects: super::effects::Effects::default(),
         }
     }
 
@@ -236,7 +239,7 @@ impl Mob {
     /// What it holds and wears.
     pub fn equipment(&self) -> Vec<(u8, Option<Stack>)> {
         match self.def.kind {
-            "minecraft:skeleton" => vec![(0, Some(Stack::new("minecraft:bow", 1)))],
+            "minecraft:skeleton" => vec![(0, Some(Stack::named("minecraft:bow", 1)))],
             _ => Vec::new(),
         }
     }
@@ -292,8 +295,41 @@ pub fn tick(
         world.step_body(body);
         return *t >= 20;
     }
+    // Status effects: poison and wither hurt the way a hit does, and can
+    // kill; regeneration heals back up to this kind's full health.
+    for ev in m.effects.tick() {
+        match ev {
+            crate::game::effects::TickEvent::Heal(h) => {
+                m.health = (m.health + h).min(m.def.health);
+                m.meta_dirty = true;
+            }
+            crate::game::effects::TickEvent::Damage { amount, lethal } => {
+                let damage = crate::game::effects::tick_damage(m.health, amount, lethal);
+                if damage > 0.0 {
+                    m.health -= damage;
+                    m.meta_dirty = true;
+                    if m.health <= 0.0 {
+                        m.health = 0.0;
+                        m.death = Some(0);
+                        actions.push(Action::Tracked(
+                            id,
+                            crate::protocol::ServerEvent::EntityStatus {
+                                entity_id: id,
+                                status: 3,
+                            },
+                        ));
+                    }
+                }
+            }
+            crate::game::effects::TickEvent::Exhaust(_)
+            | crate::game::effects::TickEvent::Removed(_) => {}
+        }
+    }
     m.hurt_cd = m.hurt_cd.saturating_sub(1);
     m.attack_cd = m.attack_cd.saturating_sub(1);
+    // Speed and slowness move the mob at the same pace the movement-speed
+    // attribute would.
+    let move_speed = m.def.speed * m.effects.movement_multiplier();
     let (bx, by, bz) = (
         pos.x.floor() as i32,
         pos.y.floor() as i32,
@@ -407,9 +443,9 @@ pub fn tick(
                         m.see_time.min(0) - 1
                     };
                     if dist > 15.0 || !sees {
-                        goal = Some((p.pos.x, p.pos.z, m.def.speed));
+                        goal = Some((p.pos.x, p.pos.z, move_speed));
                     } else if dist < 4.0 {
-                        goal = Some((pos.x - dx, pos.z - dz, m.def.speed));
+                        goal = Some((pos.x - dx, pos.z - dz, move_speed));
                     }
                     if sees && dist < 15.0 && m.see_time >= 20 && m.attack_cd == 0 {
                         m.attack_cd = SKELETON_INTERVAL;
@@ -453,7 +489,7 @@ pub fn tick(
                                 m.meta_dirty = true;
                             }
                         }
-                        goal = Some((p.pos.x, p.pos.z, m.def.speed));
+                        goal = Some((p.pos.x, p.pos.z, move_speed));
                     }
                     if m.fuse >= 30 {
                         actions.push(Action::Explode {
@@ -464,7 +500,7 @@ pub fn tick(
                     }
                 }
                 _ => {
-                    goal = Some((p.pos.x, p.pos.z, m.def.speed));
+                    goal = Some((p.pos.x, p.pos.z, move_speed));
                     let reach = 1.2 + body_half_width(body);
                     if dist_h < reach && dy.abs() < 2.0 && m.attack_cd == 0 {
                         m.attack_cd = 20;
@@ -506,9 +542,9 @@ pub fn tick(
         }
         if let Some((wx, wz)) = m.wander {
             let speed = if m.panic > 0 {
-                m.def.speed * 2.0
+                move_speed * 2.0
             } else {
-                m.def.speed
+                move_speed
             };
             if (wx - pos.x).powi(2) + (wz - pos.z).powi(2) < 0.5 {
                 m.wander = None;
