@@ -832,6 +832,11 @@ pub fn tick(
         }
     }
 
+    // Whether the mob is at a water surface: there it swims, so the walking
+    // pathfinder and its drop guard do not apply.
+    let height = body_height(body);
+    let feet_wet = is_water(world, bx, (pos.y + 0.1).floor() as i32, bz);
+
     // Steer. When a path is being followed it supplies the waypoint; the
     // straight line to the goal is the fallback when no path was found.
     let mut want = (0.0, 0.0);
@@ -849,8 +854,12 @@ pub fn tick(
             // Only the straight-line fallback needs the drop guard, and it
             // applies to every mob: a hostile whose search failed must not
             // walk off a cliff either. A mob with a path can trust it, since
-            // the search used the same drop limit.
-            if waypoint.is_none() && !can_advance(&WorldNav { world }, [bx, by, bz], dx, dz) {
+            // the search used the same drop limit, and a swimming mob is not
+            // walking at all.
+            if !feet_wet
+                && waypoint.is_none()
+                && !can_advance(&WorldNav { world }, [bx, by, bz], dx, dz)
+            {
                 want = (0.0, 0.0);
                 if m.target.is_none() {
                     m.wander = None;
@@ -862,8 +871,6 @@ pub fn tick(
     // pace, the way vanilla's `travel` (drag 0.8, a quarter of gravity) and
     // `FloatGoal` (rise while more than 0.4 deep) settle it. Holding exactly
     // against gravity at the surface, as this did, stood mobs *on* the water.
-    let height = body_height(body);
-    let feet_wet = is_water(world, bx, (pos.y + 0.1).floor() as i32, bz);
     let middle_wet = is_water(world, bx, (pos.y + height * 0.5).floor() as i32, bz);
     let swimming = feet_wet || middle_wet;
     let pace = if swimming { 0.5 } else { 1.0 };
