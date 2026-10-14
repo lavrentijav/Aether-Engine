@@ -880,20 +880,32 @@ pub fn method_for_block(short: &str) -> Cook {
 }
 
 /// What cooking `input` by `method` produces, from the pack when one is
-/// loaded, else the compiled-in smelting table.
+/// loaded, else [`fallback_cook`].
 pub fn cook(method: Cook, input: ItemTypeId) -> Option<Cooked> {
     if let Some(b) = book() {
         return b.cook(method, input);
     }
-    if method == Cook::Smelting {
-        return tables::smelt_id(input).map(|result| Cooked {
-            result,
-            count: 1,
-            ticks: 200,
-            xp: input.vanilla_name().map_or(0.0, tables::smelt_xp),
-        });
-    }
-    None
+    fallback_cook(method, input)
+}
+
+/// The no-pack answer from the compiled-in smelting table.
+///
+/// The compiled table does not distinguish smelting-only from smoking- or
+/// blasting-only recipes, so — as before recipes were loaded from a pack —
+/// every furnace cooks whatever the table can smelt, at its block's pace. A
+/// blast furnace or smoker must not stop cooking just because no pack is
+/// configured (the default).
+fn fallback_cook(method: Cook, input: ItemTypeId) -> Option<Cooked> {
+    tables::smelt_id(input).map(|result| Cooked {
+        result,
+        count: 1,
+        ticks: match method {
+            Cook::Blasting | Cook::Smoking => 100,
+            Cook::Campfire => 600,
+            Cook::Smelting => 200,
+        },
+        xp: input.vanilla_name().map_or(0.0, tables::smelt_xp),
+    })
 }
 
 /// The item a crafting ingredient leaves behind when it is consumed — vanilla's
@@ -1319,5 +1331,34 @@ mod tests {
             craft(&[log, None, None, None], 2),
             Some((crate::inventory::item("minecraft:oak_planks"), 4))
         );
+    }
+
+    #[test]
+    fn the_no_pack_fallback_cooks_in_every_furnace() {
+        // No test installs a pack, so `book()` is None: every step goes
+        // through the compiled-in table. A blast furnace or smoker must
+        // still cook (the pre-recipe behaviour), not return nothing.
+        assert!(book().is_none());
+        let raw = crate::inventory::item("minecraft:raw_iron");
+        let ingot = crate::inventory::item("minecraft:iron_ingot");
+        assert_eq!(
+            cook(Cook::Smelting, raw).map(|c| (c.result, c.ticks)),
+            Some((ingot, 200))
+        );
+        assert_eq!(
+            cook(Cook::Blasting, raw).map(|c| (c.result, c.ticks)),
+            Some((ingot, 100))
+        );
+        assert_eq!(
+            cook(Cook::Smoking, raw).map(|c| (c.result, c.ticks)),
+            Some((ingot, 100))
+        );
+        assert_eq!(
+            cook(Cook::Campfire, raw).map(|c| (c.result, c.ticks)),
+            Some((ingot, 600))
+        );
+        // An item the table cannot smelt cooks nowhere.
+        let stick = crate::inventory::item("minecraft:stick");
+        assert!(cook(Cook::Smelting, stick).is_none());
     }
 }
