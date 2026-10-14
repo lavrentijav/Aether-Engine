@@ -62,6 +62,30 @@ and the `meta`/`legacy` rule fields with a richer `resolver` returning
 main's**; `gen_items.js` regenerates only `item_gen/v1_8.rs` differently from
 the pre-merge J10 tables (the legacy rules), the flattened tables unchanged.
 
+## Review fixes (QP-review-1, commits J10-fix1 … J10-fix7 + J10-fixtest)
+
+`docs/tasks/QP-review-1.md` returned DO NOT MERGE with F1–F7. All are fixed,
+one commit each, with a test reproducing the review's sequence:
+
+* **F1** (`J10-fix1`): a report with no source is a *creation* — the genuine
+  item the wire id names — not a refusal. `Resolution::Refuse` removed.
+* **F2** (`J10-fix2`): the source is only the single carried shadow, and it is
+  spent; `resolve_move`'s all-slots scan (which never consumed the source) is
+  gone.
+* **F3** (`J10-fix3`): `PlayerState::clear_creative_shadow` is called by
+  `combat::die`, `combat::respawn` and `game::window::close`.
+* **F4** (`J10-fix4`): an empty report for an already-empty slot leaves the
+  shadow alone (a genuine pickup supersedes it).
+* **F5** (`J10-fix5`): a block item resolves through `blocks.json` first and
+  only; the three block-item entries in `items.json` are removed.
+* **F6** (`J10-fix6`): the source is the carried item, never the lowest
+  matching slot (fix2 already removed the scan).
+* **F7** (`J10-fix7`): `LEGACY_BLOCK_ITEMS` maps `standing_sign`/`wall_sign` →
+  `sign`, the banner blocks → `banner`, etc. The campfire family still maps to
+  stone (1.8 has no `fire` item) — asserted and documented.
+* **property test** (`J10-fixtest`): random window reports never grow the spear
+  multiset; pure moves conserve it exactly.
+
 ## Left / interface note for the J5 (J9) agent
 
 The per-move logic keys off `compat::items::table_for(handle.codec.protocol_id())`.
