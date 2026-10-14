@@ -142,6 +142,8 @@ pub enum Configured {
     Coral(super::extra::Coral, Arc<super::extra::CoralBlocks>),
     /// `iceberg`.
     Iceberg(BlockStateId),
+    /// `desert_well`.
+    DesertWell,
     /// A type this port does not place.
     Unsupported(String),
 }
@@ -358,6 +360,7 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
             Configured::Coral(kind, blocks)
         }
         "iceberg" => Configured::Iceberg(state_of(c, "state")?),
+        "desert_well" => Configured::DesertWell,
         other => {
             l.unsupported.insert(format!("feature:{other}"));
             Configured::Unsupported(other.to_string())
@@ -386,6 +389,10 @@ pub(crate) struct States {
     pub sea_pickle: BlockStateId,
     pub vine: BlockStateId,
     pub cave_air: BlockStateId,
+    pub sand: BlockStateId,
+    pub sandstone: BlockStateId,
+    pub sandstone_slab: BlockStateId,
+    pub suspicious_sand: BlockStateId,
 }
 
 pub(crate) fn states() -> &'static States {
@@ -412,6 +419,10 @@ pub(crate) fn states() -> &'static States {
             sea_pickle: s("minecraft:sea_pickle"),
             vine: s("minecraft:vine"),
             cave_air: s("minecraft:cave_air"),
+            sand: s("minecraft:sand"),
+            sandstone: s("minecraft:sandstone"),
+            sandstone_slab: s("minecraft:sandstone_slab"),
+            suspicious_sand: s("minecraft:suspicious_sand"),
         }
     })
 }
@@ -614,6 +625,7 @@ pub(crate) fn place_configured(ctx: &mut Ctx, f: &Configured, pos: Pos) -> bool 
         Configured::VegetationPatch(cfg) => super::extra::vegetation_patch(ctx, cfg, pos),
         Configured::Coral(kind, blocks) => super::extra::coral(ctx, *kind, blocks, pos),
         Configured::Iceberg(state) => super::extra::iceberg(ctx, *state, pos),
+        Configured::DesertWell => desert_well(ctx, pos),
         Configured::Unsupported(name) => {
             ctx.d.note_unsupported(&format!("feature:{name}"));
             false
@@ -1480,6 +1492,84 @@ pub(crate) fn shuffle<T: Clone>(ctx: &mut Ctx, v: &[T]) -> Vec<T> {
     out
 }
 
+/// `DesertWellFeature`.
+fn desert_well(ctx: &mut Ctx, origin: Pos) -> bool {
+    let st = states();
+    // `blockPos = origin.above()`, then down while the block is empty.
+    let mut p = origin.above(1);
+    while ctx.lv.is_air(p) && p.y > ctx.lv.min_y() + 2 {
+        p = p.below(1);
+    }
+    if blockinfo::block_of(ctx.lv.get(p)) != blockinfo::block_of(st.sand) {
+        return false;
+    }
+    // The well needs two solid layers under its whole footprint.
+    for i in -2..=2 {
+        for j in -2..=2 {
+            if ctx.lv.is_air(p.offset(i, -1, j)) && ctx.lv.is_air(p.offset(i, -2, j)) {
+                return false;
+            }
+        }
+    }
+    for i in -2..=0 {
+        for j in -2..=2 {
+            for k in -2..=2 {
+                ctx.lv.set(p.offset(j, i, k), st.sandstone);
+            }
+        }
+    }
+    ctx.lv.set(p, st.water);
+    for d in Dir::HORIZONTAL {
+        ctx.lv.set(p.rel(d), st.water);
+    }
+    let p2 = p.below(1);
+    ctx.lv.set(p2, st.sand);
+    for d in Dir::HORIZONTAL {
+        ctx.lv.set(p2.rel(d), st.sand);
+    }
+    for j in -2..=2 {
+        for k in -2..=2 {
+            if j == -2 || j == 2 || k == -2 || k == 2 {
+                ctx.lv.set(p.offset(j, 1, k), st.sandstone);
+            }
+        }
+    }
+    ctx.lv.set(p.offset(2, 1, 0), st.sandstone_slab);
+    ctx.lv.set(p.offset(-2, 1, 0), st.sandstone_slab);
+    ctx.lv.set(p.offset(0, 1, 2), st.sandstone_slab);
+    ctx.lv.set(p.offset(0, 1, -2), st.sandstone_slab);
+    for j in -1..=1 {
+        for k in -1..=1 {
+            let s = if j == 0 && k == 0 {
+                st.sandstone
+            } else {
+                st.sandstone_slab
+            };
+            ctx.lv.set(p.offset(j, 4, k), s);
+        }
+    }
+    for j in 1..=3 {
+        ctx.lv.set(p.offset(-1, j, -1), st.sandstone);
+        ctx.lv.set(p.offset(-1, j, 1), st.sandstone);
+        ctx.lv.set(p.offset(1, j, -1), st.sandstone);
+        ctx.lv.set(p.offset(1, j, 1), st.sandstone);
+    }
+    // Two suspicious-sand blocks, each at a random one of the well's five
+    // central columns, one and two layers below it.
+    let list = [
+        p,
+        p.rel(Dir::East),
+        p.rel(Dir::South),
+        p.rel(Dir::West),
+        p.rel(Dir::North),
+    ];
+    let a = list[ctx.r.next_int_bounded(5) as usize].below(1);
+    let b = list[ctx.r.next_int_bounded(5) as usize].below(2);
+    ctx.lv.set(a, st.suspicious_sand);
+    ctx.lv.set(b, st.suspicious_sand);
+    true
+}
+
 fn huge_mushroom(
     ctx: &mut Ctx,
     red: bool,
@@ -1580,4 +1670,63 @@ fn huge_mushroom(
         put(ctx, pos.above(y), s);
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::testkit::{count_name, pack, parse_configured, place, stone, World};
+    use super::*;
+
+    fn setup() -> Option<(String, crate::vanilla::generator::VanillaGenerator)> {
+        let pack = pack()?;
+        let gen = crate::vanilla::generator::VanillaGenerator::new(&pack, 42).expect("generator");
+        Some((pack, gen))
+    }
+
+    #[test]
+    fn desert_well_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        // A sand plateau at y = 64 with stone beneath; the well sinks into it.
+        let mut w = World::new(&gen, 0, 0);
+        w.fill(-16, 0, -16, 31, 63, 31, stone());
+        w.fill(-16, 64, -16, 31, 70, 31, states().sand);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(r#"{"type":"minecraft:desert_well","config":{}}"#).unwrap(),
+        );
+        let writes = place(&gen, &w, &cfg, Pos::new(8, 64, 8), 1);
+        assert!(
+            count_name(&writes, "minecraft:sandstone") > 0,
+            "no sandstone"
+        );
+        assert!(count_name(&writes, "minecraft:water") > 0, "no water");
+        assert_eq!(
+            count_name(&writes, "minecraft:suspicious_sand"),
+            2,
+            "expected exactly two suspicious sand blocks"
+        );
+    }
+
+    #[test]
+    fn desert_well_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let mut w = World::new(&gen, 0, 0);
+        w.fill(-16, 0, -16, 31, 63, 31, stone());
+        w.fill(-16, 64, -16, 31, 70, 31, states().sand);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(r#"{"type":"minecraft:desert_well","config":{}}"#).unwrap(),
+        );
+        let a = place(&gen, &w, &cfg, Pos::new(8, 64, 8), 7);
+        let b = place(&gen, &w, &cfg, Pos::new(8, 64, 8), 7);
+        assert_eq!(a, b);
+    }
 }
