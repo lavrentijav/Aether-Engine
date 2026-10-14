@@ -15,31 +15,15 @@ use aether_world::BlockStateId;
 pub(super) const SECTIONS: usize = 16;
 
 /// Map an engine block id to a vanilla 1.8 numeric block id.
+///
+/// From the generated compatibility table (`tools/gen/compat/gen.js`,
+/// `compat::V1_8`): every engine block the version has — by name, with the
+/// substitution rules applied to the ones it lacks — becomes its real 1.8 id.
+/// Anything with no stand-in becomes stone, so the client always has something
+/// solid. 1.8 is pre-flattening and stores `(id << 4) | meta`; the metadata is
+/// not derived here, so a variant lands on its block's default meta.
 pub fn vanilla_id(id: BlockStateId) -> u16 {
-    use aether_api::block_ids as b;
-    if id == b::AIR {
-        0
-    } else if id == b::STONE {
-        1
-    } else if id == b::GRASS_BLOCK {
-        2
-    } else if id == b::DIRT {
-        3
-    } else if id == b::BEDROCK {
-        7
-    } else if id == b::WATER {
-        9
-    } else if id == b::SAND {
-        12
-    } else if id == b::GRAVEL {
-        13
-    } else if id == b::OAK_LOG {
-        17
-    } else if id == b::OAK_LEAVES {
-        18
-    } else {
-        1 // unknown -> stone, so the client always has something solid
-    }
+    crate::protocol::compat::V1_8.vanilla(id)
 }
 
 /// Map a vanilla 1.8 numeric block id back to an engine block id — the inverse
@@ -47,20 +31,12 @@ pub fn vanilla_id(id: BlockStateId) -> u16 {
 /// something the engine world can store. `None` for ids the engine has no
 /// block for, so placement of an unknown item is refused rather than guessed.
 pub fn engine_id(vanilla: u16) -> Option<BlockStateId> {
-    use aether_api::block_ids as b;
-    Some(match vanilla {
-        0 => b::AIR,
-        1 => b::STONE,
-        2 => b::GRASS_BLOCK,
-        3 => b::DIRT,
-        7 => b::BEDROCK,
-        8 | 9 => b::WATER,
-        12 => b::SAND,
-        13 => b::GRAVEL,
-        17 => b::OAK_LOG,
-        18 => b::OAK_LEAVES,
-        _ => return None,
-    })
+    // Flowing water has no block in the engine's registry but is the same
+    // material as water; treat it as water so a bucket pour lands.
+    if vanilla == 8 {
+        return Some(aether_api::block_ids::WATER);
+    }
+    crate::protocol::compat::V1_8.engine(vanilla)
 }
 
 /// A full-nibble (all `0xFF`) light array: 2048 bytes = 4096 nibbles.

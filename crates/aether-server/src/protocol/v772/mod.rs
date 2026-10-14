@@ -105,30 +105,7 @@ const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_0000_0000_0002;
 
 /// Engine block id -> this version's block-state id.
 pub fn block_state(id: BlockStateId) -> u32 {
-    use aether_api::block_ids as b;
-    if id == b::AIR {
-        0
-    } else if id == b::STONE {
-        1
-    } else if id == b::GRASS_BLOCK {
-        9
-    } else if id == b::DIRT {
-        10
-    } else if id == b::BEDROCK {
-        85
-    } else if id == b::WATER {
-        86
-    } else if id == b::SAND {
-        118
-    } else if id == b::GRAVEL {
-        124
-    } else if id == b::OAK_LOG {
-        137
-    } else if id == b::OAK_LEAVES {
-        279
-    } else {
-        1 // substitution: anything unexpressible becomes solid stone
-    }
+    crate::protocol::compat::V1_21_8.state(id)
 }
 
 /// The codec for 1.21.7/1.21.8.
@@ -526,7 +503,12 @@ mod tests {
         seen.dedup();
         assert_eq!(seen.len(), before, "states must be distinct");
         // Anything the engine cannot express becomes stone rather than air.
-        assert_eq!(block_state(BlockStateId(9999)), 1);
+        // 9,999 is a real engine state now — the engine's ids are 1.21.11's —
+        // so the substitution boundary is the end of the state space, and a
+        // block past it becomes this version's stone.
+        let modded =
+            aether_world::BlockStateId(aether_world::registry::blocks::STATE_COUNT as u32 + 7);
+        assert_eq!(block_state(modded), 1);
     }
 
     #[test]
