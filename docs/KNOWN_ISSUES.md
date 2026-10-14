@@ -66,6 +66,8 @@
 
 12. **Item provenance has known blind spots.** A stack that merges into one already in a slot ends there (its uid is destroyed and the other's count grows), so that hop has no *derived from* edge; events are per click, not per operation, until revisions group them; the economy still journals its own moves with uids of their own beside the real ones; items in inventories from before this change were never minted, so their first event reads as an anomaly in `/audit`; fights and trades between players are not recorded yet.
 
+13. **1.20.2 through 1.20.4 cannot connect.** Protocols 764–765 are absent from `codecs()` on purpose. They predate the per-registry packets of 1.20.5, so the whole registry set travels as one NBT blob — the format 1.20.1 (763) already uses and every older codec carries its own copy of, and whose 1.20.2–1.20.4 copy has not been written. 1.20.1 and 1.20.5/1.20.6 (766) are served; a client on 1.20.2–1.20.4 is kicked with the version list.
+
 ### B. Known Deviations Registry (Phase 1 — accepted on purpose)
 These are **not bugs** in Phase 1 — they are documented, temporary compatibility gaps that must be recorded in the engine config and closed in Phase 2.
 

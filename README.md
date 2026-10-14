@@ -167,7 +167,8 @@ cargo run -p aether-demo --release
 ### Join with a Minecraft client — *"can I connect right now?"*
 
 `aether-server` is a server you can **connect to with a vanilla client**:
-1.8.9, 1.17 through 1.21.11, and 26.1–26.3. On 1.21.11 and 26.x it runs the
+1.8.9, 1.17 through 1.21.11 (1.20.2–1.20.4 are not served — see
+[Known Issues](docs/KNOWN_ISSUES.md)), and 26.1–26.3. On 1.21.11 and 26.x it runs the
 survival game server-side (mobs, combat, items, crafting, chests, furnaces,
 flowing water); older versions get building and seeing each other.
 
