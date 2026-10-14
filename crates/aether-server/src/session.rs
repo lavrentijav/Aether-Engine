@@ -1393,26 +1393,23 @@ fn resolve_creative_report(
         };
     };
 
-    // Snapshot before the move: what the slot holds, the shadow the client is
-    // carrying, and every real slot (the window's authoritative items). Lock
-    // order is the game state, then the inventory (see `PlayerHandle`).
-    let (previous, carried, authority) = {
+    // Snapshot before the move: what the slot holds and the shadow the client
+    // is carrying. Neither the cursor nor the other slots are consulted — the
+    // shadow is the *single* source a move may draw on, so one item can never
+    // feed two placements. Lock order is the game state, then the inventory
+    // (see `PlayerHandle`).
+    let (previous, carried) = {
         let st = handle.game();
         let inv = handle.inventory();
-        let mut authority = Vec::new();
-        if let Some(c) = &st.cursor {
-            authority.push(c.item);
-        }
-        authority.extend(inv.occupied().map(|(_, s)| s.item));
         let previous = if slot >= 0 {
             inv.get(slot as usize).map(|s| s.item)
         } else {
             None
         };
-        (previous, st.creative_carry, authority)
+        (previous, st.creative_carry)
     };
 
-    let (resolution, carried) = table.resolve_change(reported, previous, carried, &authority);
+    let (resolution, carried) = table.resolve_change(reported, previous, carried);
     handle.game().creative_carry = carried;
     match resolution {
         protocol::compat::items::Resolution::Apply(item) => item,

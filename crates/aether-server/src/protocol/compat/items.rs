@@ -13,9 +13,10 @@
 //! [`ItemTable::resolve_reported`] is the other half of that when the client
 //! echoes the stand-in back into the *same* slot. A client that instead
 //! *moves* the stand-in — through the cursor into another slot — is answered
-//! by [`ItemTable::resolve_move`], which resolves the destination against the
-//! window's authoritative items so the real item follows the move and a
-//! stand-in cannot be conjured from the wire.
+//! by [`ItemTable::resolve_change`], which follows the single shadowed cursor
+//! item so the real item goes with the move, a report with no source is a
+//! *creation* (the genuine item the wire names), and a stand-in cannot be
+//! duplicated or conjured from the wire.
 //!
 //! The block half of the layer (block-state translation and substitution,
 //! tasks J1/J2) is a sibling, and a block *item* now follows its block:
@@ -107,34 +108,17 @@ impl ItemTable {
                 .any(|&e| e >= 0 && e & 0x1_0000 != 0 && (e & 0xffff) == wire)
     }
 
-    /// Resolve an item a client reported on the wire, with the window's
-    /// authoritative items as context (the cursor and every real slot).
+    /// Whether two engine items go out on the wire under the same id.
     ///
-    /// The wire id alone cannot say whether a report of a stand-in *is* the
-    /// stand-in or the genuine item it hides: both look identical. So a report
-    /// whose wire id is unambiguous is taken as stated, and one whose wire id
-    /// is a stand-in is matched against the items the server still holds — the
-    /// source of the move — and refused (`None`) when there is no source. This
-    /// is what carries a spear across a creative move instead of letting the
-    /// trident stand-in become a real trident. Compare [`Self::resolve_reported`],
-    /// which only looks at the destination slot.
-    pub fn resolve_move(
-        &self,
-        reported: ItemTypeId,
-        authority: &[ItemTypeId],
-    ) -> Option<ItemTypeId> {
-        let Some(r) = self.wire(reported) else {
-            // An item this version cannot express at all: nothing on the wire
-            // to launder, so the report stands for whatever it names.
-            return Some(reported);
-        };
-        if !self.stand_in_wire(r.id) {
-            return Some(reported);
+    /// The wire cannot tell a genuine item from a stand-in that shares its id
+    /// (`oak_planks` and `pale_oak_planks`), so "is this the same thing on the
+    /// client's screen?" is a wire-id question, not an engine-id one.
+    #[inline]
+    pub fn same_wire(&self, a: ItemTypeId, b: ItemTypeId) -> bool {
+        match (self.wire(a), self.wire(b)) {
+            (Some(x), Some(y)) => x.id == y.id,
+            _ => a == b,
         }
-        authority
-            .iter()
-            .copied()
-            .find(|&candidate| self.wire(candidate).is_some_and(|w| w.id == r.id))
     }
 }
 
@@ -149,50 +133,55 @@ impl ItemTable {
     /// Resolve one creative slot report against the window's state.
     ///
     /// `report` is the item the client says the slot now holds (`None` for an
-    /// emptied slot), `previous` is what the server had in that slot,
-    /// `carried` is the item shadowed from an earlier report (the client's
-    /// cursor), and `authority` is every other real slot's item. Returns the
-    /// resolution and the carried item after the report, so the caller can
-    /// keep shadowing the move. This is the per-move counterpart of
-    /// [`Self::resolve_reported`]: it follows a stand-in from slot to cursor
-    /// to slot instead of only matching the slot it came back to.
+    /// emptied slot), `previous` is what the server had in that slot, and
+    /// `carried` is the item shadowed from an earlier report — the server's
+    /// model of the single item on the client's cursor. Returns the resolution
+    /// and the carried item after the report.
+    ///
+    /// The wire id alone cannot say whether a report of a stand-in *is* the
+    /// stand-in or the genuine item it hides. The server therefore:
+    ///
+    /// * keeps the slot's **own** real item when the report names the same
+    ///   wire id (a re-send, or an echo), so a spear shown as a trident stays a
+    ///   spear even though the client can only say "trident";
+    /// * follows the **carried** item — the one source taken off a slot by an
+    ///   earlier report — when the report names that stand-in, so a genuine
+    ///   *move* keeps the real item and the shadow is **spent** (one source
+    ///   can feed exactly one placement, so no copy is ever minted);
+    /// * otherwise treats the report as **creation**: a creative client can
+    ///   conjure any item its version has, so the genuine item is written.
+    ///
+    /// An earlier design instead scanned every occupied slot for a source and
+    /// refused a report with none. That both made ordinary creative picks of a
+    /// stand-in-target item vanish *and* let a single source feed many
+    /// placements (the source was never consumed), minting duplicates. The
+    /// source is now only ever the shadow, and only ever once.
     pub fn resolve_change(
         &self,
         report: Option<ItemTypeId>,
         previous: Option<ItemTypeId>,
         carried: Option<ItemTypeId>,
-        authority: &[ItemTypeId],
     ) -> (Resolution, Option<ItemTypeId>) {
-        // The shadow is the strongest source: it is the item the last report
-        // took off a slot, so prepend it to the window's items.
-        let mut sources = Vec::with_capacity(authority.len() + 1);
-        if let Some(c) = carried {
-            sources.push(c);
-        }
-        sources.extend_from_slice(authority);
-
         match report {
             None => {
                 // The slot emptied: the client is now carrying what was in it.
                 (Resolution::Apply(None), previous)
             }
-            Some(r) if previous == Some(r) => {
-                // The client re-sent what the slot already held: nothing moved.
+            Some(r) => {
+                if let Some(p) = previous.filter(|p| self.same_wire(*p, r)) {
+                    // The slot already shows this wire id: nothing moved.
+                    return (Resolution::Apply(Some(p)), carried);
+                }
+                if let Some(c) = carried.filter(|c| self.same_wire(*c, r)) {
+                    // A true move of the shadowed item: spend the one source.
+                    return (Resolution::Apply(Some(c)), None);
+                }
+                // Creation: the client conjured (or replaced with) the genuine
+                // item the wire id names. A shadow for a *different* wire id is
+                // left alone — it is still on the cursor — and only a matching
+                // report could have spent it.
                 (Resolution::Apply(Some(r)), carried)
             }
-            Some(r) => match self.resolve_move(r, &sources) {
-                Some(real) => {
-                    let carried = if carried == Some(real) { None } else { carried };
-                    (Resolution::Apply(Some(real)), carried)
-                }
-                // No source in the window: a *creation*. A creative client can
-                // conjure any item its version has, so the report stands as the
-                // genuine item the wire id names. Refusing it (the old
-                // behaviour) made ordinary creative picks vanish: on 1.20.5–1.21.8
-                // `oak_planks` is also `pale_oak_planks`'s stand-in, so every
-                // Oak Planks pick was a stand-in with no source.
-                None => (Resolution::Apply(Some(r)), carried),
-            },
         }
     }
 }
@@ -381,31 +370,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_moved_stand_in_keeps_the_real_item_it_stands_for() {
-        // J10: the round trip follows a *move*, not just an echo in the same
-        // slot. `authority` is what the server still holds in the window
-        // (cursor then slots) before the move.
-        let spear = id("minecraft:iron_spear");
-        let t = &V1_21_1;
-        let Some(w) = t.wire(spear) else {
-            return; // no spear rule: nothing to move
-        };
-        let shown = t.engine(w.id).unwrap(); // the trident stand-in
-        assert!(t.stand_in_wire(t.wire(shown).unwrap().id));
-        // The source is still somewhere in the window: the destination takes
-        // the real spear, not the trident the client sent.
-        assert_eq!(t.resolve_move(shown, &[spear]), Some(spear));
-        // A genuine trident in the window is preserved as itself.
-        let trident = id("minecraft:trident");
-        assert_eq!(t.resolve_move(shown, &[trident]), Some(trident));
-        // A stand-in with no source is refused: the wire cannot conjure one.
-        assert_eq!(t.resolve_move(shown, &[]), None);
-        // An unambiguous item is always taken as stated.
-        assert_eq!(
-            t.resolve_move(id("minecraft:diamond"), &[]),
-            Some(id("minecraft:diamond"))
-        );
+    /// The stand-in the client sees for `real` on table `t`, if any.
+    fn shown_as(t: &ItemTable, real: ItemTypeId) -> Option<ItemTypeId> {
+        t.wire(real).and_then(|w| t.engine(w.id))
     }
 
     #[test]
@@ -417,50 +384,66 @@ mod tests {
         // follows.
         let spear = id("minecraft:iron_spear");
         let t = &V1_21_1;
-        let Some(w) = t.wire(spear) else {
+        let Some(shown) = shown_as(t, spear) else {
             return; // no spear rule: nothing to move
         };
-        let shown = t.engine(w.id).unwrap(); // the trident the client sees
-        let mut carried = None;
-        let mut slots: Vec<(usize, ItemTypeId)> = vec![(36, spear)];
-        // The window's items, minus the slot being reported on.
-        let others = |slots: &[(usize, ItemTypeId)], skip: usize| {
-            slots
-                .iter()
-                .filter(|(s, _)| *s != skip)
-                .map(|(_, i)| *i)
-                .collect::<Vec<_>>()
-        };
-
         // 1. Pick up: slot 36 empties, and the spear is now on the cursor.
-        let (res, next) = t.resolve_change(None, Some(spear), carried, &others(&slots, 36));
+        let (res, carried) = t.resolve_change(None, Some(spear), None);
         assert_eq!(res, Resolution::Apply(None));
-        carried = next;
         assert_eq!(carried, Some(spear));
-        slots.retain(|(s, _)| *s != 36);
 
         // 2. Place into empty slot 10: the client reports the trident. The
-        //    source is gone, so only the carried shadow can identify it.
-        let (res, next) = t.resolve_change(Some(shown), None, carried, &others(&slots, 10));
+        //    source slot is gone, so only the carried shadow identifies it.
+        let (res, carried) = t.resolve_change(Some(shown), None, carried);
         assert_eq!(res, Resolution::Apply(Some(spear)));
-        carried = next;
-        assert_eq!(carried, None);
-        slots.push((10, spear));
+        assert_eq!(carried, None, "the one source is spent");
 
         // 3. Pick up and place again, into slot 11.
-        let (_, next) = t.resolve_change(None, Some(spear), carried, &others(&slots, 10));
-        carried = next;
-        let (res, _next) = t.resolve_change(Some(shown), None, carried, &others(&slots, 11));
+        let (_, carried) = t.resolve_change(None, Some(spear), carried);
+        let (res, _) = t.resolve_change(Some(shown), None, carried);
         assert_eq!(res, Resolution::Apply(Some(spear)));
 
         // 4. A trident with no source is a *creation*: a creative client can
-        //    conjure one, so it is accepted as the genuine trident (F1), not
-        //    refused.
-        let (res, _) = t.resolve_change(Some(shown), None, None, &[]);
+        //    conjure one, so it is accepted as the genuine trident (F1).
+        let (res, _) = t.resolve_change(Some(shown), None, None);
         assert_eq!(res, Resolution::Apply(Some(id("minecraft:trident"))));
         // ...and a genuine item is always believed.
-        let (res, _) = t.resolve_change(Some(id("minecraft:diamond")), None, None, &[]);
+        let (res, _) = t.resolve_change(Some(id("minecraft:diamond")), None, None);
         assert_eq!(res, Resolution::Apply(Some(id("minecraft:diamond"))));
+    }
+
+    #[test]
+    fn a_single_source_cannot_feed_two_placements() {
+        // F2 (HIGH): the old code scanned every occupied slot and never
+        // consumed the source, so a client that simply never sent the
+        // source-empty packet minted copies. Here slot 36 holds one spear; the
+        // client claims a trident in slot 10 twice. On the second report the
+        // shadow is spent, so it is a *creation* of a genuine trident — never
+        // a second spear.
+        let spear = id("minecraft:iron_spear");
+        let t = &V1_21_1;
+        let Some(shown) = shown_as(t, spear) else {
+            return;
+        };
+        let (res, carried) = t.resolve_change(Some(shown), None, None);
+        assert_eq!(
+            res,
+            Resolution::Apply(Some(id("minecraft:trident"))),
+            "no source at all: a creation"
+        );
+        assert_eq!(carried, None);
+
+        // A real move: pick the spear up, place it, then try to place again.
+        let (_, carried) = t.resolve_change(None, Some(spear), None);
+        let (first, carried) = t.resolve_change(Some(shown), None, carried);
+        assert_eq!(first, Resolution::Apply(Some(spear)));
+        assert_eq!(carried, None);
+        let (second, _) = t.resolve_change(Some(shown), None, carried);
+        assert_eq!(
+            second,
+            Resolution::Apply(Some(id("minecraft:trident"))),
+            "the source was spent, so the second report is a genuine creation"
+        );
     }
 
     #[test]
@@ -484,7 +467,7 @@ mod tests {
                 t.stand_in_wire(w.id),
                 "{name} must be a stand-in wire id for this test to bite"
             );
-            let (res, carry) = t.resolve_change(Some(picked), None, None, &[]);
+            let (res, carry) = t.resolve_change(Some(picked), None, None);
             assert_eq!(res, Resolution::Apply(Some(picked)), "{name} vanished");
             assert_eq!(carry, None);
         }
