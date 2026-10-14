@@ -58,11 +58,8 @@
     { "from": "minecraft:armadillo_scute", "to": "minecraft:leather" },
     { "from": "minecraft:echo_shard", "to": "minecraft:amethyst_shard" },
     { "from": "minecraft:disc_fragment_5", "to": "minecraft:paper" },
-    { "from": "minecraft:frogspawn", "to": "minecraft:slime_ball" },
     { "from": "minecraft:pitcher_pod", "to": "minecraft:wheat_seeds" },
     { "from": "minecraft:torchflower_seeds", "to": "minecraft:wheat_seeds" },
-    { "from": "minecraft:resin_brick", "to": "minecraft:brick" },
-    { "from": "minecraft:resin_clump", "to": "minecraft:honeycomb" },
-    { "from": "minecraft:dried_ghast", "to": "minecraft:rotten_flesh" }
+    { "from": "minecraft:resin_brick", "to": "minecraft:brick" }
   ]
 }

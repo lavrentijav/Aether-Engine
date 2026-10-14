@@ -363,6 +363,50 @@ mod tests {
     }
 
     #[test]
+    fn a_block_item_follows_its_blocks_substitution_not_the_item_rules() {
+        // F5 (HIGH): a name that is both a block item and had an item rule was
+        // resolved by the item rule first, so the held icon and the placed
+        // block differed in shape — `resin_clump` showed a Honeycomb but placed
+        // a Honeycomb Block. The item must take the block's stand-in item.
+        let cases = [
+            (
+                &V1_21_1,
+                "minecraft:resin_clump",
+                "minecraft:honeycomb_block",
+            ),
+            (&V1_21_1, "minecraft:dried_ghast", "minecraft:white_wool"),
+            (&V1_17, "minecraft:frogspawn", "minecraft:lily_pad"),
+            (&V1_18, "minecraft:frogspawn", "minecraft:lily_pad"),
+            (
+                &V1_20_1,
+                "minecraft:resin_clump",
+                "minecraft:honeycomb_block",
+            ),
+        ];
+        for (t, item, block) in cases {
+            let w = t
+                .wire(id(item))
+                .unwrap_or_else(|| panic!("{item} has a stand-in"));
+            assert!(w.disguised, "{item} is a disguise");
+            assert_eq!(
+                w.id,
+                t.wire(id(block)).expect("the block's item").id,
+                "{item} must show the block {block}, not the old item rule"
+            );
+        }
+        // The old item rules are gone: neither name resolves to its former
+        // generic target.
+        assert_ne!(
+            V1_21_1.wire(id("minecraft:resin_clump")).unwrap().id,
+            V1_21_1.wire(id("minecraft:honeycomb")).unwrap().id
+        );
+        assert_ne!(
+            V1_21_1.wire(id("minecraft:dried_ghast")).unwrap().id,
+            V1_21_1.wire(id("minecraft:rotten_flesh")).unwrap().id
+        );
+    }
+
+    #[test]
     fn no_block_item_is_left_without_a_stand_in() {
         // A block item follows its block's substitution (J10), and a block no
         // rule covers becomes stone, so `ITEM_FALLBACKS` — the items a client

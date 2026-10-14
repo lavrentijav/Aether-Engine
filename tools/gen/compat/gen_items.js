@@ -107,15 +107,18 @@ function buildItems(mcVersion, itemRules, blockRules) {
     if (names.has(name)) {
       id = byName[name].id
     } else {
-      let sub = resolveItem(name)?.name ?? null
-      // A block item follows its *block's* substitution. The block rules can
-      // chain (a target that is itself missing is resolved again) and a block
-      // no rule covers becomes stone, exactly as the block table does — so a
-      // block item never ends in `ITEM_FALLBACKS`. If the resolved block has
-      // no item of that name in this version, stone is the last resort.
-      if (!sub && BASE_BLOCKS.has(name)) {
+      // A block item follows its *block's* substitution — the block rules are
+      // tried first, never the item rules, so the held item and the placed
+      // block downgrade together (F5). The block rules chain, and a block no
+      // rule covers becomes stone, exactly as the block table does, so a block
+      // item never ends in `ITEM_FALLBACKS`. If the resolved block has no item
+      // of that name in this version, stone is the last resort.
+      let sub
+      if (BASE_BLOCKS.has(name)) {
         const block = resolveBlock(name)?.name ?? null
-        sub = block && names.has(block) ? block : stone
+        sub = (block && names.has(block) ? block : null) ?? stone
+      } else {
+        sub = resolveItem(name)?.name ?? null
       }
       if (sub && byName[sub]) {
         id = byName[sub].id
