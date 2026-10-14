@@ -156,9 +156,18 @@ impl<'a> Ctx<'a> {
                 let remainder = recipes::remainder(s.item);
                 s.count -= 1;
                 if s.count == 0 {
+                    // The cell empties, so a remainder takes its place.
                     self.put(r, remainder.map(|i| Stack::new(i, 1)));
                 } else {
                     self.put(r, Some(s));
+                    // Items are left in the cell; a different remainder goes
+                    // to the player's inventory, or the ground — vanilla's
+                    // `ResultSlot.onTake` never discards it.
+                    if let Some(rem) = remainder {
+                        if let Some(rest) = self.inv.insert(Stack::new(rem, 1)) {
+                            self.drops.push(rest);
+                        }
+                    }
                 }
             }
         }
@@ -1137,6 +1146,27 @@ mod tests {
             c.inv.slot(1).map(|s| s.item),
             Some(crate::inventory::item("minecraft:bucket")),
             "a consumed milk bucket leaves a bucket"
+        );
+    }
+
+    #[test]
+    fn a_remainder_is_not_lost_when_the_ingredient_stacks() {
+        // 16 honey bottles in one cell: one is consumed and 15 remain, so the
+        // glass bottle goes to the inventory rather than into the cell.
+        let mut inv = Inventory::new();
+        inv.put_slot(1, Some(Stack::named("minecraft:honey_bottle", 16)));
+        let mut cur = None;
+        let mut c = ctx(&mut inv, &mut cur);
+        c.consume_grid();
+        assert_eq!(
+            c.inv.slot(1).map(|s| (s.item, s.count)),
+            Some((crate::inventory::item("minecraft:honey_bottle"), 15)),
+        );
+        assert_eq!(
+            c.inv
+                .count_of(crate::inventory::item("minecraft:glass_bottle")),
+            1,
+            "the glass bottle is not lost"
         );
     }
 
