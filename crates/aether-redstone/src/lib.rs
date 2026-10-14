@@ -57,7 +57,7 @@
 //! depth-first. Every rule is a monotone fixed point over power, so the steady
 //! state is identical and the result is deterministic; only a race between two
 //! updates scheduled at the same priority within one tick could differ. See
-//! [`Redstone`] and `docs/tasks/QR-notes.md` for the full list of differences.
+//! [`Redstone`] and `docs/KNOWN_ISSUES.md` for the full list of differences.
 //!
 //! ## Not in this stage
 //!
