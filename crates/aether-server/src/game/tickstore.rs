@@ -12,7 +12,8 @@
 //! `C`/`V`/`K`/`REG`/`ITM` meta key. The two prefixes, `BT` and `BF`, keep the
 //! block-tick and fluid-tick queues apart.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use aether_world::KvBackend;
 use aether_worldgen::ChunkGenerator;
@@ -136,11 +137,21 @@ fn decode(blob: &[u8]) -> Vec<(Pos, u64)> {
     out
 }
 
+/// Chunks whose stored ticks are held in memory now, per prefix: loaded by
+/// [`load`], or written by [`save`]. Only these may have their blob deleted —
+/// a chunk not loaded since the start still has its ticks only on disk, and
+/// an absent queue entry says nothing about it.
+fn owned() -> &'static Mutex<HashMap<Vec<u8>, HashSet<(i32, i32)>>> {
+    static O: OnceLock<Mutex<HashMap<Vec<u8>, HashSet<(i32, i32)>>>> = OnceLock::new();
+    O.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Persist `entries` per chunk under `prefix`.
 ///
-/// A chunk with pending entries gets its blob rewritten; a chunk that had a
-/// blob but no longer has entries has it deleted, so a consumed tick is not
-/// resurrected after the next restart.
+/// A chunk with pending entries gets its blob rewritten. A chunk whose ticks
+/// are in memory (see [`owned`]) but has no entries left has its blob
+/// deleted, so a consumed tick is not resurrected after the next restart. A
+/// chunk not loaded since the start keeps its blob untouched.
 pub fn save(store: &dyn TickStore, prefix: &[u8], entries: Vec<(u64, Pos)>) {
     let mut groups: BTreeMap<(i32, i32), Vec<(Pos, u64)>> = BTreeMap::new();
     for (at, pos) in entries {
@@ -149,20 +160,26 @@ pub fn save(store: &dyn TickStore, prefix: &[u8], entries: Vec<(u64, Pos)>) {
     for (&(cx, cz), list) in &groups {
         store.tick_put(&key(prefix, cx, cz), &encode(list));
     }
-    for k in store.tick_keys(prefix) {
-        if k.len() != 10 {
-            continue;
+    let mut owned = owned().lock().unwrap();
+    let mine = owned.entry(prefix.to_vec()).or_default();
+    mine.retain(|&(cx, cz)| {
+        if groups.contains_key(&(cx, cz)) {
+            return true;
         }
-        let cx = i32::from_be_bytes(k[2..6].try_into().unwrap());
-        let cz = i32::from_be_bytes(k[6..10].try_into().unwrap());
-        if !groups.contains_key(&(cx, cz)) {
-            store.tick_delete(&k);
-        }
-    }
+        store.tick_delete(&key(prefix, cx, cz));
+        false
+    });
+    mine.extend(groups.keys().copied());
 }
 
 /// The entries stored for the chunk `(cx, cz)` under `prefix`.
 pub fn load(store: &dyn TickStore, prefix: &[u8], cx: i32, cz: i32) -> Vec<(Pos, u64)> {
+    owned()
+        .lock()
+        .unwrap()
+        .entry(prefix.to_vec())
+        .or_default()
+        .insert((cx, cz));
     store
         .tick_get(&key(prefix, cx, cz))
         .map(|b| decode(&b))
@@ -257,5 +274,25 @@ mod tests {
         save(&store, BLOCK_TICKS, vec![(12, (-1, 0, 20))]);
         assert_eq!(load(&store, BLOCK_TICKS, 0, 0), vec![]);
         assert_eq!(load(&store, BLOCK_TICKS, -1, 1), vec![((-1, 0, 20), 12)]);
+    }
+
+    #[test]
+    fn a_save_keeps_the_ticks_of_a_chunk_not_loaded_since_the_start() {
+        // Distinct coordinates: the owned set is process-wide.
+        let store = Fake::default();
+        store.tick_put(
+            &key(BLOCK_TICKS, 500, 500),
+            &encode(&[((8000, 1, 8000), 40)]),
+        );
+        // Restart: nothing loaded yet, an autosave with an unrelated entry.
+        save(&store, BLOCK_TICKS, vec![(41, (8100, 1, 8100))]);
+        assert_eq!(
+            load(&store, BLOCK_TICKS, 500, 500),
+            vec![((8000, 1, 8000), 40)],
+            "the unloaded chunk's tick must survive the save"
+        );
+        // Now loaded (owned) and consumed: the next save deletes it.
+        save(&store, BLOCK_TICKS, vec![(41, (8100, 1, 8100))]);
+        assert_eq!(load(&store, BLOCK_TICKS, 500, 500), vec![]);
     }
 }
