@@ -425,11 +425,16 @@ impl ProtocolCodec for Codec {
                 // them, and the window then shows as empty with no error
                 // anywhere.
                 let mut open = PacketOut::new(self.0.packets.cb_open_screen);
-                open.var_int(STASH_WINDOW)
-                    .var_int(self.0.menu_double_chest)
-                    // The title is an *anonymous* NBT component, the same
-                    // shape System Chat uses in this generation.
-                    .bytes(&super::nbt::string(title).to_network());
+                open.var_int(STASH_WINDOW).var_int(self.0.menu_double_chest);
+                // 1.20.3 made the window title an *anonymous* NBT text
+                // component; 1.20.2 still reads a length-prefixed JSON string,
+                // so sending it the NBT way makes the client read the tag byte
+                // as the string length and disconnect.
+                if self.0.gen < Gen::V1_20_4 {
+                    open.string(&play::json_text(title));
+                } else {
+                    open.bytes(&super::nbt::string(title).to_network());
+                }
 
                 let mut items = PacketOut::new(self.0.packets.cb_container_set_content);
                 items
@@ -1366,6 +1371,41 @@ mod tests {
             crate::protocol::ContainerSlot::block("minecraft:stone", 32, "stone").with_quantity();
         assert_eq!(slot.wire_count(), 32);
         assert_eq!(slot.label, "stone", "no suffix when the badge suffices");
+    }
+
+    #[test]
+    fn open_container_title_is_json_on_1_20_2_and_nbt_from_1_20_3() {
+        // The stash window (`OpenContainer`) takes the same 1.20.3 title
+        // change as `OpenWindow`: 1.20.2's open_window.windowTitle is a
+        // length-prefixed JSON string, from 1.20.3 an anonymous NBT
+        // component. Sending NBT to a 1.20.2 client makes it read the tag byte
+        // as the string length and disconnect.
+        struct Empty;
+        impl BlockSource for Empty {
+            fn block_at(&self, _x: i32, _y: i32, _z: i32) -> BlockStateId {
+                BlockStateId::AIR
+            }
+        }
+        let ev = ServerEvent::OpenContainer {
+            title: "Stash".into(),
+            slots: Vec::new(),
+        };
+
+        let pkts = Codec(&version::V1_20_2).encode(&ev, &Empty);
+        assert_eq!(pkts.len(), 2, "open screen, then contents");
+        let body = pkts[0].body();
+        let mut pin = crate::proto::PacketIn::new(&body[1..]);
+        assert_eq!(pin.var_int().unwrap(), STASH_WINDOW);
+        assert_eq!(pin.var_int().unwrap(), version::V1_20_2.menu_double_chest);
+        assert_eq!(pin.string().unwrap(), r#"{"text":"Stash"}"#);
+
+        // 1.20.3 sends the NBT component form: tag byte then payload.
+        let pkts = Codec(&version::V1_20_4).encode(&ev, &Empty);
+        let body = pkts[0].body();
+        let mut pin = crate::proto::PacketIn::new(&body[1..]);
+        assert_eq!(pin.var_int().unwrap(), STASH_WINDOW);
+        assert_eq!(pin.var_int().unwrap(), version::V1_20_4.menu_double_chest);
+        assert_eq!(pin.u8().unwrap(), 0x08, "TAG_String NBT component");
     }
 
     #[test]

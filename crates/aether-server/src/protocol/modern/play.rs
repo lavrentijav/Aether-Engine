@@ -99,7 +99,7 @@ fn disguise_labels(s: &Stack) -> (String, String) {
 }
 
 /// A `{"text": ...}` JSON text component, the pre-1.20.3 form.
-fn json_text(text: &str) -> String {
+pub(super) fn json_text(text: &str) -> String {
     format!("{{\"text\":\"{}\"}}", crate::protocol::json_escape(text))
 }
 
