@@ -115,12 +115,20 @@ fn capture(handle: &PlayerHandle, world: &DemoWorld) -> Seen {
             },
         );
     }
-    let container = match window {
-        Some(WindowKind::Chest { pos }) => Some((super::containers::ContainerKind::Chest, pos)),
-        Some(WindowKind::Furnace { pos }) => Some((super::containers::ContainerKind::Furnace, pos)),
-        _ => None,
+    let containers: Vec<((i32, i32, i32), super::containers::ContainerKind)> = match &window {
+        Some(WindowKind::Chest { left, right }) => {
+            let mut v = vec![(*left, super::containers::ContainerKind::Chest)];
+            if let Some(r) = right {
+                v.push((*r, super::containers::ContainerKind::Chest));
+            }
+            v
+        }
+        Some(WindowKind::Furnace { pos }) => {
+            vec![(*pos, super::containers::ContainerKind::Furnace)]
+        }
+        _ => Vec::new(),
     };
-    if let Some((kind, (x, y, z))) = container {
+    for ((x, y, z), kind) in containers {
         let c = super::containers::snapshot(world, (x, y, z), kind);
         for (slot, s) in c.slots.iter().enumerate() {
             if let Some(s) = s {

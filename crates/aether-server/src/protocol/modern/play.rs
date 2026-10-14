@@ -13,6 +13,7 @@ use crate::protocol::{GameMode, Menu, MetaValue, ServerEvent};
 fn menu_id(v: &Version, m: Menu) -> i32 {
     match m {
         Menu::Chest => v.menu_chest,
+        Menu::LargeChest => v.menu_double_chest,
         Menu::Crafting => v.menu_crafting,
         Menu::Furnace => v.menu_furnace,
     }

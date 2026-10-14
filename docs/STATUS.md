@@ -84,7 +84,7 @@ server a vanilla 1.8.9 client can connect to.
 | World height is `-64..=383` (448 blocks, taller than vanilla's 384); 1.17+ clients that cannot hold a negative Y are **shifted** by 64 and see the whole range as `0..=447` | ✅ |
 | 1.8.9 is the one version that cannot be widened: its section bitmask is a `u16`, so 256 blocks is a protocol limit. Shifted, it shows `-64..=191` | ⚠️ Limit |
 | Heightmap entry width derived from the world height instead of a literal 8 — at 384 tall it needs 9 bits, and the literal silently truncated everything above 255 | ✅ |
-| Neighbour-dependent states — fence/wall/pane connections, redstone shape, chest doubling, door hinge — and *re-*computing a stair's shape when a neighbour changes: **need a block-update pass, not built**. See [Known Issues A.6](KNOWN_ISSUES.md) | ❌ |
+| Neighbour-dependent states: fence/wall/pane connections, stair corners and **chest doubling** (`type=left`/`right`) settle when a neighbour changes; redstone wire shape and a door's hinge side still do not. See [Known Issues A.6](KNOWN_ISSUES.md) | 🚧 |
 | **Real lighting**: sky and block light by level-by-level mask dilation, verified against a reference flood fill; live client reads 15 in air, 14 at the water surface, 11 three metres down | ✅ |
 | Uniform light sections + the protocol's empty bitsets: block light now sends **0** sections per join instead of 2,890; sky light 1,726 instead of 2,890 | ✅ |
 | Light caching, relight on block change, and propagation across column edges — see [DESIGN_NOTES §8.10](DESIGN_NOTES.md) | ❌ |
@@ -99,7 +99,7 @@ server a vanilla 1.8.9 client can connect to.
 | Mobs: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider — natural spawning, wander/flee/chase AI, melee, skeleton arrows, creeper explosions, undead burn in daylight, loot and XP | 🚧 Preview |
 | Combat: 1.9 attack cooldown, critical hits, knockback, armour reduction and wear, tool durability, PvP | ✅ |
 | Item entities: block drops from loot tables, Q / drop stack, pickup with the collect animation, merging, 5-minute expiry | ✅ |
-| Server-authoritative windows: every click mode, 2×2 and 3×3 crafting over all 1,359 shaped + shapeless recipes, chests and furnaces persisted as block entities, smelting + fuel | ✅ |
+| Server-authoritative windows: every click mode, 2×2 and 3×3 crafting over all 1,359 shaped + shapeless recipes, single and **double chests** (54 slots, `type=left`/`right`) and furnaces persisted as block entities, smelting + fuel | ✅ |
 | Survival mining: vanilla dig times, harvest tools, tool wear; placement consumes items; buckets, hoes, flint and steel, beds (spawn point, skip night), eating, bows | ✅ |
 | Entity tracker: entities spawn/despawn per client by range, updates only to those tracking them | ✅ |
 | Player state persisted (position, health, food, XP, mode, spawn); gameplay commands `/gamemode /time /give /summon /tp /heal /food /killall /kill /spawn /block` | ✅ |

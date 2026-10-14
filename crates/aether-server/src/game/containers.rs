@@ -116,6 +116,17 @@ fn decode(b: &[u8]) -> Option<Container> {
     Some(c)
 }
 
+/// Load the container at `pos` from the world, or a fresh empty one of `kind`.
+fn load(world: &DemoWorld, pos: Pos, kind: ContainerKind) -> Container {
+    world
+        .get_meta(&key(pos))
+        .ok()
+        .flatten()
+        .and_then(|b| decode(&b))
+        .filter(|c| c.kind == kind)
+        .unwrap_or_else(|| Container::new(kind))
+}
+
 /// Run `f` over the container at `pos`, loading or creating it as `kind`.
 /// The result is saved afterwards.
 pub fn with<R>(
@@ -125,15 +136,7 @@ pub fn with<R>(
     f: impl FnOnce(&mut Container) -> R,
 ) -> R {
     let mut map = all().lock().unwrap();
-    let c = map.entry(pos).or_insert_with(|| {
-        world
-            .get_meta(&key(pos))
-            .ok()
-            .flatten()
-            .and_then(|b| decode(&b))
-            .filter(|c| c.kind == kind)
-            .unwrap_or_else(|| Container::new(kind))
-    });
+    let c = map.entry(pos).or_insert_with(|| load(world, pos, kind));
     let r = f(c);
     let _ = world.put_meta(&key(pos), &encode(c));
     if c.kind == ContainerKind::Furnace {
@@ -142,9 +145,37 @@ pub fn with<R>(
     r
 }
 
+/// Run `f` over **two** containers at once — a double chest's halves — and
+/// save both afterwards.
+pub fn with_pair<R>(
+    world: &DemoWorld,
+    a: Pos,
+    b: Pos,
+    f: impl FnOnce(&mut Container, &mut Container) -> R,
+) -> R {
+    let mut map = all().lock().unwrap();
+    let mut ca = map
+        .remove(&a)
+        .unwrap_or_else(|| load(world, a, ContainerKind::Chest));
+    let mut cb = map
+        .remove(&b)
+        .unwrap_or_else(|| load(world, b, ContainerKind::Chest));
+    let r = f(&mut ca, &mut cb);
+    let _ = world.put_meta(&key(a), &encode(&ca));
+    let _ = world.put_meta(&key(b), &encode(&cb));
+    map.insert(a, ca);
+    map.insert(b, cb);
+    r
+}
+
 /// A copy of the container at `pos`, if one exists there.
 pub fn snapshot(world: &DemoWorld, pos: Pos, kind: ContainerKind) -> Container {
     with(world, pos, kind, |c| c.clone())
+}
+
+/// Copies of both halves of a double chest.
+pub fn snapshot_pair(world: &DemoWorld, a: Pos, b: Pos) -> (Container, Container) {
+    with_pair(world, a, b, |ca, cb| (ca.clone(), cb.clone()))
 }
 
 /// The block at `pos` is gone: forget its container and return the items,

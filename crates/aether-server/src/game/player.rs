@@ -24,8 +24,12 @@ pub enum WindowKind {
     /// A crafting table. The grid belongs to the window, not the table, and
     /// is handed back when it closes.
     Crafting { grid: Vec<Option<Stack>> },
-    /// A chest at a position.
-    Chest { pos: (i32, i32, i32) },
+    /// A chest at a position — a double chest's left half (slots 0–26) and,
+    /// when doubled, its right.
+    Chest {
+        left: (i32, i32, i32),
+        right: Option<(i32, i32, i32)>,
+    },
     /// A furnace at a position.
     Furnace { pos: (i32, i32, i32) },
 }

@@ -221,7 +221,11 @@ pub fn use_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i3
     }
     match ContainerKind::of_block(&name) {
         Some(ContainerKind::Chest) => {
-            window::open(handle, world, WindowKind::Chest { pos: (x, y, z) });
+            let state = world.get_block(x, y, z);
+            let (left, right) = crate::placement::chest_halves(state, x, y, z, &|nx, ny, nz| {
+                world.get_block(nx, ny, nz)
+            });
+            window::open(handle, world, WindowKind::Chest { left, right });
             return true;
         }
         Some(ContainerKind::Furnace) => {

@@ -484,6 +484,8 @@ pub enum Menu {
     Crafting,
     /// A single chest, 27 slots.
     Chest,
+    /// A double chest, 54 slots.
+    LargeChest,
     /// A furnace.
     Furnace,
 }

@@ -27,7 +27,7 @@
    | placed into water | `waterlogged=false` | `waterlogged=true` |
    | two adjacent `oak_fence` | no connections | **still no connections** |
 
-   What is left is exactly the class of property that is a function of *adjacent* blocks: fence, wall and pane connections; redstone wire shape; a chest becoming a double; a door's hinge side; grass turning `snowy`. These have to re-evaluate when a **neighbour** changes, not only when the block is placed, so they need a block-update propagation pass, which is a subsystem rather than a fix. A fence placed today is a correct, unconnected fence.
+   What is left is exactly the class of property that is a function of *adjacent* blocks: fence, wall and pane connections; redstone wire shape; a door's hinge side; grass turning `snowy`. These have to re-evaluate when a **neighbour** changes, not only when the block is placed, so they need a block-update propagation pass, which is a subsystem rather than a fix. A fence placed today is a correct, unconnected fence.
 
    **Interaction now beats placement.** Clicking a door, trapdoor or fence gate toggles it instead of building against it — the reported "door opens and instantly shuts with a block in front of it" was the server placing a block where the client had predicted an opening, and the ack then reverting the prediction. Both halves of a door toggle together. Sneaking still builds against it, or a door could never be placed beside another. Detected from the block's own data — anything declaring an `open` property — so there is no list to maintain.
 
@@ -57,7 +57,7 @@
     - **No redstone, crop growth, leaf decay, fire spread or falling sand/gravel.** Water and lava **do flow** now (`game/fluids.rs`: scheduled updates with vanilla delays, levels, falls, slope-seeking, infinite water, lava + water → obsidian/cobblestone/stone), but flowing water does not push mobs or items, waterlogged blocks do not flow, and generated water only starts moving when something next to it changes.
     - **No enchanting, brewing, anvils, smithing, villager trading, beds only set the spawn point and skip the night.** Status effects (golden apples, poison) are not applied; foods restore hunger only.
     - **No XP orbs.** Experience is credited to the killer directly; ores give none.
-    - **Chests do not double**, and hoppers/droppers/dispensers have no inventory.
+    - Chests **do double**: two adjacent chests merge into one 54-slot window (`type=left`/`right`), breaking one half splits the other back to single. Hoppers/droppers/dispensers have no inventory.
     - **Block collision is per cube**: slabs, stairs and fences collide as full blocks for mobs and item entities (as for the burial check in item 6).
     - **Anti-cheat is minimal**: mining time is checked at half the expected duration, reach at 6 blocks; movement is trusted.
     - **Light is not consulted for spawning**: monsters spawn at night under open sky, or at any time under cover.

@@ -57,8 +57,8 @@ impl<'a> Ctx<'a> {
     fn len(&self) -> usize {
         match self.layout {
             Layout::Player | Layout::Crafting => 46,
-            Layout::Chest => 63,
-            Layout::Furnace => 39,
+            // A chest is 27 slots, or 54 doubled; a furnace 3.
+            Layout::Chest | Layout::Furnace => self.cont.as_ref().map_or(0, |c| c.len()) + 36,
         }
     }
 
@@ -67,8 +67,7 @@ impl<'a> Ctx<'a> {
         match self.layout {
             Layout::Player => 9,
             Layout::Crafting => 10,
-            Layout::Chest => 27,
-            Layout::Furnace => 3,
+            Layout::Chest | Layout::Furnace => self.cont.as_ref().map_or(0, |c| c.len()),
         }
     }
 
@@ -575,11 +574,28 @@ impl<'a> Ctx<'a> {
     }
 }
 
-fn layout_of(w: &OpenWindow) -> (Layout, Option<(ContainerKind, Pos)>) {
+/// Which container(s) a window is attached to.
+enum ContainerTarget {
+    /// A single block entity.
+    Single(ContainerKind, Pos),
+    /// A double chest: its left half, then its right.
+    Double(Pos, Pos),
+}
+
+fn layout_of(w: &OpenWindow) -> (Layout, Option<ContainerTarget>) {
     match &w.kind {
         WindowKind::Crafting { .. } => (Layout::Crafting, None),
-        WindowKind::Chest { pos } => (Layout::Chest, Some((ContainerKind::Chest, *pos))),
-        WindowKind::Furnace { pos } => (Layout::Furnace, Some((ContainerKind::Furnace, *pos))),
+        WindowKind::Chest { left, right } => (
+            Layout::Chest,
+            Some(match right {
+                Some(r) => ContainerTarget::Double(*left, *r),
+                None => ContainerTarget::Single(ContainerKind::Chest, *left),
+            }),
+        ),
+        WindowKind::Furnace { pos } => (
+            Layout::Furnace,
+            Some(ContainerTarget::Single(ContainerKind::Furnace, *pos)),
+        ),
     }
 }
 
@@ -649,19 +665,48 @@ pub fn click(
                         ctx.click(slot, button, mode, drag);
                         ctx.drops
                     }
-                    Some((kind, pos)) => containers::with(world, pos, kind, |c| {
-                        let mut ctx = Ctx {
-                            layout,
-                            inv: &mut inv,
-                            cursor,
-                            grid: None,
-                            cont: Some(&mut c.slots),
-                            creative,
-                            drops: Vec::new(),
-                        };
-                        ctx.click(slot, button, mode, drag);
-                        ctx.drops
-                    }),
+                    Some(ContainerTarget::Single(kind, pos)) => {
+                        containers::with(world, pos, kind, |c| {
+                            let mut ctx = Ctx {
+                                layout,
+                                inv: &mut inv,
+                                cursor,
+                                grid: None,
+                                cont: Some(&mut c.slots),
+                                creative,
+                                drops: Vec::new(),
+                            };
+                            ctx.click(slot, button, mode, drag);
+                            ctx.drops
+                        })
+                    }
+                    Some(ContainerTarget::Double(a, b)) => {
+                        containers::with_pair(world, a, b, |ca, cb| {
+                            let mut slots: Vec<Option<Stack>> = ca
+                                .slots
+                                .iter()
+                                .cloned()
+                                .chain(cb.slots.iter().cloned())
+                                .collect();
+                            let drops = {
+                                let mut ctx = Ctx {
+                                    layout,
+                                    inv: &mut inv,
+                                    cursor,
+                                    grid: None,
+                                    cont: Some(&mut slots),
+                                    creative,
+                                    drops: Vec::new(),
+                                };
+                                ctx.click(slot, button, mode, drag);
+                                ctx.drops
+                            };
+                            let (ls, rs) = slots.split_at(ca.slots.len());
+                            ca.slots = ls.to_vec();
+                            cb.slots = rs.to_vec();
+                            drops
+                        })
+                    }
                 }
             }
         }
@@ -675,11 +720,22 @@ pub fn click(
     }
 }
 
-/// The container position this player is looking into, if any.
+/// The container position this player is looking into, if any — for a double
+/// chest, its left half, which both halves agree on.
 fn viewing_container(handle: &PlayerHandle) -> Option<(i32, i32, i32)> {
     match handle.game().window.as_ref().map(|w| &w.kind) {
-        Some(WindowKind::Chest { pos }) | Some(WindowKind::Furnace { pos }) => Some(*pos),
+        Some(WindowKind::Chest { left, .. }) => Some(*left),
+        Some(WindowKind::Furnace { pos }) => Some(*pos),
         _ => None,
+    }
+}
+
+/// Whether `w` is the window showing the container at `pos`.
+fn window_shows(w: &OpenWindow, pos: (i32, i32, i32)) -> bool {
+    match &w.kind {
+        WindowKind::Chest { left, right } => *left == pos || *right == Some(pos),
+        WindowKind::Furnace { pos: p } => *p == pos,
+        _ => false,
     }
 }
 
@@ -692,7 +748,12 @@ pub fn refresh_viewers(pos: (i32, i32, i32), world: &DemoWorld, except: Option<i
         if Some(p.entity_id) == except {
             continue;
         }
-        if viewing_container(&p) == Some(pos) {
+        let shows = p
+            .game()
+            .window
+            .as_ref()
+            .is_some_and(|w| window_shows(w, pos));
+        if shows {
             sync_open(&p, world);
         }
     }
@@ -704,7 +765,12 @@ pub fn close_viewers(pos: (i32, i32, i32), world: &DemoWorld) {
         return;
     };
     for p in registry.snapshot() {
-        if viewing_container(&p) == Some(pos) {
+        let shows = p
+            .game()
+            .window
+            .as_ref()
+            .is_some_and(|w| window_shows(w, pos));
+        if shows {
             let id = {
                 let mut st = p.game();
                 st.window.take().map(|w| w.id)
@@ -733,9 +799,16 @@ fn open_window_slots(st: &PlayerState, inv: &Inventory, world: &DemoWorld) -> Op
             v.append(&mut player_part);
             (w.id, v, None)
         }
-        WindowKind::Chest { pos } => {
-            let c = containers::snapshot(world, *pos, ContainerKind::Chest);
-            let mut v = c.slots;
+        WindowKind::Chest { left, right } => {
+            let mut v = match right {
+                Some(r) => {
+                    let (a, b) = containers::snapshot_pair(world, *left, *r);
+                    let mut v = a.slots;
+                    v.extend(b.slots);
+                    v
+                }
+                None => containers::snapshot(world, *left, ContainerKind::Chest).slots,
+            };
             v.append(&mut player_part);
             (w.id, v, None)
         }
@@ -827,6 +900,7 @@ pub fn open(handle: &PlayerHandle, world: &DemoWorld, kind: WindowKind) {
         let id = st.next_window_id();
         let (menu, title) = match &kind {
             WindowKind::Crafting { .. } => (Menu::Crafting, "Crafting"),
+            WindowKind::Chest { right, .. } if right.is_some() => (Menu::LargeChest, "Large Chest"),
             WindowKind::Chest { .. } => (Menu::Chest, "Chest"),
             WindowKind::Furnace { .. } => (Menu::Furnace, "Furnace"),
         };
@@ -1000,5 +1074,68 @@ mod tests {
         c.click(-999, 0, 0, &mut drag);
         assert!(c.cursor.is_none());
         assert_eq!(c.drops.iter().map(|s| s.count as u32).sum::<u32>(), 10);
+    }
+
+    #[test]
+    fn a_double_chest_shows_fifty_four_slots() {
+        // A doubled chest is 54 slots, the player's 36 behind it.
+        let mut inv = Inventory::new();
+        let mut cur = None;
+        let mut cont: Vec<Option<Stack>> = vec![None; 54];
+        let c = Ctx {
+            layout: Layout::Chest,
+            inv: &mut inv,
+            cursor: &mut cur,
+            grid: None,
+            cont: Some(&mut cont),
+            creative: false,
+            drops: Vec::new(),
+        };
+        assert_eq!(c.len(), 90);
+        assert_eq!(c.main_start(), 54);
+        // Slot 30 lives in the right half, and still maps past the player
+        // inventory.
+        assert_eq!(c.resolve(30), Some(Ref::Cont(30)));
+        assert_eq!(c.resolve(54), Some(Ref::Inv(9)));
+    }
+
+    #[test]
+    fn a_double_chest_moves_items_from_its_second_half() {
+        let mut inv = Inventory::new();
+        let mut cur = None;
+        let mut cont: Vec<Option<Stack>> = vec![None; 54];
+        cont[30] = Some(Stack::new("minecraft:diamond", 3));
+        let mut drag = None;
+        {
+            let mut c = Ctx {
+                layout: Layout::Chest,
+                inv: &mut inv,
+                cursor: &mut cur,
+                grid: None,
+                cont: Some(&mut cont),
+                creative: false,
+                drops: Vec::new(),
+            };
+            // Shift-click the right half straight into the inventory.
+            c.click(30, 0, 1, &mut drag);
+            assert!(c.cont.as_ref().unwrap()[30].is_none());
+            assert_eq!(c.inv.count_of("minecraft:diamond"), 3);
+        }
+        cont[40] = Some(Stack::new("minecraft:gold_ingot", 5));
+        {
+            let mut c = Ctx {
+                layout: Layout::Chest,
+                inv: &mut inv,
+                cursor: &mut cur,
+                grid: None,
+                cont: Some(&mut cont),
+                creative: false,
+                drops: Vec::new(),
+            };
+            // Left-click a right-half slot picks it up on the cursor.
+            c.click(40, 0, 0, &mut drag);
+            assert_eq!(c.cursor.as_ref().map(|s| s.count), Some(5));
+            assert!(c.cont.as_ref().unwrap()[40].is_none());
+        }
     }
 }
