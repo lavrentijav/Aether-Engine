@@ -10,6 +10,10 @@
 //! The engine reads and writes the world only through [`RedstoneView`], so the
 //! same code runs against the real engine world, a generated chunk, or the
 //! in-memory [`MemWorld`] the tests use. [`Redstone`] itself holds nothing:
+//! world-owned state the engine needs (scheduled ticks, the torch burnout log,
+//! item drops) lives on the view. Dropping an item for a block the engine
+//! destroys is **delegated**: the crate has no item model, so it calls
+//! [`RedstoneView::drop_block`] and the host runs the loot table.
 //!
 //! ```
 //! use aether_redstone::{BlockPos, MemWorld, Redstone};

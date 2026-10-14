@@ -215,9 +215,14 @@ pub trait RedstoneView {
     /// Emit the item drops for a block the engine is destroying at `pos` (a
     /// wire or torch whose support is gone, so its `updateShape` returned air).
     ///
-    /// The host spawns the item entity; the engine has no item model. Called
-    /// before the cell is replaced with air, and suppressed by
-    /// [`SetBlockFlags::UPDATE_SUPPRESS_DROPS`]. The default does nothing.
+    /// **Dropping is delegated to the host, not implemented here.** The crate
+    /// has no item model — it cannot name or spawn an item — so vanilla's
+    /// `destroyBlock(pos, drop = true)`, which runs the block's loot table, is
+    /// left to the world. The engine calls this once per destroyed block, before
+    /// the cell is replaced with air, and only when
+    /// [`SetBlockFlags::UPDATE_SUPPRESS_DROPS`] is not set (so a piston or a
+    /// command that suppresses drops stays silent). The default does nothing; a
+    /// host that wants items implements it.
     fn drop_block(&mut self, _pos: BlockPos, _state: BlockStateId) {}
 }
 
