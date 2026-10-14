@@ -8,13 +8,13 @@ use aether_world::BlockStateId;
 
 use super::super::blockinfo::{self, prop};
 use super::super::density::BuildError;
-use super::super::fossil_template::{
-    self, bounding_box, zero_position, Processor, Rotation, StructureTemplate,
-};
 use super::super::json::Json;
 use super::super::noise::NormalNoise;
 use super::super::providers::IntProvider;
 use super::super::rng::Rng;
+use super::super::structure::template::{
+    self, bounding_box, zero_position, PlaceSettings, Processor, Rotation, StructureTemplate,
+};
 use super::super::surface::parse_block_state;
 use super::super::tags::BlockSet;
 use super::blocks::{
@@ -475,7 +475,7 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
                     let id = id
                         .as_str()
                         .ok_or_else(|| BuildError::new(format!("fossil: bad `{key}` entry")))?;
-                    v.push(Arc::new(fossil_template::load_from_pack(l.pack, id)?));
+                    v.push(Arc::new(template::load_from_pack(l.pack, id)?));
                 }
                 Ok(v)
             };
@@ -484,7 +484,7 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
                     .str_of(key)
                     .ok_or_else(|| BuildError::new(format!("fossil: no `{key}`")))?;
                 let pj = l.pack.read_json("processor_list", id)?;
-                fossil_template::parse_processors(&pj, l.tags)
+                template::parse_processors(&pj, l.tags)
             };
             Configured::Fossil(Box::new(FossilConfig {
                 fossil_processors: processors("fossil_processors")?,
@@ -2158,22 +2158,30 @@ fn fossil(ctx: &mut Ctx, cfg: &FossilConfig, origin: Pos) -> bool {
         return false;
     }
     let bbox = Some((min, max));
-    fossil_template::place_in_world(
+    // `FossilFeature` sets `setRandom(randomSource)`, so each template's
+    // processor draws (and the single-palette pick) come from the feature seed.
+    template.place_in_world(
         ctx.lv,
         base,
-        template,
-        rotation,
-        &cfg.fossil_processors,
-        bbox,
+        &PlaceSettings {
+            rotation,
+            bounding_box: bbox,
+            random_palette: true,
+            processors: &cfg.fossil_processors,
+            ..PlaceSettings::default()
+        },
         ctx.r,
     );
-    fossil_template::place_in_world(
+    overlay.place_in_world(
         ctx.lv,
         base,
-        overlay,
-        rotation,
-        &cfg.overlay_processors,
-        bbox,
+        &PlaceSettings {
+            rotation,
+            bounding_box: bbox,
+            random_palette: true,
+            processors: &cfg.overlay_processors,
+            ..PlaceSettings::default()
+        },
         ctx.r,
     );
     true
@@ -2182,7 +2190,7 @@ fn fossil(ctx: &mut Ctx, cfg: &FossilConfig, origin: Pos) -> bool {
 /// `StructureTemplate.getSize(rotation)`.
 fn rotation_size(rotation: Rotation, size: [i32; 3]) -> [i32; 3] {
     match rotation {
-        Rotation::Cw90 | Rotation::Ccw90 => [size[2], size[1], size[0]],
+        Rotation::Clockwise90 | Rotation::Counterclockwise90 => [size[2], size[1], size[0]],
         _ => size,
     }
 }

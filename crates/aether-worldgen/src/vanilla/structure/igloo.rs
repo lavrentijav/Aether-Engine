@@ -20,14 +20,16 @@ use crate::vanilla::feature::level::{Heightmap, Level, Pos};
 use crate::vanilla::generator::Core;
 use crate::vanilla::rng::{Rng, WorldgenRandom};
 
-use super::template::{transform, Rotation, Template, TemplateManager};
+use super::template::{
+    transform, Mirror, PlaceSettings, Rotation, StructureTemplate, TemplateManager,
+};
 
 /// `IglooPieces.GENERATION_HEIGHT`.
 const GENERATION_HEIGHT: i32 = 90;
 
 /// Per-template placement data from `IglooPieces.PIVOTS` / `OFFSETS`.
 struct PieceKind {
-    template: Arc<Template>,
+    template: Arc<StructureTemplate>,
     pivot: [i32; 3],
     offset: [i32; 3],
     /// The top igloo carries the `chest` data marker and the snow lid.
@@ -106,7 +108,7 @@ impl IglooStructure {
         pieces.push((&self.top, 0));
 
         for (kind, y_offset) in pieces {
-            self.place_piece(lv, kind, block_pos, rotation, y_offset);
+            self.place_piece(lv, kind, block_pos, rotation, y_offset, &mut r);
         }
         true
     }
@@ -118,6 +120,7 @@ impl IglooStructure {
         block_pos: [i32; 3],
         rotation: Rotation,
         y_offset: i32,
+        r: &mut WorldgenRandom,
     ) {
         let mut position = [
             block_pos[0] + kind.offset[0],
@@ -127,7 +130,7 @@ impl IglooStructure {
         // `postProcess`: snap to the surface at this piece's own corner column.
         let rel = transform(
             [3 - kind.offset[0], 0, -kind.offset[2]],
-            super::template::Mirror::None,
+            Mirror::None,
             rotation,
             kind.pivot,
         );
@@ -136,24 +139,25 @@ impl IglooStructure {
         let surface = lv.height(Heightmap::WorldSurfaceWg, col_x, col_z);
         position[1] += surface - GENERATION_HEIGHT - 1;
 
-        for (x, y, z, state) in kind.template.place(
-            position,
-            rotation,
-            super::template::Mirror::None,
-            kind.pivot,
-        ) {
-            lv.set(Pos::new(x, y, z), state);
-        }
+        // `IglooPiece.makeSettings`: rotation about the piece pivot, no mirror,
+        // and `BlockIgnoreProcessor.STRUCTURE_BLOCK` for the `chest` marker.
+        kind.template.place_in_world(
+            lv,
+            Pos::new(position[0], position[1], position[2]),
+            &PlaceSettings {
+                rotation,
+                mirror: Mirror::None,
+                pivot: kind.pivot,
+                ignore_structure_blocks: true,
+                ..PlaceSettings::default()
+            },
+            r,
+        );
 
         if kind.top {
             // `if block below the trapdoor is not air and not a ladder: a snow
             // block covers it`.
-            let lid = transform(
-                [3, 0, 5],
-                super::template::Mirror::None,
-                rotation,
-                kind.pivot,
-            );
+            let lid = transform([3, 0, 5], Mirror::None, rotation, kind.pivot);
             let lid_pos = Pos::new(
                 position[0] + lid[0],
                 position[1] + lid[1],
