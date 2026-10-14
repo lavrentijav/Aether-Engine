@@ -362,6 +362,130 @@ mod tests {
         assert_eq!(english(id("minecraft:iron_spear")), Some("Iron Spear"));
     }
 
+    /// A tiny deterministic xorshift, so the property test is reproducible
+    /// without a dependency.
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    /// The multiset of *real* engine items a window holds: slots plus the item
+    /// on the client's true cursor. A creative client may add the genuine
+    /// items its menu offers, but never the engine-only spear.
+    fn count_real(
+        slots: &[Option<ItemTypeId>],
+        client_carry: Option<ItemTypeId>,
+        real: ItemTypeId,
+    ) -> usize {
+        slots.iter().filter(|s| **s == Some(real)).count() + usize::from(client_carry == Some(real))
+    }
+
+    /// Drive a random sequence of creative window reports and check that the
+    /// engine-only spear is never minted. When `allow_creation` is false the
+    /// sequence is pure window actions (pick up / place / echo) and the spear
+    /// count is conserved exactly.
+    fn run_reports(seed: u64, steps: usize, allow_creation: bool, expect_conserved: bool) {
+        let t = &V1_21_1;
+        let spear = id("minecraft:iron_spear");
+        let Some(_shown_spear) = shown_as(t, spear) else {
+            return;
+        };
+        // What the client actually receives for a real item (`engine()` of its
+        // wire id): a spear arrives as a trident.
+        let shown = |it: ItemTypeId| {
+            t.engine(t.wire(it).expect("a version item").id)
+                .expect("a real item")
+        };
+        let menu = [
+            id("minecraft:trident"),
+            id("minecraft:diamond"),
+            id("minecraft:oak_planks"),
+        ];
+
+        let slots_n = 9;
+        let mut slots: Vec<Option<ItemTypeId>> = vec![None; slots_n];
+        slots[0] = Some(spear);
+        slots[4] = Some(spear);
+        let initial = count_real(&slots, None, spear);
+        let mut client_carry: Option<ItemTypeId> = None;
+        let mut server_carry: Option<ItemTypeId> = None;
+        let mut rng = seed | 1;
+
+        for step in 0..steps {
+            let s = (xorshift(&mut rng) as usize) % slots_n;
+            let op = xorshift(&mut rng) % 8;
+            match op {
+                // 0..=2: pick a slot up (empty client cursor, occupied slot).
+                0..=2 if client_carry.is_none() && slots[s].is_some() => {
+                    let prev = slots[s].take();
+                    client_carry = prev;
+                    let (res, carry) = t.resolve_change(None, prev, server_carry);
+                    assert_eq!(res, Resolution::Apply(None), "step {step}");
+                    server_carry = carry;
+                }
+                // 3..=5: place the carried item into an empty slot.
+                3..=5 if client_carry.is_some() && slots[s].is_none() => {
+                    let Some(held) = client_carry else {
+                        unreachable!()
+                    };
+                    let (res, carry) = t.resolve_change(Some(shown(held)), None, server_carry);
+                    slots[s] = match res {
+                        Resolution::Apply(i) => i,
+                    };
+                    server_carry = carry;
+                    client_carry = None;
+                }
+                // 6: a creative creation from the menu (empty cursor).
+                6 if allow_creation && client_carry.is_none() => {
+                    let picked = menu[(xorshift(&mut rng) as usize) % menu.len()];
+                    let (res, carry) = t.resolve_change(Some(picked), slots[s], server_carry);
+                    slots[s] = match res {
+                        Resolution::Apply(i) => i,
+                    };
+                    server_carry = carry;
+                }
+                // 7 (and fallthrough): the client re-sends a slot's wire item.
+                _ => {
+                    if let Some(prev) = slots[s] {
+                        let (res, carry) =
+                            t.resolve_change(Some(shown(prev)), Some(prev), server_carry);
+                        slots[s] = match res {
+                            Resolution::Apply(i) => i,
+                        };
+                        server_carry = carry;
+                    }
+                }
+            }
+            let now = count_real(&slots, client_carry, spear);
+            assert!(
+                now <= initial,
+                "step {step}: the spear multiset grew from {initial} to {now}"
+            );
+            if expect_conserved {
+                assert_eq!(now, initial, "step {step}: a pure move lost a spear");
+            }
+        }
+    }
+
+    #[test]
+    fn random_window_reports_never_mint_a_real_item() {
+        // The property J10 must hold: random creative window actions never
+        // change the multiset of *real* engine items except by an explicit
+        // creative action (a menu conjure of a genuine item). The engine-only
+        // spear can only ever move, so its count never grows; and with no
+        // creation at all, pure moves conserve it exactly.
+        for seed in 0..64u64 {
+            run_reports(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), 400, true, false);
+        }
+        for seed in 0..64u64 {
+            run_reports(seed.wrapping_mul(0xD1B5_4A32_D192_ED03), 400, false, true);
+        }
+    }
+
     #[test]
     fn a_legacy_block_item_follows_its_blocks_item_name() {
         // F7: on 1.8 a few blocks have no item of the same name. The sign and
