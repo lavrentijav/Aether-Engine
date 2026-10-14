@@ -49,8 +49,13 @@ fn carries(boxes: &[Box6]) -> bool {
 
 /// Whether a mob can stand in this cell: the cell and the one above are clear,
 /// nothing lethal is there, and the block below can carry it.
+///
+/// The hazard test covers the support cell as well as the body's two cells: a
+/// cactus or magma block is only ever the *floor* under the mob, and picking a
+/// standable floor without it would path a mob straight onto the cactus —
+/// vanilla gives the node above a `PathType.DAMAGE_OTHER` (malus −1).
 pub fn standable<N: Nav + ?Sized>(nav: &N, x: i32, y: i32, z: i32) -> bool {
-    if nav.hazard(x, y, z) || nav.hazard(x, y + 1, z) {
+    if nav.hazard(x, y, z) || nav.hazard(x, y + 1, z) || nav.hazard(x, y - 1, z) {
         return false;
     }
     if blocking(nav.boxes(x, y, z)) || blocking(nav.boxes(x, y + 1, z)) {
@@ -285,6 +290,7 @@ mod tests {
     /// floor is y = 0 and walls are inserted at y = 1.
     struct Grid {
         solid: HashSet<[i32; 3]>,
+        hazards: HashSet<[i32; 3]>,
     }
 
     impl Grid {
@@ -295,13 +301,24 @@ mod tests {
                     solid.insert([x, 0, z]);
                 }
             }
-            Self { solid }
+            Self {
+                solid,
+                hazards: HashSet::new(),
+            }
         }
 
         /// A two-block-tall wall, which neither a step nor a drop climbs.
         fn wall(mut self, x: i32, z: i32) -> Self {
             self.solid.insert([x, 1, z]);
             self.solid.insert([x, 2, z]);
+            self
+        }
+
+        /// An otherwise-solid cell that hurts to touch, like a cactus or a
+        /// magma block — it still has a collision box, so it can carry.
+        fn hazard(mut self, x: i32, y: i32, z: i32) -> Self {
+            self.solid.insert([x, y, z]);
+            self.hazards.insert([x, y, z]);
             self
         }
     }
@@ -314,8 +331,8 @@ mod tests {
                 &NONE
             }
         }
-        fn hazard(&self, _x: i32, _y: i32, _z: i32) -> bool {
-            false
+        fn hazard(&self, x: i32, y: i32, z: i32) -> bool {
+            self.hazards.contains(&[x, y, z])
         }
     }
 
@@ -414,5 +431,20 @@ mod tests {
         let grid = Grid::floor(3, 3);
         // Feet one above the floor: settle onto it.
         assert_eq!(resolve_start(&grid, [1, 2, 1]), Some([1, 1, 1]));
+    }
+
+    #[test]
+    fn a_hazard_in_the_floor_is_not_standable() {
+        // A cactus is only ever the support cell, under the mob. It has a
+        // collision top (0.9375) so `carries` alone accepts it; the floor
+        // hazard must reject the cell above it all the same.
+        let grid = Grid::floor(5, 1).hazard(1, 0, 0);
+        assert!(
+            !standable(&grid, 1, 1, 0),
+            "the cell standing on a cactus must not be walkable"
+        );
+        // The search cannot cross the cactus on a one-wide corridor.
+        let r = search(&grid, [0, 1, 0], [4, 1, 0], 0.0, 4096);
+        assert!(!r.reached, "a corridor blocked by a cactus is unreachable");
     }
 }
