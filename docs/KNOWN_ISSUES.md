@@ -5,12 +5,12 @@
 > Current problems, engineering risks, and the **Known Deviations Registry** (Phase 1
 > compatibility gaps that are accepted on purpose).
 >
-> Last reviewed: 2026-07-28
+> Last reviewed: 2026-10-14
 
 ---
 
 ### A. Current known problems (early alpha)
-1. **Gameplay runs on 1.21.11 and 26.1–26.3 only; engine-level subsystems are still unbuilt.** The server now has a survival game layer (`crates/aether-server/src/game`: mobs, items, combat, hunger, crafting, chests, furnaces — see item 11), but it is a server-side layer, not the ECS/Flow-Field design of the roadmap; redstone, fluid flow and the full staged physics pipeline are not implemented.
+1. **Gameplay runs on 1.21.11 and 26.1–26.3 only; engine-level subsystems are still unbuilt.** The server now has a survival game layer (`crates/aether-server/src/game`: mobs, items, combat, hunger, crafting, chests, furnaces — see item 10), but it is a server-side layer, not the ECS/Flow-Field design of the roadmap; redstone and the full staged physics pipeline are not implemented.
 2. **SIMD parity only partially validated.** `Scalar / SSE4.2 / AVX2` paths are implemented and unit-tested; `AVX-512` is *detected* but routed to the AVX2 path — there is no native AVX-512 backend yet.
 3. **Determinism unproven.** Parallel subsystems must merge at Safe Points; the merge points are specified but not validated, and the work-stealing scheduler that would exercise them does not exist yet.
 4. **Experimental 1.8.9 server is unverified against a live client.** `aether-server` speaks protocol 47 in offline mode with no compression/encryption, and its framing is checked only against a raw socket client. A real Minecraft 1.8.9 client may still reject some packets (chunk-data format is the most likely gap). It binds to loopback by default and must not be exposed publicly.
@@ -25,17 +25,19 @@
    | `oak_slab` on a **bottom** face | `type=bottom` | `type=top` |
    | `oak_door` | `half=lower` only, air above | two blocks, `lower` + `upper`, facing agrees |
    | placed into water | `waterlogged=false` | `waterlogged=true` |
-   | two adjacent `oak_fence` | no connections | **still no connections** |
+   | two adjacent `oak_fence` | no connections | connect, in either build order |
 
-   What is left is exactly the class of property that is a function of *adjacent* blocks: fence, wall and pane connections; redstone wire shape; a chest becoming a double; a door's hinge side; grass turning `snowy`. These have to re-evaluate when a **neighbour** changes, not only when the block is placed, so they need a block-update propagation pass, which is a subsystem rather than a fix. A fence placed today is a correct, unconnected fence.
+   **Neighbour-dependent shapes settle both ways now.** A block-update pass (`placement::neighbour_updates`) re-runs when a neighbour changes, so a fence built *away* from an existing one connects instead of keeping the unconnected shape it was born with. It covers fences, walls, panes/bars and stair corners — the families whose shape is a pure function of the six touching cells.
+
+   What is left is the class of property that needs a wider propagation than a single reshape: redstone wire shape; a chest becoming a double; a door's hinge side; grass turning `snowy`. A fence placed today is a correct, connected fence.
 
    **Interaction now beats placement.** Clicking a door, trapdoor or fence gate toggles it instead of building against it — the reported "door opens and instantly shuts with a block in front of it" was the server placing a block where the client had predicted an opening, and the ack then reverting the prediction. Both halves of a door toggle together. Sneaking still builds against it, or a door could never be placed beside another. Detected from the block's own data — anything declaring an `open` property — so there is no list to maintain.
 
-   **Stairs take their corner shape**, transcribed from `StairBlock`'s bytecode in the 1.21.11 server rather than from memory: the four corner cases differ only in which of `left` and `right` they name. Computed at placement, which is where vanilla computes it too; vanilla *also* recomputes when a neighbour changes, and that still needs the update pass.
+   **Stairs take their corner shape**, transcribed from `StairBlock`'s bytecode in the 1.21.11 server rather than from memory: the four corner cases differ only in which of `left` and `right` they name. Computed at placement, and re-computed by the neighbour-update pass when a neighbour changes — both places vanilla computes it.
 
    **Open question, measured but not explained:** a headless client's *view* of a toggled door trails the server by a click or two, while the server's own state is right every time and nothing is placed in front. It may be the client's prediction handling rather than ours — mineflayer's differs from the game's — so this wants checking with a real client before it is chased.
 
-   Two smaller gaps inside the part that does work:
+   Three smaller gaps inside the part that does work:
    - **Attachment-based facing is not distinguished from look-based facing.** A ladder or a wall torch takes its direction from the surface it is on; nothing in the block's own data says so, and they get the look-based answer.
    - **Anvils are 90 degrees out.** `AnvilBlock` uses `getClockWise()`, a third rule that is not implemented.
    - **Properties do not vary within a block.** An open door still collides, an unlit redstone lamp still emits nothing, a double slab is not a full opaque cube. `minecraft-data` publishes light and bounding box per *block*; closing this means asking the game itself, which is the technique the worldgen work uses.
@@ -44,15 +46,13 @@
 
 8. **Vanilla worldgen: decoration is vanilla-like, not exact; some features and all structures are missing.** Terrain shape, biomes, surface rules (now including `temperature`, `steep`, `hole` and badlands banding) and carvers are matched stage by stage against the game's own generator. The decoration step runs the pack's placed features with the game's seeds and order, and lands 99.7% of all blocks and 96.7% of top blocks against a vanilla server world — but it is not position-exact: vanilla's result depends on which neighbouring chunks were decorated first, and trees, ores and plants overlapping a chunk border settle differently. Leaf `distance` values differ in a few percent of leaves. Not generated at all: structures (villages, mineshafts, strongholds…), geodes, dungeons, fossils, dripstone, sculk, root systems, desert wells; multiface growths (glow lichen) are placed without spreading. `minecraft:cinnabar` and `minecraft:sulfur` are not in this engine's block registry, so those surface leaves fall through rather than placing a substitute.
 
-   ~~**Biomes are generated but not sent.**~~ **Fixed on 1.21.11:** the codec registers all 65 biomes (temperature and precipitation from `minecraft-data`, rainfall and water colours by family, vanilla's sky-colour formula) and writes each section's 64 entries as a paletted container; the other codecs and the noise generator still show plains. The block containers also widen past four bits now — a decorated section with more than sixteen states used to corrupt the column.
+   **Biomes are sent on 1.21.11:** the codec registers all 65 biomes (temperature and precipitation from `minecraft-data`, rainfall and water colours by family, vanilla's sky-colour formula) and writes each section's 64 entries as a paletted container; the other codecs and the noise generator still show plains. The block containers also widen past four bits — a decorated section with more than sixteen states used to corrupt the column.
 
    **Throughput is no longer the problem.** It was: the generator once managed 35 columns in 120 s against a live client, about 10 s a column. Two bugs in the density graph's node cache did it — the `cache_once` / `cache_2d` / `flat_cache` markers were no-ops that memoized nothing, and the cell-corner cache packed `x0`/`y0`/`z0` into overlapping bit ranges, so with `min_y = -64` it collided on nearly every lookup. A third fix sized the corner cache to the real working set. Measured against a real 1.21.11 client at view radius 8: **spawn at 1.87 s, all 289 columns in ~21 s** cold, and within the first five seconds once the column cache is warm.
 
-9. ~~**A joining client's input is not acted on until its columns have finished streaming.**~~ **Fixed:** columns now stream from a per-player thread (nearest first, re-targeted as the player moves), so the connection thread keeps reading input while the horizon generates.
+9. **No headless-client regression suite yet.** `tools/probe` connects a real 1.21.11 client (mineflayer) and reports what the server actually sends; it found two live defects in one run — a seven-entry item→block table that placed every other block as **stone**, and a missing `set_health` that stalled every bot client before spawn. It is a set of scripts, not a test suite, and nothing runs it automatically. For 26.x, `tools/wire` goes further: a client compiled against the release's own server jar decodes every packet with the game's codecs and builds the registries as the client does. On its first runs it found two defects mineflayer cannot see: 26.3's byte-array `BitSet` (every chunk's light masks misread) and cave/void air counted as blocks in each section's non-air count. It needs the release's jar and Java 25, so CI does not run it either.
 
-10. **No headless-client regression suite yet.** `tools/probe` connects a real 1.21.11 client (mineflayer) and reports what the server actually sends; it found two live defects in one run — a seven-entry item→block table that placed every other block as **stone**, and a missing `set_health` that stalled every bot client before spawn. It is a set of scripts, not a test suite, and nothing runs it automatically. For 26.x, `tools/wire` goes further: a client compiled against the release's own server jar decodes every packet with the game's codecs and builds the registries as the client does. On its first runs it found two defects mineflayer cannot see: 26.3's byte-array `BitSet` (every chunk's light masks misread) and cave/void air counted as blocks in each section's non-air count. It needs the release's jar and Java 25, so CI does not run it either.
-
-11. **What the survival layer does not do yet** (1.21.11 and 26.1–26.3; every older codec ignores the gameplay events and keeps its older, client-trusting subset — no mobs, no server-side windows):
+10. **What the survival layer does not do yet** (1.21.11 and 26.1–26.3; every older codec ignores the gameplay events and keeps its older, client-trusting subset — no mobs, no server-side windows):
     - **Mob AI is straight-line.** Mobs walk towards their goal, jump one-block steps and refuse unclimbable drops; there is no pathfinding around obstacles, no door opening, no climbing for spiders. Eight kinds exist: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider. No breeding, taming, villagers or the Nether/End mobs.
     - **No redstone, crop growth, leaf decay, fire spread or falling sand/gravel.** Water and lava **do flow** now (`game/fluids.rs`: scheduled updates with vanilla delays, levels, falls, slope-seeking, infinite water, lava + water → obsidian/cobblestone/stone), but flowing water does not push mobs or items, waterlogged blocks do not flow, and generated water only starts moving when something next to it changes.
     - **No enchanting, brewing, anvils, smithing, villager trading, beds only set the spawn point and skip the night.** Status effects (golden apples, poison) are not applied; foods restore hunger only.
@@ -62,9 +62,9 @@
     - **Anti-cheat is minimal**: mining time is checked at half the expected duration, reach at 6 blocks; movement is trusted.
     - **Light is not consulted for spawning**: monsters spawn at night under open sky, or at any time under cover.
 
-12. **The journal keeps every event forever.** Loading a column no longer replays its whole history (per-column checkpoints), but the history itself still grows without bound on disk; grouped revisions and packed cold segments are the plan (ROADMAP, Phase 1 "History at scale"). Fluid flow is written without a journal entry, so in a sub-chunk rebuilt after a generator change, flowing water resets to what the generator made until something disturbs it.
+11. **The journal keeps every event forever.** Loading a column no longer replays its whole history (per-column checkpoints), but the history itself still grows without bound on disk; grouped revisions and packed cold segments are the plan (ROADMAP, Phase 1 "History at scale"). Fluid flow is written without a journal entry, so in a sub-chunk rebuilt after a generator change, flowing water resets to what the generator made until something disturbs it.
 
-13. **Item provenance has known blind spots.** A stack that merges into one already in a slot ends there (its uid is destroyed and the other's count grows), so that hop has no *derived from* edge; events are per click, not per operation, until revisions group them; the economy still journals its own moves with uids of their own beside the real ones; items in inventories from before this change were never minted, so their first event reads as an anomaly in `/audit`; fights and trades between players are not recorded yet.
+12. **Item provenance has known blind spots.** A stack that merges into one already in a slot ends there (its uid is destroyed and the other's count grows), so that hop has no *derived from* edge; events are per click, not per operation, until revisions group them; the economy still journals its own moves with uids of their own beside the real ones; items in inventories from before this change were never minted, so their first event reads as an anomaly in `/audit`; fights and trades between players are not recorded yet.
 
 ### B. Known Deviations Registry (Phase 1 — accepted on purpose)
 These are **not bugs** in Phase 1 — they are documented, temporary compatibility gaps that must be recorded in the engine config and closed in Phase 2.
@@ -76,14 +76,14 @@ These are **not bugs** in Phase 1 — they are documented, temporary compatibili
 | **Update order** | Simultaneous redstone updates ordered by the parallel graph | Strict deterministic directional-priority queue |
 | **Entity spawn** | Batched async spawn every N ticks (every 40 ticks, per-player caps, sky/darkness test without light levels) | Per-tick precise spawner |
 | **Mob AI** | Straight-line steering with step jumps and drop avoidance | Flow-Field navigation + cached A\* |
-| **Lighting** | `FullBright` fallback — every block is fully lit | Async cell-based flood-fill with safe-point merges |
+| **Lighting** | Real block/sky light by mask dilation, but recomputed per chunk send and per column only: no incremental relight on a block change, no cross-column propagation, no caching. The demo and the 1.8.9 codec still read `FullBright` | Incremental relight off journal events, cross-column propagation, caching |
 
 ### C. Engineering risks & trade-offs
 - **RAM overhead: +15–25%.** SoA masks, Morton order, and redstone graphs cost more memory than classic structures. Accepted for cache-locality and SIMD wins.
 - **x86-64 first.** The first version targets x86-64 with AVX2; other ISAs are deferred. Users on ARM/RISC-V are unsupported until later.
 - **Determinism vs. parallelism.** Aggressive parallelism increases the risk of non-deterministic results if Safe-Point merges are wrong — needs strong test coverage.
 - **Compatibility ceiling in Phase 1.** 70–75% Vanilla compliance means some contraptions (QC-dependent redstone, tick-perfect fluids) will behave differently until Phase 2.
-- **External dependency choices.** RocksDB vs. Fjall, Elixir/OTP vs. C++/Rust for the Gateway — not finalized; a wrong pick is expensive to reverse.
+- **External dependency choices.** Fjall was chosen over RocksDB for the KV store (it is what the engine uses); Elixir/OTP vs. C++/Rust for the Gateway is not finalized, and a wrong pick is expensive to reverse.
 
 ### D. How to report a problem
 Open a GitHub issue with: the subsystem, whether it's a **bug** or an **accepted deviation** (check the table above first), reproduction steps, and — for performance issues — a Tracy capture or the relevant benchmark scenario. See [CONTRIBUTING.md](../CONTRIBUTING.md).
