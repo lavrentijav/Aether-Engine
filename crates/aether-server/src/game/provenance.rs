@@ -54,14 +54,6 @@ struct Entry {
 
 type Seen = HashMap<ItemUid, Entry>;
 
-/// The name an event still records for an item id (P1d moves the events onto
-/// ids too). A modded id has no name here.
-fn event_item_name(item: aether_world::ItemTypeId) -> String {
-    crate::inventory::item_name(item)
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("item#{}", item.0))
-}
-
 fn add(seen: &mut Seen, s: &Stack, place: Place) {
     if s.count > 0 {
         seen.insert(
@@ -191,7 +183,7 @@ pub fn mint_on_ground(
         actor,
         EventBody::ItemMint {
             uid: stack.uid,
-            item: event_item_name(stack.item),
+            item: stack.item,
             count: stack.count,
             to: at,
         },
@@ -348,13 +340,13 @@ fn diff(before: &Seen, after: &Seen) -> Vec<EventBody> {
             }),
             None if sources.is_empty() => made.push(EventBody::ItemMint {
                 uid: *uid,
-                item: event_item_name(a.item),
+                item: a.item,
                 count: a.count,
                 to: a.place,
             }),
             None => made.push(EventBody::ItemDerive {
                 uid: *uid,
-                item: event_item_name(a.item),
+                item: a.item,
                 count: a.count,
                 to: a.place,
                 from: sources.clone(),
@@ -435,7 +427,7 @@ mod tests {
             ev[1],
             EventBody::ItemDerive {
                 uid: ItemUid(2),
-                item: "minecraft:oak_planks".into(),
+                item: crate::inventory::item("minecraft:oak_planks"),
                 count: 4,
                 to: inv(CURSOR_SLOT),
                 from: vec![ItemUid(1)]
@@ -465,7 +457,7 @@ mod tests {
             vec![
                 EventBody::ItemDerive {
                     uid: ItemUid(6),
-                    item: "minecraft:diamond".into(),
+                    item: crate::inventory::item("minecraft:diamond"),
                     count: 3,
                     to: inv(36),
                     from: vec![ItemUid(5)]

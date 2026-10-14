@@ -11,6 +11,8 @@
 #![cfg_attr(not(feature = "postgres"), allow(dead_code))]
 
 use aether_world::journal::ActorId;
+use aether_world::registry::items::display_name;
+use aether_world::ItemTypeId;
 
 /// An amount of money, in minor units (hundredths).
 ///
@@ -101,7 +103,7 @@ pub struct Listing {
     /// Seller's name at the time of listing, for display. Stored rather than
     /// looked up because the seller may be offline when someone browses.
     pub seller_name: String,
-    pub item: String,
+    pub item: ItemTypeId,
     /// How many are still on offer.
     pub count: u64,
     /// Price for one.
@@ -125,7 +127,8 @@ impl Listing {
 
     /// A one-line description for the market window.
     pub fn describe(&self, now_ms: u64) -> String {
-        let short = self.item.split_once(':').map_or(&*self.item, |(_, n)| n);
+        let name = display_name(self.item);
+        let short = name.split_once(':').map_or(&*name, |(_, n)| n);
         let left = match self.expires_ms {
             Some(e) if e > now_ms => {
                 format!(" ({} left)", crate::economy::model::until(e - now_ms))
@@ -260,7 +263,7 @@ mod tests {
             id: 1,
             seller: ActorId(1),
             seller_name: "alice".into(),
-            item: "minecraft:diamond".into(),
+            item: crate::inventory::item("minecraft:diamond"),
             count,
             unit_price: Money(price),
             created_ms: 0,

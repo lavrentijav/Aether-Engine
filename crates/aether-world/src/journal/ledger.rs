@@ -23,6 +23,7 @@
 
 use super::event::{Event, EventBody, ItemUid, Place};
 use crate::storage::{KvBackend, StorageError};
+use crate::ItemTypeId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -54,8 +55,8 @@ pub enum Anomaly {
 /// What the ledger knows about one item instance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Instance {
-    /// Registry name, e.g. `minecraft:diamond`.
-    pub item: String,
+    /// The item type, by the world's registry id.
+    pub item: ItemTypeId,
     pub count: u8,
     /// Where it is now, or [`Place::Nowhere`] once destroyed.
     pub at: Place,
@@ -97,14 +98,14 @@ impl Ledger {
                 item,
                 count,
                 to,
-            } => self.mint(e.seq, *uid, item, *count, *to, Vec::new()),
+            } => self.mint(e.seq, *uid, *item, *count, *to, Vec::new()),
             EventBody::ItemDerive {
                 uid,
                 item,
                 count,
                 to,
                 from,
-            } => self.mint(e.seq, *uid, item, *count, *to, from.clone()),
+            } => self.mint(e.seq, *uid, *item, *count, *to, from.clone()),
             EventBody::ItemMove {
                 uid,
                 from,
@@ -175,7 +176,7 @@ impl Ledger {
         &mut self,
         seq: u64,
         uid: ItemUid,
-        item: &str,
+        item: ItemTypeId,
         count: u8,
         to: Place,
         derived_from: Vec<ItemUid>,
@@ -187,7 +188,7 @@ impl Ledger {
         self.items.insert(
             uid,
             Instance {
-                item: item.to_owned(),
+                item,
                 count,
                 at: to,
                 minted_at: seq,

@@ -161,6 +161,14 @@ fn short_place(p: &aether_world::journal::Place) -> String {
     }
 }
 
+/// The display name of an item id, resolved through the world's registry so a
+/// modded item reads by its real name.
+fn item_name(world: &DemoWorld, id: aether_world::ItemTypeId) -> String {
+    world
+        .item_name(id)
+        .unwrap_or_else(|| format!("item#{}", id.0))
+}
+
 fn describe_body(
     e: &Event,
     world: &DemoWorld,
@@ -195,12 +203,14 @@ fn describe_body(
             to: aether_world::journal::Place::Ground { x, y, z },
             ..
         } => Some(format!(
-            "  {ago} {count}x {item} dropped at {x} {y} {z}  #{}",
+            "  {ago} {count}x {} dropped at {x} {y} {z}  #{}",
+            item_name(world, *item),
             e.seq
         )),
         EventBody::ItemMint { item, count, .. } => Some(format!(
-            "  {ago} {} received {count}x {item}  #{}",
+            "  {ago} {} received {count}x {}  #{}",
             actor_name(e.actor.0),
+            item_name(world, *item),
             e.seq
         )),
         EventBody::ItemMove {
@@ -222,8 +232,9 @@ fn describe_body(
         EventBody::ItemDerive {
             item, count, from, ..
         } => Some(format!(
-            "  {ago} {} made {count}x {item} from {} item(s)  #{}",
+            "  {ago} {} made {count}x {} from {} item(s)  #{}",
             actor_name(e.actor.0),
+            item_name(world, *item),
             from.len(),
             e.seq
         )),

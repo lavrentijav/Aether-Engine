@@ -1318,15 +1318,11 @@ fn record_slot_change(
         );
     }
     if let Some(now) = change.added {
-        // The event still names the item (see P1d); resolve the id here.
-        let item = world
-            .item_name(now.item)
-            .unwrap_or_else(|| format!("item#{}", now.item.0));
         let _ = journal.append(
             actor,
             aether_world::journal::EventBody::ItemMint {
                 uid: now.uid,
-                item,
+                item: now.item,
                 count: now.count,
                 to: where_,
             },

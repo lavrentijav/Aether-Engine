@@ -38,6 +38,7 @@
 #[cfg(feature = "postgres")]
 use aether_world::journal::EventSink;
 use aether_world::journal::{Event, EventBody, Place};
+use aether_world::registry::items::display_name;
 
 /// The schema. Applied on connect, so a fresh database needs no setup step.
 ///
@@ -185,7 +186,7 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
         } => {
             v[3] = Some("item_mint".into());
             v[11] = Some(uid_text(uid.0));
-            v[12] = Some(item.clone());
+            v[12] = Some(display_name(*item));
             v[13] = Some(count.to_string());
             v[15] = Some(place_text(to));
         }
@@ -215,7 +216,7 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
         } => {
             v[3] = Some("item_derive".into());
             v[11] = Some(uid_text(uid.0));
-            v[12] = Some(item.clone());
+            v[12] = Some(display_name(*item));
             v[13] = Some(count.to_string());
             v[15] = Some(place_text(to));
             let list: Vec<String> = from.iter().map(|u| uid_text(u.0)).collect();
@@ -381,7 +382,7 @@ mod live_tests {
                 cause: None,
                 body: EventBody::ItemMint {
                     uid: ItemUid(0xdead_beef),
-                    item: "minecraft:diamond".into(),
+                    item: aether_world::ItemTypeId::vanilla("minecraft:diamond").unwrap(),
                     count: 64,
                     to: Place::Inventory {
                         owner: ActorId(1),
@@ -529,7 +530,7 @@ mod tests {
             cause: None,
             body: EventBody::ItemMint {
                 uid: ItemUid(9),
-                item: "minecraft:diamond".into(),
+                item: aether_world::ItemTypeId::vanilla("minecraft:diamond").unwrap(),
                 count: 64,
                 to: Place::Inventory {
                     owner: ActorId(1),

@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::storage::MemStore;
-use crate::BlockStateId;
+use crate::{BlockStateId, ItemTypeId};
 
 const DIRT: BlockStateId = BlockStateId(3);
 const STONE: BlockStateId = BlockStateId(1);
@@ -21,6 +21,12 @@ fn bob() -> ActorId {
 
 fn set(x: i32, y: i32, z: i32, from: BlockStateId, to: BlockStateId) -> EventBody {
     EventBody::BlockSet { x, y, z, from, to }
+}
+
+/// The id of a vanilla item, for test events: a name here is a literal the
+/// game owns, so an unknown one is a typo and panics.
+fn it(name: &str) -> ItemTypeId {
+    ItemTypeId::vanilla(name).unwrap_or_else(|| panic!("{name} is not an item"))
 }
 
 #[test]
@@ -64,7 +70,7 @@ fn an_item_uid_is_eight_bytes_after_the_header() {
         cause: None,
         body: EventBody::ItemMint {
             uid: ItemUid(0x0102_0304_0506_0708),
-            item: String::new(),
+            item: ItemTypeId::AIR,
             count: 0,
             to: Place::Nowhere,
         },
@@ -113,7 +119,7 @@ fn a_truncated_blob_is_refused_at_every_length() {
         cause: None,
         body: EventBody::ItemMint {
             uid: ItemUid(9),
-            item: "minecraft:diamond".into(),
+            item: it("minecraft:diamond"),
             count: 64,
             to: Place::Inventory {
                 owner: alice(),
@@ -405,7 +411,7 @@ fn an_empty_filter_selects_everything_and_a_narrow_one_selects_nothing() {
 fn mint(uid: u64, to: Place) -> EventBody {
     EventBody::ItemMint {
         uid: ItemUid(uid),
-        item: "minecraft:diamond".into(),
+        item: it("minecraft:diamond"),
         count: 1,
         to,
     }
@@ -792,7 +798,7 @@ fn a_derived_item_and_a_cause_survive_a_round_trip() {
         cause: Some(4),
         body: EventBody::ItemDerive {
             uid: ItemUid(0x42),
-            item: "minecraft:iron_pickaxe".into(),
+            item: it("minecraft:iron_pickaxe"),
             count: 1,
             to: Place::Inventory {
                 owner: alice(),
@@ -842,7 +848,7 @@ fn the_ledger_remembers_what_an_item_was_made_from() {
         cause: None,
         body: EventBody::ItemMint {
             uid: ItemUid(uid),
-            item: item.into(),
+            item: it(item),
             count: 1,
             to: inv(seq as i16),
         },
@@ -857,7 +863,7 @@ fn the_ledger_remembers_what_an_item_was_made_from() {
             cause: None,
             body: EventBody::ItemDerive {
                 uid: ItemUid(12),
-                item: "minecraft:iron_pickaxe".into(),
+                item: it("minecraft:iron_pickaxe"),
                 count: 1,
                 to: inv(5),
                 from: vec![ItemUid(10), ItemUid(11)],
@@ -881,7 +887,7 @@ fn append_caused_records_the_cause() {
             alice(),
             EventBody::ItemMint {
                 uid: ItemUid(5),
-                item: "minecraft:diamond".into(),
+                item: it("minecraft:diamond"),
                 count: 1,
                 to: Place::Ground { x: 1, y: 2, z: 3 },
             },

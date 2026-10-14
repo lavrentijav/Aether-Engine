@@ -63,7 +63,7 @@ pub fn dispatch(
         "balance" | "bal" | "money" => balance(args, handle, registry, econ),
         "pay" => pay(args, handle, registry, econ),
         "sell" => sell(args, handle, world, econ),
-        "market" => market(args, handle, registry, econ),
+        "market" => market(args, handle, registry, world, econ),
         "buy" => buy(args, handle, registry, world, econ),
         "listings" => listings(handle, econ),
         "unlist" => unlist(args, handle, registry, world, econ),
@@ -217,7 +217,6 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
     let Some(item) = handle.held_item() else {
         return Reply(vec!["you are not holding anything".into()]);
     };
-    // The economy still speaks names (P1d moves its listings onto ids).
     let item_name = world
         .item_name(item)
         .unwrap_or_else(|| format!("item#{}", item.0));
@@ -233,12 +232,11 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
     handle.inventory().take(item, count);
     handle.sync_inventory(world);
 
-    match econ.list(ActorId(handle.uuid), &item_name, count, price, expires) {
+    match econ.list(ActorId(handle.uuid), item, count, price, expires) {
         Ok(id) => {
             journal_move(
                 world,
                 ActorId(handle.uuid),
-                &item_name,
                 count,
                 Place::Inventory {
                     owner: ActorId(handle.uuid),
@@ -264,7 +262,7 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
 
 /// Record an item leaving or arriving somewhere, so the ledger keeps up with
 /// trades as well as with slot edits.
-fn journal_move(world: &DemoWorld, actor: ActorId, item: &str, count: u64, from: Place, to: Place) {
+fn journal_move(world: &DemoWorld, actor: ActorId, count: u64, from: Place, to: Place) {
     let _ = world.journal().append(
         actor,
         EventBody::ItemMove {
@@ -277,13 +275,13 @@ fn journal_move(world: &DemoWorld, actor: ActorId, item: &str, count: u64, from:
             count: count.min(u8::MAX as u64) as u8,
         },
     );
-    let _ = item;
 }
 
 fn market(
     args: &[&str],
     handle: &PlayerHandle,
     registry: &SharedRegistry,
+    world: &DemoWorld,
     econ: &dyn Economy,
 ) -> Reply {
     let mut filter = MarketFilter {
@@ -296,11 +294,15 @@ fn market(
         };
         match key {
             "item" | "i" => {
-                filter.item = Some(if value.contains(':') {
+                let name = if value.contains(':') {
                     value.to_string()
                 } else {
                     format!("minecraft:{value}")
-                })
+                };
+                match world.item_id(&name) {
+                    Some(id) => filter.item = Some(id),
+                    None => return Reply(vec![format!("unknown item `{name}`")]),
+                }
             }
             "seller" | "s" => match registry.uuid_of(value) {
                 Some(u) => filter.seller = Some(ActorId(u)),
@@ -363,14 +365,11 @@ fn buy(
             // and can be picked up once they make room. This is why the seam
             // between the committed transaction and the inventory is
             // survivable rather than merely reported.
-            let (_, dropped) = match world.item_id(&p.item) {
-                Some(item) => crate::ground::give_or_drop(handle, registry, world, item, p.count),
-                None => (0, p.count),
-            };
+            let (_, dropped) =
+                crate::ground::give_or_drop(handle, registry, world, p.item, p.count);
             journal_move(
                 world,
                 me,
-                &p.item,
                 p.count,
                 Place::Nowhere,
                 Place::Inventory {
@@ -378,7 +377,10 @@ fn buy(
                     slot: -1,
                 },
             );
-            let mut lines = vec![format!("bought {}x {} for {}", p.count, p.item, p.paid)];
+            let name = world
+                .item_name(p.item)
+                .unwrap_or_else(|| format!("item#{}", p.item.0));
+            let mut lines = vec![format!("bought {}x {} for {}", p.count, name, p.paid)];
             if dropped > 0 {
                 lines.push(format!("{dropped} would not fit and fell at your feet"));
             }
@@ -421,14 +423,11 @@ fn unlist(
     match econ.cancel(ActorId(handle.uuid), id) {
         Ok(l) => {
             let me = ActorId(handle.uuid);
-            let (_, dropped) = match world.item_id(&l.item) {
-                Some(item) => crate::ground::give_or_drop(handle, registry, world, item, l.count),
-                None => (0, l.count),
-            };
+            let (_, dropped) =
+                crate::ground::give_or_drop(handle, registry, world, l.item, l.count);
             journal_move(
                 world,
                 me,
-                &l.item,
                 l.count,
                 Place::Nowhere,
                 Place::Inventory {
@@ -436,7 +435,10 @@ fn unlist(
                     slot: -1,
                 },
             );
-            let mut lines = vec![format!("withdrew #{id}: {}x {}", l.count, l.item)];
+            let name = world
+                .item_name(l.item)
+                .unwrap_or_else(|| format!("item#{}", l.item.0));
+            let mut lines = vec![format!("withdrew #{id}: {}x {}", l.count, name)];
             if dropped > 0 {
                 lines.push(format!("{dropped} would not fit and fell at your feet"));
             }

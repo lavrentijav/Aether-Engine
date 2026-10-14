@@ -38,12 +38,6 @@ pub fn item(name: &str) -> ItemTypeId {
     ItemTypeId::vanilla(name).unwrap_or_else(|| panic!("{name} is not an item in this release"))
 }
 
-/// The canonical name of an item id, for display and the name-keyed game
-/// tables. `None` for a modded item the vanilla table does not name.
-pub fn item_name(id: ItemTypeId) -> Option<&'static str> {
-    id.vanilla_name()
-}
-
 /// Slots in a player's own window: 9 crafting/armour + 27 main + 9 hotbar +
 /// the offhand.
 pub const SLOTS: usize = 46;
