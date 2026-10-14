@@ -7,6 +7,7 @@
 //! event needs no other state, so a rollback is a backwards walk and not a
 //! replay from the beginning of the world.
 
+use crate::registry::items::ItemTypeId;
 use crate::BlockStateId;
 
 /// Who caused an event.
@@ -63,8 +64,9 @@ pub enum EventBody {
     /// these; a uid that appears without one is the signature of a dupe.
     ItemMint {
         uid: ItemUid,
-        /// Registry name of the item, e.g. `minecraft:stone`.
-        item: String,
+        /// The item type, by the world's registry id. Names live at the edges
+        /// (commands, the PostgreSQL mirror), never in the log.
+        item: ItemTypeId,
         count: u8,
         to: Place,
     },
@@ -84,7 +86,7 @@ pub enum EventBody {
     /// with a pedigree — the edge provenance follows backwards.
     ItemDerive {
         uid: ItemUid,
-        item: String,
+        item: ItemTypeId,
         count: u8,
         to: Place,
         /// The instances it was made from, as they were consumed or reduced
@@ -142,7 +144,10 @@ impl Place {
 /// Bumped whenever the layout below changes. A blob whose first byte is not
 /// this is refused rather than guessed at: a misread journal would undo the
 /// wrong blocks, which is worse than refusing to undo anything.
-pub const FORMAT_VERSION: u8 = 2;
+///
+/// Version 3 replaced the item type's `String` name with a two-byte
+/// [`ItemTypeId`].
+pub const FORMAT_VERSION: u8 = 3;
 
 /// Errors from [`Event::decode`].
 #[derive(Debug, PartialEq)]
@@ -245,13 +250,6 @@ impl<'a> Cur<'a> {
     fn u128(&mut self) -> Result<u128, DecodeError> {
         Ok(u128::from_be_bytes(self.take(16)?.try_into().unwrap()))
     }
-    fn string(&mut self) -> Result<String, DecodeError> {
-        let n = self.u32()? as usize;
-        let s = self.take(n)?;
-        std::str::from_utf8(s)
-            .map(str::to_owned)
-            .map_err(|_| DecodeError::NotUtf8)
-    }
     fn place(&mut self) -> Result<Place, DecodeError> {
         match self.u8()? {
             PLACE_INVENTORY => Ok(Place::Inventory {
@@ -300,8 +298,7 @@ impl Event {
             } => {
                 out.push(TAG_ITEM_MINT);
                 out.extend_from_slice(&uid.0.to_be_bytes());
-                out.extend_from_slice(&(item.len() as u32).to_be_bytes());
-                out.extend_from_slice(item.as_bytes());
+                out.extend_from_slice(&item.0.to_be_bytes());
                 out.push(*count);
                 put_place(&mut out, to);
             }
@@ -331,8 +328,7 @@ impl Event {
             } => {
                 out.push(TAG_ITEM_DERIVE);
                 out.extend_from_slice(&uid.0.to_be_bytes());
-                out.extend_from_slice(&(item.len() as u32).to_be_bytes());
-                out.extend_from_slice(item.as_bytes());
+                out.extend_from_slice(&item.0.to_be_bytes());
                 out.push(*count);
                 put_place(&mut out, to);
                 out.extend_from_slice(&(from.len() as u16).to_be_bytes());
@@ -368,7 +364,7 @@ impl Event {
             },
             TAG_ITEM_MINT => EventBody::ItemMint {
                 uid: ItemUid(c.u64()?),
-                item: c.string()?,
+                item: ItemTypeId(c.u16()?),
                 count: c.u8()?,
                 to: c.place()?,
             },
@@ -384,7 +380,7 @@ impl Event {
             },
             TAG_ITEM_DERIVE => {
                 let uid = ItemUid(c.u64()?);
-                let item = c.string()?;
+                let item = ItemTypeId(c.u16()?);
                 let count = c.u8()?;
                 let to = c.place()?;
                 let n = c.u16()?;

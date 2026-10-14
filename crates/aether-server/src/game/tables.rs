@@ -6,7 +6,62 @@
 //! rest of the server uses — and the generated tables are sorted by name, so
 //! each is a binary search.
 
+use aether_world::ItemTypeId;
+
 use super::data;
+
+// The id-keyed forms of the name-keyed lookups below: hot code holds an
+// `ItemTypeId`, but the game data is keyed by name. Every hot id is a vanilla
+// item, so its name is a table lookup, and a modded id falls back to the same
+// default the name-keyed lookup gives an unknown name.
+
+/// The most of `item` one slot may hold.
+pub fn max_stack_id(item: ItemTypeId) -> u8 {
+    match item.vanilla_name() {
+        Some(n) => max_stack(n),
+        None => 64,
+    }
+}
+
+/// How many uses a tool or armour piece has, `0` for items that do not wear.
+pub fn max_durability_id(item: ItemTypeId) -> u16 {
+    match item.vanilla_name() {
+        Some(n) => max_durability(n),
+        None => 0,
+    }
+}
+
+/// What eating `item` restores, if it is food.
+pub fn food_id(item: ItemTypeId) -> Option<Food> {
+    item.vanilla_name().and_then(food)
+}
+
+/// Which armour slot an item goes in, if any.
+pub fn armor_slot_id(item: ItemTypeId) -> Option<usize> {
+    item.vanilla_name().and_then(armor_slot)
+}
+
+/// Armour points and toughness of one piece.
+pub fn armor_points_id(item: ItemTypeId) -> (f32, f32) {
+    item.vanilla_name().map_or((0.0, 0.0), armor_points)
+}
+
+/// Attack damage and attacks per second for what is held.
+pub fn weapon_id(item: Option<ItemTypeId>) -> (f32, f32) {
+    weapon(item.and_then(|i| i.vanilla_name()))
+}
+
+/// How many ticks an item burns as furnace fuel.
+pub fn fuel_ticks_id(item: ItemTypeId) -> u32 {
+    item.vanilla_name().map_or(0, fuel_ticks)
+}
+
+/// What smelting an item makes, as an id.
+pub fn smelt_id(item: ItemTypeId) -> Option<ItemTypeId> {
+    item.vanilla_name()
+        .and_then(smelt)
+        .map(crate::inventory::item)
+}
 
 /// What eating an item restores.
 #[derive(Debug, Clone, Copy)]

@@ -236,7 +236,7 @@ impl Mob {
     /// What it holds and wears.
     pub fn equipment(&self) -> Vec<(u8, Option<Stack>)> {
         match self.def.kind {
-            "minecraft:skeleton" => vec![(0, Some(Stack::new("minecraft:bow", 1)))],
+            "minecraft:skeleton" => vec![(0, Some(Stack::named("minecraft:bow", 1)))],
             _ => Vec::new(),
         }
     }

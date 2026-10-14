@@ -357,7 +357,10 @@ pub fn take_named(
     // them. They agree for almost everything, and where they do not the block
     // has no item at all — so the transfer is still recorded as taken, and the
     // ground layer simply has nothing to show.
-    let (_, dropped) = crate::ground::give_or_drop(handle, registry, world, name, taken);
+    let dropped = match aether_world::ItemTypeId::vanilla(name) {
+        Some(item) => crate::ground::give_or_drop(handle, registry, world, item, taken).1,
+        None => 0,
+    };
     (taken, dropped)
 }
 

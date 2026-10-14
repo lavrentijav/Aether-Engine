@@ -480,7 +480,7 @@ fn apply(world: &DemoWorld, registry: &SharedRegistry, p: Pos, to: BlockStateId)
                 z,
                 drops
                     .into_iter()
-                    .map(|(i, n)| crate::inventory::Stack::new(&i, n))
+                    .map(|(i, n)| crate::inventory::Stack::named(&i, n))
                     .collect(),
                 aether_world::journal::ActorId::SERVER,
                 None,

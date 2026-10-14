@@ -11,7 +11,7 @@
 //! [`ServerEvent::SpawnPlayer`] is encoded separately for a 1.8 viewer and a
 //! 1.21 viewer, from the same source of truth.
 
-use aether_world::BlockStateId;
+use aether_world::{BlockStateId, ItemTypeId};
 use std::io;
 
 use crate::players::{PlayerHandle, PosLook};
@@ -296,8 +296,8 @@ pub enum ServerEvent<'a> {
         x: f64,
         y: f64,
         z: f64,
-        /// `minecraft:`-qualified item name.
-        item: String,
+        /// The item type, resolved per codec to that version's own id.
+        item: ItemTypeId,
         /// May exceed a stack: see [`ContainerSlot::count`].
         count: u64,
     },
@@ -546,13 +546,13 @@ pub enum ClientEvent {
     /// In creative the client fills a slot itself and reports it here, which
     /// is how the server learns about items it never handed out.
     ///
-    /// The item is named, not numbered: item ids differ between versions, and
-    /// the inventory this feeds has to mean the same thing on all of them —
-    /// the same anchoring the block events use. `item` is `None` when the slot
-    /// was emptied.
+    /// The item arrives as the engine's own type id: item ids differ between
+    /// versions, and the inventory this feeds has to mean the same thing on all
+    /// of them — the same anchoring the block events use. `item` is `None` when
+    /// the slot was emptied, or names an item this build does not know.
     CreativeSlot {
         slot: i16,
-        item: Option<String>,
+        item: Option<ItemTypeId>,
         count: u8,
     },
     /// The player closed the open container.

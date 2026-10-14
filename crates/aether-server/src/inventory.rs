@@ -29,6 +29,14 @@
 //! is unreachable, and the mirror is derived from the journal in any case.
 
 use aether_world::journal::{ledger::mint_uid, ItemUid};
+use aether_world::ItemTypeId;
+
+/// Resolve a canonical item name to its id, for a name the game's own tables
+/// hold. An unknown name is a typo in a literal, so it is a bug and panics
+/// ([`ItemTypeId::vanilla`] is the non-panicking form).
+pub fn item(name: &str) -> ItemTypeId {
+    ItemTypeId::vanilla(name).unwrap_or_else(|| panic!("{name} is not an item in this release"))
+}
 
 /// Slots in a player's own window: 9 crafting/armour + 27 main + 9 hotbar +
 /// the offhand.
@@ -47,8 +55,9 @@ pub const STACK: u8 = 64;
 /// One stack in one slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stack {
-    /// The version-neutral item name, e.g. `minecraft:diamond`.
-    pub item: String,
+    /// The item type, an index into the world's item registry — two bytes
+    /// rather than a heap string, and compared by id.
+    pub item: ItemTypeId,
     pub count: u8,
     /// This instance's identity, stable across every move it makes.
     pub uid: ItemUid,
@@ -58,19 +67,25 @@ pub struct Stack {
 }
 
 impl Stack {
-    /// A fresh stack with its own identity.
-    pub fn new(item: &str, count: u8) -> Self {
+    /// A fresh stack of `item` with its own identity.
+    pub fn new(item: ItemTypeId, count: u8) -> Self {
         Self {
-            item: item.to_owned(),
+            item,
             count,
             uid: mint_uid(),
             damage: 0,
         }
     }
 
+    /// [`Stack::new`] from a canonical item name, for the game's own literals.
+    /// Panics on an unknown name: a typo is a bug.
+    pub fn named(item: &str, count: u8) -> Self {
+        Self::new(crate::inventory::item(item), count)
+    }
+
     /// The most of this item one slot may hold.
     pub fn max_stack(&self) -> u8 {
-        crate::game::tables::max_stack(&self.item)
+        crate::game::tables::max_stack_id(self.item)
     }
 
     /// Whether `other` could merge into this stack: same item, same wear.
@@ -83,7 +98,7 @@ impl Stack {
         let n = n.min(self.count);
         self.count -= n;
         Stack {
-            item: self.item.clone(),
+            item: self.item,
             count: n,
             uid: mint_uid(),
             damage: self.damage,
@@ -129,7 +144,7 @@ impl Inventory {
     /// slot contents freely (after a window close, a respawn, a resync), and
     /// minting on every resend would fill the ledger with thousands of
     /// one-hop instances and bury the real duplications.
-    pub fn set(&mut self, slot: usize, item: Option<(&str, u8)>) -> SlotChange {
+    pub fn set(&mut self, slot: usize, item: Option<(ItemTypeId, u8)>) -> SlotChange {
         self.ensure();
         if slot >= SLOTS {
             return SlotChange::default();
@@ -138,9 +153,9 @@ impl Inventory {
         let after = match item {
             None => None,
             Some((_, 0)) => None,
-            Some((name, count)) => match &before {
-                Some(s) if s.item == name && s.count == count => Some(s.clone()),
-                _ => Some(Stack::new(name, count)),
+            Some((item, count)) => match &before {
+                Some(s) if s.item == item && s.count == count => Some(s.clone()),
+                _ => Some(Stack::new(item, count)),
             },
         };
         let unchanged = before == after;
@@ -175,7 +190,7 @@ impl Inventory {
     /// Never merges into an existing stack: merging would have to decide which
     /// of the two uids survives, and either answer loses a trail the ledger
     /// depends on. A separate slot keeps both identities intact.
-    pub fn give(&mut self, item: &str, count: u8) -> Option<usize> {
+    pub fn give(&mut self, item: ItemTypeId, count: u8) -> Option<usize> {
         self.ensure();
         let order = (FIRST_HOTBAR..OFFHAND).chain(9..FIRST_HOTBAR);
         let slot = order.into_iter().find(|s| self.slots[*s].is_none())?;
@@ -274,9 +289,9 @@ impl Inventory {
     /// on the floor is not a detail this function should decide, but silently
     /// losing it is not an option either, which is why the count comes back
     /// rather than being discarded here.
-    pub fn give_many(&mut self, item: &str, count: u64) -> u64 {
+    pub fn give_many(&mut self, item: ItemTypeId, count: u64) -> u64 {
         let mut left = count;
-        let max = crate::game::tables::max_stack(item).min(STACK) as u64;
+        let max = crate::game::tables::max_stack_id(item).min(STACK) as u64;
         while left > 0 {
             let chunk = left.min(max) as u8;
             match self.insert(Stack::new(item, chunk)) {
@@ -292,7 +307,7 @@ impl Inventory {
 
     /// Remove `count` of `item`, across as many slots as it takes. Returns how
     /// many were actually removed.
-    pub fn take(&mut self, item: &str, mut count: u64) -> u64 {
+    pub fn take(&mut self, item: ItemTypeId, mut count: u64) -> u64 {
         self.ensure();
         let mut taken = 0;
         for slot in self.slots.iter_mut() {
@@ -315,7 +330,7 @@ impl Inventory {
     }
 
     /// How many of `item` are held, across every slot.
-    pub fn count_of(&self, item: &str) -> u64 {
+    pub fn count_of(&self, item: ItemTypeId) -> u64 {
         self.slots
             .iter()
             .flatten()
@@ -362,11 +377,12 @@ impl SlotChange {
 /// this is refused rather than guessed at: a misread inventory would hand a
 /// player somebody else's items.
 ///
-/// Version 3 narrowed item uids from 16 bytes to 8 (see
+/// Version 4 stores the item as a two-byte id rather than a length-prefixed
+/// name; version 3 narrowed item uids from 16 bytes to 8 (see
 /// [`aether_world::journal::event::ItemUid`]); version 2 added the wear field.
 /// There is no backwards compatibility branch: old worlds are wiped, and
 /// guessing at an old layout risks handing a player the wrong items.
-pub const FORMAT_VERSION: u8 = 3;
+pub const FORMAT_VERSION: u8 = 4;
 
 /// Serialize for the KV store.
 pub fn encode(inv: &Inventory) -> Vec<u8> {
@@ -378,8 +394,7 @@ pub fn encode(inv: &Inventory) -> Vec<u8> {
         out.push(s.count);
         out.extend_from_slice(&s.uid.0.to_be_bytes());
         out.extend_from_slice(&s.damage.to_be_bytes());
-        out.extend_from_slice(&(s.item.len() as u16).to_be_bytes());
-        out.extend_from_slice(s.item.as_bytes());
+        out.extend_from_slice(&s.item.0.to_be_bytes());
     }
     out
 }
@@ -408,8 +423,7 @@ pub fn decode(blob: &[u8]) -> Option<Inventory> {
         let count = take(1)?[0];
         let uid = u64::from_be_bytes(take(8)?.try_into().ok()?);
         let damage = u16::from_be_bytes(take(2)?.try_into().ok()?);
-        let len = u16::from_be_bytes(take(2)?.try_into().ok()?) as usize;
-        let item = std::str::from_utf8(take(len)?).ok()?.to_owned();
+        let item = ItemTypeId(u16::from_be_bytes(take(2)?.try_into().ok()?));
         if slot < SLOTS && count > 0 {
             inv.slots[slot] = Some(Stack {
                 item,
@@ -437,6 +451,11 @@ pub fn key(uuid: u128) -> [u8; 17] {
 mod tests {
     use super::*;
 
+    /// A canonical item id by name, for the tests' literals.
+    fn it(name: &str) -> ItemTypeId {
+        item(name)
+    }
+
     #[test]
     fn a_new_inventory_is_empty_and_holds_the_first_hotbar_slot() {
         let inv = Inventory::new();
@@ -448,8 +467,8 @@ mod tests {
     #[test]
     fn every_stack_gets_its_own_identity() {
         let mut inv = Inventory::new();
-        inv.set(36, Some(("minecraft:stone", 64)));
-        inv.set(37, Some(("minecraft:stone", 64)));
+        inv.set(36, Some((it("minecraft:stone"), 64)));
+        inv.set(37, Some((it("minecraft:stone"), 64)));
         let a = inv.get(36).unwrap().uid;
         let b = inv.get(37).unwrap().uid;
         assert_ne!(a, b, "two stacks of the same item are two instances");
@@ -460,9 +479,9 @@ mod tests {
         // Clients resend slot contents freely. Minting on every resend would
         // bury real duplications under thousands of one-hop instances.
         let mut inv = Inventory::new();
-        inv.set(36, Some(("minecraft:stone", 64)));
+        inv.set(36, Some((it("minecraft:stone"), 64)));
         let first = inv.get(36).unwrap().uid;
-        let change = inv.set(36, Some(("minecraft:stone", 64)));
+        let change = inv.set(36, Some((it("minecraft:stone"), 64)));
         assert!(change.is_noop(), "an identical report is not a change");
         assert_eq!(inv.get(36).unwrap().uid, first);
     }
@@ -473,9 +492,9 @@ mod tests {
         // would let a client grow a stack in place with no event to show for
         // it — precisely the shape of a duplication.
         let mut inv = Inventory::new();
-        inv.set(36, Some(("minecraft:stone", 1)));
+        inv.set(36, Some((it("minecraft:stone"), 1)));
         let first = inv.get(36).unwrap().uid;
-        let change = inv.set(36, Some(("minecraft:stone", 64)));
+        let change = inv.set(36, Some((it("minecraft:stone"), 64)));
         assert!(!change.is_noop());
         assert_eq!(change.removed.unwrap().uid, first);
         assert_ne!(change.added.unwrap().uid, first);
@@ -484,9 +503,9 @@ mod tests {
     #[test]
     fn clearing_a_slot_reports_what_left_it() {
         let mut inv = Inventory::new();
-        inv.set(36, Some(("minecraft:diamond", 3)));
+        inv.set(36, Some((it("minecraft:diamond"), 3)));
         let change = inv.set(36, None);
-        assert_eq!(change.removed.unwrap().item, "minecraft:diamond");
+        assert_eq!(change.removed.unwrap().item, it("minecraft:diamond"));
         assert!(change.added.is_none());
         assert!(inv.is_empty());
     }
@@ -494,7 +513,7 @@ mod tests {
     #[test]
     fn a_zero_count_is_an_empty_slot_not_a_stack_of_nothing() {
         let mut inv = Inventory::new();
-        inv.set(36, Some(("minecraft:stone", 0)));
+        inv.set(36, Some((it("minecraft:stone"), 0)));
         assert!(inv.get(36).is_none());
     }
 
@@ -502,17 +521,17 @@ mod tests {
     fn a_slot_outside_the_window_is_ignored_rather_than_panicking() {
         // The slot index comes off the wire, so it is whatever a client says.
         let mut inv = Inventory::new();
-        assert!(inv.set(9999, Some(("minecraft:stone", 1))).is_noop());
+        assert!(inv.set(9999, Some((it("minecraft:stone"), 1))).is_noop());
         assert!(inv.is_empty());
     }
 
     #[test]
     fn the_held_stack_follows_the_selected_slot() {
         let mut inv = Inventory::new();
-        inv.set(FIRST_HOTBAR + 3, Some(("minecraft:torch", 12)));
+        inv.set(FIRST_HOTBAR + 3, Some((it("minecraft:torch"), 12)));
         assert!(inv.held().is_none());
         inv.select(3);
-        assert_eq!(inv.held().unwrap().item, "minecraft:torch");
+        assert_eq!(inv.held().unwrap().item, it("minecraft:torch"));
     }
 
     #[test]
@@ -525,21 +544,25 @@ mod tests {
     #[test]
     fn giving_fills_the_hotbar_before_the_backpack() {
         let mut inv = Inventory::new();
-        assert_eq!(inv.give("minecraft:stone", 1), Some(FIRST_HOTBAR));
+        assert_eq!(inv.give(it("minecraft:stone"), 1), Some(FIRST_HOTBAR));
         for _ in 1..9 {
-            inv.give("minecraft:stone", 1);
+            inv.give(it("minecraft:stone"), 1);
         }
         // Hotbar full: the next one goes to the main inventory, not the
         // offhand.
-        let next = inv.give("minecraft:stone", 1).unwrap();
+        let next = inv.give(it("minecraft:stone"), 1).unwrap();
         assert!((9..FIRST_HOTBAR).contains(&next), "went to slot {next}");
     }
 
     #[test]
     fn a_large_gift_is_split_into_stacks() {
         let mut inv = Inventory::new();
-        assert_eq!(inv.give_many("minecraft:stone", 200), 0, "all of it fitted");
-        assert_eq!(inv.count_of("minecraft:stone"), 200);
+        assert_eq!(
+            inv.give_many(it("minecraft:stone"), 200),
+            0,
+            "all of it fitted"
+        );
+        assert_eq!(inv.count_of(it("minecraft:stone")), 200);
         let counts: Vec<u8> = inv.occupied().map(|(_, s)| s.count).collect();
         assert_eq!(
             counts,
@@ -555,54 +578,54 @@ mod tests {
         let mut inv = Inventory::new();
         let free = (FIRST_HOTBAR..OFFHAND).len() + (9..FIRST_HOTBAR).len();
         let capacity = free as u64 * STACK as u64;
-        assert_eq!(inv.give_many("minecraft:stone", capacity + 100), 100);
-        assert_eq!(inv.count_of("minecraft:stone"), capacity);
+        assert_eq!(inv.give_many(it("minecraft:stone"), capacity + 100), 100);
+        assert_eq!(inv.count_of(it("minecraft:stone")), capacity);
     }
 
     #[test]
     fn giving_exactly_a_stack_uses_exactly_one_slot() {
         let mut inv = Inventory::new();
-        assert_eq!(inv.give_many("minecraft:stone", 64), 0);
+        assert_eq!(inv.give_many(it("minecraft:stone"), 64), 0);
         assert_eq!(inv.occupied().count(), 1);
     }
 
     #[test]
     fn giving_into_a_full_inventory_fails_rather_than_overwriting() {
         let mut inv = Inventory::new();
-        while inv.give("minecraft:stone", 1).is_some() {}
-        assert_eq!(inv.give("minecraft:diamond", 1), None);
-        assert_eq!(inv.count_of("minecraft:diamond"), 0);
+        while inv.give(it("minecraft:stone"), 1).is_some() {}
+        assert_eq!(inv.give(it("minecraft:diamond"), 1), None);
+        assert_eq!(inv.count_of(it("minecraft:diamond")), 0);
     }
 
     #[test]
     fn taking_spans_slots_and_reports_a_short_fall() {
         let mut inv = Inventory::new();
-        inv.set(36, Some(("minecraft:stone", 30)));
-        inv.set(37, Some(("minecraft:stone", 30)));
-        assert_eq!(inv.count_of("minecraft:stone"), 60);
-        assert_eq!(inv.take("minecraft:stone", 45), 45);
-        assert_eq!(inv.count_of("minecraft:stone"), 15);
+        inv.set(36, Some((it("minecraft:stone"), 30)));
+        inv.set(37, Some((it("minecraft:stone"), 30)));
+        assert_eq!(inv.count_of(it("minecraft:stone")), 60);
+        assert_eq!(inv.take(it("minecraft:stone"), 45), 45);
+        assert_eq!(inv.count_of(it("minecraft:stone")), 15);
         // Asking for more than is there takes what there is and says so,
         // rather than failing and leaving the caller to guess.
-        assert_eq!(inv.take("minecraft:stone", 100), 15);
+        assert_eq!(inv.take(it("minecraft:stone"), 100), 15);
         assert!(inv.is_empty());
     }
 
     #[test]
     fn taking_leaves_other_items_alone() {
         let mut inv = Inventory::new();
-        inv.set(36, Some(("minecraft:stone", 10)));
-        inv.set(37, Some(("minecraft:diamond", 10)));
-        inv.take("minecraft:stone", 100);
-        assert_eq!(inv.count_of("minecraft:diamond"), 10);
+        inv.set(36, Some((it("minecraft:stone"), 10)));
+        inv.set(37, Some((it("minecraft:diamond"), 10)));
+        inv.take(it("minecraft:stone"), 100);
+        assert_eq!(inv.count_of(it("minecraft:diamond")), 10);
     }
 
     #[test]
     fn an_inventory_survives_a_round_trip_with_its_identities_intact() {
         let mut inv = Inventory::new();
-        inv.set(0, Some(("minecraft:crafting_table", 1)));
-        inv.set(FIRST_HOTBAR, Some(("minecraft:stone", 64)));
-        inv.set(OFFHAND, Some(("minecraft:shield", 1)));
+        inv.set(0, Some((it("minecraft:crafting_table"), 1)));
+        inv.set(FIRST_HOTBAR, Some((it("minecraft:stone"), 64)));
+        inv.set(OFFHAND, Some((it("minecraft:shield"), 1)));
         inv.select(5);
         let back = decode(&encode(&inv)).expect("decodes");
         assert_eq!(back, inv, "uids and slots must both survive");
@@ -618,9 +641,9 @@ mod tests {
     #[test]
     fn an_item_uid_is_eight_bytes_on_the_wire() {
         // One stack: version, held, count u16, then slot, count, uid, damage,
-        // name length, name. Read by hand so the width is pinned by value.
+        // item id u16. Read by hand so the width is pinned by value.
         let mut inv = Inventory::new();
-        inv.set(36, Some(("minecraft:stone", 64)));
+        inv.set(36, Some((it("minecraft:stone"), 64)));
         inv.slot_mut(36).unwrap().as_mut().unwrap().uid = ItemUid(0x0102_0304_0506_0708);
         let b = encode(&inv);
         assert_eq!(b[0], FORMAT_VERSION);
@@ -649,8 +672,8 @@ mod tests {
         // Never a partial inventory: handing a player half their items is
         // worse than handing them none and saying so.
         let mut inv = Inventory::new();
-        inv.set(36, Some(("minecraft:stone", 64)));
-        inv.set(37, Some(("minecraft:diamond_pickaxe", 1)));
+        inv.set(36, Some((it("minecraft:stone"), 64)));
+        inv.set(37, Some((it("minecraft:diamond_pickaxe"), 1)));
         let full = encode(&inv);
         for n in 0..full.len() {
             assert!(decode(&full[..n]).is_none(), "prefix of {n} bytes decoded");

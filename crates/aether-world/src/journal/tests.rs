@@ -5,8 +5,8 @@
 //! test that shares it.
 
 use super::*;
-use crate::storage::MemStore;
-use crate::BlockStateId;
+use crate::storage::{KvBackend, MemStore, StorageError};
+use crate::{BlockStateId, ItemTypeId};
 
 const DIRT: BlockStateId = BlockStateId(3);
 const STONE: BlockStateId = BlockStateId(1);
@@ -21,6 +21,12 @@ fn bob() -> ActorId {
 
 fn set(x: i32, y: i32, z: i32, from: BlockStateId, to: BlockStateId) -> EventBody {
     EventBody::BlockSet { x, y, z, from, to }
+}
+
+/// The id of a vanilla item, for test events: a name here is a literal the
+/// game owns, so an unknown one is a typo and panics.
+fn it(name: &str) -> ItemTypeId {
+    ItemTypeId::vanilla(name).unwrap_or_else(|| panic!("{name} is not an item"))
 }
 
 #[test]
@@ -64,7 +70,7 @@ fn an_item_uid_is_eight_bytes_after_the_header() {
         cause: None,
         body: EventBody::ItemMint {
             uid: ItemUid(0x0102_0304_0506_0708),
-            item: String::new(),
+            item: ItemTypeId::AIR,
             count: 0,
             to: Place::Nowhere,
         },
@@ -113,7 +119,7 @@ fn a_truncated_blob_is_refused_at_every_length() {
         cause: None,
         body: EventBody::ItemMint {
             uid: ItemUid(9),
-            item: "minecraft:diamond".into(),
+            item: it("minecraft:diamond"),
             count: 64,
             to: Place::Inventory {
                 owner: alice(),
@@ -405,7 +411,7 @@ fn an_empty_filter_selects_everything_and_a_narrow_one_selects_nothing() {
 fn mint(uid: u64, to: Place) -> EventBody {
     EventBody::ItemMint {
         uid: ItemUid(uid),
-        item: "minecraft:diamond".into(),
+        item: it("minecraft:diamond"),
         count: 1,
         to,
     }
@@ -792,7 +798,7 @@ fn a_derived_item_and_a_cause_survive_a_round_trip() {
         cause: Some(4),
         body: EventBody::ItemDerive {
             uid: ItemUid(0x42),
-            item: "minecraft:iron_pickaxe".into(),
+            item: it("minecraft:iron_pickaxe"),
             count: 1,
             to: Place::Inventory {
                 owner: alice(),
@@ -842,7 +848,7 @@ fn the_ledger_remembers_what_an_item_was_made_from() {
         cause: None,
         body: EventBody::ItemMint {
             uid: ItemUid(uid),
-            item: item.into(),
+            item: it(item),
             count: 1,
             to: inv(seq as i16),
         },
@@ -857,7 +863,7 @@ fn the_ledger_remembers_what_an_item_was_made_from() {
             cause: None,
             body: EventBody::ItemDerive {
                 uid: ItemUid(12),
-                item: "minecraft:iron_pickaxe".into(),
+                item: it("minecraft:iron_pickaxe"),
                 count: 1,
                 to: inv(5),
                 from: vec![ItemUid(10), ItemUid(11)],
@@ -881,7 +887,7 @@ fn append_caused_records_the_cause() {
             alice(),
             EventBody::ItemMint {
                 uid: ItemUid(5),
-                item: "minecraft:diamond".into(),
+                item: it("minecraft:diamond"),
                 count: 1,
                 to: Place::Ground { x: 1, y: 2, z: 3 },
             },
@@ -901,4 +907,91 @@ fn a_malformed_reservation_bound_refuses_to_open_rather_than_restart_numbering()
     assert!(ledger::UidAllocator::open(std::sync::Arc::clone(&store)).is_err());
     store.put(b"N", &[0; 5]).unwrap();
     assert!(Journal::open(std::sync::Arc::clone(&store)).is_err());
+}
+
+/// A backend that counts the work a query does — proof that a bounded command
+/// reads a bounded amount instead of materialising the whole history.
+struct Counting<B> {
+    inner: B,
+    gets: std::sync::atomic::AtomicUsize,
+    scans: std::sync::atomic::AtomicUsize,
+}
+
+impl<B: KvBackend> Counting<B> {
+    fn new(inner: B) -> Self {
+        Self {
+            inner,
+            gets: std::sync::atomic::AtomicUsize::new(0),
+            scans: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+    fn reset(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.gets.store(0, SeqCst);
+        self.scans.store(0, SeqCst);
+    }
+    fn get_calls(&self) -> usize {
+        self.gets.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn scan_prefix_calls(&self) -> usize {
+        self.scans.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl<B: KvBackend> KvBackend for Counting<B> {
+    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.inner.put(key, value)
+    }
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.get(key)
+    }
+    fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete(key)
+    }
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        self.scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.scan_prefix(prefix)
+    }
+}
+
+#[test]
+fn a_bounded_query_over_100k_events_reads_only_what_it_returns() {
+    // `/lookup` and `/audit` used to pull every event into a `Vec`; on a long
+    // history that is seconds of work and all of it in RAM. The bounded queries
+    // must touch a bounded number of entries.
+    let store = std::sync::Arc::new(Counting::new(MemStore::new()));
+    let j = Journal::open(std::sync::Arc::clone(&store)).unwrap();
+    for i in 0..100_000u64 {
+        j.append_at(alice(), set(i as i32, 64, 0, DIRT, STONE), i)
+            .unwrap();
+    }
+
+    store.reset();
+    let recent = j.recent_events(10).unwrap();
+    assert_eq!(recent.len(), 10);
+    assert_eq!(recent.first().unwrap().seq, 99_991);
+    assert_eq!(recent.last().unwrap().seq, 100_000);
+    assert_eq!(
+        store.scan_prefix_calls(),
+        0,
+        "recent_events scanned the whole event index"
+    );
+    assert!(
+        store.get_calls() <= 10,
+        "read {} events to answer for 10",
+        store.get_calls()
+    );
+
+    // By actor: the index is scanned lazily and only the newest few events
+    // are read.
+    store.reset();
+    let by_actor = j.actor_events_recent(alice(), 5).unwrap();
+    assert_eq!(by_actor.len(), 5);
+    assert_eq!(by_actor.last().unwrap().seq, 100_000);
+    assert!(
+        store.get_calls() <= 5,
+        "read {} events to answer for 5",
+        store.get_calls()
+    );
 }

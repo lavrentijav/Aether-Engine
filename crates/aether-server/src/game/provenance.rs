@@ -49,7 +49,7 @@ pub const GRID_SLOT: i16 = -10;
 struct Entry {
     place: Place,
     count: u8,
-    item: String,
+    item: aether_world::ItemTypeId,
 }
 
 type Seen = HashMap<ItemUid, Entry>;
@@ -61,7 +61,7 @@ fn add(seen: &mut Seen, s: &Stack, place: Place) {
             Entry {
                 place,
                 count: s.count,
-                item: s.item.clone(),
+                item: s.item,
             },
         );
     }
@@ -183,7 +183,7 @@ pub fn mint_on_ground(
         actor,
         EventBody::ItemMint {
             uid: stack.uid,
-            item: stack.item.clone(),
+            item: stack.item,
             count: stack.count,
             to: at,
         },
@@ -340,13 +340,13 @@ fn diff(before: &Seen, after: &Seen) -> Vec<EventBody> {
             }),
             None if sources.is_empty() => made.push(EventBody::ItemMint {
                 uid: *uid,
-                item: a.item.clone(),
+                item: a.item,
                 count: a.count,
                 to: a.place,
             }),
             None => made.push(EventBody::ItemDerive {
                 uid: *uid,
-                item: a.item.clone(),
+                item: a.item,
                 count: a.count,
                 to: a.place,
                 from: sources.clone(),
@@ -386,7 +386,7 @@ mod tests {
         Entry {
             place,
             count,
-            item: item.into(),
+            item: crate::inventory::item(item),
         }
     }
 
@@ -427,7 +427,7 @@ mod tests {
             ev[1],
             EventBody::ItemDerive {
                 uid: ItemUid(2),
-                item: "minecraft:oak_planks".into(),
+                item: crate::inventory::item("minecraft:oak_planks"),
                 count: 4,
                 to: inv(CURSOR_SLOT),
                 from: vec![ItemUid(1)]
@@ -457,7 +457,7 @@ mod tests {
             vec![
                 EventBody::ItemDerive {
                     uid: ItemUid(6),
-                    item: "minecraft:diamond".into(),
+                    item: crate::inventory::item("minecraft:diamond"),
                     count: 3,
                     to: inv(36),
                     from: vec![ItemUid(5)]

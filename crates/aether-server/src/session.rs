@@ -655,7 +655,7 @@ fn play_loop(
                     // here, from the slot and creative-slot reports, and wins.
                     let held_item = handle.held_item();
                     let held = held_item
-                        .as_deref()
+                        .and_then(|id| id.vanilla_name())
                         .and_then(|item| handle.codec.block_for_item(item));
                     let chosen = if full {
                         held
@@ -694,8 +694,10 @@ fn play_loop(
                             let clicked =
                                 crate::game::block_name(world, world.get_block(tx, ty, tz))
                                     .unwrap_or_default();
-                            let tool = held_item.clone().unwrap_or_default();
-                            if let Some(to) = interact::item_on_block(&tool, &clicked) {
+                            let tool = held_item
+                                .and_then(|id| id.vanilla_name())
+                                .unwrap_or_default();
+                            if let Some(to) = interact::item_on_block(tool, &clicked) {
                                 if let Some(state) =
                                     aether_world::registry::blocks::default_state(to)
                                 {
@@ -1296,7 +1298,7 @@ fn record_slot_change(
     handle: &crate::players::PlayerHandle,
     world: &DemoWorld,
     slot: i16,
-    item: Option<String>,
+    item: Option<aether_world::ItemTypeId>,
     count: u8,
 ) {
     let change = handle.set_creative_slot(slot, item, count);
@@ -1396,7 +1398,9 @@ fn on_block_broken(
     // from the loot tables (see `game::interact::on_broken`); the others
     // keep the older shortcut of the block going straight to them.
     if !handle.full() && crate::server_game_mode().server_grants_drops() {
-        crate::ground::give_or_drop(handle, registry, world, &name, 1);
+        if let Some(item) = aether_world::ItemTypeId::vanilla(&name) {
+            crate::ground::give_or_drop(handle, registry, world, item, 1);
+        }
     }
 
     if !crate::rewards::is_payable(&name) {

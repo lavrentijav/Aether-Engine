@@ -127,6 +127,18 @@ fn main() -> std::process::ExitCode {
         world = world.with_journal_sink(sink);
     }
     let world: Arc<DemoWorld> = Arc::new(world);
+    // Item id ⇄ name for the surfaces that still speak names — chat, /audit,
+    // the PostgreSQL mirror, the economy rows. The journal itself carries only
+    // ids; a modded item's name lives in this world's registry, so hand it to
+    // the library once, the same shape as the uid allocator just below.
+    {
+        let name_world = Arc::clone(&world);
+        let id_world = Arc::clone(&world);
+        aether_world::registry::items::install_resolvers(
+            Box::new(move |id| name_world.item_name(id)),
+            Box::new(move |name| id_world.item_id(name)),
+        );
+    }
     // Item instance ids come from one process-wide allocator over the same KV
     // backend as the journal, installed here — before the listener exists, so
     // no connection can ever mint an id. Opening it reads the reservation

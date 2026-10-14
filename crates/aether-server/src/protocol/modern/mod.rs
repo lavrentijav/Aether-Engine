@@ -350,7 +350,7 @@ impl ProtocolCodec for Codec {
                 meta.var_int(*entity_id)
                     .u8(ITEM_DATA_INDEX)
                     .var_int(META_ITEM_STACK);
-                match self.0.item_id(item) {
+                match self.0.wire_item(*item) {
                     Some(id) => inventory::write_item(&mut meta, id, *count as i32),
                     None => inventory::write_empty(&mut meta),
                 }
@@ -504,10 +504,13 @@ impl ProtocolCodec for Codec {
                 let (item, count) = match pin.var_int() {
                     Ok(0) | Err(_) => (None, 0),
                     Ok(n) => (
+                        // An id this version has but the engine does not maps
+                        // to `AIR`, i.e. nothing: the item renders as air on
+                        // the way out, so it must not enter the inventory.
                         pin.var_int()
                             .ok()
-                            .and_then(|id| self.0.item_name(id))
-                            .map(str::to_owned),
+                            .and_then(|id| self.0.engine_item(id))
+                            .filter(|id| *id != aether_world::ItemTypeId::AIR),
                         n.clamp(0, u8::MAX as i32) as u8,
                     ),
                 };
@@ -1051,7 +1054,7 @@ mod tests {
                 x: 1.0,
                 y: 2.0,
                 z: 3.0,
-                item: "minecraft:stone".into(),
+                item: crate::inventory::item("minecraft:stone"),
                 count: 1,
             },
             &Empty,
@@ -1172,7 +1175,7 @@ mod tests {
         match C.decode(&pkt, any_pos()) {
             ClientEvent::CreativeSlot { slot, item, count } => {
                 assert_eq!(slot, 36);
-                assert_eq!(item.as_deref(), Some("minecraft:stone"));
+                assert_eq!(item, Some(crate::inventory::item("minecraft:stone")));
                 assert_eq!(count, 1);
             }
             _ => panic!("a creative-slot packet must decode as one"),
@@ -1347,7 +1350,7 @@ mod tests {
                 x: 1.0,
                 y: 2.0,
                 z: 3.0,
-                item: "minecraft:diamond".into(),
+                item: crate::inventory::item("minecraft:diamond"),
                 count: 200,
             },
             &Empty,

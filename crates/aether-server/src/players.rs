@@ -130,7 +130,7 @@ impl PlayerHandle {
     pub fn set_creative_slot(
         &self,
         slot: i16,
-        item: Option<String>,
+        item: Option<aether_world::ItemTypeId>,
         count: u8,
     ) -> crate::inventory::SlotChange {
         let Ok(index) = usize::try_from(slot) else {
@@ -139,24 +139,23 @@ impl PlayerHandle {
         self.inventory
             .lock()
             .unwrap()
-            .set(index, item.as_deref().map(|n| (n, count)))
+            .set(index, item.map(|i| (i, count)))
     }
 
     /// Record the hotbar the server handed this player at join.
     pub fn seed_hotbar(&self, items: &[(String, u8)]) {
         let mut inv = self.inventory.lock().unwrap();
         for (i, (name, count)) in items.iter().enumerate() {
-            inv.set(crate::inventory::FIRST_HOTBAR + i, Some((name, *count)));
+            inv.set(
+                crate::inventory::FIRST_HOTBAR + i,
+                Some((crate::inventory::item(name), *count)),
+            );
         }
     }
 
-    /// The name of the item in the selected hotbar slot.
-    pub fn held_item(&self) -> Option<String> {
-        self.inventory
-            .lock()
-            .unwrap()
-            .held()
-            .map(|s| s.item.clone())
+    /// The item in the selected hotbar slot.
+    pub fn held_item(&self) -> Option<aether_world::ItemTypeId> {
+        self.inventory.lock().unwrap().held().map(|s| s.item)
     }
 
     /// Render `ev` with this player's codec and queue it for their socket.

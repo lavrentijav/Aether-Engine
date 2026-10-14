@@ -105,7 +105,7 @@ pub fn dispatch(
         "lookup" | "l" => lookup(&args, handle, registry, world),
         "rollback" | "rb" => rollback(&args, handle, registry, world),
         "page" | "pg" => page(&args, handle),
-        "inv" | "inventory" => inventory(handle),
+        "inv" | "inventory" => inventory(handle, world),
         "stash" => crate::stash::open_command(handle, world),
         "audit" => audit(world),
         "cache" => cache(world),
@@ -161,6 +161,14 @@ fn short_place(p: &aether_world::journal::Place) -> String {
     }
 }
 
+/// The display name of an item id, resolved through the world's registry so a
+/// modded item reads by its real name.
+fn item_name(world: &DemoWorld, id: aether_world::ItemTypeId) -> String {
+    world
+        .item_name(id)
+        .unwrap_or_else(|| format!("item#{}", id.0))
+}
+
 fn describe_body(
     e: &Event,
     world: &DemoWorld,
@@ -195,12 +203,14 @@ fn describe_body(
             to: aether_world::journal::Place::Ground { x, y, z },
             ..
         } => Some(format!(
-            "  {ago} {count}x {item} dropped at {x} {y} {z}  #{}",
+            "  {ago} {count}x {} dropped at {x} {y} {z}  #{}",
+            item_name(world, *item),
             e.seq
         )),
         EventBody::ItemMint { item, count, .. } => Some(format!(
-            "  {ago} {} received {count}x {item}  #{}",
+            "  {ago} {} received {count}x {}  #{}",
             actor_name(e.actor.0),
+            item_name(world, *item),
             e.seq
         )),
         EventBody::ItemMove {
@@ -222,8 +232,9 @@ fn describe_body(
         EventBody::ItemDerive {
             item, count, from, ..
         } => Some(format!(
-            "  {ago} {} made {count}x {item} from {} item(s)  #{}",
+            "  {ago} {} made {count}x {} from {} item(s)  #{}",
             actor_name(e.actor.0),
+            item_name(world, *item),
             from.len(),
             e.seq
         )),
@@ -245,6 +256,14 @@ fn describe_age(ms: u64) -> String {
     }
 }
 
+/// How many of the newest matching events `/lookup` and `/inspect` read.
+///
+/// A bound, not the whole history: an operator pages through recent activity,
+/// and loading 400k events to render the newest few would cost seconds and all
+/// of it in RAM. The queries behind it ([`aether_world::journal::Journal`]'s
+/// bounded reads) stop after this many and never materialise the rest.
+const HISTORY_LIMIT: usize = 500;
+
 fn lookup(
     args: &[&str],
     handle: &PlayerHandle,
@@ -261,7 +280,14 @@ fn lookup(
         Ok(q) => q,
         Err(e) => return Reply::one(e.to_string()),
     };
-    let events = match world.journal().all_events() {
+    // Narrow by the player index when the query names one: that reads only
+    // that player's events rather than the newest few of everyone's.
+    let journal = world.journal();
+    let events = match q.filter.actor {
+        Some(a) => journal.actor_events_recent(a, HISTORY_LIMIT),
+        None => journal.recent_events(HISTORY_LIMIT),
+    };
+    let events = match events {
         Ok(e) => e,
         Err(e) => return Reply::one(format!("history unreadable: {e}")),
     };
@@ -365,7 +391,10 @@ pub fn inspect_block(
     y: i32,
     z: i32,
 ) -> Reply {
-    let events = match world.journal().column_events(x >> 4, z >> 4) {
+    let events = match world
+        .journal()
+        .column_events_recent(x >> 4, z >> 4, HISTORY_LIMIT)
+    {
         Ok(e) => e,
         Err(e) => return Reply::one(format!("history unreadable: {e}")),
     };
@@ -396,7 +425,12 @@ pub fn inspect_block(
 /// view and the client's can drift — in creative the client is the one filling
 /// slots — and this is the only way to see that they have, short of reading a
 /// database.
-fn inventory(handle: &PlayerHandle) -> Reply {
+fn inventory(handle: &PlayerHandle, world: &DemoWorld) -> Reply {
+    let name = |id: aether_world::ItemTypeId| {
+        world
+            .item_name(id)
+            .unwrap_or_else(|| format!("item#{}", id.0))
+    };
     let inv = handle.inventory();
     if inv.is_empty() {
         return Reply::one("the server has you carrying nothing");
@@ -415,9 +449,15 @@ fn inventory(handle: &PlayerHandle) -> Reply {
         // follow this exact stack through /audit.
         lines.push(format!(
             "  {where_}: {}x {}  [{:016x}]",
-            stack.count, stack.item, stack.uid.0
+            stack.count,
+            name(stack.item),
+            stack.uid.0
         ));
     }
+    // Release the inventory before touching the entity list: the tick holds
+    // the entity lock and takes player locks, so the reverse here would be a
+    // lock-order inversion. See docs/storage-v2/lock-order.md.
+    drop(inv);
     // Anything of theirs on the floor is part of the answer to "what do I
     // have": it is theirs, it is just not in a slot yet.
     let mine = crate::game::entities::owned_items(handle.uuid);
@@ -425,8 +465,11 @@ fn inventory(handle: &PlayerHandle) -> Reply {
         lines.push(format!("On the ground ({} stack(s)):", mine.len()));
         for (item, count, p, left) in mine {
             lines.push(format!(
-                "  {count}x {item} at {:.0} {:.0} {:.0} — walk over it ({left}s left)",
-                p.x, p.y, p.z
+                "  {count}x {} at {:.0} {:.0} {:.0} — walk over it ({left}s left)",
+                name(item),
+                p.x,
+                p.y,
+                p.z
             ));
         }
     }
@@ -436,11 +479,15 @@ fn inventory(handle: &PlayerHandle) -> Reply {
 }
 
 fn audit(world: &DemoWorld) -> Reply {
-    let events = match world.journal().all_events() {
-        Ok(e) => e,
-        Err(e) => return Reply::one(format!("history unreadable: {e}")),
-    };
-    let ledger = Ledger::replay(&events);
+    // Streamed: the ledger still tracks every instance, but the events
+    // themselves are decoded one at a time and never held as a `Vec`.
+    let mut ledger = Ledger::default();
+    if let Err(e) = world.journal().for_each_event(|ev| {
+        ledger.apply(ev);
+        Ok(())
+    }) {
+        return Reply::one(format!("history unreadable: {e}"));
+    }
     if ledger.anomalies().is_empty() {
         return Reply::one(format!(
             "{} item instance(s) tracked, nothing anomalous",

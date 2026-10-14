@@ -86,15 +86,15 @@ pub fn dispatch(
             } else {
                 format!("minecraft:{raw}")
             };
-            if !super::tables::is_item(&item) {
+            let Some(item_id) = world.item_id(&item) else {
                 return Some(vec![format!("No such item: {item}")]);
-            }
+            };
             let count: u64 = args
                 .get(1)
                 .and_then(|c| c.parse().ok())
                 .unwrap_or(1)
                 .min(64 * 36);
-            crate::ground::give_or_drop(handle, registry, world, &item, count);
+            crate::ground::give_or_drop(handle, registry, world, item_id, count);
             vec![format!("Gave {count} {item}")]
         }
         "summon" => {

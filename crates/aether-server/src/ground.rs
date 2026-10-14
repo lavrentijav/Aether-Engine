@@ -25,6 +25,7 @@ use crate::game::entities;
 use crate::inventory::Stack;
 use crate::players::{PlayerHandle, SharedRegistry};
 use crate::session::DemoWorld;
+use aether_world::ItemTypeId;
 
 /// Give `count` of `item` to `handle`, dropping whatever does not fit at their
 /// feet. Returns `(taken, dropped)`.
@@ -36,7 +37,7 @@ pub fn give_or_drop(
     handle: &PlayerHandle,
     _registry: &SharedRegistry,
     world: &DemoWorld,
-    item: &str,
+    item: ItemTypeId,
     count: u64,
 ) -> (u64, u64) {
     let left = handle.inventory().give_many(item, count);
@@ -50,9 +51,9 @@ pub fn give_or_drop(
 
 /// Put `count` of `item` on the ground where `handle` is standing, for them
 /// alone to pick up.
-pub fn drop_at_feet(handle: &PlayerHandle, item: &str, count: u64) {
+pub fn drop_at_feet(handle: &PlayerHandle, item: ItemTypeId, count: u64) {
     let pos = handle.pos();
-    let max = crate::game::tables::max_stack(item).max(1) as u64;
+    let max = crate::game::tables::max_stack_id(item).max(1) as u64;
     let mut left = count;
     while left > 0 {
         let n = left.min(max);
