@@ -22,7 +22,7 @@ static ONLY_EAST: OnlyEast = OnlyEast;
 
 #[test]
 fn an_external_crate_registers_a_block_behaviour() {
-    register("minecraft:observer", &ONLY_EAST);
+    register("minecraft:sticky_piston", &ONLY_EAST);
 
     let engine = Redstone::new();
     let mut w = MemWorld::new();
@@ -30,7 +30,7 @@ fn an_external_crate_registers_a_block_behaviour() {
     let observer = BlockPos::new(1, 0, 0);
     w.put(wire, "minecraft:redstone_wire");
     let observer_state = BlockRegistry::new()
-        .get("minecraft:observer[facing=east]")
+        .get("minecraft:sticky_piston[facing=east,extended=false]")
         .expect("observer state");
     w.set_block(observer, observer_state);
 

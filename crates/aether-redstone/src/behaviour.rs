@@ -691,6 +691,7 @@ impl Registry {
         put(&mut by_state, "minecraft:redstone_wire", &blocks::Wire);
         put(&mut by_state, "minecraft:repeater", &blocks::Repeater);
         put(&mut by_state, "minecraft:comparator", &blocks::Comparator);
+        put(&mut by_state, "minecraft:observer", &blocks::Observer);
         put(&mut by_state, "minecraft:redstone_torch", &blocks::Torch);
         put(
             &mut by_state,
@@ -767,10 +768,10 @@ impl Registry {
             &blocks::WoodButton,
         );
 
-        // A test-only block registered over the observer's states, proving that a
+        // A test-only block registered over the piston's states, proving that a
         // new component decides its own wire connection without a core edit.
         #[cfg(test)]
-        put(&mut by_state, "minecraft:observer", &blocks::TestObserver);
+        put(&mut by_state, "minecraft:piston", &blocks::TestObserver);
         // A test-only recording block for the notification-order findings.
         #[cfg(test)]
         put(

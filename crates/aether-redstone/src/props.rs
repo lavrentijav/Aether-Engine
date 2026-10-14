@@ -109,6 +109,20 @@ pub fn facing(state: BlockStateId) -> Direction {
     }
 }
 
+/// The `facing` property as a full direction, including vertical. Used by
+/// directional blocks (the observer) whose facing may be `up`/`down`.
+pub fn direction(state: BlockStateId) -> Direction {
+    match get(state, "facing") {
+        Some("north") => Direction::North,
+        Some("south") => Direction::South,
+        Some("west") => Direction::West,
+        Some("east") => Direction::East,
+        Some("up") => Direction::Up,
+        Some("down") => Direction::Down,
+        _ => Direction::North,
+    }
+}
+
 /// The attachment direction of a face-attached block (`getConnectedDirection`):
 /// a floor block attaches upward, a ceiling block downward, a wall block
 /// horizontally, and anything else falls back to `facing`.

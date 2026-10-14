@@ -10,6 +10,7 @@ mod default;
 pub(crate) mod diode;
 mod lamp;
 mod lever;
+mod observer;
 mod redstone_block;
 mod repeater;
 mod torch;
@@ -27,6 +28,7 @@ pub use comparator::Comparator;
 pub use default::DefaultBehaviour;
 pub use lamp::Lamp;
 pub use lever::Lever;
+pub use observer::Observer;
 pub use redstone_block::RedstoneBlock;
 pub use repeater::Repeater;
 #[cfg(test)]

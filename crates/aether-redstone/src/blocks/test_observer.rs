@@ -2,7 +2,7 @@
 //! that a new component can decide its own redstone-wire connection without any
 //! edit to [`crate::blocks::wire`] (QR-review-2 finding N2).
 //!
-//! It mirrors `ObserverBlock`: `isSignalSource` is `POWERED`, and wire connects
+//! It mirrors `ObserverBlock`'s wire rule: `isSignalSource` is `POWERED`, and wire connects
 //! only on the observer's facing side — *regardless* of `POWERED`. That last
 //! part is exactly what the default `connects_to_wire` cannot express, so the
 //! test below could not pass without the trait hook.
@@ -53,7 +53,7 @@ mod tests {
         let wire = p(0, 0, 0);
         let observer = p(1, 0, 0);
         let observer_state = BlockRegistry::new()
-            .get("minecraft:observer[facing=east,powered=false]")
+            .get("minecraft:piston[facing=east,extended=false]")
             .expect("observer state");
         w.put(wire, "minecraft:redstone_wire");
         w.set_block(observer, observer_state);
