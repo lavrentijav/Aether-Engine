@@ -78,30 +78,7 @@ const SB_PLACE: i32 = 0x31;
 /// on many clients. Anything the version cannot express falls back to stone,
 /// so a client is never handed an id outside its registry.
 pub fn block_state(id: BlockStateId) -> u32 {
-    use aether_api::block_ids as b;
-    if id == b::AIR {
-        0
-    } else if id == b::STONE {
-        1
-    } else if id == b::GRASS_BLOCK {
-        9
-    } else if id == b::DIRT {
-        10
-    } else if id == b::BEDROCK {
-        76
-    } else if id == b::WATER {
-        77
-    } else if id == b::SAND {
-        109
-    } else if id == b::GRAVEL {
-        111
-    } else if id == b::OAK_LOG {
-        120
-    } else if id == b::OAK_LEAVES {
-        241
-    } else {
-        1 // substitution: anything unexpressible becomes solid stone
-    }
+    crate::protocol::compat::V1_19_3.state(id)
 }
 
 /// The 1.19.3 codec.
@@ -536,7 +513,12 @@ mod tests {
 
     #[test]
     fn unknown_blocks_fall_back_to_stone() {
-        assert_eq!(block_state(BlockStateId(9999)), 1);
+        // 9,999 is a real engine state now — the engine's ids are 1.21.11's —
+        // so the substitution boundary is the end of the state space, and a
+        // block past it becomes this version's stone.
+        let modded =
+            aether_world::BlockStateId(aether_world::registry::blocks::STATE_COUNT as u32 + 7);
+        assert_eq!(block_state(modded), 1);
     }
 
     #[test]

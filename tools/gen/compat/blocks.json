@@ -1,0 +1,5 @@
+{
+  "note": "Block substitution rules for the version-compat layer (task J2).",
+  "help": "from/to are bare or minecraft:-qualified names; a single * is a wildcard and its capture is substituted into the target. The first rule whose `from` matches is applied; if the target is itself missing from the client's version the resolver applies the rules again to it (chaining). Resolution happens at generation time, per version, so runtime is one array read.",
+  "rules": []
+}

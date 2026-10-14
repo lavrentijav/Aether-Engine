@@ -18,6 +18,7 @@ use crate::players::{PlayerHandle, PosLook};
 use crate::proto::{Conn, PacketOut, RawPacket};
 
 pub mod commands;
+pub mod compat;
 pub mod modern;
 pub mod nbt;
 pub mod v47;
