@@ -53,6 +53,10 @@ fn spawn_autosave(world: Arc<DemoWorld>, secs: u64) {
     let period = Duration::from_secs(secs.max(1));
     std::thread::spawn(move || loop {
         std::thread::sleep(period);
+        // The scheduled queues are not part of the world's dirty set, so they
+        // are written here, beside the chunks they belong to.
+        game::blockticks::save(&world);
+        game::fluids::save(&world);
         if let Err(e) = world.flush() {
             log::error(&format!("autosave failed: {e}"));
         }
@@ -122,7 +126,14 @@ fn main() -> std::process::ExitCode {
         revision,
         &cfg.cache.to_config(),
     );
-    let mut world = World::new(store, generator).with_snapshot_policy(snapshot_policy(revision));
+    let mut world = World::new(store, generator)
+        .with_snapshot_policy(snapshot_policy(revision))
+        // Reload a chunk's pending scheduled ticks as it comes in; they were
+        // written next to it (see `game::tickstore`).
+        .with_column_load_hook(|world, cx, cz| {
+            game::blockticks::load_column(world, cx, cz);
+            game::fluids::load_column(world, cx, cz);
+        });
     if let Some(sink) = open_history_mirror(&cfg.database) {
         world = world.with_journal_sink(sink);
     }

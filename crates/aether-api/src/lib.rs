@@ -81,6 +81,14 @@ pub struct SnapshotPolicy {
     pub on_rebuild: Box<dyn Fn(SubChunkKey, usize) + Send + Sync>,
 }
 
+/// A callback fired once, the first time a chunk column is materialized.
+///
+/// Used to reload per-chunk state that lives beside the chunk rather than in
+/// it — the server's durable scheduled block ticks. It is handed the world and
+/// the chunk coordinates, and must not read blocks (it runs before the column
+/// is latched as done, so a nested materialization would deadlock).
+pub type ColumnLoadHook<B, G> = Arc<dyn Fn(&World<B, G>, i32, i32) + Send + Sync>;
+
 /// A live world: block access, on-demand generation and physics over a
 /// [`KvBackend`] and a [`ChunkGenerator`].
 pub struct World<B: KvBackend, G: ChunkGenerator> {
@@ -105,6 +113,9 @@ pub struct World<B: KvBackend, G: ChunkGenerator> {
     columns: RwLock<HashMap<(i32, i32), Arc<Mutex<bool>>>>,
     params: PhysicsParams,
     snapshots: Option<SnapshotPolicy>,
+    /// Fired once per column, the first time it is materialized. See
+    /// [`ColumnLoadHook`].
+    on_column_load: Option<ColumnLoadHook<B, G>>,
 }
 
 impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
@@ -175,6 +186,7 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             columns: RwLock::new(HashMap::new()),
             params: PhysicsParams::default(),
             snapshots: None,
+            on_column_load: None,
         }
     }
 
@@ -190,6 +202,19 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
     /// (stamped) at the next flush. Without a policy, snapshots load whole.
     pub fn with_snapshot_policy(mut self, policy: SnapshotPolicy) -> Self {
         self.snapshots = Some(policy);
+        self
+    }
+
+    /// Run `hook` once for each chunk column, the first time it is loaded.
+    ///
+    /// The world knows nothing about what the callback does; the server uses it
+    /// to pull per-chunk state — durable scheduled block ticks — out of the
+    /// store as the chunk comes in. Must be set before any block is read.
+    pub fn with_column_load_hook(
+        mut self,
+        hook: impl Fn(&Self, i32, i32) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_column_load = Some(Arc::new(hook));
         self
     }
 
@@ -381,7 +406,17 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         // Only latch the column as done once it really is. A read error left
         // it holding nothing but generator output, so a later touch must retry
         // rather than be told the cache is authoritative.
-        *materialized = !read_error;
+        let done = !read_error;
+        *materialized = done;
+        drop(materialized);
+        // Tell the hook — once per column — that it is now in the cache. The
+        // latch is released first so a hook that (wrongly) read a block would
+        // re-enter here on a different thread rather than deadlock.
+        if done {
+            if let Some(hook) = self.on_column_load.as_deref() {
+                hook(self, cx, cz);
+            }
+        }
     }
 
     /// A stale snapshot rebuilt over the fresh generation: see
@@ -960,6 +995,26 @@ mod tests {
         for t in threads {
             t.join().unwrap();
         }
+    }
+
+    #[test]
+    fn a_column_load_hook_fires_once_per_column() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        // The hook must run as each column is first materialized, not on every
+        // block read — a per-chunk reload that ran per block would re-add a
+        // chunk's ticks thousands of times.
+        let hits = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&hits);
+        let world = World::new(MemStore::new(), FlatGenerator::classic()).with_column_load_hook(
+            move |_world, _cx, _cz| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        let _ = world.get_block(0, 0, 0);
+        let _ = world.get_block(5, 20, 5); // same column
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "one column, one call");
+        let _ = world.get_block(20, 0, 0); // the column to the east
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
     #[test]

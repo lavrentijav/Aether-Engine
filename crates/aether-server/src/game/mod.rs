@@ -21,6 +21,7 @@ pub mod provenance;
 pub mod scheduler;
 pub mod tables;
 pub mod tick;
+pub mod tickstore;
 pub mod window;
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};

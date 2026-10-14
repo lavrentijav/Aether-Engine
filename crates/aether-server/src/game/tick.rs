@@ -117,6 +117,10 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
 
     if now % 600 == 0 {
         save_time(world);
+        // Bound what a crash loses of the pending scheduled ticks, the same
+        // thirty-second horizon the world clock gets.
+        super::blockticks::save(world);
+        super::fluids::save(world);
     }
 }
 
