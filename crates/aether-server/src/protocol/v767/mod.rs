@@ -16,8 +16,16 @@ pub mod registry;
 
 use std::io;
 
-use aether_world::BlockStateId;
+use aether_world::{BlockStateId, ItemTypeId};
 
+/// The shared [`super::modern`] version for this protocol: its packet ids,
+/// entity types, menus and compat-backed block and item tables drive the
+/// gameplay path this codec delegates to.
+fn version() -> &'static super::modern::version::Version {
+    &super::modern::version::V1_21_1
+}
+
+use super::modern;
 use super::{BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::players::PosLook;
 use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
@@ -56,12 +64,6 @@ const PLAY_BLOCK_CHANGED_ACK: i32 = 0x05;
 const PLAY_PLAYER_INFO: i32 = 0x3E;
 /// Play: tab list entry removed.
 const PLAY_PLAYER_REMOVE: i32 = 0x3D;
-/// Play: spawn an entity.
-const PLAY_SPAWN_ENTITY: i32 = 0x01;
-/// Play: absolute entity move.
-const PLAY_ENTITY_TELEPORT: i32 = 0x70;
-/// Play: entity head yaw.
-const PLAY_HEAD_ROTATION: i32 = 0x48;
 /// Play: remove entities.
 const PLAY_DESTROY_ENTITIES: i32 = 0x42;
 /// Play: keep-alive (a long, unlike 1.8's varint).
@@ -100,10 +102,6 @@ const SB_USE_ITEM: i32 = 0x39;
 /// Serverbound: block placement.
 const SB_BLOCK_PLACE: i32 = 0x38;
 
-/// Entity type id for `minecraft:player` — a registry index, which moves
-/// whenever an entity type is added ahead of `player`.
-const PLAYER_ENTITY_TYPE: i32 = 128;
-
 /// Stable id for the pack this server offers.
 const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_0000_0000_0002;
 
@@ -122,6 +120,25 @@ impl ProtocolCodec for Codec {
 
     fn protocol_id(&self) -> i32 {
         767
+    }
+
+    fn supports_containers(&self) -> bool {
+        true
+    }
+
+    fn full_gameplay(&self) -> bool {
+        true
+    }
+
+    fn block_for_item(&self, item: &str) -> Option<BlockStateId> {
+        super::modern::block_for_item(item)
+    }
+
+    fn resolve_reported_item(&self, server: ItemTypeId, reported: ItemTypeId) -> ItemTypeId {
+        // A spear shown as a trident comes back as a trident; the slot's real
+        // item wins, so a creative client cannot launder one into a real
+        // trident by moving it around.
+        version().resolve_reported(server, reported)
     }
 
     fn read_login_start(&self, s: &mut Conn) -> io::Result<Option<String>> {
@@ -207,10 +224,24 @@ impl ProtocolCodec for Codec {
             .f32(p.pitch)
             .u8(0) // all absolute
             .var_int(1); // teleport id
-        pkt.send(s)
-        // No hotbar: Set Slot carries a full item-component structure this
-        // server has no inventory model for. Creative players take blocks from
-        // the creative menu instead.
+        pkt.send(s)?;
+        // This codec now runs the full game, so the client needs the same
+        // bootstrap the 1.21.11 codec sends: its abilities, the selected
+        // hotbar slot, and full health and food.
+        let v = version();
+        let flags = match p.game_mode {
+            super::GameMode::Creative => 0x01 | 0x04 | 0x08,
+            super::GameMode::Survival => 0,
+        };
+        let mut abilities = PacketOut::new(v.packets.cb_player_abilities);
+        abilities.u8(flags).f32(0.05).f32(0.10);
+        abilities.send(s)?;
+        PacketOut::new(v.packets.cb_set_held_slot)
+            .var_int(0)
+            .send(s)?;
+        let mut health = PacketOut::new(v.packets.cb_set_health);
+        health.f32(20.0).var_int(20).f32(5.0);
+        health.send(s)
     }
 
     fn encode(&self, ev: &ServerEvent, world: &dyn BlockSource) -> Vec<PacketOut> {
@@ -241,38 +272,6 @@ impl ProtocolCodec for Codec {
                 p.var_int(1).uuid(*uuid);
                 vec![p]
             }
-            ServerEvent::SpawnPlayer(h) => {
-                let pos = h.pos();
-                let mut p = PacketOut::new(PLAY_SPAWN_ENTITY);
-                p.var_int(h.entity_id)
-                    .uuid(h.uuid)
-                    .var_int(PLAYER_ENTITY_TYPE)
-                    .f64(pos.x)
-                    .f64(pos.y)
-                    .f64(pos.z)
-                    .u8(angle(pos.pitch))
-                    .u8(angle(pos.yaw))
-                    .u8(angle(pos.yaw)) // head yaw
-                    .var_int(0) // no object data
-                    .u16(0)
-                    .u16(0)
-                    .u16(0); // velocity
-                vec![p]
-            }
-            ServerEvent::EntityMove(h) => {
-                let pos = h.pos();
-                let mut tp = PacketOut::new(PLAY_ENTITY_TELEPORT);
-                tp.var_int(h.entity_id)
-                    .f64(pos.x)
-                    .f64(pos.y)
-                    .f64(pos.z)
-                    .u8(angle(pos.yaw))
-                    .u8(angle(pos.pitch))
-                    .bool(pos.on_ground);
-                let mut head = PacketOut::new(PLAY_HEAD_ROTATION);
-                head.var_int(h.entity_id).u8(angle(pos.yaw));
-                vec![tp, head]
-            }
             ServerEvent::DespawnEntity(eid) => {
                 let mut p = PacketOut::new(PLAY_DESTROY_ENTITIES);
                 p.var_int(1).var_int(*eid);
@@ -289,14 +288,6 @@ impl ProtocolCodec for Codec {
                 p.var_int(*seq);
                 vec![p]
             }
-            // This version has no server-driven container support here; the
-            // caller falls back to a chat listing. See
-            // `ProtocolCodec::supports_containers`.
-            // No item entity on this version yet; the caller keeps the stack
-            // rather than dropping it, so nothing is lost.
-            ServerEvent::MoveEntity { .. } => Vec::new(),
-            ServerEvent::DropItem { .. } => Vec::new(),
-            ServerEvent::OpenContainer { .. } => Vec::new(),
             ServerEvent::SetCenterChunk { cx, cz } => {
                 let mut p = PacketOut::new(PLAY_SET_CENTER_CHUNK);
                 p.var_int(*cx).var_int(*cz);
@@ -315,8 +306,11 @@ impl ProtocolCodec for Codec {
                 p.bytes(&super::nbt::string(text).to_network()).bool(false);
                 vec![p]
             }
-            // Gameplay events this version does not render.
-            _ => Vec::new(),
+            // Everything the codec above does not handle itself — entities,
+            // combat, health, hunger, windows, effects — is the shared
+            // gameplay path, driven by this version's ids and layouts (see
+            // `modern::play`).
+            other => modern::Codec(version()).encode(other, world),
         }
     }
 
@@ -389,7 +383,17 @@ impl ProtocolCodec for Codec {
                 // release-use status is what a held right click sends, and a
                 // spear's charge is read from it.
                 match status {
-                    0 | 2 => {
+                    // 1.19 split "started mining" from "finished mining":
+                    // 0 is the start, 2 the finish. Treating both as a finish
+                    // would make every survival block break instantly.
+                    0 => {
+                        let Ok(packed) = pin.i64() else {
+                            return ClientEvent::Ignored;
+                        };
+                        let (x, y, z) = decode_position(packed);
+                        ClientEvent::StartDig { x, y, z, seq }
+                    }
+                    2 => {
                         let Ok(packed) = pin.i64() else {
                             return ClientEvent::Ignored;
                         };
@@ -446,7 +450,10 @@ impl ProtocolCodec for Codec {
                 Ok(text) => ClientEvent::Chat(text),
                 Err(_) => ClientEvent::Ignored,
             },
-            _ => ClientEvent::Ignored,
+            // Everything this codec did not decode before — window clicks,
+            // creative slots, sprint, sneak, swing, entity interaction — is
+            // the shared gameplay decoder, driven by this version's ids.
+            _ => modern::Codec(version()).decode(pkt, prev),
         }
     }
 }
@@ -466,11 +473,6 @@ fn wait_for(s: &mut Conn, id: i32) -> io::Result<()> {
         io::ErrorKind::InvalidData,
         "client never sent the expected handshake packet",
     ))
-}
-
-/// Degrees -> the protocol's angle byte (256ths of a full turn).
-fn angle(deg: f32) -> u8 {
-    (deg.rem_euclid(360.0) / 360.0 * 256.0).round() as u8
 }
 
 /// Encode a block position: `X (26) | Z (26) | Y (12)`, Y in the low bits.
@@ -674,5 +676,103 @@ mod tests {
             crate::protocol::compat::items::V1_21_1.engine(shown.id),
             Some(crate::inventory::item("minecraft:trident")),
         );
+    }
+
+    #[test]
+    fn the_codec_runs_the_full_game_and_exposes_windows() {
+        assert!(Codec.full_gameplay());
+        assert!(Codec.supports_containers());
+    }
+
+    #[test]
+    fn gameplay_packets_the_old_subset_never_read_decode_through_the_shared_path() {
+        // These three were not in this codec's hand-written subset; the
+        // fallback to the shared gameplay decoder is what makes them work.
+        let any = PosLook {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: true,
+        };
+        let p = version().packets;
+
+        // Held Slot: a short here, the same bytes a byte would be for 0..9.
+        let pkt = RawPacket {
+            id: p.sb_set_carried_item,
+            data: 4u16.to_be_bytes().to_vec(),
+        };
+        match Codec.decode(&pkt, any) {
+            ClientEvent::HeldSlot(4) => {}
+            _ => panic!("held slot must decode"),
+        }
+
+        // Creative slot 36 with one stone: count, id, then the two zero
+        // component counts.
+        let mut data = 36u16.to_be_bytes().to_vec();
+        data.extend_from_slice(&[1, 1, 0, 0]);
+        let pkt = RawPacket {
+            id: p.sb_set_creative_mode_slot,
+            data,
+        };
+        match Codec.decode(&pkt, any) {
+            ClientEvent::CreativeSlot { slot, item, count } => {
+                assert_eq!(slot, 36);
+                assert_eq!(item, Some(crate::inventory::item("minecraft:stone")));
+                assert_eq!(count, 1);
+            }
+            _ => panic!("creative slot must decode"),
+        }
+
+        // A window click: window, state, slot, button, mode.
+        let mut data = vec![1]; // window 1
+        data.push(0); // state id
+        data.extend_from_slice(&(-999i16).to_be_bytes()); // outside-click slot
+        data.push(0); // left button
+        data.push(0); // normal mode
+        let pkt = RawPacket {
+            id: p.sb_container_click,
+            data,
+        };
+        match Codec.decode(&pkt, any) {
+            ClientEvent::WindowClick {
+                window, slot, mode, ..
+            } => {
+                assert_eq!(window, 1);
+                assert_eq!(slot, -999);
+                assert_eq!(mode, 0);
+            }
+            _ => panic!("window click must decode"),
+        }
+    }
+
+    #[test]
+    fn a_teleport_uses_the_pre_1_21_2_layout() {
+        struct Empty;
+        impl BlockSource for Empty {
+            fn block_at(&self, _x: i32, _y: i32, _z: i32) -> BlockStateId {
+                BlockStateId::AIR
+            }
+        }
+        // The old layout is position, look, flags, then the teleport id.
+        let pkts = Codec.encode(
+            &ServerEvent::Teleport {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+            &Empty,
+        );
+        let mut wire = Vec::new();
+        pkts[0].write_to(&mut wire, None).unwrap();
+        assert_eq!(wire[1] as i32, PLAY_POSITION);
+        // Payload: x, y, z (8 each), yaw, pitch (4 each), flags, teleport id.
+        let body = &wire[2..];
+        assert_eq!(body.len(), 24 + 8 + 2);
+        assert_eq!(body[32], 0, "all absolute");
+        assert_eq!(body[33], 2, "teleport id trails the flags");
     }
 }

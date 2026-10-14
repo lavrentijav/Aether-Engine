@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use aether_world::registry::items::{ItemTypeId, ITEM_BEYOND, ITEM_NAMES};
 use aether_world::BlockStateId;
 
+use crate::protocol::compat::items::ItemTable;
 use crate::protocol::nbt::Nbt;
 
 /// Packet ids of one version, by phase, direction and vanilla name; `-1`
@@ -36,6 +37,9 @@ pub struct Packets {
     pub cb_container_set_data: i32,
     pub cb_damage_event: i32,
     pub cb_entity_event: i32,
+    /// The pre-1.21.3 absolute entity teleport. 1.21.3 replaced it with
+    /// [`Packets::cb_entity_position_sync`]; the older codecs still use it.
+    pub cb_entity_teleport: i32,
     pub cb_entity_position_sync: i32,
     pub cb_explode: i32,
     pub cb_game_event: i32,
@@ -103,8 +107,32 @@ pub struct Packets {
 }
 
 /// The generations of the modern protocol, oldest first.
+///
+/// The variants below [`Gen::V1_21_11`] are the releases the older codecs
+/// (protocols 766-773) share with the modern gameplay path; they are ordered
+/// so `gen >= Gen::V1_21_3` and friends mean "this release or newer", while
+/// `gen < Gen::V1_21_3` is exactly the older codecs' range. The modern codec
+/// itself only ever sees `V1_21_11` and later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Gen {
+    /// 1.20.5 – 1.20.6 (766). Attribute-modifier ids are UUIDs, not
+    /// identifiers; there is no `pick_item_from_block`.
+    V1_20_5,
+    /// 1.21 – 1.21.1 (767).
+    V1_21_1,
+    /// 1.21.2 – 1.21.4 (768, 769): entity position sync replaces
+    /// `entity_teleport`, container ids go from a byte to a VarInt, the
+    /// SpawnInfo gains a sea level, the player-position packet is reordered,
+    /// and attribute-modifier ids become identifiers.
+    V1_21_3,
+    /// 1.21.5 – 1.21.6 (770, 771): the attribute set is reordered
+    /// (`camera_distance` before the entity-interaction range), and
+    /// `pick_item_from_block` exists.
+    V1_21_5,
+    /// 1.21.7 – 1.21.8 (772).
+    V1_21_8,
+    /// 1.21.9 – 1.21.10 (773): the quantized `lpVec3` velocity.
+    V1_21_9,
     /// 1.21.11 (protocol 774).
     V1_21_11,
     /// 26.1 – 26.1.2 (775): world clocks replace the time-of-day field;
@@ -136,6 +164,19 @@ pub enum Registries {
         /// pack: length-prefixed network NBT, deflated.
         data: &'static [u8],
     },
+    /// The older codecs (766-773) carry their own configuration-phase
+    /// registry dump in their module, so the shared gameplay path never
+    /// consults this. Their per-release registries that the gameplay events
+    /// name by index (damage types, attributes) are generated instead.
+    None,
+}
+
+/// A wire id to show a client for an engine item: the id itself and whether
+/// it stands in for a different item (see [`Version::wire_stack_item`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct StackItem {
+    pub id: i32,
+    pub disguised: bool,
 }
 
 /// The two item-id tables of one version, built once from its name table.
@@ -163,6 +204,10 @@ struct ItemTables {
     /// for a wire id the version does not have.
     #[allow(dead_code)]
     names_by_wire: Vec<Option<&'static str>>,
+    /// Name → wire id, sorted, for the older codecs whose ids come from the
+    /// compat table rather than a checked-in name list. Empty for the modern
+    /// releases, which binary-search `items` directly.
+    by_name: Vec<(&'static str, u16)>,
 }
 
 /// One protocol version.
@@ -177,6 +222,18 @@ pub struct Version {
     /// Block states in this version, for the direct palette's width.
     pub state_count: u32,
     pub items: &'static [(&'static str, u16)],
+    /// The compat item table for the older codecs, substitution (a stand-in
+    /// for an item the release lacks) already applied. `None` for the modern
+    /// releases, whose item ids the engine shares, so `items` is authoritative
+    /// there.
+    pub compat_items: Option<&'static ItemTable>,
+    /// Engine attribute id (1.21.11 order) → this release's id, for the older
+    /// codecs. Empty for the modern releases, whose attribute set is the
+    /// engine's.
+    pub attribute_map: &'static [i32],
+    /// Damage-type names in *registry order* (the index is the wire id), for
+    /// the older codecs. Empty for the modern releases.
+    pub damage_types: &'static [&'static str],
     /// The hot-path id tables, built on first use from `items` (see
     /// [`ItemTables`]). Private: callers go through the methods on this type.
     item_ids: OnceLock<ItemTables>,
@@ -219,9 +276,36 @@ impl Version {
         (32 - (self.state_count - 1).leading_zeros()) as u8
     }
 
-    /// The lazily built id tables, from this version's name table.
+    /// The lazily built id tables, from this version's name table or, for the
+    /// older codecs, the compat item table.
     fn item_tables(&self) -> &ItemTables {
         self.item_ids.get_or_init(|| {
+            if let Some(t) = self.compat_items {
+                // Engine ids are the vanilla 1.21.11 ids; the compat table
+                // answers both directions, substitution included.
+                let to_wire = (0..ITEM_NAMES.len() as u16)
+                    .map(|raw| t.wire(ItemTypeId(raw)).map(|w| w.id).unwrap_or(-1))
+                    .collect();
+                let n = t.by_id.len();
+                let mut from_wire = vec![ItemTypeId::AIR; n];
+                let mut names_by_wire = vec![None; n];
+                let mut by_name = Vec::with_capacity(n);
+                for wire in 0..n as i32 {
+                    if let Some(name) = t.name(wire) {
+                        from_wire[wire as usize] =
+                            ItemTypeId::vanilla(name).unwrap_or(ItemTypeId::AIR);
+                        names_by_wire[wire as usize] = Some(name);
+                        by_name.push((name, wire as u16));
+                    }
+                }
+                by_name.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                return ItemTables {
+                    to_wire,
+                    from_wire,
+                    names_by_wire,
+                    by_name,
+                };
+            }
             // Engine ids are the vanilla 1.21.11 ids, so a walk of ITEM_NAMES
             // gives every id its wire id in this version, or -1 if it is new
             // here or already gone.
@@ -260,12 +344,25 @@ impl Version {
                 to_wire,
                 from_wire,
                 names_by_wire,
+                by_name: Vec::new(),
             }
         })
     }
 
     /// This version's id for an item, by name.
+    ///
+    /// The older codecs answer from the compat table's name map; the modern
+    /// releases binary-search the checked-in name list directly, which is also
+    /// what [`Version::item_tables`] needs while building its own tables.
     pub fn item_id(&self, name: &str) -> Option<i32> {
+        if self.compat_items.is_some() {
+            let t = self.item_tables();
+            return t
+                .by_name
+                .binary_search_by(|(n, _)| (*n).cmp(name))
+                .ok()
+                .map(|i| t.by_name[i].1 as i32);
+        }
         self.items
             .binary_search_by(|(n, _)| (*n).cmp(name))
             .ok()
@@ -279,12 +376,40 @@ impl Version {
     /// release, so callers fall back to their own "unknown item" id.
     #[allow(dead_code)]
     pub fn wire_item(&self, id: ItemTypeId) -> Option<i32> {
+        self.wire_stack_item(id).map(|s| s.id)
+    }
+
+    /// The wire id to show for an engine item, and whether it is a stand-in
+    /// for a *different* item (so the client must be told the real name).
+    ///
+    /// The older codecs go through the compat table, which substitutes an item
+    /// the release lacks; the modern releases never disguise.
+    pub fn wire_stack_item(&self, id: ItemTypeId) -> Option<StackItem> {
         if id.0 >= ITEM_BEYOND {
             return None;
         }
+        if let Some(t) = self.compat_items {
+            let w = t.wire(id)?;
+            return Some(StackItem {
+                id: w.id,
+                disguised: w.disguised,
+            });
+        }
         match self.item_tables().to_wire[id.0 as usize] {
             -1 => None,
-            wire => Some(wire),
+            wire => Some(StackItem {
+                id: wire,
+                disguised: false,
+            }),
+        }
+    }
+
+    /// Resolve an item a client reported in a slot to the real engine item,
+    /// for the older codecs whose items are shown as stand-ins.
+    pub fn resolve_reported(&self, server: ItemTypeId, reported: ItemTypeId) -> ItemTypeId {
+        match self.compat_items {
+            Some(t) => t.resolve_reported(server, reported),
+            None => reported,
         }
     }
 
@@ -325,7 +450,7 @@ impl Version {
             Registries::KnownPacks { synced, .. } => {
                 synced.iter().find(|(r, _)| *r == registry).map(|(_, e)| *e)
             }
-            Registries::Explicit => None,
+            Registries::Explicit | Registries::None => None,
         }
     }
 
@@ -350,7 +475,14 @@ impl Version {
     }
 
     /// The network id of a damage type.
+    ///
+    /// The older codecs carry their own registry-order table; the modern
+    /// releases use the synchronized list or, failing that, the 1.21.11
+    /// registry the rest of the codec is pinned to.
     pub fn damage_type(&self, name: &str) -> Option<usize> {
+        if !self.damage_types.is_empty() {
+            return self.damage_types.iter().position(|d| *d == name);
+        }
         match self.synced("minecraft:damage_type") {
             Some(list) => list.iter().position(|d| *d == name),
             None => super::registry::damage_type_index(name),
@@ -373,6 +505,9 @@ macro_rules! version {
             state_runs: super::gen::$m::STATE_RUNS,
             state_count: super::gen::$m::STATE_COUNT,
             items: super::gen::$m::ITEMS,
+            compat_items: None,
+            attribute_map: &[],
+            damage_types: &[],
             item_ids: OnceLock::new(),
             entity_types: super::gen::$m::ENTITY_TYPES,
             menu_chest: super::gen::$m::MENU_GENERIC_9X3,
@@ -413,6 +548,54 @@ pub static V1_21_11: Version = version!(
 pub static V26_1: Version = version!("26.1.x", 775, Gen::V26_1, v26_1, known_packs!(v26_1));
 pub static V26_2: Version = version!("26.2", 776, Gen::V26_2, v26_2, known_packs!(v26_2));
 pub static V26_3: Version = version!("26.3", 777, Gen::V26_3, v26_3, known_packs!(v26_3));
+
+/// A [`Version`] for one of the older codecs (protocols 766-773).
+///
+/// Its block states and items come from the compat layer, its packet ids,
+/// entity types, damage types, menus and data components from the generated
+/// `legacy_gen` module, and its registries are its own codec's (the shared
+/// gameplay path does not touch them).
+macro_rules! legacy_version {
+    ($name:literal, $proto:literal, $gen:expr, $m:ident, $compat:ident) => {
+        Version {
+            name: $name,
+            protocol: $proto,
+            gen: $gen,
+            packets: &super::legacy_gen::$m::PACKETS,
+            state_runs: crate::protocol::compat::gen::$m::STATE_RUNS,
+            state_count: crate::protocol::compat::gen::$m::STATE_COUNT,
+            items: &[],
+            compat_items: Some(&crate::protocol::compat::items::$compat),
+            attribute_map: super::legacy_gen::$m::ATTRIBUTE_MAP,
+            damage_types: super::legacy_gen::$m::DAMAGE_TYPES,
+            item_ids: OnceLock::new(),
+            entity_types: super::legacy_gen::$m::ENTITY_TYPES,
+            menu_chest: super::legacy_gen::$m::MENU_GENERIC_9X3,
+            menu_double_chest: super::legacy_gen::$m::MENU_GENERIC_9X6,
+            menu_crafting: super::legacy_gen::$m::MENU_CRAFTING,
+            menu_furnace: super::legacy_gen::$m::MENU_FURNACE,
+            menu_hopper: super::legacy_gen::$m::MENU_HOPPER,
+            menu_dispenser: super::legacy_gen::$m::MENU_GENERIC_3X3,
+            component_damage: super::legacy_gen::$m::COMPONENT_DAMAGE,
+            component_custom_name: super::legacy_gen::$m::COMPONENT_CUSTOM_NAME,
+            component_lore: super::legacy_gen::$m::COMPONENT_LORE,
+            particle_explosion: super::legacy_gen::$m::PARTICLE_EXPLOSION,
+            particle_explosion_emitter: super::legacy_gen::$m::PARTICLE_EXPLOSION_EMITTER,
+            registries: Registries::None,
+            tags: &[],
+        }
+    };
+}
+
+pub static V1_20_5: Version = legacy_version!("1.20.5/1.20.6", 766, Gen::V1_20_5, v1_20_5, V1_20_5);
+pub static V1_21_1: Version = legacy_version!("1.21/1.21.1", 767, Gen::V1_21_1, v1_21_1, V1_21_1);
+pub static V1_21_3: Version = legacy_version!("1.21.3", 768, Gen::V1_21_3, v1_21_3, V1_21_3);
+pub static V1_21_4: Version = legacy_version!("1.21.4", 769, Gen::V1_21_3, v1_21_4, V1_21_4);
+pub static V1_21_5: Version = legacy_version!("1.21.5", 770, Gen::V1_21_5, v1_21_5, V1_21_5);
+pub static V1_21_6: Version = legacy_version!("1.21.6", 771, Gen::V1_21_5, v1_21_6, V1_21_6);
+pub static V1_21_8: Version = legacy_version!("1.21.8", 772, Gen::V1_21_8, v1_21_8, V1_21_8);
+pub static V1_21_9: Version =
+    legacy_version!("1.21.9/1.21.10", 773, Gen::V1_21_9, v1_21_9, V1_21_9);
 
 #[cfg(test)]
 mod tests {
