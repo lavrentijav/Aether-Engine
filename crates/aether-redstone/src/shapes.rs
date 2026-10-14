@@ -1,17 +1,32 @@
 //! Per-*state* shape predicates, from the generated collision tables.
 //!
-//! Two vanilla predicates drive redstone connectivity and they are **not** the
-//! same:
+//! Three vanilla predicates matter to redstone, and they are **not** the same:
 //!
 //! * `isRedstoneConductor` — the state's collision shape is a whole block. A
 //!   conductor passes strong power on as weak power.
-//! * `isFaceSturdy(dir, FULL)` — the state's collision shape covers the whole
-//!   face in `dir`. This is what redstone wire attaches to and climbs.
+//! * `isFaceSturdy(dir, FULL)` — the state's shape covers the whole face in
+//!   `dir`. Redstone wire attaches to and climbs a full face.
+//! * `isFaceSturdy(dir, CENTER)` / `isFaceSturdy(dir, RIGID)` — weaker support
+//!   tests. A standing torch uses CENTER (`BaseTorchBlock.canSurvive`); a
+//!   repeater or comparator uses RIGID (`DiodeBlock.canSurviveOn`).
 //!
-//! R1 read both from the per-*block* `solid` flag, which is wrong for a bottom
-//! slab, a stair, a hopper or a `type=double` slab: their collision shape is
-//! per state, and the tables in [`aether_world::registry::shapes`] already
-//! carry it. These functions read that table, so the answer follows the state.
+//! # How vanilla computes a support face
+//!
+//! `VoxelShape.getFaceShape(direction)` takes the shape's **extreme slice** in
+//! the direction's axis (the topmost 1/16 for UP), flattens the axis to `0..1`,
+//! and keeps the footprint on the other two axes. `SupportType` then asks
+//! whether that footprint **contains** a fixed region:
+//!
+//! * FULL — the whole unit square.
+//! * CENTER — `Block.column(2, 0, 10)`, the central 2/16 × 2/16 column.
+//! * RIGID — `Shapes.block() − Block.column(12, 0, 16)`, the outer 2/16 frame.
+//!
+//! So the extent along the direction's axis is irrelevant: a hopper's hollow top
+//! rim is RIGID (the rim covers the frame) but not CENTER (the hollow centre is
+//! not covered), and a fence's post is CENTER (it covers the central column) but
+//! not FULL. The functions below read the per-state collision boxes and sample
+//! the footprint on a 16×16 grid; all box coordinates are multiples of 1/16, so
+//! the samples are exact.
 
 use std::sync::OnceLock;
 
@@ -30,59 +45,13 @@ pub fn full_collision(state: BlockStateId) -> bool {
     boxes.len() == 1 && boxes[0] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
 }
 
-/// `SupportType.FULL`: the state's collision shape covers the whole face in
-/// `direction` (`Block.isFaceFull`).
-///
-/// Vanilla projects the shape's **extreme slice** in `direction` onto the plane:
-/// a bottom slab's top face at y = 0.5 is a full unit square and counts, even
-/// though it is not at the block boundary. The slice is sampled on a 16×16
-/// grid; every sample must fall inside a box that reaches the extreme.
-pub fn face_full(state: BlockStateId, direction: Direction) -> bool {
-    let boxes = shapes::collision_boxes(state.raw());
-    if boxes.is_empty() {
-        return false;
+/// The two axes perpendicular to `direction`, as indices into a box.
+fn perpendicular(direction: Direction) -> (usize, usize) {
+    match direction {
+        Direction::Up | Direction::Down => (0, 2),
+        Direction::West | Direction::East => (1, 2),
+        Direction::North | Direction::South => (0, 1),
     }
-    let axis = axis(direction);
-    let positive = matches!(
-        direction,
-        Direction::Up | Direction::East | Direction::South
-    );
-    let coord = |b: &[f32; 6]| if positive { b[axis + 3] } else { b[axis] };
-    let extreme =
-        boxes
-            .iter()
-            .map(coord)
-            .fold(if positive { f32::MIN } else { f32::MAX }, |a, b| {
-                if positive {
-                    a.max(b)
-                } else {
-                    a.min(b)
-                }
-            });
-    let slice: Vec<&[f32; 6]> = boxes
-        .iter()
-        .filter(|b| (coord(b) - extreme).abs() < EPS)
-        .collect();
-
-    let (a1, a2) = match axis {
-        0 => (1, 2),
-        1 => (0, 2),
-        _ => (0, 1),
-    };
-    const N: i32 = 16;
-    for i in 0..N {
-        for j in 0..N {
-            let u = (i as f32 + 0.5) / N as f32;
-            let v = (j as f32 + 0.5) / N as f32;
-            let covered = slice.iter().any(|b| {
-                u >= b[a1] - EPS && u <= b[a1 + 3] + EPS && v >= b[a2] - EPS && v <= b[a2 + 3] + EPS
-            });
-            if !covered {
-                return false;
-            }
-        }
-    }
-    true
 }
 
 /// The axis a direction runs along.
@@ -94,39 +63,88 @@ fn axis(direction: Direction) -> usize {
     }
 }
 
+/// The boxes making up the shape's extreme slice in `direction`
+/// (`VoxelShape.getFaceShape` before the footprint test).
+fn face_slice(state: BlockStateId, direction: Direction) -> Vec<&'static [f32; 6]> {
+    let boxes = shapes::collision_boxes(state.raw());
+    let axis = axis(direction);
+    let positive = matches!(
+        direction,
+        Direction::Up | Direction::East | Direction::South
+    );
+    let coord = move |b: &[f32; 6]| if positive { b[axis + 3] } else { b[axis] };
+    let Some(extreme) = boxes
+        .iter()
+        .map(coord)
+        .reduce(|a, b| if positive { a.max(b) } else { a.min(b) })
+    else {
+        return Vec::new();
+    };
+    boxes
+        .iter()
+        .filter(|b| (coord(b) - extreme).abs() < EPS)
+        .collect()
+}
+
+/// Whether the face slice covers every sample point `required` selects.
+fn slice_covers(
+    slice: &[&[f32; 6]],
+    direction: Direction,
+    required: impl Fn(f32, f32) -> bool,
+) -> bool {
+    if slice.is_empty() {
+        return false;
+    }
+    let (a1, a2) = perpendicular(direction);
+    const N: i32 = 16;
+    for i in 0..N {
+        for j in 0..N {
+            let u = (i as f32 + 0.5) / N as f32;
+            let v = (j as f32 + 0.5) / N as f32;
+            if !required(u, v) {
+                continue;
+            }
+            let covered = slice.iter().any(|b| {
+                u >= b[a1] - EPS && u <= b[a1 + 3] + EPS && v >= b[a2] - EPS && v <= b[a2 + 3] + EPS
+            });
+            if !covered {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// `SupportType.FULL`: the footprint covers the whole face.
+pub fn face_full(state: BlockStateId, direction: Direction) -> bool {
+    slice_covers(&face_slice(state, direction), direction, |_, _| true)
+}
+
+/// `SupportType.CENTER`: the footprint covers the central 2/16 × 2/16 column.
+pub fn face_center(state: BlockStateId, direction: Direction) -> bool {
+    slice_covers(&face_slice(state, direction), direction, |u, v| {
+        (7.0 / 16.0..=9.0 / 16.0).contains(&u) && (7.0 / 16.0..=9.0 / 16.0).contains(&v)
+    })
+}
+
+/// `SupportType.RIGID`: the footprint covers the outer 2/16 frame.
+pub fn face_rigid(state: BlockStateId, direction: Direction) -> bool {
+    slice_covers(&face_slice(state, direction), direction, |u, v| {
+        !(2.0 / 16.0..=14.0 / 16.0).contains(&u) || !(2.0 / 16.0..=14.0 / 16.0).contains(&v)
+    })
+}
+
+/// `Block.canSupportCenter(state, direction)`: a standing torch's support.
+pub fn can_support_center(state: BlockStateId, direction: Direction) -> bool {
+    face_center(state, direction)
+}
+
 /// The hopper block id, resolved once. `RedStoneWireBlock.canSurviveOn`
 /// special-cases a hopper because its top face is not full.
 pub fn is_hopper(state: BlockStateId) -> bool {
     static HOPPER: OnceLock<Option<u16>> = OnceLock::new();
     let hopper = HOPPER.get_or_init(|| blocks::block_id_of("minecraft:hopper"));
     blocks::block_of_state(state).map(|(b, _)| b) == *hopper
-}
-
-/// `SupportType.CENTER`: the state's shape supports a block resting on its
-/// central column in `direction`.
-///
-/// Vanilla's `Block.canSupportCenter` (used by a standing torch, `BaseTorchBlock`)
-/// uses `isFaceSturdy(dir, SupportType.CENTER)`, which is weaker than `FULL`: a
-/// fence's central post, a slab or a hopper's funnel all centre-support a torch
-/// even though their whole face is not full. This approximates it as "some
-/// collision box covers the central 2×2 cross-section" perpendicular to `dir`.
-pub fn face_center(state: BlockStateId, direction: Direction) -> bool {
-    let boxes = shapes::collision_boxes(state.raw());
-    let (a1, a2) = match axis(direction) {
-        0 => (1, 2),
-        1 => (0, 2),
-        _ => (0, 1),
-    };
-    const LO: f32 = 7.0 / 16.0 - EPS;
-    const HI: f32 = 9.0 / 16.0 + EPS;
-    boxes
-        .iter()
-        .any(|b| b[a1] <= LO && b[a1 + 3] >= HI && b[a2] <= LO && b[a2 + 3] >= HI)
-}
-
-/// `Block.canSupportCenter(state, direction)`: a full or centre face.
-pub fn can_support_center(state: BlockStateId, direction: Direction) -> bool {
-    face_center(state, direction)
 }
 
 #[cfg(test)]
@@ -144,15 +162,17 @@ mod tests {
         let stone = s("minecraft:stone");
         assert!(full_collision(stone));
         for d in Direction::ALL {
-            assert!(face_full(stone, d), "{d:?}");
+            assert!(face_full(stone, d), "FULL {d:?}");
+            assert!(face_center(stone, d), "CENTER {d:?}");
+            assert!(face_rigid(stone, d), "RIGID {d:?}");
         }
     }
 
     #[test]
     fn a_bottom_slab_is_sturdy_on_top_and_bottom_but_not_its_sides() {
-        // Finding 2's case: a bottom slab's top face is a full square at
-        // y = 0.5, so `isFaceSturdy(UP)` is true and wire climbs it; its west
-        // face is half-height, so it is not. It is not a conductor.
+        // A bottom slab's top face at y = 0.5 is a full unit square, so wire
+        // climbs it; its west face is half-height, so it is not FULL. It is not
+        // a conductor.
         let slab = s("minecraft:oak_slab");
         assert!(!full_collision(slab));
         assert!(face_full(slab, Direction::Up));
@@ -177,17 +197,30 @@ mod tests {
     }
 
     #[test]
-    fn centre_support_is_weaker_than_full() {
-        // The torch-support predicate: a fence's post and a hopper's funnel
-        // centre-support, so they are not FULL but are CENTER; air is neither.
-        let fence = s("minecraft:oak_fence");
-        assert!(!face_full(fence, Direction::Up));
-        assert!(face_center(fence, Direction::Up));
-
+    fn a_hopper_is_rigid_but_not_centre_on_top() {
+        // D3/N1/N2: the hopper's top slice is the outer rim ring. The rim
+        // covers the RIGID frame but leaves the centre hollow, so a repeater
+        // (RIGID) stands on it while a torch (CENTER) does not.
         let hopper = s("minecraft:hopper");
-        assert!(can_support_center(hopper, Direction::Up));
+        assert!(face_rigid(hopper, Direction::Up), "RIGID");
+        assert!(!face_center(hopper, Direction::Up), "CENTER");
+    }
 
-        assert!(!can_support_center(s("minecraft:air"), Direction::Up));
-        assert!(!face_center(s("minecraft:redstone_torch"), Direction::Up));
+    #[test]
+    fn a_fence_post_is_centre_but_not_rigid_or_full() {
+        // The post covers the central column (a torch stands) but not the outer
+        // frame, so it is not RIGID (a repeater pops) and not FULL.
+        let fence = s("minecraft:oak_fence");
+        assert!(face_center(fence, Direction::Up));
+        assert!(!face_rigid(fence, Direction::Up));
+        assert!(!face_full(fence, Direction::Up));
+    }
+
+    #[test]
+    fn air_supports_nothing() {
+        let air = s("minecraft:air");
+        assert!(!face_full(air, Direction::Up));
+        assert!(!face_center(air, Direction::Up));
+        assert!(!face_rigid(air, Direction::Up));
     }
 }

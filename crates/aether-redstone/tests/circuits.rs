@@ -874,39 +874,87 @@ fn the_neighbor_update_chain_limit_is_configurable() {
 }
 
 #[test]
-fn a_standing_torch_survives_on_a_fence_or_a_hopper() {
-    // D3: `BaseTorchBlock.canSurvive` uses `canSupportCenter` (SupportType.CENTER),
-    // not the FULL face test. A fence's central post and a hopper's funnel each
-    // centre-support a torch, so a DOWN shape update must not remove it.
+fn a_standing_torch_needs_the_centre_not_just_the_rim() {
+    // D3/N2: `BaseTorchBlock.canSurvive` uses `canSupportCenter` (SupportType.CENTER),
+    // the central 2/16 column. A fence post covers it, so a torch stands; a
+    // hopper's top is a hollow rim (the centre is a funnel below the top slice),
+    // so a torch pops off. Both get a DOWN shape update.
     let engine = Redstone::new();
-    for (support, other) in [
-        (
-            "minecraft:oak_fence",
-            "minecraft:oak_fence[waterlogged=true]",
-        ),
-        ("minecraft:hopper", "minecraft:hopper[enabled=false]"),
-    ] {
-        let mut w = MemWorld::new();
-        let below = p(0, 0, 0);
-        let torch = p(0, 1, 0);
-        w.put(below, support);
-        w.put(torch, "minecraft:redstone_torch");
-        engine.on_placed(&mut w, below);
-        engine.on_placed(&mut w, torch);
-        assert_eq!(w.block_name(torch), Some("minecraft:redstone_torch"));
 
-        // Re-place the support with a different state: that runs the shape pass
-        // and gives the torch a DOWN update_shape.
-        let other_state = BlockRegistry::new()
-            .get(other)
-            .unwrap_or_else(|| panic!("state {other}"));
-        engine.set_block(&mut w, below, other_state, SetBlockFlags::PLACE);
-        assert_eq!(
-            w.block_name(torch),
-            Some("minecraft:redstone_torch"),
-            "{support}: a centre-supported torch must survive"
-        );
-    }
+    // A fence holds a torch.
+    let mut w = MemWorld::new();
+    let below = p(0, 0, 0);
+    let torch = p(0, 1, 0);
+    w.put(below, "minecraft:oak_fence");
+    w.put(torch, "minecraft:redstone_torch");
+    engine.on_placed(&mut w, below);
+    engine.on_placed(&mut w, torch);
+    engine.set_block(
+        &mut w,
+        below,
+        BlockRegistry::new()
+            .get("minecraft:oak_fence[waterlogged=true]")
+            .unwrap(),
+        SetBlockFlags::PLACE,
+    );
+    assert_eq!(
+        w.block_name(torch),
+        Some("minecraft:redstone_torch"),
+        "a fence post centre-supports a torch"
+    );
+
+    // A hopper's hollow top does not hold a torch.
+    let mut w = MemWorld::new();
+    let below = p(0, 0, 0);
+    let torch = p(0, 1, 0);
+    w.put(below, "minecraft:hopper");
+    w.put(torch, "minecraft:redstone_torch");
+    engine.on_placed(&mut w, below);
+    engine.on_placed(&mut w, torch);
+    engine.set_block(
+        &mut w,
+        below,
+        BlockRegistry::new()
+            .get("minecraft:hopper[enabled=false]")
+            .unwrap(),
+        SetBlockFlags::PLACE,
+    );
+    assert_eq!(
+        w.block_name(torch),
+        Some("minecraft:air"),
+        "a hopper's hollow top does not centre-support a torch"
+    );
+}
+
+#[test]
+fn a_repeater_stands_on_a_hopper() {
+    // N1: `DiodeBlock.canSurviveOn` uses SupportType.RIGID (the outer 2/16
+    // frame), and a hopper's rim covers exactly that frame, so a repeater — and
+    // a comparator — stands on a hopper. A FULL test would wrongly destroy it.
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    let hopper = p(0, 0, 0);
+    let repeater = p(0, 1, 0);
+    w.put(hopper, "minecraft:hopper");
+    w.put(repeater, "minecraft:repeater[facing=north,delay=1]");
+    engine.on_placed(&mut w, hopper);
+    engine.on_placed(&mut w, repeater);
+    assert_eq!(w.block_name(repeater), Some("minecraft:repeater"));
+
+    // Flip the hopper state: its DOWN shape update must not destroy the repeater.
+    engine.set_block(
+        &mut w,
+        hopper,
+        BlockRegistry::new()
+            .get("minecraft:hopper[enabled=false]")
+            .unwrap(),
+        SetBlockFlags::PLACE,
+    );
+    assert_eq!(
+        w.block_name(repeater),
+        Some("minecraft:repeater"),
+        "a RIGID support must hold a repeater"
+    );
 }
 
 #[test]

@@ -113,11 +113,12 @@ impl BlockBehaviour for Repeater {
         dir: Direction,
     ) -> Option<BlockStateId> {
         // `RepeaterBlock.updateShape(DOWN)`: a repeater whose support is gone
-        // pops off. `DiodeBlock.canSurviveOn` is `isFaceSturdy(UP, RIGID)`; a
-        // full top face is used here as a close approximation.
+        // pops off. `DiodeBlock.canSurviveOn` is `isFaceSturdy(UP, SupportType.RIGID)`
+        // — the outer 2/16 frame, not the FULL face — so a hopper's rim, a
+        // fence post and a slab all hold a repeater.
         if dir == Direction::Down {
             let below = ctx.get_block(pos.offset(Direction::Down));
-            if !shapes::face_full(below, Direction::Up) {
+            if !shapes::face_rigid(below, Direction::Up) {
                 return Some(crate::behaviour::AIR);
             }
         }
