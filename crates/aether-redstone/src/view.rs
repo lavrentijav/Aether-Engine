@@ -211,6 +211,14 @@ pub trait RedstoneView {
     fn toggle_count(&self, _pos: BlockPos, _since: u64) -> u32 {
         0
     }
+
+    /// Emit the item drops for a block the engine is destroying at `pos` (a
+    /// wire or torch whose support is gone, so its `updateShape` returned air).
+    ///
+    /// The host spawns the item entity; the engine has no item model. Called
+    /// before the cell is replaced with air, and suppressed by
+    /// [`SetBlockFlags::UPDATE_SUPPRESS_DROPS`]. The default does nothing.
+    fn drop_block(&mut self, _pos: BlockPos, _state: BlockStateId) {}
 }
 
 /// An in-memory world: a map of states, a block-tick queue and the redstone
@@ -231,6 +239,8 @@ pub struct MemWorld {
     toggles: HashMap<BlockPos, std::collections::VecDeque<u64>>,
     /// The configured chain limit; `None` means vanilla's 1,000,000.
     max_chained: Option<usize>,
+    /// Blocks the engine destroyed, as `(pos, state)`, in order.
+    drops: Vec<(BlockPos, BlockStateId)>,
 }
 
 impl MemWorld {
@@ -275,6 +285,11 @@ impl MemWorld {
     /// The current game time.
     pub fn now(&self) -> u64 {
         self.game_time
+    }
+
+    /// The blocks the engine destroyed, as `(pos, state)`, oldest first.
+    pub fn dropped(&self) -> &[(BlockPos, BlockStateId)] {
+        &self.drops
     }
 
     /// Advance one game tick and run every block tick that has come due.
@@ -364,6 +379,10 @@ impl RedstoneView for MemWorld {
             .map(|log| log.iter().filter(|&&w| w >= since).count() as u32)
             .unwrap_or(0)
     }
+
+    fn drop_block(&mut self, pos: BlockPos, state: BlockStateId) {
+        self.drops.push((pos, state));
+    }
 }
 
 /// A world that records every state write, so a test can assert the exact
@@ -439,6 +458,10 @@ impl RedstoneView for TraceWorld {
 
     fn toggle_count(&self, pos: BlockPos, since: u64) -> u32 {
         self.inner.toggle_count(pos, since)
+    }
+
+    fn drop_block(&mut self, pos: BlockPos, state: BlockStateId) {
+        self.inner.drop_block(pos, state);
     }
 }
 

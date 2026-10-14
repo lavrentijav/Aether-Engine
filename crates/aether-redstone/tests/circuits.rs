@@ -908,3 +908,33 @@ fn a_standing_torch_survives_on_a_fence_or_a_hopper() {
         );
     }
 }
+
+#[test]
+fn a_destroyed_component_drops_its_item() {
+    // N8 (partial): a wire that pops off when its support is removed is
+    // destroyed — vanilla `Block.updateOrDestroy` calls `destroyBlock(drop=true)`,
+    // so the host must see the drop. The engine reports it through
+    // `RedstoneView::drop_block`.
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    let support = p(0, 0, 0);
+    let wire = p(0, 1, 0);
+    w.put(support, "minecraft:stone");
+    w.put(wire, "minecraft:redstone_wire");
+    engine.on_placed(&mut w, support);
+    engine.on_placed(&mut w, wire);
+    let wire_state = w.state(wire);
+    assert!(w.dropped().is_empty(), "nothing dropped yet");
+
+    engine.set_block(&mut w, support, BlockStateId::AIR, SetBlockFlags::PLACE);
+    assert_eq!(
+        w.block_name(wire),
+        Some("minecraft:air"),
+        "the wire must pop off"
+    );
+    assert_eq!(
+        w.dropped(),
+        &[(wire, wire_state)],
+        "the wire's item must be dropped at its cell"
+    );
+}
