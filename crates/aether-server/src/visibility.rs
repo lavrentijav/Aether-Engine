@@ -212,6 +212,11 @@ fn invalidate_section(cache: &mut GraphCache, key: (i32, i32, i32)) {
 
 /// Store `graph` for `key` only if no write touched `key` since the snapshot
 /// `computed_at` was taken.
+///
+/// On success the per-section epoch is dropped: the graph now carries the
+/// up-to-date state, and a future write re-creates the epoch as it removes the
+/// graph. That keeps the epoch map bounded by the sections invalidated but not
+/// yet recomputed, rather than by every section ever edited.
 fn store_graph(
     cache: &mut GraphCache,
     key: (i32, i32, i32),
@@ -220,6 +225,7 @@ fn store_graph(
 ) {
     if cache.epochs.get(&key).copied().unwrap_or(0) == computed_at {
         cache.graphs.insert(key, graph);
+        cache.epochs.remove(&key);
     }
 }
 
@@ -720,10 +726,15 @@ mod tests {
             "a graph from a stale snapshot must not be cached"
         );
 
-        // With no intervening write it is cached, and a later write removes it.
+        // With no intervening write it is cached, and the epoch entry is
+        // pruned; a later write removes the graph and re-creates it.
         let computed_at = cache.epochs.get(&key).copied().unwrap_or(0);
         store_graph(&mut cache, key, SectionGraph::open(), computed_at);
         assert!(cache.graphs.contains_key(&key));
+        assert!(
+            !cache.epochs.contains_key(&key),
+            "the epoch is pruned once the graph is stored"
+        );
         invalidate_section(&mut cache, key);
         assert!(!cache.graphs.contains_key(&key));
     }
