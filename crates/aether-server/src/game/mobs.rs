@@ -8,9 +8,11 @@
 //! Movement is A\* over the block grid (`aether_world::pathfind`, a
 //! simplified `WalkNodeEvaluator`): a mob follows a cached path to its goal,
 //! re-solving when the target moves far enough, the next waypoint is walled
-//! off, or the path runs out. The search is charged against a per-tick node
-//! budget shared by every mob, so a crowd cannot stall the tick; a mob that
-//! cannot afford a path falls back to steering straight.
+//! off, the path runs out, or the mob stops making progress (a block dropped
+//! onto the path). The search is charged against a per-tick node budget shared
+//! by every mob, so a crowd cannot stall the tick; a mob that cannot afford a
+//! path falls back to straight-line steering, guarded against steps the
+//! pathfinder itself would refuse.
 
 use std::cell::Cell;
 
