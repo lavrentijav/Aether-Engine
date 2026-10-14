@@ -138,10 +138,14 @@ pub enum Gen {
     /// SpawnInfo gains a sea level, the player-position packet is reordered,
     /// and attribute-modifier ids become identifiers.
     V1_21_3,
-    /// 1.21.5 – 1.21.6 (770, 771): the attribute set is reordered
-    /// (`camera_distance` before the entity-interaction range), and
-    /// `pick_item_from_block` exists.
+    /// 1.21.5 (770): the attribute set is reordered (`camera_distance`
+    /// before the entity-interaction range), and `pick_item_from_block`
+    /// exists.
     V1_21_5,
+    /// 1.21.6 (771): `entity_action` drops its sneak entries, so its sprint
+    /// ids move from 3/4 to 1/2 and sneaking comes through `player_input`
+    /// instead. Its attribute set matches 1.21.5's.
+    V1_21_6,
     /// 1.21.7 – 1.21.8 (772).
     V1_21_8,
     /// 1.21.9 – 1.21.10 (773): the quantized `lpVec3` velocity.
@@ -613,7 +617,7 @@ pub static V1_21_1: Version = legacy_version!("1.21/1.21.1", 767, Gen::V1_21_1, 
 pub static V1_21_3: Version = legacy_version!("1.21.3", 768, Gen::V1_21_3, v1_21_3, V1_21_3);
 pub static V1_21_4: Version = legacy_version!("1.21.4", 769, Gen::V1_21_3, v1_21_4, V1_21_4);
 pub static V1_21_5: Version = legacy_version!("1.21.5", 770, Gen::V1_21_5, v1_21_5, V1_21_5);
-pub static V1_21_6: Version = legacy_version!("1.21.6", 771, Gen::V1_21_5, v1_21_6, V1_21_6);
+pub static V1_21_6: Version = legacy_version!("1.21.6", 771, Gen::V1_21_6, v1_21_6, V1_21_6);
 pub static V1_21_8: Version = legacy_version!("1.21.8", 772, Gen::V1_21_8, v1_21_8, V1_21_8);
 pub static V1_21_9: Version =
     legacy_version!("1.21.9/1.21.10", 773, Gen::V1_21_9, v1_21_9, V1_21_9);

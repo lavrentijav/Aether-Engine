@@ -664,12 +664,26 @@ impl ProtocolCodec for Codec {
                 }
                 Err(_) => ClientEvent::Ignored,
             },
+            // `entity_action`. 1.21.6 dropped the sneak entries, moving sprint
+            // from 3/4 to 1/2 and sneaking to `player_input`; before that this
+            // packet carries both.
             id if id == p.sb_player_command => {
-                let _ = pin.var_int();
-                match pin.var_int() {
-                    Ok(1) => ClientEvent::Sprint(true),
-                    Ok(2) => ClientEvent::Sprint(false),
-                    _ => ClientEvent::Ignored,
+                let _ = pin.var_int(); // entity id
+                let action = pin.var_int();
+                if self.0.gen >= Gen::V1_21_6 {
+                    match action {
+                        Ok(1) => ClientEvent::Sprint(true),
+                        Ok(2) => ClientEvent::Sprint(false),
+                        _ => ClientEvent::Ignored,
+                    }
+                } else {
+                    match action {
+                        Ok(0) => ClientEvent::Input { sneak: true },
+                        Ok(1) => ClientEvent::Input { sneak: false },
+                        Ok(3) => ClientEvent::Sprint(true),
+                        Ok(4) => ClientEvent::Sprint(false),
+                        _ => ClientEvent::Ignored,
+                    }
                 }
             }
             id if id == p.sb_player_input => match pin.u8() {
@@ -1293,6 +1307,60 @@ mod tests {
         match Codec(&version::V1_20_5).decode(&pkt, any_pos()) {
             ClientEvent::CreativeSlot { count, .. } => assert_eq!(count, 64),
             _ => panic!("1.20.5: expected a creative slot"),
+        }
+    }
+
+    #[test]
+    fn entity_action_maps_per_release_through_1_21_5() {
+        // `entity_action` action ids: sneak is 0/1 and sprint 3/4 up to 1.21.5;
+        // 1.21.6 moved sprint to 1/2 and dropped the sneak entries (they come
+        // through `player_input` from then on). Decode action `a` on `v`.
+        let action = |v: &'static version::Version, a: i32| {
+            let pkt = RawPacket {
+                id: v.packets.sb_player_command,
+                data: vec![1, a as u8], // entity id 1, then the action
+            };
+            Codec(v).decode(&pkt, any_pos())
+        };
+        for (v, proto) in [
+            (&version::V1_20_2, 764),
+            (&version::V1_20_4, 765),
+            (&version::V1_20_5, 766),
+            (&version::V1_21_1, 767),
+            (&version::V1_21_3, 768),
+            (&version::V1_21_4, 769),
+            (&version::V1_21_5, 770),
+        ] {
+            assert!(
+                matches!(action(v, 0), ClientEvent::Input { sneak: true }),
+                "{proto}: action 0 starts sneaking"
+            );
+            assert!(
+                matches!(action(v, 1), ClientEvent::Input { sneak: false }),
+                "{proto}: action 1 stops sneaking"
+            );
+            assert!(
+                matches!(action(v, 3), ClientEvent::Sprint(true)),
+                "{proto}: action 3 starts sprinting"
+            );
+            assert!(
+                matches!(action(v, 4), ClientEvent::Sprint(false)),
+                "{proto}: action 4 stops sprinting"
+            );
+        }
+        for (v, proto) in [
+            (&version::V1_21_6, 771),
+            (&version::V1_21_8, 772),
+            (&version::V1_21_9, 773),
+        ] {
+            assert!(
+                matches!(action(v, 1), ClientEvent::Sprint(true)),
+                "{proto}: action 1 starts sprinting"
+            );
+            assert!(
+                matches!(action(v, 2), ClientEvent::Sprint(false)),
+                "{proto}: action 2 stops sprinting"
+            );
         }
     }
 
