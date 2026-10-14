@@ -44,8 +44,6 @@ pub trait TickStore {
     fn tick_put(&self, key: &[u8], value: &[u8]);
     /// Remove `key`.
     fn tick_delete(&self, key: &[u8]);
-    /// Every key starting with `prefix`.
-    fn tick_keys(&self, prefix: &[u8]) -> Vec<Vec<u8>>;
 }
 
 /// A shared reference is itself a store, so an `Arc<World>` held by the
@@ -60,9 +58,6 @@ impl<T: TickStore + ?Sized> TickStore for std::sync::Arc<T> {
     fn tick_delete(&self, key: &[u8]) {
         (**self).tick_delete(key)
     }
-    fn tick_keys(&self, prefix: &[u8]) -> Vec<Vec<u8>> {
-        (**self).tick_keys(prefix)
-    }
 }
 
 impl<B: KvBackend, G: ChunkGenerator> TickStore for aether_api::World<B, G> {
@@ -74,13 +69,6 @@ impl<B: KvBackend, G: ChunkGenerator> TickStore for aether_api::World<B, G> {
     }
     fn tick_delete(&self, key: &[u8]) {
         let _ = self.journal().backend().delete(key);
-    }
-    fn tick_keys(&self, prefix: &[u8]) -> Vec<Vec<u8>> {
-        self.journal()
-            .backend()
-            .scan_prefix(prefix)
-            .map(|v| v.into_iter().map(|(k, _)| k).collect())
-            .unwrap_or_default()
     }
 }
 
@@ -212,18 +200,6 @@ mod tests {
         }
         fn tick_delete(&self, key: &[u8]) {
             self.0.lock().unwrap().remove(key);
-        }
-        fn tick_keys(&self, prefix: &[u8]) -> Vec<Vec<u8>> {
-            let mut v: Vec<Vec<u8>> = self
-                .0
-                .lock()
-                .unwrap()
-                .keys()
-                .filter(|k| k.starts_with(prefix))
-                .cloned()
-                .collect();
-            v.sort();
-            v
         }
     }
 
