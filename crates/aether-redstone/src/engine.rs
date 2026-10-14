@@ -6,9 +6,8 @@
 //! call needs lives on the stack for the duration of that call.
 //!
 //! This module holds the **power model** — weak and strong signal, conductor
-//! pass-through — the update plumbing, **redstone wire**, and the simple
-//! sources: levers, buttons and redstone torches. Repeaters and lamps are added
-//! by the next stage of the same crate.
+//! pass-through — the update plumbing, **redstone wire**, **repeaters** and
+//! **lamps**, and the simple sources: levers, buttons and redstone torches.
 //!
 //! # Update order
 //!
@@ -121,6 +120,16 @@ fn wire_power(state: BlockStateId) -> u8 {
 
 fn is_trapdoor(state: BlockStateId) -> bool {
     props::name_of(state).is_some_and(|n| n.ends_with("_trapdoor"))
+}
+
+/// `true` for the diode family. Comparators are recognised so locking works,
+/// but their comparison behaviour is a later stage.
+fn is_diode(state: BlockStateId) -> bool {
+    matches!(kind_of(state), Kind::Repeater | Kind::Comparator)
+}
+
+fn delay(state: BlockStateId) -> u8 {
+    props::int_or(state, "delay", 1)
 }
 
 fn power(state: BlockStateId) -> u8 {
@@ -337,7 +346,6 @@ impl Redstone {
     }
 
     /// The control input a diode reads from a side block (`getControlInputSignal`).
-    #[allow(dead_code)]
     fn control_input<V: RedstoneView>(
         &self,
         view: &V,
@@ -531,6 +539,207 @@ impl Redstone {
     }
 
     // -----------------------------------------------------------------------
+    // Repeater
+    // -----------------------------------------------------------------------
+
+    fn diode_delay(state: BlockStateId) -> u32 {
+        u32::from(delay(state)) * 2
+    }
+
+    fn diode_input_signal<V: RedstoneView>(
+        &self,
+        view: &V,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> u8 {
+        let dir = facing(state);
+        let input = pos.offset(dir);
+        let signal = self.signal(view, input, dir, false);
+        if signal >= 15 {
+            return signal;
+        }
+        let neighbour = view.get_block(input);
+        signal.max(wire_power(neighbour))
+    }
+
+    fn diode_should_turn_on<V: RedstoneView>(
+        &self,
+        view: &V,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> bool {
+        self.diode_input_signal(view, pos, state) > 0
+    }
+
+    fn diode_alternate_signal<V: RedstoneView>(
+        &self,
+        view: &V,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> u8 {
+        let f = facing(state);
+        let cw = f.clockwise();
+        let ccw = f.counter_clockwise();
+        self.control_input(view, pos.offset(cw), cw, true)
+            .max(self.control_input(view, pos.offset(ccw), ccw, true))
+    }
+
+    fn diode_is_locked<V: RedstoneView>(
+        &self,
+        view: &V,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> bool {
+        self.diode_alternate_signal(view, pos, state) > 0
+    }
+
+    /// Keep the repeater's `locked` property in step with its side inputs, the
+    /// way vanilla's `updateShape` does.
+    fn diode_update_locked<V: RedstoneView>(
+        &self,
+        view: &mut V,
+        queue: &mut VecDeque<Update>,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> BlockStateId {
+        let locked = self.diode_is_locked(view, pos, state);
+        let current = props::bool_or(state, "locked", false);
+        if locked == current {
+            return state;
+        }
+        let value = if locked { "true" } else { "false" };
+        let new = props::with(state, "locked", value).unwrap_or(state);
+        view.set_block(pos, new);
+        self.update_neighbors_at(queue, pos);
+        new
+    }
+
+    fn diode_should_prioritize<V: RedstoneView>(
+        &self,
+        view: &V,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> bool {
+        let opposite = facing(state).opposite();
+        let neighbour = view.get_block(pos.offset(opposite));
+        is_diode(neighbour) && facing(neighbour) != opposite
+    }
+
+    fn diode_check_tick<V: RedstoneView>(
+        &self,
+        view: &mut V,
+        _queue: &mut VecDeque<Update>,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) {
+        if self.diode_is_locked(view, pos, state) {
+            return;
+        }
+        let is_on = powered(state);
+        let should = self.diode_should_turn_on(view, pos, state);
+        if is_on != should && !view.will_tick_this_tick(pos) {
+            let priority = if self.diode_should_prioritize(view, pos, state) {
+                TickPriority::ExtremelyHigh
+            } else if is_on {
+                TickPriority::VeryHigh
+            } else {
+                TickPriority::High
+            };
+            view.schedule_block_tick(pos, Self::diode_delay(state), priority);
+        }
+    }
+
+    fn diode_tick<V: RedstoneView>(
+        &self,
+        view: &mut V,
+        queue: &mut VecDeque<Update>,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) {
+        if self.diode_is_locked(view, pos, state) {
+            return;
+        }
+        let is_on = powered(state);
+        let should = self.diode_should_turn_on(view, pos, state);
+        if is_on && !should {
+            let new = props::with(state, "powered", "false").unwrap_or(state);
+            self.apply(view, queue, pos, new);
+        } else if !is_on {
+            let new = props::with(state, "powered", "true").unwrap_or(state);
+            self.apply(view, queue, pos, new);
+            // Pulse extension: the input may already be gone, in which case the
+            // repeater holds for one more delay before dropping.
+            if !should {
+                view.schedule_block_tick(pos, Self::diode_delay(state), TickPriority::VeryHigh);
+            }
+        }
+    }
+
+    fn diode_update_neighbors_in_front<V: RedstoneView>(
+        &self,
+        _view: &V,
+        queue: &mut VecDeque<Update>,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) {
+        let f = facing(state);
+        let output = pos.offset(f.opposite());
+        queue.push_back(Update(output));
+        self.update_neighbors_except(queue, output, f);
+    }
+
+    fn repeater_use<V: RedstoneView>(
+        &self,
+        view: &mut V,
+        _queue: &mut VecDeque<Update>,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) {
+        let next = if delay(state) >= 4 {
+            1
+        } else {
+            delay(state) + 1
+        };
+        let new = props::with(state, "delay", &next.to_string()).unwrap_or(state);
+        view.set_block(pos, new);
+    }
+
+    // -----------------------------------------------------------------------
+    // Redstone lamp
+    // -----------------------------------------------------------------------
+
+    fn lamp_neighbor_changed<V: RedstoneView>(
+        &self,
+        view: &mut V,
+        queue: &mut VecDeque<Update>,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) {
+        let is_lit = lit(state);
+        if is_lit != self.has_neighbor_signal(view, pos) {
+            if is_lit {
+                view.schedule_block_tick(pos, 4, TickPriority::Normal);
+            } else {
+                let new = props::with(state, "lit", "true").unwrap_or(state);
+                self.apply(view, queue, pos, new);
+            }
+        }
+    }
+
+    fn lamp_tick<V: RedstoneView>(
+        &self,
+        view: &mut V,
+        queue: &mut VecDeque<Update>,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) {
+        if lit(state) && !self.has_neighbor_signal(view, pos) {
+            let new = props::with(state, "lit", "false").unwrap_or(state);
+            self.apply(view, queue, pos, new);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Update plumbing
     // -----------------------------------------------------------------------
 
@@ -538,6 +747,19 @@ impl Redstone {
     fn update_neighbors_at(&self, queue: &mut VecDeque<Update>, pos: BlockPos) {
         for dir in Direction::UPDATE_ORDER {
             queue.push_back(Update(pos.offset(dir)));
+        }
+    }
+
+    fn update_neighbors_except(
+        &self,
+        queue: &mut VecDeque<Update>,
+        pos: BlockPos,
+        skip: Direction,
+    ) {
+        for dir in Direction::UPDATE_ORDER {
+            if dir != skip {
+                queue.push_back(Update(pos.offset(dir)));
+            }
         }
     }
 
@@ -606,7 +828,12 @@ impl Redstone {
         let state = view.get_block(pos);
         match kind_of(state) {
             Kind::Wire => self.wire_update(view, queue, pos, state),
+            Kind::Repeater => {
+                let state = self.diode_update_locked(view, queue, pos, state);
+                self.diode_check_tick(view, queue, pos, state);
+            }
             Kind::Torch | Kind::WallTorch => self.torch_neighbor_changed(view, queue, pos, state),
+            Kind::Lamp => self.lamp_neighbor_changed(view, queue, pos, state),
             _ => {}
         }
     }
@@ -635,6 +862,10 @@ impl Redstone {
         let mut queue = VecDeque::new();
         self.update_neighbors_at(&mut queue, pos);
         queue.push_back(Update(pos));
+        let state = view.get_block(pos);
+        if is_diode(state) {
+            self.diode_update_neighbors_in_front(view, &mut queue, pos, state);
+        }
         self.drain(view, queue);
     }
 
@@ -647,6 +878,7 @@ impl Redstone {
                 self.update_neighbors_of_neighboring_wires(view, &mut queue, pos);
             }
             Kind::Torch | Kind::WallTorch => self.torch_notify_neighbors(&mut queue, pos),
+            Kind::Repeater => self.diode_update_neighbors_in_front(view, &mut queue, pos, old),
             Kind::Lever | Kind::Button => {
                 if powered(old) {
                     self.update_powered_source_neighbours(&mut queue, pos, old);
@@ -675,7 +907,9 @@ impl Redstone {
         let mut queue = VecDeque::new();
         let state = view.get_block(pos);
         match kind_of(state) {
+            Kind::Repeater => self.diode_tick(view, &mut queue, pos, state),
             Kind::Torch | Kind::WallTorch => self.torch_tick(view, &mut queue, pos, state),
+            Kind::Lamp => self.lamp_tick(view, &mut queue, pos, state),
             Kind::Button => self.button_tick(view, &mut queue, pos, state),
             _ => {}
         }
@@ -690,6 +924,7 @@ impl Redstone {
         match kind_of(state) {
             Kind::Lever => self.lever_use(view, &mut queue, pos, state),
             Kind::Button => self.button_use(view, &mut queue, pos, state),
+            Kind::Repeater => self.repeater_use(view, &mut queue, pos, state),
             Kind::Wire => self.wire_use(view, &mut queue, pos, state),
             _ => {}
         }
