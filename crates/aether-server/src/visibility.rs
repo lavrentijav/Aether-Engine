@@ -731,6 +731,39 @@ mod tests {
     }
 
     #[test]
+    fn the_spawn_column_is_masked_the_way_the_join_path_masks_it() {
+        // The join path masks its first columns through exactly these calls
+        // (finding 2). A buried ore a section below the surface must not reach
+        // the client as itself.
+        invalidate_all();
+        struct BuriedOre;
+        impl BlockSource for BuriedOre {
+            fn block_at(&self, _x: i32, y: i32, _z: i32) -> BlockStateId {
+                if y == -48 {
+                    BlockStateId(1234) // a stand-in ore id
+                } else if y < 0 {
+                    STONE
+                } else {
+                    BlockStateId::AIR
+                }
+            }
+        }
+        let world = BuriedOre;
+        let vis = visible_from(&world, (0.5, 5.5, 0.5), 8);
+        let hidden = desired_hidden(&vis, 0, 0);
+        assert_ne!(hidden, 0, "the deep sections must be hidden");
+        let masked = MaskedColumn::new(&world, 0, 0, hidden, fill_for_mode(GameMode::Creative));
+        assert_eq!(
+            masked.block_at(0, -48, 0),
+            STONE,
+            "the buried ore must be sent as stone"
+        );
+        // A column the mask does not cover keeps the real block.
+        let unmasked = MaskedColumn::new(&world, 1, 0, hidden, STONE);
+        assert_eq!(unmasked.block_at(0, -48, 0), BlockStateId(1234));
+    }
+
+    #[test]
     fn section_of_floors_negative_coordinates() {
         let pos = crate::players::PosLook {
             x: -0.5,
