@@ -5,7 +5,8 @@
 //! with one or more structures and weights. This module reads them and decides
 //! which chunks start a structure ([`StructureRegistry::starts_at`]) exactly as
 //! the game's `ChunkGeneratorStructureState` / `ChunkGenerator.createStructures`
-//! do. Template placement on top of those starts lives here too (F2).
+//! do. [`template`] is the one structure-template reader and placer, shared by
+//! the igloo ([`igloo`]) and the fossil feature.
 //!
 //! # Groundwork boundaries
 //!
@@ -14,8 +15,8 @@
 //!   vanilla would fall through to the next entry when the biome at the
 //!   generation position does not match, which needs the terrain. That check
 //!   belongs to generation and is not modelled yet.
-//! * Only the igloo is placed, from the pack's `.nbt` templates
-//!   ([`igloo`]). Jigsaw structures (villages, …) are not — see
+//! * Of the sets' structures, only the igloo is placed (from the pack's `.nbt`
+//!   templates); jigsaw structures (villages, …) are not — see
 //!   `docs/tasks/QF-notes.md`.
 
 pub mod igloo;

@@ -33,6 +33,23 @@
   integration tests that generate a real snowy igloo start and assert the
   template blocks, determinism, and the lab chest.
 
+**F3 — one template loader** (`structure/template.rs`)
+
+* Queue B had grown a second loader (`vanilla/fossil_template.rs`) for the
+  fossil feature. Both are now the single `structure/template.rs`:
+  `StructureTemplate` + `place_in_world`, the `Nbt` reader, `Rotation`/`Mirror`,
+  `zero_position`/`bounding_box`, and the processors (`block_rot`, `rule`,
+  `protected_blocks`) live in one place; `fossil_template.rs` is deleted.
+* Fossil and igloo both call `place_in_world` with a `PlaceSettings`
+  (rotation, mirror, pivot, processors, bounding box, `random_palette`,
+  `ignore_structure_blocks`). Fossil keeps `random_palette` set (its
+  `StructurePlaceSettings` carries the feature random, so the single-palette
+  `nextInt(1)` and the processor draws advance the feature seed) and gets its
+  blocks in `buildInfoList` order from `load_from_pack`; the igloo uses file
+  order and drops its `structure_block` markers.
+* Behaviour is unchanged: the fossil tests and the igloo/parity tests pass
+  without edits.
+
 ## Accepted F2 deviations
 
 * **Block entities are not written.** A template block with NBT (igloo furnace,

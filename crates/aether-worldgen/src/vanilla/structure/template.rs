@@ -2,20 +2,32 @@
 //!
 //! A template is a palette plus a list of `(pos, state)` blocks; placing it
 //! transforms each block by a mirror, a rotation about a rotation pivot, and a
-//! world position, then writes the rotated block state. This is a port of the
-//! parts of `StructureTemplate` a data-driven structure needs:
+//! world position, may run the pack's structure processors over it, then writes
+//! the rotated block state. This is the single port of `StructureTemplate` and
+//! `StructureTemplate.placeInWorld` used by both the igloo ([`super::igloo`])
+//! and the fossil feature ([`crate::vanilla::feature::features`]):
 //!
-//! * [`load`](Template::load) — parse the (gzipped) NBT: `size`, `palette`,
-//!   `blocks` (and the first of `palettes`, when a template has several);
-//! * [`transform`] — `StructureTemplate.transform`;
-//! * [`transform_state`] — `BlockState.mirror(mirror).rotate(rotation)` for the
+//! * [`StructureTemplate::from_gzip`] parses the (gzipped) NBT: `size`,
+//!   `palette`, `blocks` (and the first of `palettes`, when a template has
+//!   several);
+//! * [`transform`] is `StructureTemplate.transform`;
+//! * [`transform_state`] is `BlockState.mirror(mirror).rotate(rotation)` for the
 //!   property shapes the overworld structures use (directional `facing`, the
 //!   `axis` of a pillar, the four cross-connection booleans, a 16-way
-//!   `rotation`); anything else is left as it was.
-//! * [`Template::place`] — the writes, in template order, with
-//!   `structure_block` markers dropped (`BlockIgnoreProcessor`). A marker in
-//!   `data` mode leaves air behind, as `TemplateStructurePiece`'s
-//!   `handleDataMarker` does for the igloo's chest marker.
+//!   `rotation`); anything else is left as it was;
+//! * [`StructureTemplate::place_in_world`] is `placeInWorld`, driven by a
+//!   [`PlaceSettings`]: the processors (`block_rot`, `rule`, `protected_blocks`)
+//!   are run in the pack's order and their random draws are part of the
+//!   caller's seed, so that order is preserved exactly;
+//! * [`load_from_pack`] reads a template the way the game builds its palette
+//!   (`buildInfoList`: sorted by Y, then X, then Z), which the fossil's
+//!   per-block processor draws depend on.
+//!
+//! `structure_block` handling is the caller's choice: with
+//! [`PlaceSettings::ignore_structure_blocks`] a `structure_block` marker is
+//! dropped (`BlockIgnoreProcessor.STRUCTURE_BLOCK`) and a `data` marker leaves
+//! air behind, as `TemplateStructurePiece`'s `handleDataMarker` does for the
+//! igloo's chest marker.
 //!
 //! `TemplateManager` reads and caches templates from the operator's own data
 //! pack, never vendoring them.
@@ -28,6 +40,14 @@ use aether_world::registry::{blocks, props};
 use aether_world::BlockStateId;
 
 use crate::vanilla::blockinfo;
+use crate::vanilla::density::{BuildError, DataPack};
+use crate::vanilla::feature::blocks::RuleTest;
+use crate::vanilla::feature::level::{Level, Pos};
+use crate::vanilla::json::Json;
+use crate::vanilla::mth;
+use crate::vanilla::rng::{Rng, WorldgenRandom};
+use crate::vanilla::surface::parse_block_state as parse_json_block_state;
+use crate::vanilla::tags::{BlockSet, Tags};
 
 /// `Mirror`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +83,11 @@ impl Rotation {
         Rotation::Counterclockwise90,
     ];
 
+    /// `Rotation.getRandom`.
+    pub fn random(r: &mut impl Rng) -> Self {
+        Self::ALL[r.next_int_bounded(4) as usize]
+    }
+
     /// `Rotation.rotate(int, int)` for a `count`-way rotation index.
     pub fn rotate_index(self, i: i32, count: i32) -> i32 {
         match self {
@@ -85,14 +110,14 @@ pub struct TemplateBlock {
 
 /// A parsed structure template.
 #[derive(Debug, Clone)]
-pub struct Template {
+pub struct StructureTemplate {
     /// `size`.
     pub size: [i32; 3],
     /// Every block, in the order the file lists them.
     pub blocks: Vec<TemplateBlock>,
 }
 
-impl Template {
+impl StructureTemplate {
     /// Parse a gzipped `.nbt` buffer.
     pub fn from_gzip(data: &[u8]) -> Result<Self, String> {
         let raw = gunzip(data)?;
@@ -113,7 +138,7 @@ impl Template {
             .ok_or("template has no palette")?;
         let mut palette: Vec<BlockStateId> = Vec::new();
         for p in palette_json.as_list().unwrap_or(&[]) {
-            palette.push(parse_block_state(p)?);
+            palette.push(parse_palette_state(p)?);
         }
 
         let mut blocks = Vec::new();
@@ -128,38 +153,98 @@ impl Template {
         Ok(Self { size, blocks })
     }
 
-    /// Place the template at `position`, applying `mirror` then `rotation`
-    /// about `pivot`. Returns the world writes; `structure_block` data markers
-    /// become air (as `handleDataMarker` leaves them) and every other
-    /// `structure_block` is dropped, as `BlockIgnoreProcessor.STRUCTURE_BLOCK`
-    /// does.
-    pub fn place(
+    /// `StructureTemplate.placeInWorld`: process and place every block into
+    /// `lv`, `origin` the placement position. See [`PlaceSettings`].
+    pub fn place_in_world(
         &self,
-        position: [i32; 3],
-        rotation: Rotation,
-        mirror: Mirror,
-        pivot: [i32; 3],
-    ) -> Vec<(i32, i32, i32, BlockStateId)> {
-        let mut out = Vec::with_capacity(self.blocks.len());
+        lv: &mut Level,
+        origin: Pos,
+        s: &PlaceSettings,
+        r: &mut WorldgenRandom,
+    ) {
+        // `StructurePlaceSettings.getRandomPalette`: a single-palette template
+        // still draws `nextInt(1)` when the settings carry a random, so the
+        // caller's stream advances here even though the pick is always palette
+        // 0. The igloo carries no random, so it draws nothing.
+        if s.random_palette {
+            let _ = r.next_int_bounded(1);
+        }
+        // Processors read the world before any of this template's writes, so
+        // the whole list is built first and only then written, as
+        // `StructureTemplate.placeInWorld` does.
+        let mut processed: Vec<(Pos, BlockStateId)> = Vec::with_capacity(self.blocks.len());
         for b in &self.blocks {
-            let r = transform(b.pos, mirror, rotation, pivot);
-            let mut push = |state: BlockStateId| {
-                out.push((
-                    position[0] + r[0],
-                    position[1] + r[1],
-                    position[2] + r[2],
-                    state,
-                ));
-            };
-            if blockinfo::name(b.state) == "minecraft:structure_block" {
+            let rel = transform(b.pos, s.mirror, s.rotation, s.pivot);
+            let pos = Pos::new(origin.x + rel[0], origin.y + rel[1], origin.z + rel[2]);
+            if s.ignore_structure_blocks && blockinfo::name(b.state) == "minecraft:structure_block"
+            {
                 if is_data_marker(b.state) {
-                    push(BlockStateId::AIR);
+                    processed.push((pos, BlockStateId::AIR));
                 }
                 continue;
             }
-            push(transform_state(b.state, mirror, rotation));
+            let mut state = Some(b.state);
+            for p in s.processors {
+                match state.and_then(|st| p.process(&*lv, pos, st, r)) {
+                    Some(st) => state = Some(st),
+                    None => {
+                        state = None;
+                        break;
+                    }
+                }
+            }
+            if let Some(st) = state {
+                processed.push((pos, transform_state(st, s.mirror, s.rotation)));
+            }
         }
-        out
+        for (pos, st) in processed {
+            if let Some((min, max)) = s.bounding_box {
+                if pos.x < min.x
+                    || pos.x > max.x
+                    || pos.y < min.y
+                    || pos.y > max.y
+                    || pos.z < min.z
+                    || pos.z > max.z
+                {
+                    continue;
+                }
+            }
+            lv.set(pos, st);
+        }
+    }
+}
+
+/// `StructurePlaceSettings` — how a template is placed.
+#[derive(Debug, Clone)]
+pub struct PlaceSettings<'a> {
+    /// The rotation about the pivot.
+    pub rotation: Rotation,
+    /// The mirror, applied before the rotation.
+    pub mirror: Mirror,
+    /// The rotation pivot (`StructurePlaceSettings.setRotationPivot`).
+    pub pivot: [i32; 3],
+    /// The processors to run, in order.
+    pub processors: &'a [Processor],
+    /// Writes are dropped outside this box, when set.
+    pub bounding_box: Option<(Pos, Pos)>,
+    /// Draw the palette index from the random (`setRandom`); the igloo, which
+    /// does not set one, leaves this false.
+    pub random_palette: bool,
+    /// Drop `structure_block`s, a `data` marker becoming air.
+    pub ignore_structure_blocks: bool,
+}
+
+impl Default for PlaceSettings<'_> {
+    fn default() -> Self {
+        Self {
+            rotation: Rotation::None,
+            mirror: Mirror::None,
+            pivot: [0, 0, 0],
+            processors: &[],
+            bounding_box: None,
+            random_palette: false,
+            ignore_structure_blocks: false,
+        }
     }
 }
 
@@ -196,6 +281,36 @@ pub fn transform(pos: [i32; 3], mirror: Mirror, rotation: Rotation, pivot: [i32;
             }
         }
     }
+}
+
+/// `StructureTemplate.getZeroPositionWithTransform(pos, mirror, rotation)` for
+/// a template of `size`, mirror `none`.
+pub fn zero_position(base: Pos, rotation: Rotation, size: [i32; 3]) -> Pos {
+    let (i, j) = (size[0] - 1, size[2] - 1);
+    match rotation {
+        Rotation::None => base,
+        Rotation::Clockwise90 => base.offset(j, 0, 0),
+        Rotation::Clockwise180 => base.offset(i, 0, j),
+        Rotation::Counterclockwise90 => base.offset(0, 0, i),
+    }
+}
+
+/// `StructureTemplate.getBoundingBox(pos, rotation, mirror)` for a template of
+/// `size`, mirror `none`, as `(min, max)`.
+pub fn bounding_box(base: Pos, rotation: Rotation, size: [i32; 3]) -> (Pos, Pos) {
+    let a = [0, 0, 0];
+    let b = transform(
+        [size[0] - 1, size[1] - 1, size[2] - 1],
+        Mirror::None,
+        rotation,
+        [0, 0, 0],
+    );
+    let min = Pos::new(a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2]));
+    let max = Pos::new(a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2]));
+    (
+        min.offset(base.x, base.y, base.z),
+        max.offset(base.x, base.y, base.z),
+    )
 }
 
 /// `BlockState.mirror(mirror).rotate(rotation)`, for the property shapes the
@@ -354,7 +469,182 @@ fn rotate_axis(a: &str, rotation: Rotation) -> Option<&'static str> {
     }
 }
 
-fn parse_block_state(j: &Nbt) -> Result<BlockStateId, String> {
+// --- processors ------------------------------------------------------------
+
+/// A location predicate for `rule` processors: `always_true` /
+/// `block_match` / `tag_match`, tested against the world block.
+#[derive(Debug)]
+pub enum RuleLocation {
+    /// `always_true`.
+    Always,
+    /// `block_match`.
+    Block(u16),
+    /// `tag_match`.
+    Tag(BlockSet),
+}
+
+impl RuleLocation {
+    fn test(&self, lv: &Level, p: Pos) -> bool {
+        match self {
+            RuleLocation::Always => true,
+            RuleLocation::Block(b) => blockinfo::block_of(lv.get(p)) == *b,
+            RuleLocation::Tag(t) => t.contains(lv.get(p)),
+        }
+    }
+}
+
+/// One `ProcessorRule`.
+#[derive(Debug)]
+pub struct Rule {
+    input: RuleTest,
+    location: RuleLocation,
+    output: BlockStateId,
+}
+
+/// A structure processor.
+#[derive(Debug)]
+pub enum Processor {
+    /// `block_rot`.
+    BlockRot {
+        /// The integrity (chance a block survives).
+        integrity: f32,
+        /// The blocks the rot applies to, or all when `None`.
+        rottable: Option<BlockSet>,
+    },
+    /// `rule`.
+    Rule(Vec<Rule>),
+    /// `protected_blocks`.
+    Protected {
+        /// The blocks that survive (are not dropped).
+        cannot: BlockSet,
+    },
+}
+
+impl Processor {
+    /// Run one processor over a block. `None` means the block is dropped.
+    fn process(
+        &self,
+        lv: &Level,
+        pos: Pos,
+        state: BlockStateId,
+        r: &mut WorldgenRandom,
+    ) -> Option<BlockStateId> {
+        match self {
+            Processor::BlockRot {
+                integrity,
+                rottable,
+            } => {
+                let applies = rottable.as_ref().map(|s| s.contains(state)).unwrap_or(true);
+                if applies && r.next_float() > *integrity {
+                    None
+                } else {
+                    Some(state)
+                }
+            }
+            Processor::Rule(rules) => {
+                // `RandomSource.create(Mth.getSeed(pos))`, fresh per block.
+                let mut pos_r = WorldgenRandom::legacy(mth::get_seed(pos.x, pos.y, pos.z));
+                for rule in rules {
+                    if rule.input.test(state, &mut pos_r) && rule.location.test(lv, pos) {
+                        return Some(rule.output);
+                    }
+                }
+                Some(state)
+            }
+            Processor::Protected { cannot } => {
+                if cannot.contains(lv.get(pos)) {
+                    None
+                } else {
+                    Some(state)
+                }
+            }
+        }
+    }
+}
+
+/// Parse a `processor_list` JSON file.
+pub fn parse_processors(j: &Json, tags: &Tags) -> Result<Vec<Processor>, BuildError> {
+    let mut out = Vec::new();
+    for p in j.get("processors").and_then(Json::as_arr).unwrap_or(&[]) {
+        let ty = p
+            .str_of("processor_type")
+            .unwrap_or("")
+            .trim_start_matches("minecraft:");
+        out.push(match ty {
+            "block_rot" => Processor::BlockRot {
+                integrity: p.f64_or("integrity", 1.0) as f32,
+                rottable: p.get("rottable_blocks").map(|v| tags.holder_set(v)),
+            },
+            "rule" => {
+                let mut rules = Vec::new();
+                for r in p.get("rules").and_then(Json::as_arr).unwrap_or(&[]) {
+                    let input = RuleTest::parse(
+                        r.get("input_predicate")
+                            .ok_or_else(|| BuildError::new("rule: no input_predicate"))?,
+                        tags,
+                    )?;
+                    let loc = r
+                        .get("location_predicate")
+                        .ok_or_else(|| BuildError::new("rule: no location_predicate"))?;
+                    let location = match loc
+                        .str_of("predicate_type")
+                        .unwrap_or("")
+                        .trim_start_matches("minecraft:")
+                    {
+                        "always_true" => RuleLocation::Always,
+                        "block_match" => RuleLocation::Block(
+                            loc.str_of("block")
+                                .and_then(aether_world::registry::blocks::block_id_of)
+                                .ok_or_else(|| BuildError::new("rule: bad location block"))?,
+                        ),
+                        "tag_match" => {
+                            RuleLocation::Tag(tags.block_tag(loc.str_of("tag").unwrap_or("")))
+                        }
+                        other => {
+                            return Err(BuildError::new(format!(
+                                "unknown location predicate `{other}`"
+                            )))
+                        }
+                    };
+                    let output = r
+                        .get("output_state")
+                        .and_then(parse_json_block_state)
+                        .ok_or_else(|| BuildError::new("rule: bad output_state"))?;
+                    rules.push(Rule {
+                        input,
+                        location,
+                        output,
+                    });
+                }
+                Processor::Rule(rules)
+            }
+            "protected_blocks" => Processor::Protected {
+                cannot: tags.holder_set(p.get("value").unwrap_or(&Json::Null)),
+            },
+            other => {
+                return Err(BuildError::new(format!(
+                    "unknown structure processor `{other}`"
+                )))
+            }
+        });
+    }
+    Ok(out)
+}
+
+/// Read a structure template from the pack, with its blocks in the game's
+/// placement order (`buildInfoList`: sorted by Y, then X, then Z).
+///
+/// That order is what `StructureTemplate.placeInWorld` iterates, so it is also
+/// the order per-block processors draw from the caller's random.
+pub fn load_from_pack(pack: &DataPack, id: &str) -> Result<StructureTemplate, BuildError> {
+    let bytes = pack.read_structure(id)?;
+    let mut t = StructureTemplate::from_gzip(&bytes)
+        .map_err(|e| BuildError::new(format!("cannot parse structure `{id}`: {e}")))?;
+    t.blocks.sort_by_key(|b| (b.pos[1], b.pos[0], b.pos[2]));
+    Ok(t)
+}
+
+fn parse_palette_state(j: &Nbt) -> Result<BlockStateId, String> {
     let name = j
         .get("Name")
         .and_then(Nbt::as_str)
@@ -379,18 +669,22 @@ fn parse_block_state(j: &Nbt) -> Result<BlockStateId, String> {
 }
 
 fn int_list(j: Option<&Nbt>) -> Option<[i32; 3]> {
-    let l = j?.as_list()?;
-    Some([
-        l.first()?.as_i64()? as i32,
-        l.get(1)?.as_i64()? as i32,
-        l.get(2)?.as_i64()? as i32,
-    ])
+    let j = j?;
+    let v: Vec<i32> = match j {
+        Nbt::IntArray(a) => a.clone(),
+        Nbt::List(items) => items
+            .iter()
+            .map(|n| n.as_i64().map(|v| v as i32))
+            .collect::<Option<Vec<i32>>>()?,
+        _ => return None,
+    };
+    (v.len() == 3).then(|| [v[0], v[1], v[2]])
 }
 
 /// Reads and caches templates from a data pack's `data/minecraft/structure/`.
 pub struct TemplateManager {
     dir: PathBuf,
-    cache: Mutex<HashMap<String, Arc<Template>>>,
+    cache: Mutex<HashMap<String, Arc<StructureTemplate>>>,
 }
 
 impl TemplateManager {
@@ -404,14 +698,14 @@ impl TemplateManager {
     }
 
     /// Load `id` (e.g. `minecraft:igloo/top`), or `None` when absent or broken.
-    pub fn get(&self, id: &str) -> Option<Arc<Template>> {
+    pub fn get(&self, id: &str) -> Option<Arc<StructureTemplate>> {
         let rel = id.strip_prefix("minecraft:").unwrap_or(id);
         if let Some(t) = self.cache.lock().unwrap().get(rel) {
             return Some(Arc::clone(t));
         }
         let path = self.dir.join(format!("{rel}.nbt"));
         let data = std::fs::read(&path).ok()?;
-        let t = Arc::new(Template::from_gzip(&data).ok()?);
+        let t = Arc::new(StructureTemplate::from_gzip(&data).ok()?);
         self.cache
             .lock()
             .unwrap()
@@ -692,6 +986,29 @@ mod tests {
     }
 
     #[test]
+    fn zero_position_and_bounding_box_match_get_zero_position_with_transform() {
+        // `StructureTemplate.getZeroPositionWithTransform` for a 3×5×7.
+        let base = Pos::new(10, 20, 30);
+        assert_eq!(zero_position(base, Rotation::None, [3, 5, 7]), base);
+        assert_eq!(
+            zero_position(base, Rotation::Clockwise90, [3, 5, 7]),
+            base.offset(6, 0, 0)
+        );
+        assert_eq!(
+            zero_position(base, Rotation::Clockwise180, [3, 5, 7]),
+            base.offset(2, 0, 6)
+        );
+        assert_eq!(
+            zero_position(base, Rotation::Counterclockwise90, [3, 5, 7]),
+            base.offset(0, 0, 2)
+        );
+        // The rotated bounding box: 3×7 for a quarter turn.
+        let (min, max) = bounding_box(base, Rotation::Clockwise90, [3, 5, 7]);
+        assert_eq!(min, Pos::new(4, 20, 30));
+        assert_eq!(max, Pos::new(10, 24, 32));
+    }
+
+    #[test]
     fn rotate_index_wraps_like_the_game() {
         assert_eq!(Rotation::Clockwise90.rotate_index(7, 16), 11);
         assert_eq!(Rotation::Clockwise180.rotate_index(7, 16), 15);
@@ -771,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn the_packs_igloo_templates_parse_and_place() {
+    fn the_packs_igloo_templates_parse() {
         let Some(root) = std::env::var("AETHER_VANILLA_PACK").ok() else {
             eprintln!("skipping: AETHER_VANILLA_PACK not set");
             return;
@@ -786,20 +1103,27 @@ mod tests {
         assert_eq!(top.blocks.len(), 152);
         assert_eq!(middle.blocks.len(), 15);
         assert_eq!(bottom.blocks.len(), 244);
-
-        // No structure block survives as a write; the bottom's `chest` data
-        // marker becomes air.
-        for t in [&top, &middle, &bottom] {
-            let writes = t.place([0, 0, 0], Rotation::None, Mirror::None, [0, 0, 0]);
-            assert!(writes
-                .iter()
-                .all(|(_, _, _, s)| blockinfo::name(*s) != "minecraft:structure_block"));
-        }
-        let writes = bottom.place([0, 0, 0], Rotation::None, Mirror::None, [0, 0, 0]);
-        assert_eq!(writes.len(), 244);
-        // The marker sat at (1, 2, 6); with no pivot it lands there as air.
-        assert!(writes
+        // The bottom carries the `chest` data marker as a structure block.
+        assert!(bottom
+            .blocks
             .iter()
-            .any(|&(x, y, z, s)| (x, y, z) == (1, 2, 6) && s == BlockStateId::AIR));
+            .any(|b| blockinfo::name(b.state) == "minecraft:structure_block"));
+    }
+
+    #[test]
+    fn load_from_pack_sorts_blocks_in_build_info_list_order() {
+        let Some(root) = std::env::var("AETHER_VANILLA_PACK").ok() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let pack = DataPack::open(&root).expect("open pack");
+        let t = load_from_pack(&pack, "minecraft:fossil/spine_1").expect("fossil/spine_1");
+        assert_eq!(t.size, [3, 3, 13]);
+        // `buildInfoList`: sorted by Y, then X, then Z.
+        assert!(t
+            .blocks
+            .windows(2)
+            .all(|w| (w[0].pos[1], w[0].pos[0], w[0].pos[2])
+                <= (w[1].pos[1], w[1].pos[0], w[1].pos[2])));
     }
 }
