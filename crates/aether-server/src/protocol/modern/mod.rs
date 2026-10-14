@@ -778,6 +778,12 @@ fn write_container_slot(v: &version::Version, p: &mut PacketOut, slot: &super::C
         .item_id(&slot.item)
         .or_else(|| v.item_id("minecraft:barrier"))
         .unwrap_or(0);
+    // Pre-1.20.5 a slot is NBT-based, so the name rides in `display.Name`
+    // rather than a data component.
+    if v.gen < Gen::V1_20_5 {
+        play::write_legacy_container_slot(p, id, slot.wire_count() as u8, &slot.label);
+        return;
+    }
     // The badge shows `wire_count`, which is one for anything past a stack;
     // the real number rides in the name. The wire could carry 4000 — the count
     // is a VarInt since 1.20.5 — but the client renders that badge into the
