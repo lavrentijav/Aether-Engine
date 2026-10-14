@@ -172,6 +172,16 @@ fn main() -> std::process::ExitCode {
     // connected: time, mobs, items on the floor, furnaces.
     game::tick::start(Arc::clone(&registry), Arc::clone(&world));
 
+    // Loot tables are read lazily from the same pack; report what the parser
+    // did not understand once, so a silent gap in the drop path is visible.
+    let skipped = game::loot::LootTables::global().unsupported();
+    if !skipped.is_empty() {
+        log::info(&format!(
+            "loot tables : {} unsupported construct(s) in skipped tables",
+            skipped.len()
+        ));
+    }
+
     let addr = format!("{}:{}", cfg.server.host, cfg.server.port);
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
@@ -390,6 +400,22 @@ pub fn is_operator(handle: &players::PlayerHandle) -> bool {
     CONFIG
         .get()
         .is_some_and(|c| c.is_operator(&handle.name, handle.ip))
+}
+
+/// The operator's `worldgen_data` path, for the parts of the game that read
+/// the same data pack the generator does (loot tables, recipes). Empty when
+/// no pack is configured.
+pub fn worldgen_data() -> &'static str {
+    CONFIG
+        .get()
+        .map(|c| c.server.worldgen_data.as_str())
+        .unwrap_or("")
+}
+
+/// The world seed, for the subsystems that derive a deterministic random from
+/// it (structure chest loot).
+pub fn seed() -> u64 {
+    CONFIG.get().map(|c| c.server.seed).unwrap_or(0)
 }
 
 /// Say so, loudly, when a server anyone can reach trusts names alone.
