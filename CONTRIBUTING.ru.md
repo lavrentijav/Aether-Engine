@@ -42,6 +42,7 @@ cargo bench -p aether-core                        # производительн
 ```
 `cargo deny check` читает [`deny.toml`](deny.toml); CI гоняет его на каждый push
 и PR через `cargo-deny-action`. Если команды нет локально — `cargo install cargo-deny`.
+
 PR, влияющие на производительность, должны включать захват Tracy или соответствующий результат бенчмарка. QA-гейты (редстоун/сущности/взрыв/миграция) — в [README](README.md#benchmark-targets-qa-gates).
 
 ### Стиль коммитов и PR

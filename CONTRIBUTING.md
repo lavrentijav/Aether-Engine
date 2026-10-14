@@ -45,6 +45,7 @@ cargo bench -p aether-core                        # performance (no regressions 
 `cargo deny check` reads [`deny.toml`](deny.toml); CI runs it on every push and
 PR via `cargo-deny-action`. Install it with `cargo install cargo-deny` if the
 command is missing locally.
+
 Performance-sensitive PRs should include a Tracy capture or the relevant benchmark result. The QA gates (redstone/entity/explosion/migration) live in the [README](README.md#benchmark-targets-qa-gates).
 
 ### Commit & PR style
