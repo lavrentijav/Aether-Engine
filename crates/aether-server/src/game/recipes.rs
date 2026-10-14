@@ -500,6 +500,25 @@ impl RecipeBook {
                 return Some((r.result, r.count));
             }
         }
+        // Transmutation (`crafting_transmute`) is a crafting-grid recipe with
+        // exactly two items, one matching the input and one the material.
+        if items.len() == 2 {
+            for t in &self.transmute {
+                let (a, b) = (items[0], items[1]);
+                let input = if t.input.matches(a) && t.material.matches(b) {
+                    a
+                } else if t.input.matches(b) && t.material.matches(a) {
+                    b
+                } else {
+                    continue;
+                };
+                // Vanilla refuses the recipe when it would return the input
+                // unchanged (dyeing an already-black bundle black).
+                if input != t.result {
+                    return Some((t.result, 1));
+                }
+            }
+        }
         None
     }
 
@@ -1146,6 +1165,36 @@ mod tests {
     }
 
     #[test]
+    fn a_transmute_recipe_crafts_in_the_grid() {
+        let book = book_of(
+            &[r##"{"type":"minecraft:crafting_transmute",
+                "input":"#minecraft:bundles","material":"minecraft:black_dye",
+                "result":{"id":"minecraft:black_bundle"}}"##],
+            vec![(
+                "bundles",
+                r##"{"values": ["minecraft:white_bundle", "minecraft:black_bundle"]}"##,
+            )],
+        );
+        let white = ItemTypeId::vanilla("minecraft:white_bundle").unwrap();
+        let black = ItemTypeId::vanilla("minecraft:black_bundle").unwrap();
+        let dye = ItemTypeId::vanilla("minecraft:black_dye").unwrap();
+        let either = |a, b| {
+            matches!(
+                book.craft(&[Some(a), Some(b), None, None], 2),
+                Some((r, 1)) if r == black
+            )
+        };
+        assert!(
+            either(white, dye),
+            "white bundle + black dye -> black bundle"
+        );
+        assert!(either(dye, white), "order does not matter");
+        // Dyeing an already-black bundle black returns it unchanged, which
+        // vanilla refuses.
+        assert_eq!(book.craft(&[Some(black), Some(dye), None, None], 2), None);
+    }
+
+    #[test]
     fn special_and_unknown_types_are_counted_not_run() {
         let book = book_of(
             &[
@@ -1231,6 +1280,14 @@ mod tests {
             None,
         ];
         assert_eq!(book.craft(&grid, 3), Some((pick, 1)));
+        // Transmutation: a white bundle plus black dye makes a black bundle.
+        let white = ItemTypeId::vanilla("minecraft:white_bundle").unwrap();
+        let black = ItemTypeId::vanilla("minecraft:black_bundle").unwrap();
+        let dye = ItemTypeId::vanilla("minecraft:black_dye").unwrap();
+        assert_eq!(
+            book.craft(&[Some(white), Some(dye), None, None], 2),
+            Some((black, 1))
+        );
         // Cooking: smelting and blasting raw iron share a result but not a time.
         let raw = ItemTypeId::vanilla("minecraft:raw_iron").unwrap();
         let ingot = ItemTypeId::vanilla("minecraft:iron_ingot").unwrap();
