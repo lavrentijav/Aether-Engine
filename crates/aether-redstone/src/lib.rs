@@ -9,7 +9,23 @@
 //!
 //! The engine reads and writes the world only through [`RedstoneView`], so the
 //! same code runs against the real engine world, a generated chunk, or the
-//! in-memory [`MemWorld`] the tests use. [`Redstone`] itself holds nothing.
+//! in-memory [`MemWorld`] the tests use. [`Redstone`] itself holds nothing:
+//!
+//! ```
+//! use aether_redstone::{BlockPos, MemWorld, Redstone};
+//!
+//! let engine = Redstone::new();
+//! let mut world = MemWorld::new();
+//! world.put(BlockPos::new(0, 0, 0), "minecraft:lever[face=floor,facing=east]");
+//! world.put(BlockPos::new(1, 0, 0), "minecraft:redstone_wire");
+//! engine.on_placed(&mut world, BlockPos::new(0, 0, 0));
+//! engine.on_placed(&mut world, BlockPos::new(1, 0, 0));
+//! engine.on_use(&mut world, BlockPos::new(0, 0, 0));
+//! assert_eq!(
+//!     aether_redstone::props::get(world.state(BlockPos::new(1, 0, 0)), "power"),
+//!     Some("15")
+//! );
+//! ```
 //!
 //! Block states are [`aether_world::BlockStateId`], and every property is read
 //! and written through `aether-world`'s existing state schema (see [`props`]) —

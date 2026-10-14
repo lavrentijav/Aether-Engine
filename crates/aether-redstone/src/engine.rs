@@ -6,9 +6,25 @@
 //! call needs lives on the stack for the duration of that call.
 //!
 //! This module holds the **power model** — weak and strong signal, conductor
-//! pass-through, and the update plumbing — plus the simple sources: levers,
-//! buttons and redstone torches. Wire, repeaters and lamps are added by later
-//! stages of the same crate.
+//! pass-through — the update plumbing, **redstone wire**, and the simple
+//! sources: levers, buttons and redstone torches. Repeaters and lamps are added
+//! by the next stage of the same crate.
+//!
+//! # Update order
+//!
+//! This is the **1.21.11 default** — the "Eigencraft" evaluator turned off.
+//! Vanilla collects neighbour updates in a `CollectingNeighborUpdater` and runs
+//! them depth-first in `UPDATE_ORDER`, with the subtlety that a multi-neighbour
+//! update yields after each neighbour so freshly-generated updates interleave.
+//! This engine reproduces the *set* of updates and the `UPDATE_ORDER` position
+//! order, but drains the queue **breadth-first**. That is deterministic — the
+//! same circuit always produces the same trace — and reaches the same steady
+//! state, because every rule is a monotone fixed point over power (a wire
+//! recomputes its target from its neighbours until they agree). Where a single
+//! tick's *intermediate* state is observable (two diodes scheduled at the same
+//! priority racing in one update), the winner may differ from vanilla. The
+//! long-term plan is the compiled dependency graph in `docs/ROADMAP.md`; this is
+//! the simple vanilla-style model it will replace.
 
 use std::collections::VecDeque;
 
@@ -63,7 +79,6 @@ fn kind_of(state: BlockStateId) -> Kind {
     }
 }
 
-#[allow(dead_code)]
 fn is_signal_source(state: BlockStateId) -> bool {
     matches!(
         kind_of(state),
@@ -76,6 +91,36 @@ fn is_signal_source(state: BlockStateId) -> bool {
             | Kind::Button
             | Kind::RedstoneBlock
     )
+}
+
+fn set_side(state: BlockStateId, dir: Direction, value: &str) -> BlockStateId {
+    props::with(state, side_prop(dir), value).unwrap_or(state)
+}
+
+fn is_dot(state: BlockStateId) -> bool {
+    !side_connected(state, Direction::North)
+        && !side_connected(state, Direction::South)
+        && !side_connected(state, Direction::East)
+        && !side_connected(state, Direction::West)
+}
+
+fn is_cross(state: BlockStateId) -> bool {
+    side_connected(state, Direction::North)
+        && side_connected(state, Direction::South)
+        && side_connected(state, Direction::East)
+        && side_connected(state, Direction::West)
+}
+
+fn wire_power(state: BlockStateId) -> u8 {
+    if kind_of(state) == Kind::Wire {
+        power(state)
+    } else {
+        0
+    }
+}
+
+fn is_trapdoor(state: BlockStateId) -> bool {
+    props::name_of(state).is_some_and(|n| n.ends_with("_trapdoor"))
 }
 
 fn power(state: BlockStateId) -> u8 {
@@ -318,6 +363,174 @@ impl Redstone {
     }
 
     // -----------------------------------------------------------------------
+    // Wire shape
+    // -----------------------------------------------------------------------
+
+    /// A conductor is a full solid opaque cube, the engine's summary of
+    /// vanilla's full-collision-shape test. Also stands in for a sturdy face.
+    fn face_sturdy<V: RedstoneView>(&self, view: &V, pos: BlockPos) -> bool {
+        view.is_conductor(pos)
+    }
+
+    fn can_survive_on<V: RedstoneView>(&self, view: &V, pos: BlockPos) -> bool {
+        self.face_sturdy(view, pos)
+    }
+
+    /// `RedStoneWireBlock.shouldConnectTo`: whether wire draws a connection
+    /// toward this state. `dir` is `None` for the "no particular direction"
+    /// query.
+    fn should_connect_to(state: BlockStateId, dir: Option<Direction>) -> bool {
+        match kind_of(state) {
+            Kind::Wire => true,
+            Kind::Repeater | Kind::Comparator => {
+                let f = facing(state);
+                dir == Some(f) || Some(f.opposite()) == dir
+            }
+            _ if is_signal_source(state) => dir.is_some(),
+            _ => false,
+        }
+    }
+
+    fn wire_connecting_side<V: RedstoneView>(
+        &self,
+        view: &V,
+        pos: BlockPos,
+        dir: Direction,
+        above_not_conductor: bool,
+    ) -> &'static str {
+        let neighbour = pos.offset(dir);
+        let state = view.get_block(neighbour);
+        if above_not_conductor {
+            let sturdy = is_trapdoor(state) || self.can_survive_on(view, neighbour);
+            if sturdy
+                && Self::should_connect_to(view.get_block(neighbour.offset(Direction::Up)), None)
+            {
+                if self.face_sturdy(view, neighbour) {
+                    return "up";
+                }
+                return "side";
+            }
+        }
+        let connects = Self::should_connect_to(state, Some(dir));
+        if !connects
+            && (view.is_conductor(neighbour)
+                || !Self::should_connect_to(
+                    view.get_block(neighbour.offset(Direction::Down)),
+                    None,
+                ))
+        {
+            "none"
+        } else {
+            "side"
+        }
+    }
+
+    fn wire_missing_connections<V: RedstoneView>(
+        &self,
+        view: &V,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> BlockStateId {
+        let above_not_conductor = !view.is_conductor(pos.offset(Direction::Up));
+        let mut state = state;
+        for dir in Direction::HORIZONTAL {
+            if !side_connected(state, dir) {
+                let side = self.wire_connecting_side(view, pos, dir, above_not_conductor);
+                state = set_side(state, dir, side);
+            }
+        }
+        state
+    }
+
+    /// `RedStoneWireBlock.getConnectionState`, reduced to the shape.
+    fn wire_connection_state<V: RedstoneView>(
+        &self,
+        view: &V,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> BlockStateId {
+        let was_dot = is_dot(state);
+        let mut state = state;
+        for dir in Direction::HORIZONTAL {
+            state = set_side(state, dir, "none");
+        }
+        state = self.wire_missing_connections(view, pos, state);
+        if was_dot && is_dot(state) {
+            return state;
+        }
+        let north = side_connected(state, Direction::North);
+        let south = side_connected(state, Direction::South);
+        let east = side_connected(state, Direction::East);
+        let west = side_connected(state, Direction::West);
+        let ns_none = !north && !south;
+        let ew_none = !east && !west;
+        if !west && ns_none {
+            state = set_side(state, Direction::West, "side");
+        }
+        if !east && ns_none {
+            state = set_side(state, Direction::East, "side");
+        }
+        if !north && ew_none {
+            state = set_side(state, Direction::North, "side");
+        }
+        if !south && ew_none {
+            state = set_side(state, Direction::South, "side");
+        }
+        state
+    }
+
+    // -----------------------------------------------------------------------
+    // Wire power
+    // -----------------------------------------------------------------------
+
+    /// `RedstoneWireEvaluator.getIncomingWireSignal`: the strongest neighbouring
+    /// wire minus one, including the up-and-over and down-around cases.
+    fn incoming_wire_signal<V: RedstoneView>(&self, view: &V, pos: BlockPos) -> u8 {
+        let mut best = 0;
+        let above = pos.offset(Direction::Up);
+        for dir in Direction::HORIZONTAL {
+            let neighbour = pos.offset(dir);
+            let state = view.get_block(neighbour);
+            best = best.max(wire_power(state));
+            if view.is_conductor(neighbour) && !view.is_conductor(above) {
+                best = best.max(wire_power(view.get_block(neighbour.offset(Direction::Up))));
+            } else if !view.is_conductor(neighbour) {
+                best = best.max(wire_power(
+                    view.get_block(neighbour.offset(Direction::Down)),
+                ));
+            }
+        }
+        best.saturating_sub(1)
+    }
+
+    fn wire_target_strength<V: RedstoneView>(&self, view: &V, pos: BlockPos) -> u8 {
+        // A wire ignores every other wire while computing its own input, so a
+        // block powered by wire cannot re-power wire next to it. Sources and
+        // strong power still count.
+        let block_signal = self.best_neighbor(view, pos, true);
+        if block_signal == 15 {
+            return 15;
+        }
+        block_signal.max(self.incoming_wire_signal(view, pos))
+    }
+
+    fn wire_update<V: RedstoneView>(
+        &self,
+        view: &mut V,
+        queue: &mut VecDeque<Update>,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) {
+        let shaped = self.wire_connection_state(view, pos, state);
+        let target = self.wire_target_strength(view, pos);
+        let new = props::with(shaped, "power", &target.to_string()).unwrap_or(shaped);
+        if new != state {
+            view.set_block(pos, new);
+            self.notify_around(queue, pos);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Update plumbing
     // -----------------------------------------------------------------------
 
@@ -325,6 +538,56 @@ impl Redstone {
     fn update_neighbors_at(&self, queue: &mut VecDeque<Update>, pos: BlockPos) {
         for dir in Direction::UPDATE_ORDER {
             queue.push_back(Update(pos.offset(dir)));
+        }
+    }
+
+    /// The 7-cell blast a wire uses when its power changes: the wire itself and
+    /// its six neighbours, each then notifying its own neighbours.
+    fn notify_around(&self, queue: &mut VecDeque<Update>, pos: BlockPos) {
+        let mut cells = vec![pos];
+        for dir in Direction::ALL {
+            let p = pos.offset(dir);
+            if !cells.contains(&p) {
+                cells.push(p);
+            }
+        }
+        for p in cells {
+            self.update_neighbors_at(queue, p);
+        }
+    }
+
+    /// `updateNeighborsOfNeighboringWires`.
+    fn update_neighbors_of_neighboring_wires<V: RedstoneView>(
+        &self,
+        view: &V,
+        queue: &mut VecDeque<Update>,
+        pos: BlockPos,
+    ) {
+        for dir in Direction::HORIZONTAL {
+            self.check_corner_change_at(view, queue, pos.offset(dir));
+        }
+        for dir in Direction::HORIZONTAL {
+            let neighbour = pos.offset(dir);
+            let target = if view.is_conductor(neighbour) {
+                neighbour.offset(Direction::Up)
+            } else {
+                neighbour.offset(Direction::Down)
+            };
+            self.check_corner_change_at(view, queue, target);
+        }
+    }
+
+    fn check_corner_change_at<V: RedstoneView>(
+        &self,
+        view: &V,
+        queue: &mut VecDeque<Update>,
+        pos: BlockPos,
+    ) {
+        if kind_of(view.get_block(pos)) == Kind::Wire {
+            self.update_neighbors_at(queue, pos);
+            for dir in Direction::ALL {
+                self.update_neighbors_at(queue, pos.offset(dir));
+            }
         }
     }
 
@@ -342,6 +605,7 @@ impl Redstone {
     fn dispatch<V: RedstoneView>(&self, view: &mut V, queue: &mut VecDeque<Update>, pos: BlockPos) {
         let state = view.get_block(pos);
         match kind_of(state) {
+            Kind::Wire => self.wire_update(view, queue, pos, state),
             Kind::Torch | Kind::WallTorch => self.torch_neighbor_changed(view, queue, pos, state),
             _ => {}
         }
@@ -378,6 +642,10 @@ impl Redstone {
     pub fn on_removed<V: RedstoneView>(&self, view: &mut V, pos: BlockPos, old: BlockStateId) {
         let mut queue = VecDeque::new();
         match kind_of(old) {
+            Kind::Wire => {
+                self.update_neighbors_at(&mut queue, pos);
+                self.update_neighbors_of_neighboring_wires(view, &mut queue, pos);
+            }
             Kind::Torch | Kind::WallTorch => self.torch_notify_neighbors(&mut queue, pos),
             Kind::Lever | Kind::Button => {
                 if powered(old) {
@@ -422,6 +690,7 @@ impl Redstone {
         match kind_of(state) {
             Kind::Lever => self.lever_use(view, &mut queue, pos, state),
             Kind::Button => self.button_use(view, &mut queue, pos, state),
+            Kind::Wire => self.wire_use(view, &mut queue, pos, state),
             _ => {}
         }
         self.drain(view, queue);
@@ -569,6 +838,36 @@ impl Redstone {
     fn torch_notify_neighbors(&self, queue: &mut VecDeque<Update>, pos: BlockPos) {
         for dir in Direction::ALL {
             self.update_neighbors_at(queue, pos.offset(dir));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Wire interaction
+    // -----------------------------------------------------------------------
+
+    fn wire_use<V: RedstoneView>(
+        &self,
+        view: &mut V,
+        queue: &mut VecDeque<Update>,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) {
+        let mut toggled = state;
+        if is_cross(state) {
+            for dir in Direction::HORIZONTAL {
+                toggled = set_side(toggled, dir, "none");
+            }
+        } else if is_dot(state) {
+            for dir in Direction::HORIZONTAL {
+                toggled = set_side(toggled, dir, "side");
+            }
+        } else {
+            return;
+        }
+        let shaped = self.wire_connection_state(view, pos, toggled);
+        if shaped != state {
+            view.set_block(pos, shaped);
+            self.notify_around(queue, pos);
         }
     }
 }
