@@ -34,6 +34,8 @@ const ITEM_PHYSICS: aether_api::PhysicsParams = aether_api::PhysicsParams {
     vertical_drag: 0.98,
     ground_friction: 0.588,
     air_friction: 0.98,
+    // An item does not step over anything: it is not a walking entity.
+    step_height: 0.0,
 };
 
 /// Ticks between position syncs for items and arrows, which the client
