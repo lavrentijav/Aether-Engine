@@ -14,14 +14,14 @@ use aether_world::BlockStateId;
 /// Number of 16-block-tall sections in a 1.8 column.
 pub(super) const SECTIONS: usize = 16;
 
-/// Map an engine block id to a vanilla 1.8 numeric block id.
+/// Map an engine block state to a vanilla 1.8 block state `(id << 4) | meta`.
 ///
 /// From the generated compatibility table (`tools/gen/compat/gen.js`,
 /// `compat::V1_8`): every engine block the version has — by name, with the
-/// substitution rules applied to the ones it lacks — becomes its real 1.8 id.
-/// Anything with no stand-in becomes stone, so the client always has something
-/// solid. 1.8 is pre-flattening and stores `(id << 4) | meta`; the metadata is
-/// not derived here, so a variant lands on its block's default meta.
+/// substitution rules applied to the ones it lacks — becomes its real 1.8
+/// state, a substituted variant carrying the metadata its rule names (a wool
+/// colour, a wood type). Anything with no stand-in becomes stone, so the
+/// client always has something solid.
 pub fn vanilla_id(id: BlockStateId) -> u16 {
     crate::protocol::compat::V1_8.vanilla(id)
 }
@@ -69,7 +69,7 @@ pub fn chunk_data_packet(
             if vid != 0 {
                 any = true;
             }
-            *slot = vid << 4; // meta = 0
+            *slot = vid; // already `(id << 4) | meta`
         }
         if !any {
             continue; // empty section -> not sent
@@ -126,10 +126,11 @@ mod tests {
 
     #[test]
     fn vanilla_mapping_covers_flat_blocks() {
+        // The table returns the full `(id << 4) | meta` state, not a bare id.
         assert_eq!(vanilla_id(b::AIR), 0);
-        assert_eq!(vanilla_id(b::BEDROCK), 7);
-        assert_eq!(vanilla_id(b::DIRT), 3);
-        assert_eq!(vanilla_id(b::GRASS_BLOCK), 2);
+        assert_eq!(vanilla_id(b::BEDROCK), 7 << 4);
+        assert_eq!(vanilla_id(b::DIRT), 3 << 4);
+        assert_eq!(vanilla_id(b::GRASS_BLOCK), 2 << 4);
     }
 
     /// Decode a framed 0x21 packet the way a vanilla 1.8 client does and
@@ -214,12 +215,9 @@ mod tests {
                 let wy = *sy as i32 * 16 + y;
                 let want = vanilla_id(get(3 * 16 + x, wy, -5 * 16 + z));
                 assert_eq!(
-                    raw >> 4,
-                    want,
-                    "block at ({x}, {wy}, {z}) decoded as {} not {want}",
-                    raw >> 4
+                    raw, want,
+                    "block at ({x}, {wy}, {z}) decoded as {raw} not {want}"
                 );
-                assert_eq!(raw & 0xF, 0, "meta must be zero");
             }
         }
         // And specifically: no water anywhere above sea level.

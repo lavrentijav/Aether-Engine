@@ -107,15 +107,43 @@ const ENGINE_STATES = base.blocksArray.reduce(
 
 // --- substitution rules -----------------------------------------------------
 
+// Named metadata maps referenced by a rule's `meta` field. A rule may set
+// `"meta": "<map>"` to take the metadata from the wildcard capture (the colour
+// in `*_wool`, the wood in `*_planks`) looked up in the named map, or
+// `"meta": <n>` for a literal. Only the pre-flattening (1.8) build reads it;
+// a flattened version numbers a variant as its own state instead.
+let META_MAPS = {}
 function loadRules() {
   const raw = JSON.parse(fs.readFileSync(path.join(__dirname, 'blocks.json'), 'utf8'))
   // Accept a bare array of rules or one wrapped in a documentation object.
   const list = Array.isArray(raw)
     ? raw.flatMap(x => (x && x.rules ? x.rules : [x]))
     : raw.rules
+  const doc = Array.isArray(raw)
+    ? raw.find(x => x && x.metaMaps)
+    : raw
+  META_MAPS = (doc && doc.metaMaps) || {}
   return list
     .filter(r => r && r.from && r.to)
-    .map(r => ({ from: strip(r.from), to: strip(r.to) }))
+    .map(r => ({
+      from: strip(r.from),
+      to: strip(r.to),
+      meta: r.meta,
+      // A rule marked `legacy` applies only where states are pre-flattening,
+      // so it can never disturb a flattened version's tables.
+      legacy: !!r.legacy,
+    }))
+}
+
+// The metadata a legacy rule lands a variant on. No `meta` means the block's
+// default (0). A named map missing the capture falls back to its `_default`.
+function ruleMeta(rule, cap) {
+  if (rule.meta === undefined || rule.meta === null) return 0
+  if (typeof rule.meta === 'number') return rule.meta
+  const map = META_MAPS[rule.meta]
+  if (!map) throw new Error('unknown meta map ' + rule.meta)
+  if (cap != null && Object.prototype.hasOwnProperty.call(map, cap)) return map[cap]
+  return map._default || 0
 }
 const strip = n => n.replace(/^minecraft:/, '')
 const prefix = n => (n.includes(':') ? n : 'minecraft:' + n)
@@ -132,20 +160,26 @@ function glob(pattern, name) {
 
 // Resolve a block name that the version lacks to one it has, by applying the
 // rules repeatedly (a target that is itself missing is resolved again).
+// Returns `{ name, rule, cap }` — the version's name, the rule that finally
+// landed on it (for its metadata) and the wildcard capture.
 function resolver(names, rules) {
   return function resolve(name) {
     let cur = name
     for (let i = 0; i < 16; i++) {
       let next = null
+      let rule = null
+      let cap = null
       for (const r of rules) {
-        const cap = glob(r.from, cur)
-        if (cap !== null) {
-          next = r.to.replace('*', cap)
+        const c = glob(r.from, cur)
+        if (c !== null) {
+          next = r.to.replace('*', c)
+          rule = r
+          cap = c
           break
         }
       }
       if (next === null) return null
-      if (names.has(next)) return next
+      if (names.has(next)) return { name: next, rule, cap }
       if (next === cur) return null
       cur = next
     }
@@ -178,7 +212,7 @@ function buildFlat(mcVersion, rules) {
     let tb = byName[bb.name]
     if (!tb) {
       const sub = resolve(bb.name)
-      if (sub) tb = byName[sub]
+      if (sub) tb = byName[sub.name]
     }
     if (!tb) {
       fallbacks.add(bb.name)
@@ -204,40 +238,52 @@ function buildFlat(mcVersion, rules) {
   return { runs, stateCount, stone, fallbacks: [...fallbacks].sort(), mismatches }
 }
 
-// 1.8 predates flattened states: a cell is `(block_id << 4) | meta`. The data
-// has no metadata table, so engine states map to their block's default meta.
-function buildLegacy(mcVersion, rules) {
+// 1.8 predates flattened states: a cell is `(block_id << 4) | meta`. A variant
+// a rule names (a wool colour, a wood type, a flower species) carries its
+// metadata with it, so `(id << 4) | meta` is the whole legacy state.
+function buildLegacy(mcVersion, allRules) {
   const t = d(mcVersion)
   const byName = {}
   for (const b of t.blocksArray) byName[b.name] = b
   const names = new Set(Object.keys(byName))
-  const resolve = resolver(names, rules)
+  const resolve = resolver(names, allRules)
   const stoneId = byName['stone'].id
   const runs = []
   const fallbacks = new Set()
-  const seen = new Map() // legacy id -> first engine state
+  const seen = new Map() // legacy block id -> first engine state
   for (let e = 0; e < ENGINE_STATES; e++) {
     const bb = base.blocksByStateId[e]
     let tb = byName[bb.name]
+    let meta = 0
     if (!tb) {
       const sub = resolve(bb.name)
-      if (sub) tb = byName[sub]
+      if (sub) {
+        tb = byName[sub.name]
+        meta = ruleMeta(sub.rule, sub.cap)
+      }
     }
     let id
     if (tb) {
       id = tb.id
+      if (meta < 0 || meta > 15 || !Number.isInteger(meta)) {
+        throw new Error(`${bb.name} resolves to a bad meta ${meta}`)
+      }
       if (!seen.has(id)) seen.set(id, e)
     } else {
       fallbacks.add(bb.name)
       id = stoneId
+      meta = 0
     }
+    const value = (id << 4) | meta
     const last = runs[runs.length - 1]
-    if (last && last[0] + last[1] === e && last[2] === id) last[1]++
-    else runs.push([e, 1, id])
+    if (last && last[0] + last[1] === e && last[2] === value) last[1]++
+    else runs.push([e, 1, value])
   }
-  // Reverse: legacy id -> the first engine state that maps to it.
+  // Reverse: legacy block id -> the first engine state that maps to it. Keyed
+  // by id, not the full `(id << 4) | meta`, because a 1.8 placement packet
+  // carries an item id with no metadata.
   const reverse = [...seen.entries()].sort((a, b) => a[0] - b[0])
-  return { runs, reverse, stone: stoneId, fallbacks: [...fallbacks].sort() }
+  return { runs, reverse, stone: (stoneId << 4) | 0, fallbacks: [...fallbacks].sort() }
 }
 
 // --- emit -------------------------------------------------------------------
@@ -282,8 +328,9 @@ function writeLegacy(mod, mcVersion, rules) {
   w('//!')
   w('//! Generated by `tools/gen/compat/gen.js`. Do not edit by hand.')
   w('')
-  w('/// `(first engine state, run length, legacy block id)`. 1.8 stores')
-  w('/// `(id << 4) | meta`; the meta is always the block default here.')
+  w('/// `(first engine state, run length, legacy block state)`. 1.8 stores a')
+  w('/// block as `(id << 4) | meta`; a substituted variant carries its meta,')
+  w('/// so a wool colour or wood type lands on the right one.')
   w('pub static LEGACY_RUNS: &[(u32, u32, u16)] = &[')
   for (const [a, b, c] of runs) w(`    (${u32(a)}, ${u32(b)}, ${c}),`)
   w('];')
@@ -293,7 +340,8 @@ function writeLegacy(mod, mcVersion, rules) {
   for (const [id, e] of reverse) w(`    (${id}, ${e}),`)
   w('];')
   w('')
-  w(`/// 1.8's stone id; the fallback for a block the version lacks.`)
+  w(`/// 1.8's stone state (id << 4 | meta); the fallback for a block the`)
+  w(`/// version lacks and for a modded engine id.`)
   w(`pub const STONE: u16 = ${stone};`)
   w('')
   w('/// Blocks the version lacks and no rule covers; they become stone.')
@@ -316,11 +364,17 @@ function verify() {
 verify()
 fs.mkdirSync(outDir, { recursive: true })
 const rules = loadRules()
-console.log(`engines states: ${ENGINE_STATES}, rules: ${rules.length}`)
+// A flattened version uses only the shared rules; the legacy-only ones are
+// dropped so its tables are exactly what they were before the 1.8 work.
+const flatRules = rules.filter(r => !r.legacy)
+console.log(
+  `engines states: ${ENGINE_STATES}, rules: ${rules.length} (${flatRules.length} shared, ` +
+    `${rules.length - flatRules.length} legacy-only)`,
+)
 let totalRuns = 0
 for (const [mod, mcVersion, proto, flat] of VERSIONS) {
   const r = flat
-    ? writeFlat(mod, mcVersion, rules)
+    ? writeFlat(mod, mcVersion, flatRules)
     : writeLegacy(mod, mcVersion, rules)
   totalRuns += r.runs
   console.log(
