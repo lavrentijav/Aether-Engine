@@ -397,13 +397,7 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
             // block's own (furnace, smoker or blast furnace); the recipe
             // carries its cooking time and experience.
             let before = c.slots.clone();
-            let method = crate::game::block_name(world, world.get_block(pos.0, pos.1, pos.2))
-                .map(|n| {
-                    super::recipes::method_for_block(
-                        n.strip_prefix("minecraft:").unwrap_or(n.as_str()),
-                    )
-                })
-                .unwrap_or(super::recipes::Cook::Smelting);
+            let method = super::recipes::method_for_state(world.get_block(pos.0, pos.1, pos.2));
             let input = c.slots[0].as_ref().map(|s| s.item);
             let recipe = input.and_then(|i| super::recipes::cook(method, i));
             let result = recipe.map(|r| r.result);

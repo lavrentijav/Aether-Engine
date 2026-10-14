@@ -905,11 +905,7 @@ fn open_window_slots(st: &PlayerState, inv: &Inventory, world: &DemoWorld) -> Op
             let c = containers::snapshot(world, *pos, ContainerKind::Furnace);
             // The progress bar's denominator is the recipe's own cooking time
             // (200 for a furnace, 100 for a smoker or blast furnace).
-            let method = crate::game::block_name(world, world.get_block(pos.0, pos.1, pos.2))
-                .map(|n| {
-                    recipes::method_for_block(n.strip_prefix("minecraft:").unwrap_or(n.as_str()))
-                })
-                .unwrap_or(recipes::Cook::Smelting);
+            let method = recipes::method_for_state(world.get_block(pos.0, pos.1, pos.2));
             let total = c
                 .slots
                 .first()

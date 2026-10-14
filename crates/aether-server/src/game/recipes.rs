@@ -919,6 +919,17 @@ pub fn method_for_block(short: &str) -> Cook {
     }
 }
 
+/// The cooking method a block **state** uses.
+///
+/// Reads the registry's `&'static str` block name directly rather than through
+/// `game::block_name`, which allocates a `String`; a lit furnace asks this
+/// every tick.
+pub fn method_for_state(state: aether_world::BlockStateId) -> Cook {
+    aether_world::registry::blocks::block_of_state(state)
+        .map(|(_, n)| method_for_block(n.strip_prefix("minecraft:").unwrap_or(n)))
+        .unwrap_or(Cook::Smelting)
+}
+
 /// What cooking `input` by `method` produces, from the pack when one is
 /// loaded, else [`fallback_cook`].
 pub fn cook(method: Cook, input: ItemTypeId) -> Option<Cooked> {
@@ -1447,6 +1458,19 @@ mod tests {
         // An item the table cannot smelt cooks nowhere.
         let stick = crate::inventory::item("minecraft:stick");
         assert!(cook(Cook::Smelting, stick).is_none());
+    }
+
+    #[test]
+    fn the_cooking_method_follows_the_block() {
+        let state = |n: &str| aether_world::registry::blocks::default_state(n).unwrap();
+        assert_eq!(method_for_state(state("minecraft:furnace")), Cook::Smelting);
+        assert_eq!(
+            method_for_state(state("minecraft:blast_furnace")),
+            Cook::Blasting
+        );
+        assert_eq!(method_for_state(state("minecraft:smoker")), Cook::Smoking);
+        // A block that is not a cooker falls back to smelting.
+        assert_eq!(method_for_state(state("minecraft:stone")), Cook::Smelting);
     }
 
     #[test]
