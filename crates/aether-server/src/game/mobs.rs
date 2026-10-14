@@ -603,6 +603,9 @@ pub fn tick(
         body.velocity.y = 0.42;
     }
     m.jump = false;
+    // Flowing water carries a swimming mob downstream, on top of its own
+    // steering.
+    crate::game::fluids::push_body(world, body);
     let before = body.feet();
     world.step_body(body);
     let after = body.feet();
