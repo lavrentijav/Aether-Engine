@@ -7,6 +7,7 @@ members = [
     "crates/aether-net",
     "crates/aether-convert",
     "crates/aether-physics",
+    "crates/aether-redstone",
     "crates/aether-worldgen",
     "crates/aether-baseproxy",
     "crates/aether-api",
