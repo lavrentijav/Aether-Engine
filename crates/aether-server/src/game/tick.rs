@@ -223,6 +223,30 @@ fn apply(a: Action, registry: &SharedRegistry, world: &DemoWorld) {
                 crate::session::save_inventory(&p, world);
             }
         }
+        Action::XpPicked {
+            orb,
+            collector,
+            value,
+        } => {
+            // Vanilla answers an orb pickup with a TakeItemEntity of amount 0;
+            // the client has usually predicted it already.
+            let ev = ServerEvent::Collect {
+                item: orb,
+                collector,
+                count: 0,
+            };
+            for p in registry.snapshot() {
+                if p.entity_id == collector || p.tracked().contains(&orb) {
+                    p.emit(&ev, world);
+                }
+                if p.tracked().remove(&orb) {
+                    p.emit(&ServerEvent::DespawnEntity(orb), world);
+                }
+            }
+            if let Some(p) = registry.by_entity(collector) {
+                combat::give_xp(&p, world, value);
+            }
+        }
         Action::Tracked(id, ev) => registry.broadcast_tracking(id, &ev, world),
     }
 }

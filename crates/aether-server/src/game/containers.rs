@@ -47,6 +47,9 @@ pub struct Container {
     pub burn_max: u32,
     /// Ticks the current item has cooked, out of 200.
     pub cook: u32,
+    /// Experience a furnace has stored, waiting for a player to take the
+    /// output (vanilla's `recipeCookingTime`).
+    pub xp: f32,
 }
 
 impl Container {
@@ -57,6 +60,7 @@ impl Container {
             burn: 0,
             burn_max: 0,
             cook: 0,
+            xp: 0.0,
         }
     }
 }
@@ -83,10 +87,11 @@ fn key(pos: Pos) -> [u8; 13] {
 }
 
 fn encode(c: &Container) -> Vec<u8> {
-    let mut out = vec![1u8, matches!(c.kind, ContainerKind::Furnace) as u8];
+    let mut out = vec![2u8, matches!(c.kind, ContainerKind::Furnace) as u8];
     out.extend_from_slice(&c.burn.to_be_bytes());
     out.extend_from_slice(&c.burn_max.to_be_bytes());
     out.extend_from_slice(&c.cook.to_be_bytes());
+    out.extend_from_slice(&c.xp.to_be_bytes());
     let mut inv = crate::inventory::Inventory::new();
     for (i, s) in c.slots.iter().enumerate() {
         inv.put_slot(i, s.clone());
@@ -96,7 +101,16 @@ fn encode(c: &Container) -> Vec<u8> {
 }
 
 fn decode(b: &[u8]) -> Option<Container> {
-    if b.len() < 14 || b[0] != 1 {
+    // Version 1 containers predate smelting experience and have none.
+    let (xp, inv_at) = match *b.first()? {
+        1 => (0.0f32, 14usize),
+        2 => (
+            f32::from_be_bytes(b.get(14..18)?.try_into().unwrap()),
+            18usize,
+        ),
+        _ => return None,
+    };
+    if b.len() < inv_at {
         return None;
     }
     let kind = if b[1] == 1 {
@@ -105,15 +119,27 @@ fn decode(b: &[u8]) -> Option<Container> {
         ContainerKind::Chest
     };
     let u = |o: usize| u32::from_be_bytes(b[o..o + 4].try_into().unwrap());
-    let inv = crate::inventory::decode(&b[14..])?;
+    let inv = crate::inventory::decode(&b[inv_at..])?;
     let mut c = Container::new(kind);
     c.burn = u(2);
     c.burn_max = u(6);
     c.cook = u(10);
+    c.xp = xp;
     for i in 0..c.slots.len() {
         c.slots[i] = inv.slot(i).cloned();
     }
     Some(c)
+}
+
+/// Load the container at `pos` from the world, or a fresh empty one of `kind`.
+fn load(world: &DemoWorld, pos: Pos, kind: ContainerKind) -> Container {
+    world
+        .get_meta(&key(pos))
+        .ok()
+        .flatten()
+        .and_then(|b| decode(&b))
+        .filter(|c| c.kind == kind)
+        .unwrap_or_else(|| Container::new(kind))
 }
 
 /// Run `f` over the container at `pos`, loading or creating it as `kind`.
@@ -125,15 +151,7 @@ pub fn with<R>(
     f: impl FnOnce(&mut Container) -> R,
 ) -> R {
     let mut map = all().lock().unwrap();
-    let c = map.entry(pos).or_insert_with(|| {
-        world
-            .get_meta(&key(pos))
-            .ok()
-            .flatten()
-            .and_then(|b| decode(&b))
-            .filter(|c| c.kind == kind)
-            .unwrap_or_else(|| Container::new(kind))
-    });
+    let c = map.entry(pos).or_insert_with(|| load(world, pos, kind));
     let r = f(c);
     let _ = world.put_meta(&key(pos), &encode(c));
     if c.kind == ContainerKind::Furnace {
@@ -142,9 +160,37 @@ pub fn with<R>(
     r
 }
 
+/// Run `f` over **two** containers at once — a double chest's halves — and
+/// save both afterwards.
+pub fn with_pair<R>(
+    world: &DemoWorld,
+    a: Pos,
+    b: Pos,
+    f: impl FnOnce(&mut Container, &mut Container) -> R,
+) -> R {
+    let mut map = all().lock().unwrap();
+    let mut ca = map
+        .remove(&a)
+        .unwrap_or_else(|| load(world, a, ContainerKind::Chest));
+    let mut cb = map
+        .remove(&b)
+        .unwrap_or_else(|| load(world, b, ContainerKind::Chest));
+    let r = f(&mut ca, &mut cb);
+    let _ = world.put_meta(&key(a), &encode(&ca));
+    let _ = world.put_meta(&key(b), &encode(&cb));
+    map.insert(a, ca);
+    map.insert(b, cb);
+    r
+}
+
 /// A copy of the container at `pos`, if one exists there.
 pub fn snapshot(world: &DemoWorld, pos: Pos, kind: ContainerKind) -> Container {
     with(world, pos, kind, |c| c.clone())
+}
+
+/// Copies of both halves of a double chest.
+pub fn snapshot_pair(world: &DemoWorld, a: Pos, b: Pos) -> (Container, Container) {
+    with_pair(world, a, b, |ca, cb| (ca.clone(), cb.clone()))
 }
 
 /// The block at `pos` is gone: forget its container and return the items,
@@ -180,9 +226,8 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
             // Fuel burnt, input smelted, output made: journalled as the
             // difference, by the server.
             let before = c.slots.clone();
-            let result = c.slots[0]
-                .as_ref()
-                .and_then(|s| super::tables::smelt_id(s.item));
+            let input = c.slots[0].as_ref().map(|s| s.item);
+            let result = input.and_then(super::tables::smelt_id);
             let output_ok = result.is_some_and(|r| match &c.slots[2] {
                 None => true,
                 Some(o) => o.item == r && o.count < o.max_stack(),
@@ -224,6 +269,11 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
                         Some(o) => o.count += 1,
                         None => c.slots[2] = Some(Stack::new(r, 1)),
                     }
+                    // The smelted item's experience waits in the furnace
+                    // until a player takes the output.
+                    if let Some(item) = input {
+                        c.xp += item.vanilla_name().map_or(0.0, super::tables::smelt_xp);
+                    }
                 }
             } else if c.cook > 0 {
                 c.cook = c.cook.saturating_sub(2);
@@ -258,8 +308,24 @@ mod tests {
         c.burn = 120;
         c.burn_max = 1600;
         c.cook = 33;
+        c.xp = 2.8;
         let back = decode(&encode(&c)).unwrap();
         assert_eq!(back.slots, c.slots);
         assert_eq!((back.burn, back.burn_max, back.cook), (120, 1600, 33));
+        assert_eq!(back.xp, 2.8);
+    }
+
+    #[test]
+    fn a_version_one_container_has_no_stored_experience() {
+        // A blob written before smelting experience existed still loads.
+        let mut old = vec![1u8, 1u8];
+        old.extend_from_slice(&0u32.to_be_bytes());
+        old.extend_from_slice(&0u32.to_be_bytes());
+        old.extend_from_slice(&0u32.to_be_bytes());
+        old.extend_from_slice(&crate::inventory::encode(
+            &crate::inventory::Inventory::new(),
+        ));
+        let back = decode(&old).expect("a version 1 blob decodes");
+        assert_eq!(back.xp, 0.0);
     }
 }

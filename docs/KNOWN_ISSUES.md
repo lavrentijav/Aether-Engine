@@ -29,7 +29,7 @@
 
    **Neighbour-dependent shapes settle both ways now.** A block-update pass (`placement::neighbour_updates`) re-runs when a neighbour changes, so a fence built *away* from an existing one connects instead of keeping the unconnected shape it was born with. It covers fences, walls, panes/bars and stair corners — the families whose shape is a pure function of the six touching cells.
 
-   What is left is the class of property that needs a wider propagation than a single reshape: redstone wire shape; a chest becoming a double; a door's hinge side; grass turning `snowy`. A fence placed today is a correct, connected fence.
+   what is left is the class of property that needs a wider propagation than a single reshape: redstone wire shape; a door's hinge side; grass turning `snowy`. A fence placed today is a correct, connected fence.
 
    **Interaction now beats placement.** Clicking a door, trapdoor or fence gate toggles it instead of building against it — the reported "door opens and instantly shuts with a block in front of it" was the server placing a block where the client had predicted an opening, and the ack then reverting the prediction. Both halves of a door toggle together. Sneaking still builds against it, or a door could never be placed beside another. Detected from the block's own data — anything declaring an `open` property — so there is no list to maintain.
 
@@ -56,8 +56,8 @@
     - **Mob AI is straight-line.** Mobs walk towards their goal, jump one-block steps and refuse unclimbable drops; there is no pathfinding around obstacles, no door opening, no climbing for spiders. Eight kinds exist: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider. No breeding, taming, villagers or the Nether/End mobs.
     - **No redstone, crop growth, leaf decay, fire spread or falling sand/gravel.** Water and lava **do flow** now (`game/fluids.rs`: scheduled updates with vanilla delays, levels, falls, slope-seeking, infinite water, lava + water → obsidian/cobblestone/stone), but flowing water does not push mobs or items, waterlogged blocks do not flow, and generated water only starts moving when something next to it changes.
     - **No enchanting, brewing, anvils, smithing, villager trading, beds only set the spawn point and skip the night.** Status effects (golden apples, poison) are not applied; foods restore hunger only.
-    - **No XP orbs.** Experience is credited to the killer directly; ores give none.
-    - **Chests do not double**, and hoppers/droppers/dispensers have no inventory.
+    - **XP orbs** are entities now (`minecraft:experience_orb`): ores, mobs killed by a player and smelting drop them on the ground; they drift to a nearby player, merge up to an orb's cap, and credit whoever picks them up. Fortune/Silk Touch do not yet change the amount (enchantments are not modelled).
+    - Chests **do double**: two adjacent chests merge into one 54-slot window (`type=left`/`right`), breaking one half splits the other back to single. Hoppers/droppers/dispensers have no inventory.
     - ~~**Block collision is per cube**~~ **Fixed:** collision boxes come per block **state**, generated from `minecraft-data`'s `blockCollisionShapes` (`registry::shapes`, generator `tools/gen/collisions.js`). Slabs collide as half cells, stairs as their step shape, fences as their 1.5-tall rails, and an open door or fence gate as nothing at all; grounded entities walk (step) up a slab but not a full block. `aether-physics` resolves an AABB against the box list and a state-aware `BlockView` supplies it.
     - **Anti-cheat is minimal**: mining time is checked at half the expected duration, reach at 6 blocks; movement is trusted.
     - **Light is not consulted for spawning**: monsters spawn at night under open sky, or at any time under cover.

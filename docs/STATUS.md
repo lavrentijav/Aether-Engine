@@ -95,7 +95,7 @@ modern versions run a server-side survival game).
 | 1.8.9 is the one version that cannot be widened: its section bitmask is a `u16`, so 256 blocks is a protocol limit. Shifted, it shows `-64..=191` | ⚠️ Limit |
 | Heightmap entry width derived from the world height instead of a literal 8 — at 384 tall it needs 9 bits, and the literal silently truncated everything above 255 | ✅ |
 | 1.17 / 1.17.1 chunk sections carry a non-air count and a **4-bit indirect** palette, and an all-air section is omitted from the bitmask (the single-valued form the encoder used is a 1.18 addition a 1.17 client reads as a length). See [Known Issues A.7](KNOWN_ISSUES.md) | ✅ |
-| Neighbour-dependent states for **shape** — fence/wall/pane connections and stair corners — re-settle when a neighbour changes, not only at placement (`placement::neighbour_updates`). Remaining neighbour-dependent states (redstone wire shape, chest doubling, door hinge) still need a wider propagation pass. See [Known Issues A.6](KNOWN_ISSUES.md) | 🚧 |
+| Neighbour-dependent states for **shape** — fence/wall/pane connections, stair corners and **chest doubling** (`type=left`/`right`) — re-settle when a neighbour changes (`placement::neighbour_updates`). Redstone wire shape and door hinge still need a wider propagation pass. See [Known Issues A.6](KNOWN_ISSUES.md) | 🚧 |
 | **Real lighting**: sky and block light by level-by-level mask dilation, verified against a reference flood fill; live client reads 15 in air, 14 at the water surface, 11 three metres down | ✅ |
 | Uniform light sections + the protocol's empty bitsets: block light now sends **0** sections per join instead of 2,890; sky light 1,726 instead of 2,890 | ✅ |
 | Light caching, relight on block change, and propagation across column edges — see [DESIGN_NOTES §8.10](DESIGN_NOTES.md) | ❌ |
@@ -110,7 +110,8 @@ modern versions run a server-side survival game).
 | Mobs: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider — natural spawning, wander/flee/chase AI, melee, skeleton arrows, creeper explosions, undead burn in daylight, loot and XP | 🚧 Preview |
 | Combat: 1.9 attack cooldown, critical hits, knockback, armour reduction and wear, tool durability, PvP | ✅ |
 | Item entities: block drops from loot tables, Q / drop stack, pickup with the collect animation, merging, 5-minute expiry | ✅ |
-| Server-authoritative windows: every click mode, 2×2 and 3×3 crafting over all 1,359 shaped + shapeless recipes, chests and furnaces persisted as block entities, smelting + fuel | ✅ |
+| Experience orbs: ores, mob kills and smelting drop `minecraft:experience_orb` entities instead of crediting the killer; they drift to a nearby player, merge up to the orb cap, and are picked up with vanilla's ladder of orb values | ✅ |
+| Server-authoritative windows: every click mode, 2×2 and 3×3 crafting over all 1,359 shaped + shapeless recipes, single and **double chests** (54 slots, `type=left`/`right`) and furnaces persisted as block entities, smelting + fuel + stored experience released on taking the output | ✅ |
 | Survival mining: vanilla dig times, harvest tools, tool wear; placement consumes items; buckets, hoes, flint and steel, beds (spawn point, skip night), eating, bows | ✅ |
 | Entity tracker: entities spawn/despawn per client by range, updates only to those tracking them | ✅ |
 | Player state persisted (position, health, food, XP, mode, spawn); gameplay commands `/gamemode /time /give /summon /tp /heal /food /killall /kill /spawn /block` | ✅ |
