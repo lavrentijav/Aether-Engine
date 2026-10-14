@@ -8,7 +8,7 @@ use crate::blocks::BlockBehaviour;
 use crate::dir::Direction;
 use crate::pos::BlockPos;
 use crate::props;
-use crate::view::TickPriority;
+use crate::view::{SetBlockFlags, TickPriority};
 
 /// A redstone torch standing on top of a block.
 pub struct Torch;
@@ -74,7 +74,7 @@ fn tick(ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
     if props::lit(state) {
         if signal {
             let new = props::with(state, "lit", "false").unwrap_or(state);
-            ctx.apply(pos, new);
+            ctx.set_block(pos, new, SetBlockFlags::PLACE);
             let now = ctx.game_time();
             ctx.push_toggle(pos, now);
             if toggle_count(ctx, pos, now) >= 8 {
@@ -85,7 +85,7 @@ fn tick(ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
         let now = ctx.game_time();
         if toggle_count(ctx, pos, now) < 8 {
             let new = props::with(state, "lit", "true").unwrap_or(state);
-            ctx.apply(pos, new);
+            ctx.set_block(pos, new, SetBlockFlags::PLACE);
         }
     }
 }

@@ -13,20 +13,17 @@
 //!
 //! This is the **1.21.11 default** — the experimental "Eigencraft" wire
 //! evaluator is off. Neighbour notifications are generated in vanilla's
-//! `UPDATE_ORDER` (west, east, down, up, north, south). This stage (`R6`) still
-//! drains them breadth-first; R7 replaces that with a port of vanilla's
-//! depth-first `CollectingNeighborUpdater`.
+//! `UPDATE_ORDER` (west, east, down, up, north, south) and drained by a port of
+//! vanilla's depth-first `CollectingNeighborUpdater` ([`crate::behaviour`]):
+//! a LIFO stack where a multi-neighbour update yields to freshly generated
+//! updates before resuming, with the chain limit.
 
 use aether_world::BlockStateId;
 
 use crate::behaviour::{self, Context};
 use crate::dir::Direction;
 use crate::pos::BlockPos;
-use crate::view::RedstoneView;
-
-/// A hard cap on the update cascade, so a malformed circuit cannot spin a call
-/// forever. A real cascade is a few hundred updates; this is far above that.
-const MAX_UPDATES: usize = 1_000_000;
+use crate::view::{RedstoneView, SetBlockFlags};
 
 /// The redstone engine.
 #[derive(Debug, Default, Clone, Copy)]
@@ -79,26 +76,45 @@ impl Redstone {
     }
 
     // -----------------------------------------------------------------------
+    // Block mutation
+    // -----------------------------------------------------------------------
+
+    /// Vanilla's `Level.setBlock(pos, state, flags)`.
+    ///
+    /// The host promises nothing was written yet; the engine runs the removal
+    /// and placement hooks and the neighbour/shape updates the flags select.
+    /// Returns whether the state changed.
+    pub fn set_block<V: RedstoneView>(
+        &self,
+        view: &mut V,
+        pos: BlockPos,
+        state: BlockStateId,
+        flags: SetBlockFlags,
+    ) -> bool {
+        let mut ctx = Context::new(view);
+        ctx.set_block(pos, state, flags)
+    }
+
+    // -----------------------------------------------------------------------
     // Entry points
     // -----------------------------------------------------------------------
 
-    /// A block was placed at `pos`. The host writes it first, then calls this.
+    /// A block was placed at `pos`. The host writes the state first, then calls
+    /// this; the engine runs the placement hook and notifies the neighbours.
     pub fn on_placed<V: RedstoneView>(&self, view: &mut V, pos: BlockPos) {
         let mut ctx = Context::new(view);
-        ctx.update_neighbors_at(pos);
-        ctx.queue.push_back(pos);
         let state = ctx.get_block(pos);
-        if behaviour::behaviour(state).is_diode() {
-            behaviour::behaviour(state).on_place(&mut ctx, state, pos, state);
-        }
-        drain(&mut ctx);
+        behaviour::behaviour(state).on_place(&mut ctx, state, pos, behaviour::AIR);
+        ctx.update_neighbors_at_with(pos, state, None);
+        ctx.update_neighbour_shapes(pos, SetBlockFlags::UPDATE_NEIGHBORS);
     }
 
-    /// A block was removed from `pos`, whose old state was `old`.
+    /// A block was removed from `pos`, whose old state was `old`. The host has
+    /// already written air.
     pub fn on_removed<V: RedstoneView>(&self, view: &mut V, pos: BlockPos, old: BlockStateId) {
         let mut ctx = Context::new(view);
         behaviour::behaviour(old).on_remove(&mut ctx, old, pos);
-        drain(&mut ctx);
+        ctx.update_neighbour_shapes(pos, SetBlockFlags::NONE);
     }
 
     /// A neighbour of the block at `pos` (the block at `from`) changed.
@@ -108,17 +124,15 @@ impl Redstone {
         pos: BlockPos,
         from: BlockPos,
     ) {
-        let _ = from;
         let mut ctx = Context::new(view);
-        ctx.queue.push_back(pos);
-        drain(&mut ctx);
+        let source = ctx.get_block(from);
+        ctx.dispatch_neighbor_changed(pos, Some(behaviour::NeighborSource::plain(from, source)));
     }
 
     /// A block tick scheduled for `pos` has come due.
     pub fn on_scheduled_tick<V: RedstoneView>(&self, view: &mut V, pos: BlockPos) {
         let mut ctx = Context::new(view);
         ctx.dispatch_tick(pos);
-        drain(&mut ctx);
     }
 
     /// A player used the block at `pos`: a lever pulls, a button presses, a
@@ -126,18 +140,5 @@ impl Redstone {
     pub fn on_use<V: RedstoneView>(&self, view: &mut V, pos: BlockPos) {
         let mut ctx = Context::new(view);
         ctx.dispatch_use(pos);
-        drain(&mut ctx);
-    }
-}
-
-/// Run the pending neighbour updates, the way vanilla's neighbour updater does.
-fn drain(ctx: &mut Context) {
-    let mut guard = 0usize;
-    while let Some(pos) = ctx.queue.pop_front() {
-        guard += 1;
-        if guard > MAX_UPDATES {
-            break;
-        }
-        ctx.dispatch_neighbor_changed(pos, None);
     }
 }

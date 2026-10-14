@@ -11,10 +11,10 @@
 //! it" — the engine and this file do not change.
 //!
 //! [`Context`] is the mutable view a behaviour acts through: it reads and
-//! writes blocks and pushes neighbour updates. [`SignalCtx`] is the read-only
-//! view the two signal methods use, so a power query cannot mutate the world.
+//! writes blocks and runs the neighbour-update cascade, a port of vanilla's
+//! depth-first `CollectingNeighborUpdater`. [`SignalCtx`] is the read-only view
+//! the two signal methods use, so a power query cannot mutate the world.
 
-use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 use aether_world::registry::{blocks as world_blocks, ids};
@@ -23,7 +23,7 @@ use aether_world::BlockStateId;
 use crate::blocks::{self, BlockBehaviour};
 use crate::dir::Direction;
 use crate::pos::BlockPos;
-use crate::view::{RedstoneView, TickPriority};
+use crate::view::{Orientation, RedstoneView, SetBlockFlags, TickPriority};
 
 /// The block that caused a neighbour update, with its position.
 #[derive(Debug, Clone, Copy)]
@@ -32,7 +32,24 @@ pub struct NeighborSource {
     pub pos: BlockPos,
     /// The source block's state at the time of the notification.
     pub state: BlockStateId,
+    /// The redstone orientation of the update, when there is one.
+    pub orientation: Option<Orientation>,
 }
+
+impl NeighborSource {
+    /// A source with no orientation.
+    pub const fn plain(pos: BlockPos, state: BlockStateId) -> Self {
+        Self {
+            pos,
+            state,
+            orientation: None,
+        }
+    }
+}
+
+/// The chain limit for the neighbour-update cascade — vanilla's
+/// `maxChainedNeighborUpdates`. Beyond it the rest is dropped with an error.
+const MAX_CHAINED: usize = 512;
 
 // ---------------------------------------------------------------------------
 // Read-only signal context
@@ -126,17 +143,46 @@ impl SignalCtx<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// The neighbour-update cascade
+// ---------------------------------------------------------------------------
+
+/// One pending neighbour update — the records vanilla's `CollectingNeighborUpdater`
+/// keeps.
+enum NeighborUpdate {
+    /// `SimpleNeighborUpdate`: notify a single cell.
+    Simple {
+        pos: BlockPos,
+        source: BlockStateId,
+        orientation: Option<Orientation>,
+    },
+    /// `MultiNeighborUpdate`: notify a cell's neighbours in `UPDATE_ORDER`,
+    /// optionally skipping one face, yielding between each.
+    Multi {
+        source_pos: BlockPos,
+        source: BlockStateId,
+        skip: Option<Direction>,
+        orientation: Option<Orientation>,
+        idx: usize,
+    },
+    /// `ShapeUpdate`: ask a neighbour for its `updateShape`.
+    Shape {
+        direction: Direction,
+        neighbor: BlockPos,
+        flags: SetBlockFlags,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // Mutable context
 // ---------------------------------------------------------------------------
 
-/// The mutable world a behaviour acts through.
-///
-/// It owns the pending neighbour updates for the current call. Later stages
-/// replace the queue with vanilla's depth-first `CollectingNeighborUpdater`;
-/// the behaviour-facing methods stay the same.
+/// The mutable world a behaviour acts through, plus the update cascade.
 pub struct Context<'a> {
     pub(crate) view: &'a mut dyn RedstoneView,
-    pub(crate) queue: VecDeque<BlockPos>,
+    stack: Vec<NeighborUpdate>,
+    added: Vec<NeighborUpdate>,
+    count: usize,
+    max_chained: usize,
 }
 
 impl<'a> Context<'a> {
@@ -144,9 +190,14 @@ impl<'a> Context<'a> {
     pub fn new(view: &'a mut dyn RedstoneView) -> Self {
         Self {
             view,
-            queue: VecDeque::new(),
+            stack: Vec::new(),
+            added: Vec::new(),
+            count: 0,
+            max_chained: MAX_CHAINED,
         }
     }
+
+    // -- reads --------------------------------------------------------------
 
     /// The state at `pos`.
     pub fn get_block(&self, pos: BlockPos) -> BlockStateId {
@@ -175,24 +226,59 @@ impl<'a> Context<'a> {
         }
     }
 
-    /// The raw block write. It does not notify anyone; callers push the update
-    /// themselves, as vanilla's flag-driven `Level.setBlock` does.
-    pub fn set_block(&mut self, pos: BlockPos, state: BlockStateId) {
-        self.view.set_block(pos, state);
-    }
-
-    /// Write `new` at `pos` if it differs, and notify the neighbours.
-    pub fn apply(&mut self, pos: BlockPos, new: BlockStateId) {
-        if self.get_block(pos) != new {
-            self.set_block(pos, new);
-            self.update_neighbors_at(pos);
-        }
-    }
-
     /// The current game time in ticks.
     pub fn game_time(&self) -> u64 {
         self.view.game_time()
     }
+
+    // -- mutation -----------------------------------------------------------
+
+    /// Vanilla's `Level.setBlock(pos, state, flags)`.
+    ///
+    /// The raw write is the host's; this runs the side effects the flags select:
+    /// the removal hook when the block changes and `UPDATE_NEIGHBORS` is set,
+    /// the placement hook unless `UPDATE_SKIP_ON_PLACE`, the neighbour fan-out
+    /// when `UPDATE_NEIGHBORS` is set, and the shape updates unless
+    /// `UPDATE_KNOWN_SHAPE`.
+    ///
+    /// Returns `false` if the state was already `state`.
+    pub fn set_block(&mut self, pos: BlockPos, state: BlockStateId, flags: SetBlockFlags) -> bool {
+        let old = self.get_block(pos);
+        if old == state {
+            return false;
+        }
+        let old_block = world_blocks::block_of_state(old).map(|(b, _)| b);
+        let new_block = world_blocks::block_of_state(state).map(|(b, _)| b);
+        let moved = flags.contains(SetBlockFlags::UPDATE_MOVE_BY_PISTON);
+
+        if old_block != new_block && (flags.contains(SetBlockFlags::UPDATE_NEIGHBORS) || moved) {
+            behaviour(old).on_remove(self, old, pos);
+        }
+
+        self.view.set_block(pos, state);
+
+        if !flags.contains(SetBlockFlags::UPDATE_SKIP_ON_PLACE) {
+            behaviour(state).on_place(self, state, pos, old);
+        }
+
+        if flags.contains(SetBlockFlags::UPDATE_NEIGHBORS) {
+            self.update_neighbors_at_with(pos, old, None);
+        }
+
+        if !flags.contains(SetBlockFlags::UPDATE_KNOWN_SHAPE) {
+            self.update_neighbour_shapes(pos, flags);
+        }
+        true
+    }
+
+    /// Write `new` at `pos` if it differs, using the flags a block state change
+    /// normally carries (`UPDATE_CLIENTS`): the placement hook runs, but the
+    /// neighbours are notified by the hook, not by a blanket fan-out.
+    pub fn apply(&mut self, pos: BlockPos, new: BlockStateId) {
+        self.set_block(pos, new, SetBlockFlags::CLIENTS);
+    }
+
+    // -- scheduling ---------------------------------------------------------
 
     /// Schedule a block tick (position-keyed this stage; block-keyed in R8).
     pub fn schedule_tick(&mut self, pos: BlockPos, delay: u32, priority: TickPriority) {
@@ -214,25 +300,66 @@ impl<'a> Context<'a> {
         self.view.toggles_since(pos, since)
     }
 
+    // -- neighbour updates --------------------------------------------------
+
     /// `Level.updateNeighborsAt`: notify a cell's six neighbours.
     pub fn update_neighbors_at(&mut self, pos: BlockPos) {
-        for dir in Direction::UPDATE_ORDER {
-            self.queue.push_back(pos.offset(dir));
-        }
+        let source = self.get_block(pos);
+        self.update_neighbors_at_with(pos, source, None);
+    }
+
+    /// Notify a cell's neighbours, with an explicit source block.
+    pub fn update_neighbors_at_with(
+        &mut self,
+        pos: BlockPos,
+        source: BlockStateId,
+        orientation: Option<Orientation>,
+    ) {
+        self.add_and_run(NeighborUpdate::Multi {
+            source_pos: pos,
+            source,
+            skip: None,
+            orientation,
+            idx: 0,
+        });
+    }
+
+    /// `Level.updateNeighborsAtExceptFromFacing`.
+    pub fn update_neighbors_at_except_from_facing(
+        &mut self,
+        pos: BlockPos,
+        source: BlockStateId,
+        skip: Direction,
+        orientation: Option<Orientation>,
+    ) {
+        self.add_and_run(NeighborUpdate::Multi {
+            source_pos: pos,
+            source,
+            skip: Some(skip),
+            orientation,
+            idx: 0,
+        });
     }
 
     /// Notify a cell's neighbours, skipping the face in `skip`.
     pub fn update_neighbors_except(&mut self, pos: BlockPos, skip: Direction) {
-        for dir in Direction::UPDATE_ORDER {
-            if dir != skip {
-                self.queue.push_back(pos.offset(dir));
-            }
-        }
+        let source = self.get_block(pos);
+        self.update_neighbors_at_except_from_facing(pos, source, skip, None);
+    }
+
+    /// `Level.neighborChanged(pos, block)`: notify one cell.
+    pub fn neighbor_changed_at(&mut self, pos: BlockPos, source: BlockStateId) {
+        self.add_and_run(NeighborUpdate::Simple {
+            pos,
+            source,
+            orientation: None,
+        });
     }
 
     /// The seven-cell blast a wire uses when its power changes: the wire and
     /// its six neighbours, each then notifying its own neighbours.
     pub fn notify_around(&mut self, pos: BlockPos) {
+        let source = self.get_block(pos);
         let mut cells = vec![pos];
         for dir in Direction::ALL {
             let p = pos.offset(dir);
@@ -241,7 +368,7 @@ impl<'a> Context<'a> {
             }
         }
         for cell in cells {
-            self.update_neighbors_at(cell);
+            self.update_neighbors_at_with(cell, source, None);
         }
     }
 
@@ -271,8 +398,9 @@ impl<'a> Context<'a> {
         }
     }
 
-    /// Dispatch a neighbour change to the block's behaviour, the way
-    /// `ServerLevel.tickBlock` / `handleNeighborChanged` dispatch.
+    // -- dispatch -----------------------------------------------------------
+
+    /// Dispatch a neighbour change to the block's behaviour.
     pub fn dispatch_neighbor_changed(&mut self, pos: BlockPos, from: Option<NeighborSource>) {
         let state = self.get_block(pos);
         behaviour(state).neighbor_changed(self, state, pos, from);
@@ -288,6 +416,139 @@ impl<'a> Context<'a> {
     pub fn dispatch_use(&mut self, pos: BlockPos) {
         let state = self.get_block(pos);
         behaviour(state).use_block(self, state, pos);
+    }
+
+    // -- the cascade --------------------------------------------------------
+
+    /// `CollectingNeighborUpdater.addAndRun`.
+    fn add_and_run(&mut self, update: NeighborUpdate) {
+        let running = self.count > 0;
+        let too_many = self.count >= self.max_chained;
+        self.count += 1;
+        if !too_many {
+            if running {
+                self.added.push(update);
+            } else {
+                self.stack.push(update);
+            }
+        }
+        if !running {
+            self.run_updates();
+        }
+    }
+
+    /// `CollectingNeighborUpdater.runUpdates`: depth-first, LIFO, yielding to
+    /// freshly generated updates before resuming a multi-neighbour update.
+    fn run_updates(&mut self) {
+        while !self.stack.is_empty() || !self.added.is_empty() {
+            while let Some(update) = self.added.pop() {
+                self.stack.push(update);
+            }
+            while let Some(mut current) = self.stack.pop() {
+                let more = self.run_next(&mut current);
+                if more {
+                    self.stack.push(current);
+                }
+                if !self.added.is_empty() {
+                    break;
+                }
+            }
+        }
+        self.stack.clear();
+        self.added.clear();
+        self.count = 0;
+    }
+
+    fn run_next(&mut self, update: &mut NeighborUpdate) -> bool {
+        match update {
+            NeighborUpdate::Simple {
+                pos,
+                source,
+                orientation,
+            } => {
+                let source = NeighborSource {
+                    pos: *pos,
+                    state: *source,
+                    orientation: *orientation,
+                };
+                self.dispatch_neighbor_changed(*pos, Some(source));
+                false
+            }
+            NeighborUpdate::Multi {
+                source_pos,
+                source,
+                skip,
+                orientation,
+                idx,
+            } => {
+                if *idx >= Direction::UPDATE_ORDER.len() {
+                    return false;
+                }
+                let dir = Direction::UPDATE_ORDER[*idx];
+                *idx += 1;
+                if Some(dir) == *skip {
+                    if *idx < Direction::UPDATE_ORDER.len()
+                        && Some(Direction::UPDATE_ORDER[*idx]) == *skip
+                    {
+                        *idx += 1;
+                    }
+                    return *idx < Direction::UPDATE_ORDER.len();
+                }
+                let target = source_pos.offset(dir);
+                let source = NeighborSource {
+                    pos: *source_pos,
+                    state: *source,
+                    orientation: *orientation,
+                };
+                self.dispatch_neighbor_changed(target, Some(source));
+                if *idx < Direction::UPDATE_ORDER.len()
+                    && Some(Direction::UPDATE_ORDER[*idx]) == *skip
+                {
+                    *idx += 1;
+                }
+                *idx < Direction::UPDATE_ORDER.len()
+            }
+            NeighborUpdate::Shape {
+                direction,
+                neighbor,
+                flags,
+            } => {
+                self.execute_shape_update(*neighbor, *direction, *flags);
+                false
+            }
+        }
+    }
+
+    pub(crate) fn update_neighbour_shapes(&mut self, pos: BlockPos, flags: SetBlockFlags) {
+        let shape_flags = flags
+            .without(SetBlockFlags::UPDATE_NEIGHBORS)
+            .without(SetBlockFlags::UPDATE_SUPPRESS_DROPS);
+        for dir in Direction::UPDATE_SHAPE_ORDER {
+            self.add_and_run(NeighborUpdate::Shape {
+                direction: dir.opposite(),
+                neighbor: pos.offset(dir),
+                flags: shape_flags,
+            });
+        }
+    }
+
+    /// `NeighborUpdater.executeShapeUpdate`.
+    fn execute_shape_update(
+        &mut self,
+        neighbor: BlockPos,
+        direction: Direction,
+        flags: SetBlockFlags,
+    ) {
+        let state = self.get_block(neighbor);
+        if let Some(new) = behaviour(state).update_shape(self, state, neighbor, direction) {
+            if new != state {
+                let nested = flags
+                    .without(SetBlockFlags::UPDATE_NEIGHBORS)
+                    .without(SetBlockFlags::UPDATE_SUPPRESS_DROPS)
+                    .union(SetBlockFlags::UPDATE_KNOWN_SHAPE);
+                self.set_block(neighbor, new, nested);
+            }
+        }
     }
 }
 

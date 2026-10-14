@@ -7,6 +7,7 @@ use crate::blocks::{update_powered_source_neighbours, BlockBehaviour};
 use crate::dir::Direction;
 use crate::pos::BlockPos;
 use crate::props;
+use crate::view::SetBlockFlags;
 
 /// A lever.
 pub struct Lever;
@@ -66,7 +67,7 @@ impl BlockBehaviour for Lever {
             "true"
         };
         let new = props::with(state, "powered", value).unwrap_or(state);
-        ctx.set_block(pos, new);
+        ctx.set_block(pos, new, SetBlockFlags::PLACE);
         update_powered_source_neighbours(ctx, pos, new);
     }
 }

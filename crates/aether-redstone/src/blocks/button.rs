@@ -7,7 +7,7 @@ use crate::blocks::{update_powered_source_neighbours, BlockBehaviour};
 use crate::dir::Direction;
 use crate::pos::BlockPos;
 use crate::props;
-use crate::view::TickPriority;
+use crate::view::{SetBlockFlags, TickPriority};
 
 /// A stone-family button (20 ticks).
 pub struct StoneButton;
@@ -38,7 +38,7 @@ fn use_block(ctx: &mut Context, state: BlockStateId, pos: BlockPos, ticks: u32) 
         return;
     }
     let new = props::with(state, "powered", "true").unwrap_or(state);
-    ctx.set_block(pos, new);
+    ctx.set_block(pos, new, SetBlockFlags::PLACE);
     update_powered_source_neighbours(ctx, pos, new);
     ctx.schedule_tick(pos, ticks, TickPriority::Normal);
 }
@@ -46,7 +46,7 @@ fn use_block(ctx: &mut Context, state: BlockStateId, pos: BlockPos, ticks: u32) 
 fn tick(ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
     if props::powered(state) {
         let new = props::with(state, "powered", "false").unwrap_or(state);
-        ctx.set_block(pos, new);
+        ctx.set_block(pos, new, SetBlockFlags::PLACE);
         update_powered_source_neighbours(ctx, pos, new);
     }
 }

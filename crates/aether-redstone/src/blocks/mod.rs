@@ -122,7 +122,13 @@ pub trait BlockBehaviour: Sync {
     }
 
     /// `affectNeighborsAfterRemoval`: the block is being replaced.
-    fn on_remove(&self, _ctx: &mut Context, _state: BlockStateId, _pos: crate::pos::BlockPos) {}
+    ///
+    /// The default notifies the six neighbours, which is what a plain block's
+    /// removal does once `UPDATE_NEIGHBORS` is set. Components override it with
+    /// their own fan-out.
+    fn on_remove(&self, ctx: &mut Context, _state: BlockStateId, pos: crate::pos::BlockPos) {
+        ctx.update_neighbors_at(pos);
+    }
 
     /// `tick`: a scheduled block tick came due.
     fn tick(&self, _ctx: &mut Context, _state: BlockStateId, _pos: crate::pos::BlockPos) {}

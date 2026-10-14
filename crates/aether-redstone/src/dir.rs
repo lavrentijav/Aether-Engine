@@ -56,6 +56,18 @@ impl Direction {
         Direction::South,
     ];
 
+    /// The order the six neighbours are visited for a shape update.
+    ///
+    /// This is `BlockBehaviour.UPDATE_SHAPE_ORDER` in vanilla.
+    pub const UPDATE_SHAPE_ORDER: [Direction; 6] = [
+        Direction::West,
+        Direction::East,
+        Direction::North,
+        Direction::South,
+        Direction::Down,
+        Direction::Up,
+    ];
+
     /// The direction pointing the other way.
     pub const fn opposite(self) -> Direction {
         match self {

@@ -48,9 +48,8 @@
 //!   torches, lamps and mechanisms.
 //! * **strong** power — [`Redstone::get_direct_signal`]. What a lever, button,
 //!   torch or repeater pushes into the block it is attached to. A redstone
-//!   conductor ([`RedstoneView::is_conductor`]) turns the strong power it holds
-//!   into weak power for its other neighbours, which is how a lever on a block
-//!   powers wire on the far side.
+//!   conductor turns the strong power it holds into weak power for its other
+//!   neighbours, which is how a lever on a block powers wire on the far side.
 //!
 //! Redstone wire deliberately reads its neighbours with every *other* wire
 //! suppressed (vanilla's `shouldSignal = false`): a block powered by wire is
@@ -61,12 +60,13 @@
 //!
 //! This implements the **1.21.11 default** evaluator — the experimental
 //! "Eigencraft" wire evaluator is not used. Neighbour notifications are
-//! generated in vanilla's `UPDATE_ORDER` (west, east, down, up, north, south),
-//! but the engine drains its update queue **breadth-first** rather than
-//! depth-first. Every rule is a monotone fixed point over power, so the steady
-//! state is identical and the result is deterministic; only a race between two
-//! updates scheduled at the same priority within one tick could differ. See
-//! [`Redstone`] and `docs/KNOWN_ISSUES.md` for the full list of differences.
+//! generated in vanilla's `UPDATE_ORDER` (west, east, down, up, north, south)
+//! and run by a port of vanilla's depth-first `CollectingNeighborUpdater`: a
+//! LIFO stack where a multi-neighbour update yields to freshly generated
+//! updates before resuming, with the chain limit. State changes go through
+//! `set_block(pos, state, flags)` with vanilla's `Block.UpdateFlags`, so the
+//! placement/removal hooks and the shape updates run where vanilla runs them.
+//! See [`Redstone`] and `docs/KNOWN_ISSUES.md` for the full list of differences.
 //!
 //! ## Not in this stage
 //!
@@ -89,4 +89,4 @@ pub mod view;
 pub use dir::Direction;
 pub use engine::Redstone;
 pub use pos::BlockPos;
-pub use view::{MemWorld, RedstoneView, TickPriority, TraceWorld};
+pub use view::{MemWorld, Orientation, RedstoneView, SetBlockFlags, TickPriority, TraceWorld};

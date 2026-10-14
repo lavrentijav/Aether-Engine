@@ -14,6 +14,7 @@ use crate::dir::Direction;
 use crate::pos::BlockPos;
 use crate::props;
 use crate::shapes;
+use crate::view::SetBlockFlags;
 
 /// Redstone wire.
 pub struct Wire;
@@ -68,7 +69,12 @@ impl BlockBehaviour for Wire {
         update(ctx, pos, state);
     }
 
-    fn on_place(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos, _old: BlockStateId) {
+    fn on_place(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos, old: BlockStateId) {
+        // Vanilla's `onPlace` only acts when the block changed (`!old.is(this)`),
+        // which is what stops a wire's own power update from recursing.
+        if crate::behaviour::block_id_of(old) == crate::behaviour::block_id_of(state) {
+            return;
+        }
         update(ctx, pos, state);
         ctx.update_neighbors_of_neighboring_wires(pos);
     }
@@ -87,20 +93,9 @@ impl BlockBehaviour for Wire {
         pos: BlockPos,
         dir: Direction,
     ) -> Option<BlockStateId> {
-        if dir == Direction::Down {
-            return if can_survive(ctx, pos) {
-                None
-            } else {
-                Some(aether_world::registry::ids::AIR)
-            };
-        }
-        if dir == Direction::Up {
-            let shaped = {
-                let signals = ctx.signals();
-                connection_state(&signals, pos, state)
-            };
-            return (shaped != state).then_some(shaped);
-        }
+        // A wire's support is not re-checked for destruction this stage (see
+        // KNOWN_ISSUES): only its connection shape follows a neighbour change.
+        let _ = dir;
         let shaped = {
             let signals = ctx.signals();
             connection_state(&signals, pos, state)
@@ -126,7 +121,7 @@ impl BlockBehaviour for Wire {
             connection_state(&signals, pos, toggled)
         };
         if shaped != state {
-            ctx.set_block(pos, shaped);
+            ctx.set_block(pos, shaped, SetBlockFlags::PLACE);
             ctx.notify_around(pos);
         }
     }
@@ -144,15 +139,9 @@ pub(crate) fn update(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
     };
     let new = props::with(shaped, "power", &target.to_string()).unwrap_or(shaped);
     if new != state {
-        ctx.set_block(pos, new);
+        ctx.set_block(pos, new, SetBlockFlags::CLIENTS);
         ctx.notify_around(pos);
     }
-}
-
-/// `RedStoneWireBlock.canSurvive` for a wire at `pos`: the block below must
-/// support it.
-pub(crate) fn can_survive(ctx: &Context, pos: BlockPos) -> bool {
-    can_survive_on(ctx.get_block(pos.offset(Direction::Down)))
 }
 
 /// `RedStoneWireBlock.canSurviveOn`: a sturdy top face, or a hopper.

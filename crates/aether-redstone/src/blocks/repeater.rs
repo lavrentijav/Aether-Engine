@@ -7,8 +7,7 @@ use crate::blocks::BlockBehaviour;
 use crate::dir::Direction;
 use crate::pos::BlockPos;
 use crate::props;
-use crate::shapes;
-use crate::view::TickPriority;
+use crate::view::{SetBlockFlags, TickPriority};
 
 /// The redstone repeater.
 pub struct Repeater;
@@ -96,9 +95,8 @@ impl BlockBehaviour for Repeater {
         pos: BlockPos,
         dir: Direction,
     ) -> Option<BlockStateId> {
-        if dir == Direction::Down && !can_survive(ctx, pos) {
-            return Some(aether_world::registry::ids::AIR);
-        }
+        // Support destruction is not re-checked this stage (see KNOWN_ISSUES):
+        // only the `locked` property follows a side-input change.
         if dir.is_horizontal()
             && dir != props::facing(state)
             && dir != props::facing(state).opposite()
@@ -119,16 +117,12 @@ impl BlockBehaviour for Repeater {
             props::delay(state) + 1
         };
         let new = props::with(state, "delay", &next.to_string()).unwrap_or(state);
-        ctx.set_block(pos, new);
+        ctx.set_block(pos, new, SetBlockFlags::PLACE);
     }
 }
 
 fn delay(state: BlockStateId) -> u32 {
     u32::from(props::delay(state)) * 2
-}
-
-fn can_survive(ctx: &Context, pos: BlockPos) -> bool {
-    shapes::face_full(ctx.get_block(pos.offset(Direction::Down)), Direction::Up)
 }
 
 fn wire_power(state: BlockStateId) -> u8 {
@@ -190,7 +184,7 @@ fn update_locked(ctx: &mut Context, pos: BlockPos, state: BlockStateId) -> Block
     }
     let value = if locked { "true" } else { "false" };
     let new = props::with(state, "locked", value).unwrap_or(state);
-    ctx.set_block(pos, new);
+    ctx.set_block(pos, new, SetBlockFlags::CLIENTS);
     ctx.update_neighbors_at(pos);
     new
 }
@@ -228,6 +222,6 @@ fn check_tick(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
 fn update_neighbors_in_front(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
     let facing = props::facing(state);
     let output = pos.offset(facing.opposite());
-    ctx.queue.push_back(output);
+    ctx.neighbor_changed_at(output, state);
     ctx.update_neighbors_except(output, facing);
 }

@@ -52,6 +52,95 @@ impl TickPriority {
     }
 }
 
+/// `Block.UpdateFlags`: what a block write should do besides storing the state.
+///
+/// The bits are vanilla's (`net.minecraft.world.level.block.Block`). The engine
+/// reads them in [`crate::behaviour::Context::set_block`] to decide whether to
+/// run the removal hook, the placement hook, the neighbour updates and the
+/// shape updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SetBlockFlags(u32);
+
+impl SetBlockFlags {
+    /// No side effects at all.
+    pub const NONE: Self = Self(0);
+    /// `UPDATE_NEIGHBORS` — notify the six neighbours.
+    pub const UPDATE_NEIGHBORS: Self = Self(1);
+    /// `UPDATE_CLIENTS` — send the block to clients.
+    pub const UPDATE_CLIENTS: Self = Self(2);
+    /// `UPDATE_INVISIBLE`.
+    pub const UPDATE_INVISIBLE: Self = Self(4);
+    /// `UPDATE_IMMEDIATE`.
+    pub const UPDATE_IMMEDIATE: Self = Self(8);
+    /// `UPDATE_KNOWN_SHAPE` — suppress the shape updates.
+    pub const UPDATE_KNOWN_SHAPE: Self = Self(16);
+    /// `UPDATE_SUPPRESS_DROPS`.
+    pub const UPDATE_SUPPRESS_DROPS: Self = Self(32);
+    /// `UPDATE_MOVE_BY_PISTON`.
+    pub const UPDATE_MOVE_BY_PISTON: Self = Self(64);
+    /// `UPDATE_SKIP_ON_PLACE` — suppress the placement hook.
+    pub const UPDATE_SKIP_ON_PLACE: Self = Self(512);
+    /// `UPDATE_NONE`.
+    pub const UPDATE_NONE: Self = Self(260);
+
+    /// The usual "place a block" flags: neighbour notify plus clients — vanilla's
+    /// `setBlockAndUpdate` (`3`).
+    pub const PLACE: Self = Self(3);
+
+    /// The flags redstone state changes usually use: clients only (`2`). The
+    /// engine still runs the placement hook, which is where the component does
+    /// its own neighbour work.
+    pub const CLIENTS: Self = Self(2);
+
+    /// Combine two flag sets.
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Remove `other` from this set.
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
+    /// Whether every bit in `other` is set here.
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    /// The raw bits.
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+}
+
+impl std::ops::BitOr for SetBlockFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        self.union(rhs)
+    }
+}
+
+/// A redstone orientation (`net.minecraft.world.level.redstone.Orientation`).
+///
+/// 1.21.11 threads this through neighbour updates so the experimental evaluator
+/// and direction-aware components (pistons, observers) know which face an
+/// update came from. The default evaluator ignores it, so this stage carries it
+/// but does not act on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Orientation {
+    /// The front face.
+    pub front: crate::dir::Direction,
+    /// The up face.
+    pub up: crate::dir::Direction,
+}
+
+impl Orientation {
+    /// An orientation with the given front and up faces.
+    pub const fn new(front: crate::dir::Direction, up: crate::dir::Direction) -> Self {
+        Self { front, up }
+    }
+}
+
 /// The world as the redstone engine sees it.
 ///
 /// A host wires this to whatever it actually stores blocks in. The engine only
