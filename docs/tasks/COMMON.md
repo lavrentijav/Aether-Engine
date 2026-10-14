@@ -12,3 +12,7 @@
   `docs/tasks/<Q>-notes.md`, commit, continue. Report at the end: branch, hash per task, checks.
 - Behaviour must match vanilla 1.21.11 (data pack / server behaviour), not a look-alike. Check
   `docs/KNOWN_ISSUES.md` first; update it (and `docs/STATUS.md`) when you close an item.
+- **Core or plugin:** an optional, non-performance-critical feature (economy, shops, rewards, kits,
+  admin UIs, web integrations, custom modes) is written as a plugin on the plugin API
+  (`docs/design/plugins.md`), not in the core; if the API lacks something, extend the API. See
+  "Core or plugin?" in `CONTRIBUTING.md`.

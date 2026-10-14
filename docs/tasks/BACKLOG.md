@@ -8,6 +8,27 @@ Size: S ≈ one agent-session, M ≈ 2–4 commits, L = split before giving out.
 Owner: **oc** = opencode agent, **C** = Claude (architecture/invariants), **oc+C** = agent implements, Claude designs/reviews.
 Each item becomes a self-contained brief in `docs/tasks/` when it is queued.
 
+## 0. Plugin system first (rule: optional, non-hot-path features are plugins — CONTRIBUTING "Core or plugin?")
+
+The plugin host is the base for a whole class of features, so it goes first. P1 (host, events) is
+running; P2 (economy service) and P3 (registries) follow. These extend the API so the existing
+optional built-ins can leave the core:
+
+| ID | Task | Needs | Size | Owner |
+|---|---|---|---|---|
+| PA1 | **UI API for plugins**: container windows (chest-style menus with click callbacks, paging), titles/actionbar/bossbar/scoreboard/sidebar, sign/anvil text input, through the compat layer for every version | P1 | M | oc+C |
+| PA2 | **History API**: read-only journal queries for plugins (who changed this block, is it worldgen-original, item provenance, events in an area/time), paged, behind a capability | P1 | M | oc+C |
+| PA3 | **Net capability**: outbound HTTP(S) client for plugins (allow-list per plugin in operator config), timeouts, no blocking the tick (async result via scheduler callback) | P1 | S | oc |
+| PM1 | Migrate **economy** to `plugins/economy` (= P2) and delete the built-in after the conformance suite passes | P2 | M | oc |
+| PM2 | Migrate **rewards** (mining/playtime coins; uses PA2 "worldgen-original" lookup and the economy service) to `plugins/rewards` | PA2, PM1 | S | oc |
+| PM3 | Migrate **`/stash`** UI (rollback recovery container) to `plugins/stash`; the core keeps the rollback and the recovered-items store, the plugin shows/claims them via PA1/PA2 | PA1, PA2 | M | oc |
+| PM4 | **Web admin** (O6) as a plugin with PA2 + an HTTP server capability (operator-granted port) | PA2 | M | oc |
+| PM5 | Example/dogfood plugins: kits, `/home` + `/tpa`, chat formatting/moderation, a shop UI over the economy service | PA1, PM1 | M | oc |
+
+Core stays core (hot path or vanilla mechanics): G1–G10 gameplay, redstone, light, protocol (N1–N4),
+storage (H2–H9), performance (O1–O5). Where they need customisation they expose events/registries.
+H6 (ClickHouse exporter) may become a plugin once PA2 exposes segment export; decide at H2.
+
 ## 1. Gameplay
 
 | ID | Task | Needs | Size | Owner |
@@ -63,18 +84,18 @@ Each item becomes a self-contained brief in `docs/tasks/` when it is queued.
 | O3 | Grafana dashboards + full Prometheus metrics (tick time, per-system time, chunk sends, journal lag, plugin time) | — | S | oc |
 | O4 | `/aether profile`: sub-tick profiler (per system, per plugin), output to chat/web | P1 | M | oc |
 | O5 | Physics: staged pipeline, SIMD broad-phase, `Cached Environment` fast path (ROADMAP 🚧) | — | M | oc |
-| O6 | Web admin (history graph, 🚧 in ROADMAP): finish the read-only admin over the journal graph | H2 | M | oc |
+| O6 | Web admin → moved to **PM4** (plugin) | — | — | — |
 
 ## 6. Plugins (after P1–P3)
 
 | ID | Task | Needs | Size | Owner |
 |---|---|---|---|---|
 | PL4 | Native C-ABI plugin tier on the same WIT world | P3 | M | oc+C |
-| PL5 | Port small built-ins to plugins as examples/dogfood: `/stash`, rewards, a shop UI over the economy service | P2 | M | oc |
 | PL6 | Plugin hot reload (drain events, swap instance, keep KV) | P3 | M | oc |
 
 ## Suggested order
 
+0. **Plugins first**: P1 (running) → P2/PM1 → PA1, PA2, PA3 in parallel → PM2, PM3, PM4, PM5.
 1. Now-ish, independent: **N1** (regression suite pays for everything else), **G4**, **H8**, **O3**, **N2**.
 2. After the running wave lands (S3/S4/T2/U1): **G1**, **G5**, **G6**, **G7**, **N4**.
 3. After redstone is STABLE: **R-A → R-B / R-C → R-D**.
