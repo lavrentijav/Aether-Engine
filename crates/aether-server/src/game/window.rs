@@ -1160,7 +1160,10 @@ mod tests {
             // Shift-click the right half straight into the inventory.
             c.click(30, 0, 1, &mut drag);
             assert!(c.cont.as_ref().unwrap()[30].is_none());
-            assert_eq!(c.inv.count_of(crate::inventory::item("minecraft:diamond")), 3);
+            assert_eq!(
+                c.inv.count_of(crate::inventory::item("minecraft:diamond")),
+                3
+            );
         }
         cont[40] = Some(Stack::named("minecraft:gold_ingot", 5));
         {
