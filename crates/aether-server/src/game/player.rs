@@ -137,6 +137,16 @@ impl PlayerState {
         self.mode == GameMode::Survival
     }
 
+    /// Forget the item shadowed on the creative cursor.
+    ///
+    /// Called wherever the cursor is emptied behind the client's back — death
+    /// drops the inventory, respawn and closing a window hand the cursor back —
+    /// so a stand-in conjured after the item is gone cannot be resolved to the
+    /// real item it once stood for. See `session::record_slot_change`.
+    pub fn clear_creative_shadow(&mut self) {
+        self.creative_carry = None;
+    }
+
     /// A fresh window id.
     pub fn next_window_id(&mut self) -> u8 {
         self.window_counter = if self.window_counter >= 100 {
@@ -387,5 +397,33 @@ mod tests {
         assert_eq!(p.xp_level().0, 1);
         p.xp_total = 352; // level 15 starts at 315 + 37 = 352 total → level 16
         assert_eq!(p.xp_level().0, 16);
+    }
+
+    #[test]
+    fn death_clears_the_creative_shadow_so_a_stand_in_is_not_conjured() {
+        // F3: the shadow is only set by a slot report, so death — which drops
+        // the whole inventory — must clear it, or a stand-in reported after
+        // respawn would resolve to the real item that no longer exists.
+        // `combat::die`, `combat::respawn` and `game::window::close` all call
+        // `clear_creative_shadow`, which is the step this test drives.
+        use crate::protocol::compat::items::{table_for, Resolution};
+        let spear = aether_world::ItemTypeId::vanilla("minecraft:iron_spear").unwrap();
+        let trident = aether_world::ItemTypeId::vanilla("minecraft:trident").unwrap();
+        let table = table_for(767).unwrap(); // 1.21.1
+        let shown = table.engine(table.wire(spear).unwrap().id).unwrap();
+        assert_eq!(shown, trident, "the spear is shown as a trident");
+
+        let mut p = PlayerState::new(GameMode::Creative);
+        // Pick the spear up: the shadow is set.
+        let (_, carry) = table.resolve_change(None, Some(spear), p.creative_carry);
+        p.creative_carry = carry;
+        assert_eq!(p.creative_carry, Some(spear));
+        // Die: the inventory is dropped and the shadow with it.
+        p.clear_creative_shadow();
+        assert_eq!(p.creative_carry, None);
+        // Respawn, report a trident into an empty slot: a genuine creation,
+        // not the spear conjured from the dropped one.
+        let (res, _) = table.resolve_change(Some(shown), None, p.creative_carry);
+        assert_eq!(res, Resolution::Apply(Some(trident)));
     }
 }
