@@ -664,6 +664,43 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
     pub fn resident_sections(&self) -> usize {
         self.cache.read().unwrap().len()
     }
+
+    /// Sample vanilla's random-tick pass: `speed` uniformly random blocks
+    /// inside every resident 16³ sub-chunk, visiting each as
+    /// `(x, y, z, id)`.
+    ///
+    /// `next` yields a uniform integer in `0..bound`; `visit` is handed the
+    /// world coordinate and the block there. The whole walk holds the cache
+    /// read lock, so `visit` must not touch the world (neither blocks nor the
+    /// registry) or it will deadlock — classify by comparing ids, then act on
+    /// what you collected once this returns.
+    pub fn for_each_random_tick(
+        &self,
+        speed: usize,
+        next: &mut dyn FnMut(u32) -> u32,
+        visit: &mut dyn FnMut(i32, i32, i32, BlockStateId),
+    ) {
+        let cache = self.cache.read().unwrap();
+        for key in cache.keys() {
+            let Some(sc) = cache.get(key) else {
+                continue;
+            };
+            let base_x = key.cx * 16;
+            let base_y = key.cy as i32 * 16;
+            let base_z = key.cz * 16;
+            for _ in 0..speed {
+                let lx = next(16) as usize & 15;
+                let ly = next(16) as usize & 15;
+                let lz = next(16) as usize & 15;
+                visit(
+                    base_x + lx as i32,
+                    base_y + ly as i32,
+                    base_z + lz as i32,
+                    sc.get(lx, ly, lz),
+                );
+            }
+        }
+    }
 }
 
 /// The world as a physics [`BlockView`]: the `collision` mask answers the

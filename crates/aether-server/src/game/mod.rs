@@ -5,6 +5,7 @@
 //! rules are the same for every client; how much of it a client *sees*
 //! depends on its codec (see [`crate::protocol::ProtocolCodec::full_gameplay`]).
 
+pub mod blockticks;
 pub mod combat;
 pub mod commands;
 pub mod containers;
@@ -17,6 +18,7 @@ pub mod interact;
 pub mod mobs;
 pub mod player;
 pub mod provenance;
+pub mod scheduler;
 pub mod tables;
 pub mod tick;
 pub mod window;

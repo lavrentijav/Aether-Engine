@@ -1269,6 +1269,8 @@ pub(crate) fn set_and_broadcast(
     registry.broadcast_except(handle.entity_id, &ev, world);
     // Water and lava next to the change get to react to it.
     crate::game::fluids::notify(world, x, y, z);
+    // Sand, crops and leaves next to it do too.
+    crate::game::blockticks::notify(world, x, y, z);
     seq
 }
 

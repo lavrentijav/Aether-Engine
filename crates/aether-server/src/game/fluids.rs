@@ -24,11 +24,13 @@
 //! player's edit, not an edit of their own, and recording each one would bury
 //! the history `/lookup` and `/rollback` read under thousands of entries.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
 use aether_api::block_ids;
 use aether_world::BlockStateId;
+
+use super::scheduler::Scheduler;
 
 use crate::players::SharedRegistry;
 use crate::protocol::ServerEvent;
@@ -148,26 +150,13 @@ pub fn state_of(c: Cell) -> BlockStateId {
     BlockStateId(base + c.level.min(15) as u32)
 }
 
-struct Queue {
-    due: BTreeMap<u64, Vec<Pos>>,
-    pending: HashSet<Pos>,
-}
-
-fn queue() -> &'static Mutex<Queue> {
-    static Q: OnceLock<Mutex<Queue>> = OnceLock::new();
-    Q.get_or_init(|| {
-        Mutex::new(Queue {
-            due: BTreeMap::new(),
-            pending: HashSet::new(),
-        })
-    })
+fn queue() -> &'static Mutex<Scheduler<Pos>> {
+    static Q: OnceLock<Mutex<Scheduler<Pos>>> = OnceLock::new();
+    Q.get_or_init(|| Mutex::new(Scheduler::new()))
 }
 
 fn schedule(pos: Pos, delay: u64) {
-    let mut q = queue().lock().unwrap();
-    if q.pending.insert(pos) {
-        q.due.entry(super::now() + delay).or_default().push(pos);
-    }
+    queue().lock().unwrap().schedule(pos, super::now() + delay);
 }
 
 const SIDES: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
@@ -433,29 +422,7 @@ fn update(world: &DemoWorld, pos: Pos) -> Changes {
 /// Run the fluid updates that are due. Called once per game tick.
 pub fn tick(world: &DemoWorld, registry: &SharedRegistry) {
     let now = super::now();
-    let batch: Vec<Pos> = {
-        let mut q = queue().lock().unwrap();
-        let mut batch = Vec::new();
-        while batch.len() < BUDGET {
-            let Some((&t, _)) = q.due.iter().next() else {
-                break;
-            };
-            if t > now {
-                break;
-            }
-            let mut list = q.due.remove(&t).unwrap_or_default();
-            let room = BUDGET - batch.len();
-            if list.len() > room {
-                let rest = list.split_off(room);
-                q.due.insert(t, rest);
-            }
-            for p in &list {
-                q.pending.remove(p);
-            }
-            batch.extend(list);
-        }
-        batch
-    };
+    let batch: Vec<Pos> = queue().lock().unwrap().due(now, BUDGET);
     for pos in batch {
         for (p, to) in update(world, pos).0 {
             apply(world, registry, p, to);
@@ -489,6 +456,9 @@ fn apply(world: &DemoWorld, registry: &SharedRegistry, p: Pos, to: BlockStateId)
     }
     world.set_block_id(x, y, z, to, world.props_of(to));
     registry.broadcast(&ServerEvent::BlockChange { x, y, z, block: to }, world);
+    // A fluid change is still a change: sand above it may now be unsupported,
+    // a crop beside it may have lost its support.
+    super::blockticks::notify(world, x, y, z);
     if let Some(c) = cell_of(to) {
         schedule(p, c.fluid.delay());
     }
