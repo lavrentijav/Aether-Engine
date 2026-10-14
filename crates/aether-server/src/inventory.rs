@@ -411,9 +411,13 @@ impl SlotChange {
 /// Version 5 added the potion contents field; version 4 stores the item as a
 /// two-byte id rather than a length-prefixed name; version 3 narrowed item uids
 /// from 16 bytes to 8 (see [`aether_world::journal::event::ItemUid`]); version
-/// 2 added the wear field. Versions 1–3 are refused rather than guessed at —
-/// handing a player the wrong items is worse than handing them none — but a
-/// version 4 blob still loads, its stacks holding no potion.
+/// 2 added the wear field. A version 4 blob loads, its stacks holding no
+/// potion. A version 3 blob loads too: its only difference is the item stored
+/// as a name, which resolves to the same vanilla id losslessly (an unknown name
+/// refuses the whole inventory). Versions 1–2 carry 16-byte uids that have no
+/// 8-byte equivalent, so they are refused — handing a player the wrong items is
+/// worse than handing them none — unless they hold no stack at all: an empty
+/// inventory has nothing to misread, and refusing it locked players out.
 pub const FORMAT_VERSION: u8 = 5;
 
 /// A potion field's "no potion" sentinel in the version 5 layout.
@@ -447,19 +451,28 @@ pub fn decode(blob: &[u8]) -> Option<Inventory> {
         Some(s)
     };
     let version = take(1)?[0];
-    if version != 4 && version != FORMAT_VERSION {
+    if !(1..=FORMAT_VERSION).contains(&version) {
         return None;
     }
     let held = take(1)?[0];
     let n = u16::from_be_bytes(take(2)?.try_into().ok()?) as usize;
     let mut inv = Inventory::new();
     inv.held = held.min(8);
+    if version <= 2 {
+        // 16-byte uids: only an empty inventory is unambiguous.
+        return (n == 0 && c == blob.len()).then_some(inv);
+    }
     for _ in 0..n {
         let slot = take(1)?[0] as usize;
         let count = take(1)?[0];
         let uid = u64::from_be_bytes(take(8)?.try_into().ok()?);
         let damage = u16::from_be_bytes(take(2)?.try_into().ok()?);
-        let item = ItemTypeId(u16::from_be_bytes(take(2)?.try_into().ok()?));
+        let item = if version == 3 {
+            let len = u16::from_be_bytes(take(2)?.try_into().ok()?) as usize;
+            ItemTypeId::vanilla(std::str::from_utf8(take(len)?).ok()?)?
+        } else {
+            ItemTypeId(u16::from_be_bytes(take(2)?.try_into().ok()?))
+        };
         // Version 4 predates the potion field.
         let potion = if version >= 5 {
             match u16::from_be_bytes(take(2)?.try_into().ok()?) {
@@ -507,6 +520,43 @@ pub fn legacy_key(uuid: u128) -> [u8; 17] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_old_empty_inventory_loads_as_empty_rather_than_locking_the_player_out() {
+        for version in 1..=3u8 {
+            let inv = decode(&[version, 2, 0, 0])
+                .expect("an empty v1-3 inventory has nothing to misread");
+            assert_eq!(inv.occupied().count(), 0, "v{version}");
+            assert_eq!(inv.held, 2);
+        }
+        // Trailing bytes after an "empty" v1/v2 header are not empty at all.
+        assert!(decode(&[2, 0, 0, 0, 9]).is_none());
+    }
+
+    #[test]
+    fn a_version_3_inventory_resolves_its_item_names() {
+        let name = b"minecraft:diamond";
+        let mut b = vec![3u8, 0, 0, 1, 5, 7];
+        b.extend_from_slice(&42u64.to_be_bytes());
+        b.extend_from_slice(&3u16.to_be_bytes());
+        b.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        b.extend_from_slice(name);
+        let inv = decode(&b).expect("v3 decodes");
+        let s = inv.slot(5).expect("slot 5");
+        assert_eq!(s.item, item("minecraft:diamond"));
+        assert_eq!((s.count, s.uid.0, s.damage, s.potion), (7, 42, 3, None));
+
+        // An unknown name refuses the whole inventory rather than dropping it.
+        let mut bad = b.clone();
+        let at = bad.len() - name.len();
+        bad[at..].copy_from_slice(b"minecraft:diamonX");
+        assert!(decode(&bad).is_none());
+    }
+
+    #[test]
+    fn a_non_empty_version_2_inventory_is_still_refused() {
+        assert!(decode(&[2, 0, 0, 1, 0, 1]).is_none());
+    }
+
     use super::*;
 
     /// A canonical item id by name, for the tests' literals.
@@ -752,14 +802,15 @@ mod tests {
         assert_eq!(decode(&b), None);
         b[0] = 0;
         assert_eq!(decode(&b), None);
-        // Version 2 stored 16-byte uids where this version stores 8; reading
-        // one as the other would shift every field after the first uid.
-        b[0] = 2;
-        assert_eq!(decode(&b), None);
-        // Version 1 is also refused now: old worlds are wiped, and there is no
-        // compatibility branch to guess with.
-        b[0] = 1;
-        assert_eq!(decode(&b), None);
+        // Versions 1-2 stored 16-byte uids where this version stores 8; reading
+        // one as the other would shift every field after the first uid, so a
+        // non-empty one is refused (an empty one has nothing to misread; see
+        // `an_old_empty_inventory_loads_as_empty_rather_than_locking_the_player_out`).
+        for v in [1u8, 2] {
+            let mut full = vec![v, 0, 0, 1];
+            full.extend_from_slice(&[0u8; 40]);
+            assert_eq!(decode(&full), None, "v{v}");
+        }
     }
 
     #[test]
