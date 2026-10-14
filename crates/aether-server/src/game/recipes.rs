@@ -27,9 +27,10 @@
 //! are not recognised by any codec and decode to `ClientEvent::Ignored`, which
 //! is the harmless outcome.
 
-// Stonecutting, smithing and transmutation recipes are loaded, indexed and
-// tested, but no block UI drives them yet (there is no stonecutter or smithing
-// table window), so their accessors are dead code outside the tests.
+// Stonecutting and smithing recipes are loaded, indexed and tested, but no
+// block UI drives them yet (there is no stonecutter or smithing-table window),
+// so their accessors are dead code outside the tests. Transmutation, by
+// contrast, is matched by the ordinary crafting grid (see `RecipeBook::craft`).
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -490,31 +491,14 @@ impl RecipeBook {
                 return Some((r.result, r.count));
             }
         }
-        // Shapeless consumes one grid item per ingredient; greedy is sound
-        // because a match removes exactly the ingredient it consumed.
         let items: Vec<ItemTypeId> = grid.iter().flatten().copied().collect();
         if items.len() != n {
             return None;
         }
-        'outer: for r in &self.shapeless {
-            if r.ingredients.len() != items.len() {
-                continue;
+        for r in &self.shapeless {
+            if r.ingredients.len() == items.len() && shapeless_matches(&r.ingredients, &items) {
+                return Some((r.result, r.count));
             }
-            let mut used = vec![false; r.ingredients.len()];
-            for item in &items {
-                let mut found = false;
-                for (i, ing) in r.ingredients.iter().enumerate() {
-                    if !used[i] && ing.matches(*item) {
-                        used[i] = true;
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    continue 'outer;
-                }
-            }
-            return Some((r.result, r.count));
         }
         None
     }
@@ -631,6 +615,46 @@ fn pattern_cell_matches(pattern: &Option<Ing>, item: Option<ItemTypeId>) -> bool
         None => item.is_none(),
         Some(_) => item.is_some_and(|i| pattern.as_ref().is_some_and(|p| p.matches(i))),
     }
+}
+
+/// Whether every ingredient can be paired with a distinct grid item — a
+/// perfect bipartite matching, not a greedy assignment. Greedy is unsound when
+/// an ingredient's set overlaps a later one: ingredients `[{a,b}, {a}]` with
+/// items `[a, b]` place `a→{a,b}`, leaving `b` nowhere, yet `a→{a}, b→{a,b}`
+/// works. Kuhn's augmenting-path algorithm finds it (≤ 9 ingredients).
+fn shapeless_matches(ings: &[Ing], items: &[ItemTypeId]) -> bool {
+    if ings.len() != items.len() {
+        return false;
+    }
+    // `item_of_ing[i]` is the grid item currently paired with ingredient `i`.
+    let mut item_of_ing = vec![usize::MAX; ings.len()];
+    for i in 0..ings.len() {
+        let mut seen = vec![false; items.len()];
+        if !augment(ings, items, i, &mut seen, &mut item_of_ing) {
+            return false;
+        }
+    }
+    true
+}
+
+fn augment(
+    ings: &[Ing],
+    items: &[ItemTypeId],
+    ing: usize,
+    seen: &mut [bool],
+    item_of_ing: &mut [usize],
+) -> bool {
+    for (j, item) in items.iter().enumerate() {
+        if seen[j] || !ings[ing].matches(*item) {
+            continue;
+        }
+        seen[j] = true;
+        if item_of_ing[j] == usize::MAX || augment(ings, items, item_of_ing[j], seen, item_of_ing) {
+            item_of_ing[j] = ing;
+            return true;
+        }
+    }
+    false
 }
 
 /// Parse a recipe `result` object (`{id, count?}`; `{item, count?}` on older
@@ -1009,6 +1033,33 @@ mod tests {
         assert_eq!(
             book.craft(&[Some(slab), None, None, None], 2),
             Some((boat, 1))
+        );
+    }
+
+    #[test]
+    fn shapeless_matching_is_not_greedy() {
+        // Ingredients [{oak, birch}, {oak}], items [oak, birch]. A greedy
+        // assignment sends oak to the tag first and then cannot place birch;
+        // a real matching sends oak to the specific ingredient and birch to
+        // the tag.
+        let book = book_of(
+            &[r##"{
+                "type": "minecraft:crafting_shapeless",
+                "ingredients": ["#minecraft:overlap", "minecraft:oak_planks"],
+                "result": {"id": "minecraft:stick", "count": 1}
+            }"##],
+            vec![(
+                "overlap",
+                r##"{"values": ["minecraft:oak_planks", "minecraft:birch_planks"]}"##,
+            )],
+        );
+        let oak = ItemTypeId::vanilla("minecraft:oak_planks").unwrap();
+        let birch = ItemTypeId::vanilla("minecraft:birch_planks").unwrap();
+        let stick = ItemTypeId::vanilla("minecraft:stick").unwrap();
+        assert_eq!(
+            book.craft(&[Some(oak), Some(birch), None, None], 2),
+            Some((stick, 1)),
+            "a specific ingredient must be able to take the item a tag also matches"
         );
     }
 
