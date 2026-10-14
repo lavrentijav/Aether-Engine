@@ -484,6 +484,13 @@ impl<B: KvBackend> Journal<B> {
     pub fn actor_events(&self, actor: ActorId) -> Result<Vec<Event>, StorageError> {
         let mut out = Vec::new();
         for (k, _) in self.backend.scan_prefix(&actor_prefix(actor))? {
+            // The index key is the 17-byte actor prefix plus an 8-byte seq. A
+            // shorter key under the same prefix — a saved-player blob written
+            // before the prefixes were pulled apart — is not an index entry;
+            // skip it rather than panic slicing it.
+            if k.len() < 25 {
+                continue;
+            }
             let seq = u64::from_be_bytes(k[17..25].try_into().unwrap());
             if let Some(e) = self.get(seq)? {
                 out.push(e);
