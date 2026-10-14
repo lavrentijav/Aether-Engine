@@ -85,6 +85,12 @@ pub fn dispatch(
     let mut words = text[1..].split_whitespace();
     let cmd = words.next().unwrap_or_default();
     let args: Vec<&str> = words.collect();
+    // A plugin command is tried first: a plugin that registers a verb has
+    // claimed it, exactly as registering an event claims it.
+    let plugin_args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    if let Some(lines) = crate::plugins::on_command(handle, cmd, &plugin_args) {
+        return Some(Reply(lines));
+    }
     // The economy owns its own verbs; it answers `None` for anything else, so
     // a command name never means two things.
     if let Some(lines) = crate::game::commands::dispatch(cmd, &args, handle, registry, world) {

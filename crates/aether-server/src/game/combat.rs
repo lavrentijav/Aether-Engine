@@ -135,6 +135,7 @@ pub fn hurt_player(
         },
         world,
     );
+    crate::plugins::after_damage(target.entity_id as u64, dealt as f64, source);
     if let Some((_, from)) = attacker {
         let p = target.pos();
         let (dx, dz) = (p.x - from.x, p.z - from.z);
@@ -204,6 +205,7 @@ pub fn die(
 ) {
     let text = death_message(&target.name, source, attacker, registry);
     crate::log::info(&format!("[death] {text}"));
+    crate::plugins::after_entity_death(target.entity_id as u64, attacker.map(|a| a as u64));
     // Death clears every effect; tell the client before the respawn screen
     // takes over.
     super::effects::clear(target, registry, world);
@@ -370,6 +372,7 @@ pub fn on_mob_hurt(
         },
         world,
     );
+    crate::plugins::after_damage(id as u64, hit.damage as f64, source);
     if !hit.killed {
         return;
     }
@@ -406,6 +409,7 @@ pub fn on_mob_hurt(
     if killer.is_some() {
         entities::award_xp(hit.pos, hit.xp);
     }
+    crate::plugins::after_entity_death(id as u64, killer.map(|k| k.entity_id as u64));
 }
 
 /// Add experience to a player.

@@ -141,6 +141,67 @@ impl ResourcePackConfig {
     }
 }
 
+/// `[plugins]` settings: where WebAssembly plugins live and their limits.
+///
+/// The table is both the global settings and the per-plugin overrides:
+/// `[plugins.hello]` is a [`PluginEntry`] for the plugin whose manifest id is
+/// `hello`. Missing per-plugin entries default to enabled with the manifest's
+/// own capability requests.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+// The fields below are only read by the `plugins` feature; without it the
+// config still parses (so one file serves every build) but nothing consults
+// the per-plugin map, which the dead-code lint would otherwise flag.
+#[allow(dead_code)]
+pub struct PluginsConfig {
+    /// Directory to scan for `plugin.toml`. Empty disables plugins entirely.
+    pub dir: String,
+    /// Per-call time budget in milliseconds (epoch interruption).
+    pub budget_ms: u64,
+    /// Per-plugin memory cap in mebibytes.
+    pub memory_mib: u64,
+    /// Traps a plugin may take before the host disables it.
+    pub max_faults: u32,
+    /// Per-plugin overrides, keyed by manifest id.
+    #[serde(flatten)]
+    pub plugins: std::collections::BTreeMap<String, PluginEntry>,
+}
+
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        PluginsConfig {
+            dir: String::new(),
+            budget_ms: 5,
+            memory_mib: 64,
+            max_faults: 5,
+            plugins: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+/// `[plugins.<id>]`: what the operator decides about one plugin.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+// See `PluginsConfig`: parsed in every build, consulted only with `plugins`.
+#[allow(dead_code)]
+pub struct PluginEntry {
+    /// `false` skips the plugin. `None` (the field absent) means enabled.
+    pub enabled: Option<bool>,
+    /// Capabilities the operator grants. Empty means "grant what the manifest
+    /// asked for".
+    pub capabilities: Vec<String>,
+    /// Values the plugin reads through `host.config` in `init`.
+    pub config: std::collections::BTreeMap<String, String>,
+}
+
+impl PluginEntry {
+    /// Whether the plugin should load; enabled unless explicitly disabled.
+    #[allow(dead_code)]
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+}
+
 /// Whole server config.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -151,6 +212,8 @@ pub struct Config {
     pub resource_pack: ResourcePackConfig,
     /// Optional history mirror.
     pub database: DatabaseConfig,
+    /// WebAssembly plugins: the directory and the per-plugin overrides.
+    pub plugins: PluginsConfig,
     /// Who may run administrative commands: `name`, or `name@address` to
     /// require that the player also connects from that IP address.
     ///
@@ -411,6 +474,21 @@ url = ""
 batch_size = 500        # write as soon as this many events are waiting
 batch_delay_ms = 1000   # ...or this long after the first one arrived
 queue_depth = 100000    # events that may wait before submissions are dropped
+
+[plugins]
+# WebAssembly plugins (a build with the `plugins` feature, the default). Each
+# plugin is a directory under `dir` holding plugin.toml and its .wasm
+# component. Empty disables plugins. See docs/design/plugins.md.
+dir = ""             # e.g. "plugins"
+budget_ms = 5        # per-call time budget before a running plugin is interrupted
+memory_mib = 64      # per-plugin linear-memory cap
+max_faults = 5       # traps before the host disables a plugin
+
+# Per-plugin overrides are tables named for the plugin's manifest id, e.g.
+# [plugins.hello]
+# enabled = true
+# capabilities = ["log", "storage.kv"]   # empty grants what the manifest asks
+# config = { greeting = "hi" }
 
 [cache]
 # Unmodified generated columns are cached on disk so the generator does not

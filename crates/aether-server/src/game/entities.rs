@@ -452,6 +452,8 @@ pub struct MobHit {
     pub kind: &'static str,
     pub xp: i32,
     pub pos: Vector3,
+    /// The damage actually dealt, after resistance: what `after-damage` hears.
+    pub damage: f32,
 }
 
 /// Hurt the mob `id` by `amount`, knocked back away from `from`.
@@ -507,6 +509,7 @@ pub fn hurt_mob(
         kind: m.def.kind,
         xp: m.def.xp,
         pos,
+        damage: amount,
     })
 }
 
