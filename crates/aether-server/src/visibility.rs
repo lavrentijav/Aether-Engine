@@ -195,42 +195,35 @@ impl State {
     }
 }
 
-/// The shared section-graph cache, plus a per-section epoch.
+/// The shared section-graph cache.
 ///
-/// The graph of a section depends only on the world, so one cache serves
-/// every player. The epoch is what makes a concurrent write safe: a graph is
-/// computed from a snapshot of the blocks, and it is only stored if the
-/// section's epoch is unchanged between the snapshot and the store. A write
-/// that lands in that window bumps the epoch and removes the entry, so the
-/// stale graph is never cached (finding 4).
+/// The graph of a section depends only on the world, so one cache serves every
+/// player. A graph is computed from a snapshot of the blocks *outside* the
+/// lock; it is stored only if the global edit epoch is unchanged between the
+/// snapshot and the store, so a write that lands in that window discards the
+/// stale graph (finding 4).
+///
+/// The epoch is global and monotonic rather than a per-section counter that is
+/// reset on store: a per-section reset lets an in-flight compute that read the
+/// reset value be re-admitted after a newer graph is stored, poisoning the
+/// cache with a pre-write graph (round-3 New-1). A global version that only
+/// ever increases cannot be re-created, and it removes the per-section map
+/// entirely, so there is nothing to grow without bound (round-2 N3).
 #[derive(Default)]
 struct GraphCache {
     graphs: HashMap<(i32, i32, i32), SectionGraph>,
-    epochs: HashMap<(i32, i32, i32), u64>,
 }
 
-/// Bump `key`'s epoch and drop any cached graph for it.
-fn invalidate_section(cache: &mut GraphCache, key: (i32, i32, i32)) {
-    *cache.epochs.entry(key).or_insert(0) += 1;
-    cache.graphs.remove(&key);
-}
-
-/// Store `graph` for `key` only if no write touched `key` since the snapshot
-/// `computed_at` was taken.
-///
-/// On success the per-section epoch is dropped: the graph now carries the
-/// up-to-date state, and a future write re-creates the epoch as it removes the
-/// graph. That keeps the epoch map bounded by the sections invalidated but not
-/// yet recomputed, rather than by every section ever edited.
+/// Store `graph` for `key` only if no write landed since `computed_at` was
+/// read.
 fn store_graph(
     cache: &mut GraphCache,
     key: (i32, i32, i32),
     graph: SectionGraph,
     computed_at: u64,
 ) {
-    if cache.epochs.get(&key).copied().unwrap_or(0) == computed_at {
+    if EDIT_EPOCH.load(Ordering::Relaxed) == computed_at {
         cache.graphs.insert(key, graph);
-        cache.epochs.remove(&key);
     }
 }
 
@@ -240,12 +233,20 @@ fn cache() -> &'static Mutex<GraphCache> {
     CACHE.get_or_init(|| Mutex::new(GraphCache::default()))
 }
 
-/// Every block write that could change a graph bumps this.
+/// The global edit epoch: every block write that could change a graph bumps
+/// it, and it is never reset.
 ///
-/// A player's search reads it before and after the breadth-first pass, so a
-/// write that lands mid-search is not cleared. It is a single relaxed
-/// increment — no lock, no allocation.
+/// It guards two things. A graph is only cached if it is unchanged since the
+/// snapshot was taken (finding 4). A player's search reads it before and after
+/// the breadth-first pass, so a write that lands mid-search is not cleared
+/// (round-2 N2). It is a single relaxed increment — no lock, no allocation.
 static EDIT_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Drop `key`'s cached graph and advance the epoch.
+fn invalidate_section(cache: &mut GraphCache, key: (i32, i32, i32)) {
+    cache.graphs.remove(&key);
+    EDIT_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
 
 /// Sections written since the last tick, for the tick thread to hand to the
 /// players in range. Bounded: drained once a tick.
@@ -275,17 +276,13 @@ pub fn invalidate_block(x: i32, y: i32, z: i32) {
 /// The cache/epoch/dirty work for one changed section.
 fn record_invalidation(key: (i32, i32, i32)) {
     invalidate_section(&mut cache().lock().unwrap(), key);
-    EDIT_EPOCH.fetch_add(1, Ordering::Relaxed);
     dirty_sections().lock().unwrap().insert(key);
 }
 
 /// Drop every cached graph. Used by tests to start from a clean cache.
 #[cfg(test)]
 pub fn invalidate_all() {
-    let mut c = cache().lock().unwrap();
-    c.graphs.clear();
-    c.epochs.clear();
-    drop(c);
+    cache().lock().unwrap().graphs.clear();
     dirty_sections().lock().unwrap().clear();
     EDIT_EPOCH.fetch_add(1, Ordering::Relaxed);
 }
@@ -298,12 +295,16 @@ fn graph(world: &dyn BlockSource, c: (i32, i32, i32)) -> Option<SectionGraph> {
     if !(SECTION_MIN_Y..=SECTION_MAX_Y).contains(&c.1) {
         return None;
     }
+    // Read the epoch under the lock, at the same moment the miss is observed,
+    // so the version seen is exactly the one that was current when we decided
+    // to compute: an invalidation that lands after this point bumps the epoch
+    // and is caught at the store (finding 4).
     let computed_at = {
         let cc = cache().lock().unwrap();
         if let Some(g) = cc.graphs.get(&c) {
             return Some(*g);
         }
-        cc.epochs.get(&c).copied().unwrap_or(0)
+        EDIT_EPOCH.load(Ordering::Relaxed)
     };
     let mut blocks = [BlockStateId::AIR; 4096];
     world.copy_section(c.0, c.1, c.2, &mut blocks);
@@ -738,31 +739,74 @@ mod tests {
     }
 
     #[test]
-    fn a_graph_snapshotted_before_a_write_is_never_cached() {
-        // The in-flight-compute race (finding 4): a write lands after the
-        // snapshot but before the store; the epoch guard must drop the stale
-        // graph instead of caching it.
-        let mut cache = GraphCache::default();
-        let key = (0, 0, 0);
-        let computed_at = cache.epochs.get(&key).copied().unwrap_or(0);
-        invalidate_section(&mut cache, key);
-        store_graph(&mut cache, key, SectionGraph::open(), computed_at);
-        assert!(
-            !cache.graphs.contains_key(&key),
-            "a graph from a stale snapshot must not be cached"
-        );
+    fn a_graph_computed_before_a_write_is_never_cached() {
+        // Round-3 New-1, the exact interleaving: two computes B then A of the
+        // same section plus a write W. B reads the version and snapshots
+        // pre-write; W bumps the version; A reads the new version, snapshots
+        // post-write and stores; B then tries to store its stale graph. With a
+        // monotonic global version B's store is rejected — the per-section
+        // reset that let `0 == unwrap_or(0)` match again is gone.
+        let _guard = global_test_lock();
+        invalidate_all();
+        let key = (0, 2, 0);
+        let mut cc = GraphCache::default();
 
-        // With no intervening write it is cached, and the epoch entry is
-        // pruned; a later write removes the graph and re-creates it.
-        let computed_at = cache.epochs.get(&key).copied().unwrap_or(0);
-        store_graph(&mut cache, key, SectionGraph::open(), computed_at);
-        assert!(cache.graphs.contains_key(&key));
-        assert!(
-            !cache.epochs.contains_key(&key),
-            "the epoch is pruned once the graph is stored"
+        // B: misses at the version current when it started.
+        let b_version = EDIT_EPOCH.load(Ordering::Relaxed);
+
+        // W: a write lands (evicts and bumps).
+        invalidate_section(&mut cc, key);
+
+        // A: reads the new version, computes post-write, stores.
+        let a_version = EDIT_EPOCH.load(Ordering::Relaxed);
+        assert_ne!(a_version, b_version, "the write advanced the version");
+        store_graph(&mut cc, key, SectionGraph::sealed(), a_version);
+        assert!(cc.graphs.contains_key(&key), "A's fresh graph is cached");
+
+        // B: stores its stale pre-write graph with the version it read.
+        store_graph(&mut cc, key, SectionGraph::open(), b_version);
+        assert_eq!(
+            cc.graphs.get(&key).copied(),
+            Some(SectionGraph::sealed()),
+            "B's stale graph must not overwrite A's"
         );
-        invalidate_section(&mut cache, key);
-        assert!(!cache.graphs.contains_key(&key));
+    }
+
+    /// A world whose section snapshot simulates a concurrent block write
+    /// arriving while the graph is being computed.
+    struct WriteDuringSnapshot;
+    impl BlockSource for WriteDuringSnapshot {
+        fn block_at(&self, _x: i32, _y: i32, _z: i32) -> BlockStateId {
+            BlockStateId::AIR
+        }
+        fn copy_section(&self, cx: i32, cy: i32, cz: i32, _out: &mut [BlockStateId; 4096]) {
+            record_invalidation((cx, cy, cz));
+        }
+    }
+
+    #[test]
+    fn a_write_during_a_graph_snapshot_is_not_cached() {
+        // The reviewer's requested concurrency test: invalidate_block
+        // interleaved with an in-flight graph computation, driven through the
+        // real `graph()` (not its pieces). The store must reject the graph
+        // computed from the pre-write snapshot.
+        let _guard = global_test_lock();
+        invalidate_all();
+        let key = (0, 2, 0);
+        assert!(graph(&WriteDuringSnapshot, key).is_some());
+        assert!(
+            !cache().lock().unwrap().graphs.contains_key(&key),
+            "a graph whose snapshot raced a write must not be cached"
+        );
+        // The same call without a racing write caches it, and a later write
+        // evicts it.
+        assert!(graph(&FlatWorld, key).is_some());
+        assert!(
+            cache().lock().unwrap().graphs.contains_key(&key),
+            "an un-raced graph is cached"
+        );
+        record_invalidation(key);
+        assert!(!cache().lock().unwrap().graphs.contains_key(&key));
     }
 
     /// Serialises the tests that touch the process-wide cache, epoch and
