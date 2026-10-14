@@ -448,6 +448,11 @@ pub fn weapon(item: Option<&str>) -> (f32, f32) {
     if short.ends_with("_hoe") {
         return (1.0, 1.0 + tier(short.trim_end_matches("_hoe")));
     }
+    // A 1.21.11 spear: a tiered one-handed weapon, `tables::weapon_id`'s
+    // damage feeding both the jab and the charged lunge (`spear_charge`).
+    if let Some(p) = short.strip_suffix("_spear") {
+        return (2.0 + tier(p), 1.1);
+    }
     if short == "trident" {
         return (9.0, 1.1);
     }

@@ -417,16 +417,28 @@ pub fn use_item(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWo
             }
         }
         handle.sync_inventory(world);
+    } else if crate::protocol::compat::behaviour::is_spear(item) {
+        // The real item decides, not the stand-in: a client without spears
+        // was shown a trident (or a sword on 1.8.9) and presses right click
+        // to charge. The server starts the *spear's* charge; the trident's
+        // throw is never run.
+        handle.game().charging = Some(now);
     }
 }
 
-/// Stopped using the held item: a drawn bow fires.
+/// Stopped using the held item: a drawn bow fires, a charged spear lunges.
 pub fn release_use(handle: &PlayerHandle, world: &DemoWorld) {
-    let drawn = {
+    let (drawn, charged) = {
         let mut st = handle.game();
         st.eating = None;
-        st.drawing.take()
+        (st.drawing.take(), st.charging.take())
     };
+    if let Some(start) = charged {
+        // A spear's release is its lunge. This is checked before the bow so
+        // that a stray `drawing` cannot fire an arrow for a spear.
+        spear_charge(handle, world, start);
+        return;
+    }
     let Some(start) = drawn else { return };
     let t = super::now().saturating_sub(start) as f64 / 20.0;
     let power = ((t * t + t * 2.0) / 3.0).min(1.0);
@@ -476,6 +488,134 @@ pub fn release_use(handle: &PlayerHandle, world: &DemoWorld) {
     } else {
         handle.sync_inventory(world);
     }
+}
+
+/// The minimum hold, in ticks, before a spear charge is worth anything.
+const SPEAR_MIN_CHARGE: u64 = 10;
+/// How far in front of the player a spear's kinetic hit reaches.
+const SPEAR_REACH: f64 = 3.0;
+
+/// The release of a held right click on a spear: the charged lunge.
+///
+/// The real item decides: this runs only while the server holds a spear, no
+/// matter which stand-in the client was shown. It never spawns a projectile —
+/// the client may have predicted a trident throw, and `correct_release`
+/// cancels that — instead it drives the player forward and deals the kinetic
+/// blow to whatever is in front.
+pub fn spear_charge(handle: &PlayerHandle, world: &DemoWorld, start: u64) {
+    // The held item can have changed since the press; only a spear lunges.
+    if !handle
+        .held_item()
+        .is_some_and(crate::protocol::compat::behaviour::is_spear)
+    {
+        correct_release(handle, world);
+        return;
+    }
+    let held_ticks = super::now().saturating_sub(start);
+    if held_ticks < SPEAR_MIN_CHARGE {
+        // Not enough charge to lunge, but the client's predicted throw still
+        // has to be cancelled.
+        correct_release(handle, world);
+        return;
+    }
+    let p = handle.pos();
+    let (yaw, pitch) = (p.yaw.to_radians() as f64, p.pitch.to_radians() as f64);
+    let dir = Vector3::new(
+        -yaw.sin() * pitch.cos(),
+        -pitch.sin(),
+        yaw.cos() * pitch.cos(),
+    );
+    let seconds = held_ticks as f64 / 20.0;
+    let speed = seconds.min(3.0) * 0.9;
+
+    // The lunge itself: the client applies this velocity, so the player
+    // travels the way they are looking.
+    handle.emit(
+        &ServerEvent::EntityVelocity {
+            entity_id: handle.entity_id,
+            velocity: (dir.x * speed, dir.y * speed + 0.15, dir.z * speed),
+        },
+        world,
+    );
+    kinetic_hit(
+        handle,
+        world,
+        Vector3::new(p.x, p.y + 1.0, p.z),
+        dir,
+        seconds,
+    );
+    // The arm swings for the real action, whatever the stand-in.
+    if let Some(r) = super::registry() {
+        r.broadcast_except(
+            handle.entity_id,
+            &ServerEvent::EntityAnimation {
+                entity_id: handle.entity_id,
+                animation: 0,
+            },
+            world,
+        );
+    }
+    if handle.game().survival() {
+        combat::wear_held(handle, world, 1);
+    }
+    correct_release(handle, world);
+}
+
+/// Give the spear back to a client that predicted the stand-in's projectile.
+///
+/// A trident stand-in's release makes the client spawn a predicted thrown
+/// trident and pull the item out of the hand. Resending the slot makes the
+/// server's view — the spear, still in hand — win, cancelling the prediction.
+fn correct_release(handle: &PlayerHandle, world: &DemoWorld) {
+    handle.sync_inventory(world);
+    crate::session::save_inventory(handle, world);
+}
+
+/// Damage the nearest mob in front of `eye` within [`SPEAR_REACH`].
+///
+/// Returns whether anything was hit. The blow scales with the charge, as
+/// vanilla's kinetic weapon does.
+fn kinetic_hit(
+    handle: &PlayerHandle,
+    world: &DemoWorld,
+    eye: Vector3,
+    dir: Vector3,
+    seconds: f64,
+) -> bool {
+    let (base, _) = tables::weapon_id(handle.held_item());
+    let damage = base * (1.0 + seconds.min(3.0) as f32);
+    let mut target: Option<(f64, i32)> = None;
+    for (id, pos) in entities::mobs_in(eye, SPEAR_REACH) {
+        let to = Vector3::new(pos.x - eye.x, pos.y - eye.y, pos.z - eye.z);
+        let dist = (to.x * to.x + to.y * to.y + to.z * to.z).sqrt();
+        if dist < 0.01 {
+            continue;
+        }
+        // In front: the target is within the cone the player looks down.
+        if (to.x * dir.x + to.y * dir.y + to.z * dir.z) / dist < 0.5 {
+            continue;
+        }
+        if target.map_or(true, |(d, _)| dist < d) {
+            target = Some((dist, id));
+        }
+    }
+    let Some((_, id)) = target else {
+        return false;
+    };
+    let Some(hit) = entities::hurt_mob(id, damage, Some(eye), Some(handle.entity_id)) else {
+        return false;
+    };
+    if let Some(reg) = super::registry() {
+        combat::on_mob_hurt(
+            id,
+            &hit,
+            Some(handle),
+            reg,
+            world,
+            "minecraft:player_attack",
+        );
+    }
+    true
 }
 
 /// Q: throw one of the held stack, or all of it.

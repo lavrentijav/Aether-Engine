@@ -7,7 +7,7 @@
 //! look like on that client?*
 //!
 //! This branch owns the **item** half ([`items`], task J3) and the
-//! behaviour-preserving stand-ins (`behaviour`, task J4). The **block** half
+//! behaviour-preserving stand-ins ([`behaviour`], task J4). The **block** half
 //! (block-state translation and block substitution, tasks J1/J2) is a sibling
 //! branch and joins here as `compat::blocks` at the merge. Until then the
 //! generated item tables substitute *block items* a version lacks with a
@@ -44,5 +44,8 @@ pub mod item_gen {
     pub mod v1_21_9;
 }
 
+/// The behaviour half: what the *real* item does when a client acts on the
+/// substitute it was shown (task J4).
+pub mod behaviour;
 /// The item half of the layer: per-release item tables and substitution.
 pub mod items;

@@ -742,6 +742,7 @@ fn play_loop(
                     let mut st = handle.game();
                     st.eating = None;
                     st.drawing = None;
+                    st.charging = None;
                 }
             }
             ClientEvent::CreativeSlot { slot, item, count } => {
