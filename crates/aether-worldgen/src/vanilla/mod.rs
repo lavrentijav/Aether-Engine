@@ -116,6 +116,7 @@ pub mod chunk;
 pub mod climate;
 pub mod density;
 pub mod feature;
+pub mod fossil_template;
 pub mod generator;
 pub mod json;
 pub mod mth;

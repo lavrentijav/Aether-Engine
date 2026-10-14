@@ -8,13 +8,13 @@ use aether_world::BlockStateId;
 
 use super::super::blockinfo::{self, prop};
 use super::super::density::BuildError;
+use super::super::fossil_template::{
+    self, bounding_box, zero_position, Processor, Rotation, StructureTemplate,
+};
 use super::super::json::Json;
 use super::super::noise::NormalNoise;
 use super::super::providers::IntProvider;
 use super::super::rng::Rng;
-use super::super::structure::{
-    self, bounding_box, zero_position, Processor, Rotation, StructureTemplate,
-};
 use super::super::surface::parse_block_state;
 use super::super::tags::BlockSet;
 use super::blocks::{
@@ -475,7 +475,7 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
                     let id = id
                         .as_str()
                         .ok_or_else(|| BuildError::new(format!("fossil: bad `{key}` entry")))?;
-                    v.push(Arc::new(structure::load_from_pack(l.pack, id)?));
+                    v.push(Arc::new(fossil_template::load_from_pack(l.pack, id)?));
                 }
                 Ok(v)
             };
@@ -484,7 +484,7 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
                     .str_of(key)
                     .ok_or_else(|| BuildError::new(format!("fossil: no `{key}`")))?;
                 let pj = l.pack.read_json("processor_list", id)?;
-                structure::parse_processors(&pj, l.tags)
+                fossil_template::parse_processors(&pj, l.tags)
             };
             Configured::Fossil(Box::new(FossilConfig {
                 fossil_processors: processors("fossil_processors")?,
@@ -2158,7 +2158,7 @@ fn fossil(ctx: &mut Ctx, cfg: &FossilConfig, origin: Pos) -> bool {
         return false;
     }
     let bbox = Some((min, max));
-    structure::place_in_world(
+    fossil_template::place_in_world(
         ctx.lv,
         base,
         template,
@@ -2167,7 +2167,7 @@ fn fossil(ctx: &mut Ctx, cfg: &FossilConfig, origin: Pos) -> bool {
         bbox,
         ctx.r,
     );
-    structure::place_in_world(
+    fossil_template::place_in_world(
         ctx.lv,
         base,
         overlay,
