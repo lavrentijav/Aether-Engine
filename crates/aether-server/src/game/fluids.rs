@@ -28,6 +28,7 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
 use aether_api::block_ids;
+use aether_world::registry::{blocks, props};
 use aether_world::BlockStateId;
 
 use super::scheduler::Scheduler;
@@ -150,6 +151,124 @@ pub fn state_of(c: Cell) -> BlockStateId {
     BlockStateId(base + c.level.min(15) as u32)
 }
 
+// ---------------------------------------------------------------------------
+// The flow vector, and pushing bodies with it
+// ---------------------------------------------------------------------------
+
+/// Vanilla's `Entity.updateInWaterStateAndDoFluidPushing` motion scale.
+pub const FLOW_PUSH: f64 = 0.014;
+
+/// Vanilla fluid height for the flow vector: `getOwnHeight`, whose *level*
+/// grows downstream (a source is 0, level 1 is 1/9, …… level 7 is 7/9, a
+/// falling column is 8/9). This is not the same as [`Cell::amount`], which is
+/// what feeds a cell's level.
+fn flow_height(c: Cell) -> f64 {
+    if c.is_source() {
+        0.0
+    } else if c.falling() {
+        8.0
+    } else {
+        c.level as f64
+    }
+}
+
+/// Vanilla's `FlowingFluid.getFlow`: the unit direction fluid at `pos` pushes
+/// a body, `None` when the flow balances out.
+///
+/// Each horizontal neighbour holding the same fluid contributes its own height
+/// in that direction; because the height *rises* downstream, the sum points
+/// downstream and the body is carried the way the water runs. A source (height
+/// 0) contributes nothing itself, but borrows the height of the fluid below it
+/// — vanilla's `f == 0` branch — so an ocean source still feeds the flow when a
+/// falling column sits under it, unless the neighbour is a block that blocks
+/// motion. A falling column is forced downward as soon as a solid face stands
+/// beside it. The result is normalized, as vanilla's is.
+fn flow_from(
+    fluid_at: &dyn Fn(i32, i32, i32) -> Option<Cell>,
+    solid_at: &dyn Fn(i32, i32, i32) -> bool,
+    pos: Pos,
+    cell: Cell,
+) -> Option<(f64, f64, f64)> {
+    let (x, y, z) = pos;
+    let mut vx = 0.0;
+    let mut vz = 0.0;
+    for (dx, dz) in SIDES {
+        let (nx, ny, nz) = (x + dx, y, z + dz);
+        let Some(n) = fluid_at(nx, ny, nz) else {
+            continue;
+        };
+        if n.fluid != cell.fluid {
+            continue;
+        }
+        let mut f = flow_height(n);
+        let mut f1 = if f > 0.0 { 1.0 } else { 0.0 };
+        if f == 0.0 && !solid_at(nx, ny, nz) {
+            if let Some(b) = fluid_at(nx, ny - 1, nz) {
+                if b.fluid == cell.fluid {
+                    f = flow_height(b);
+                    f1 = if f > 0.0 { 1.0 } else { 0.0 };
+                }
+            }
+        }
+        vx += dx as f64 * f * f1;
+        vz += dz as f64 * f * f1;
+    }
+    let mut vy = 0.0;
+    if cell.falling() {
+        for (dx, dz) in SIDES {
+            if solid_at(x + dx, y, z + dz) || solid_at(x + dx, y + 1, z + dz) {
+                vy = -6.0;
+                break;
+            }
+        }
+    }
+    let len = (vx * vx + vy * vy + vz * vz).sqrt();
+    (len > 1e-9).then(|| (vx / len, vy / len, vz / len))
+}
+
+/// The flow vector at the fluid cell containing `(x, y, z)`, or `None`.
+pub fn flow_at<B, G>(world: &aether_api::World<B, G>, pos: Pos) -> Option<(f64, f64, f64)>
+where
+    B: aether_world::KvBackend,
+    G: aether_worldgen::ChunkGenerator,
+{
+    let cell = fluid_cell(world, pos.0, pos.1, pos.2)?;
+    let fluid_at = |x, y, z| fluid_cell(world, x, y, z);
+    let solid_at = |x, y, z| world.props_of(world.get_block(x, y, z)).collision;
+    flow_from(&fluid_at, &solid_at, pos, cell)
+}
+
+/// Push a body by the fluid flow it is standing in, vanilla's `0.014` per
+/// tick. A body tall enough to span two fluid cells of different flow has both
+/// summed, then the total normalized, exactly as vanilla's per-block scan does.
+pub fn push_body<B, G>(world: &aether_api::World<B, G>, body: &mut aether_api::Body)
+where
+    B: aether_world::KvBackend,
+    G: aether_worldgen::ChunkGenerator,
+{
+    let f = body.feet();
+    let mut total = (0.0, 0.0, 0.0);
+    for h in [0.1, 0.6, 1.1] {
+        let p = (
+            f.x.floor() as i32,
+            (f.y + h).floor() as i32,
+            f.z.floor() as i32,
+        );
+        if let Some(v) = flow_at(world, p) {
+            total.0 += v.0;
+            total.1 += v.1;
+            total.2 += v.2;
+        }
+    }
+    let len = (total.0 * total.0 + total.1 * total.1 + total.2 * total.2).sqrt();
+    if len <= 1e-9 {
+        return;
+    }
+    body.velocity.x += total.0 / len * FLOW_PUSH;
+    body.velocity.y += total.1 / len * FLOW_PUSH;
+    body.velocity.z += total.2 / len * FLOW_PUSH;
+}
+
 fn queue() -> &'static Mutex<Scheduler<Pos>> {
     static Q: OnceLock<Mutex<Scheduler<Pos>>> = OnceLock::new();
     Q.get_or_init(|| Mutex::new(Scheduler::new()))
@@ -174,6 +293,99 @@ pub fn load_column(store: &dyn super::tickstore::TickStore, cx: i32, cz: i32) {
     super::tickstore::restore(&mut queue().lock().unwrap(), entries);
 }
 
+/// Sections scanned bottom-to-top when a column loads.
+const SCAN_CY_MIN: i32 = -4;
+const SCAN_CY_MAX: i32 = 23;
+
+/// Fluid cells examined per column load, so a loaded ocean cannot cost an
+/// unbounded scan.
+const WAKE_SCAN_MAX: usize = 4096;
+
+/// Ticks scheduled per column load. Combined with [`BUDGET`], the work a burst
+/// of column loads can impose on any one tick is bounded.
+const WAKE_BUDGET: usize = 64;
+
+/// Give freshly generated fluid that can flow a scheduled tick when its column
+/// loads.
+///
+/// A generator lays fluid down as plain blocks and schedules nothing, so a
+/// generated stream that wanted to flow would sit still until something beside
+/// it changed. This walks the column and schedules the fluid that *can* flow —
+/// any flowing or falling cell, and any source with a replaceable cell under
+/// it — leaving a settled source (one sitting on another source or on solid
+/// ground) alone. Both the scan and what it schedules are capped, and the
+/// scheduler only runs [`BUDGET`] cells a tick, so a world of loaded oceans
+/// does not stampede.
+pub fn wake_generated<B, G>(world: &aether_api::World<B, G>, cx: i32, cz: i32)
+where
+    B: aether_world::KvBackend,
+    G: aether_worldgen::ChunkGenerator,
+{
+    let mut section = [BlockStateId::AIR; 4096];
+    let mut examined = 0usize;
+    let mut woken = 0usize;
+    for cy in SCAN_CY_MIN..=SCAN_CY_MAX {
+        world.copy_section(cx, cy, cz, &mut section);
+        for (i, &state) in section.iter().enumerate() {
+            let Some(cell) = cell_of(state) else {
+                continue;
+            };
+            examined += 1;
+            if examined > WAKE_SCAN_MAX {
+                return;
+            }
+            let lx = (i & 15) as i32;
+            let lz = ((i >> 4) & 15) as i32;
+            let ly = (i >> 8) as i32;
+            let x = cx * 16 + lx;
+            let y = cy * 16 + ly;
+            let z = cz * 16 + lz;
+            let flowable =
+                !cell.is_source() || can_replace(world, world.get_block(x, y - 1, z), cell.fluid);
+            if flowable {
+                schedule((x, y, z), cell.fluid.delay());
+                woken += 1;
+                if woken >= WAKE_BUDGET {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Whether a block state carries `waterlogged=true`.
+///
+/// Such a block is a contained water source: it never spreads on its own (it
+/// is not a fluid block and is never scheduled), but vanilla's fluid logic
+/// reads its `FluidState` as a source — it feeds neighbouring flows, counts
+/// toward infinite-water creation and gives lava something to harden against.
+pub fn is_waterlogged(id: BlockStateId) -> bool {
+    let Some((bid, _)) = blocks::block_of_state(id) else {
+        return false;
+    };
+    let (lo, _) = blocks::STATE_RANGE[bid as usize];
+    props::values_of(bid, id.raw() - lo)
+        .into_iter()
+        .any(|(k, v)| k == "waterlogged" && v == "true")
+}
+
+/// The fluid cell at `(x, y, z)`: a water/lava block, or a waterlogged block
+/// standing in as a water source.
+fn fluid_cell<B, G>(world: &aether_api::World<B, G>, x: i32, y: i32, z: i32) -> Option<Cell>
+where
+    B: aether_world::KvBackend,
+    G: aether_worldgen::ChunkGenerator,
+{
+    let id = world.get_block(x, y, z);
+    if let Some(c) = cell_of(id) {
+        return Some(c);
+    }
+    is_waterlogged(id).then_some(Cell {
+        fluid: Fluid::Water,
+        level: 0,
+    })
+}
+
 const SIDES: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 const AROUND: [Pos; 6] = [
     (1, 0, 0),
@@ -195,19 +407,29 @@ pub fn notify(world: &DemoWorld, x: i32, y: i32, z: i32) {
 }
 
 /// Whether a fluid may flow into a cell holding `id`: air, a plant or a
-/// weaker flow of the same fluid. Never a source, never a solid block.
-fn can_replace(world: &DemoWorld, id: BlockStateId, fluid: Fluid) -> bool {
+/// weaker flow of the same fluid. Never a source, never a solid block, never a
+/// waterlogged block (it is occupied).
+fn can_replace<B, G>(world: &aether_api::World<B, G>, id: BlockStateId, fluid: Fluid) -> bool
+where
+    B: aether_world::KvBackend,
+    G: aether_worldgen::ChunkGenerator,
+{
     if id == block_ids::AIR {
         return true;
     }
     if let Some(c) = cell_of(id) {
         return c.fluid == fluid && !c.is_source();
     }
+    if is_waterlogged(id) {
+        return false;
+    }
     let props = world.props_of(id);
     if props.collision {
         return false;
     }
-    let name = super::block_name(world, id).unwrap_or_default();
+    let name = blocks::block_of_state(id)
+        .map(|(_, n)| n)
+        .unwrap_or_default();
     matches!(
         name.trim_start_matches("minecraft:"),
         "short_grass"
@@ -250,16 +472,20 @@ fn can_replace(world: &DemoWorld, id: BlockStateId, fluid: Fluid) -> bool {
 struct Changes(Vec<(Pos, BlockStateId)>);
 
 /// The state a non-source cell should hold given its neighbours.
-fn recompute(world: &DemoWorld, pos: Pos, fluid: Fluid) -> Option<Cell> {
+fn recompute<B, G>(world: &aether_api::World<B, G>, pos: Pos, fluid: Fluid) -> Option<Cell>
+where
+    B: aether_world::KvBackend,
+    G: aether_worldgen::ChunkGenerator,
+{
     let (x, y, z) = pos;
-    let above = cell_of(world.get_block(x, y + 1, z));
+    let above = fluid_cell(world, x, y + 1, z);
     if above.is_some_and(|a| a.fluid == fluid) {
         return Some(Cell { fluid, level: 8 });
     }
     let mut best = 0u8;
     let mut sources = 0;
     for (dx, dz) in SIDES {
-        if let Some(n) = cell_of(world.get_block(x + dx, y, z + dz)) {
+        if let Some(n) = fluid_cell(world, x + dx, y, z + dz) {
             if n.fluid != fluid {
                 continue;
             }
@@ -271,7 +497,8 @@ fn recompute(world: &DemoWorld, pos: Pos, fluid: Fluid) -> Option<Cell> {
     }
     if fluid == Fluid::Water && sources >= 2 {
         let below = world.get_block(x, y - 1, z);
-        let firm = world.props_of(below).collision || cell_of(below).is_some_and(|c| c.is_source());
+        let firm = world.props_of(below).collision
+            || fluid_cell(world, x, y - 1, z).is_some_and(|c| c.is_source());
         if firm {
             return Some(Cell { fluid, level: 0 });
         }
@@ -285,14 +512,20 @@ fn recompute(world: &DemoWorld, pos: Pos, fluid: Fluid) -> Option<Cell> {
 
 /// Sideways directions a flow from `pos` takes: towards the nearest place it
 /// can fall within the slope distance, or all open sides when there is none.
-fn spread_dirs(world: &DemoWorld, pos: Pos, fluid: Fluid) -> Vec<(i32, i32)> {
+fn spread_dirs<B, G>(world: &aether_api::World<B, G>, pos: Pos, fluid: Fluid) -> Vec<(i32, i32)>
+where
+    B: aether_world::KvBackend,
+    G: aether_worldgen::ChunkGenerator,
+{
     let (x, y, z) = pos;
     let mut best = i32::MAX;
     let mut dirs = Vec::new();
     for (dx, dz) in SIDES {
         let first = (x + dx, y, z + dz);
         let id = world.get_block(first.0, y, first.2);
-        if !can_replace(world, id, fluid) || cell_of(id).is_some_and(|c| c.is_source()) {
+        if !can_replace(world, id, fluid)
+            || fluid_cell(world, first.0, y, first.2).is_some_and(|c| c.is_source())
+        {
             continue;
         }
         let d = distance_to_drop(world, first, fluid);
@@ -311,7 +544,11 @@ fn spread_dirs(world: &DemoWorld, pos: Pos, fluid: Fluid) -> Vec<(i32, i32)> {
 
 /// Blocks from `start` to the nearest cell with a way down, searching up to
 /// the fluid's slope distance; `i32::MAX - 1` when there is none.
-fn distance_to_drop(world: &DemoWorld, start: Pos, fluid: Fluid) -> i32 {
+fn distance_to_drop<B, G>(world: &aether_api::World<B, G>, start: Pos, fluid: Fluid) -> i32
+where
+    B: aether_world::KvBackend,
+    G: aether_worldgen::ChunkGenerator,
+{
     let mut seen = HashSet::new();
     let mut frontier = VecDeque::new();
     frontier.push_back((start, 0));
@@ -349,8 +586,7 @@ fn update(world: &DemoWorld, pos: Pos) -> Changes {
             .iter()
             .filter(|(_, dy, _)| *dy != -1)
             .any(|(dx, dy, dz)| {
-                cell_of(world.get_block(x + dx, y + dy, z + dz))
-                    .is_some_and(|c| c.fluid == Fluid::Water)
+                fluid_cell(world, x + dx, y + dy, z + dz).is_some_and(|c| c.fluid == Fluid::Water)
             });
         if wet {
             let to = if cell.is_source() {
@@ -381,7 +617,7 @@ fn update(world: &DemoWorld, pos: Pos) -> Changes {
     // Down first.
     let below = (x, y - 1, z);
     let below_id = world.get_block(below.0, below.1, below.2);
-    let below_cell = cell_of(below_id);
+    let below_cell = fluid_cell(world, below.0, below.1, below.2);
     if cell.fluid == Fluid::Lava && below_cell.is_some_and(|c| c.fluid == Fluid::Water) {
         out.0.push((below, s.stone));
         return out;
@@ -400,7 +636,7 @@ fn update(world: &DemoWorld, pos: Pos) -> Changes {
         let sources = SIDES
             .iter()
             .filter(|(dx, dz)| {
-                cell_of(world.get_block(x + dx, y, z + dz))
+                fluid_cell(world, x + dx, y, z + dz)
                     .is_some_and(|c| c.fluid == cell.fluid && c.is_source())
             })
             .count();
@@ -424,8 +660,7 @@ fn update(world: &DemoWorld, pos: Pos) -> Changes {
     };
     for (dx, dz) in spread_dirs(world, pos, cell.fluid) {
         let p = (x + dx, y, z + dz);
-        let id = world.get_block(p.0, p.1, p.2);
-        match cell_of(id) {
+        match fluid_cell(world, p.0, p.1, p.2) {
             // Only strengthen a weaker flow; never weaken one.
             Some(c) if c.fluid == cell.fluid && (c.falling() || c.amount() >= left) => {}
             _ => out.0.push((p, state_of(side))),
@@ -519,5 +754,197 @@ mod tests {
         assert_eq!(w(1).amount(), 7);
         assert_eq!(w(7).amount(), 1);
         assert_eq!(w(8).amount(), 8);
+    }
+
+    /// A map-of-cells fluid source, for the pure flow tests.
+    fn channel(cells: &[(Pos, u8)]) -> impl Fn(i32, i32, i32) -> Option<Cell> {
+        let map: std::collections::HashMap<Pos, Cell> = cells
+            .iter()
+            .map(|&(p, level)| {
+                (
+                    p,
+                    Cell {
+                        fluid: Fluid::Water,
+                        level,
+                    },
+                )
+            })
+            .collect();
+        move |x, y, z| map.get(&(x, y, z)).copied()
+    }
+
+    #[test]
+    fn flow_points_downstream_in_a_channel() {
+        let fluid = channel(&[((0, 0, 0), 0), ((1, 0, 0), 1), ((2, 0, 0), 2)]);
+        let solid = |_: i32, _: i32, _: i32| false;
+        let at = |p| flow_from(&fluid, &solid, p, fluid(p.0, p.1, p.2).unwrap());
+        // A source contributes nothing itself, but the level-1 cell to its
+        // east does, so the source's cell pushes east too — downstream.
+        let (sx, sy, sz) = at((0, 0, 0)).unwrap();
+        assert!(
+            sx > 0.9 && sy == 0.0 && sz == 0.0,
+            "source pushes east: {sx}"
+        );
+        // Inside the channel the lower cell to the east wins the balance.
+        let (x, _, z) = at((1, 0, 0)).unwrap();
+        assert!(x > 0.9 && z == 0.0, "wave flows east: {x},{z}");
+        // At the leading edge the only same-fluid neighbour is the higher
+        // water behind it, so vanilla's sum points back upstream — a known
+        // consequence of `getFlow` reading neighbours only, not momentum.
+        let (x, _, _) = at((2, 0, 0)).unwrap();
+        assert!(x < -0.9, "leading edge points back at the water: {x}");
+    }
+
+    #[test]
+    fn a_still_pool_has_no_flow() {
+        let fluid = channel(&[((0, 0, 0), 0), ((1, 0, 0), 0), ((2, 0, 0), 0)]);
+        let solid = |_: i32, _: i32, _: i32| false;
+        assert!(flow_from(&fluid, &solid, (1, 0, 0), fluid(1, 0, 0).unwrap()).is_none());
+    }
+
+    #[test]
+    fn a_falling_column_beside_a_wall_is_pushed_down() {
+        // A falling cell (level 8) with a solid block east: vanilla adds the
+        // downward −6, so the flow leaves mostly downward.
+        let fluid = channel(&[((0, 0, 0), 8)]);
+        let solid = |x: i32, _: i32, _: i32| x == 1;
+        let (x, y, z) = flow_from(&fluid, &solid, (0, 0, 0), fluid(0, 0, 0).unwrap()).unwrap();
+        assert!(y < -0.9, "pushed down against the wall: {y}");
+        assert!(x == 0.0 && z == 0.0);
+    }
+
+    /// A state of `name` carrying `waterlogged=true`.
+    fn waterlogged_state(name: &str) -> BlockStateId {
+        for raw in blocks::states_of(name).expect("block exists") {
+            let id = BlockStateId(raw);
+            if is_waterlogged(id) {
+                return id;
+            }
+        }
+        panic!("{name} has no waterlogged state");
+    }
+
+    #[test]
+    fn only_waterlogged_true_states_count() {
+        let wet = waterlogged_state("minecraft:oak_stairs");
+        assert!(is_waterlogged(wet));
+        assert!(!is_waterlogged(
+            blocks::default_state("minecraft:oak_stairs").unwrap()
+        ));
+        assert!(!is_waterlogged(block_ids::WATER));
+        assert!(!is_waterlogged(block_ids::STONE));
+    }
+
+    #[test]
+    fn a_waterlogged_block_is_a_source_that_feeds_and_combines() {
+        use aether_api::{FlatGenerator, MemStore, World};
+        let world = World::new(MemStore::new(), FlatGenerator::classic());
+        // Firm ground so an infinite source can form over it.
+        let stone = blocks::default_state("minecraft:stone").unwrap();
+        world.set_block_id(1, 9, 0, stone, world.props_of(stone));
+        let stairs = waterlogged_state("minecraft:oak_stairs");
+        let sp = world.props_of(stairs);
+        world.set_block_id(0, 10, 0, stairs, sp);
+
+        // A waterlogged neighbour is a source: a lone weak cell fed by it
+        // strengthens to level 1 instead of drying up.
+        let weak = state_of(Cell {
+            fluid: Fluid::Water,
+            level: 7,
+        });
+        world.set_block_id(1, 10, 0, weak, world.props_of(weak));
+        assert_eq!(
+            recompute(&world, (1, 10, 0), Fluid::Water),
+            Some(Cell {
+                fluid: Fluid::Water,
+                level: 1
+            })
+        );
+
+        // Two sources — the waterlogged block and a real one — make the cell
+        // between them a source.
+        let src = state_of(Cell {
+            fluid: Fluid::Water,
+            level: 0,
+        });
+        world.set_block_id(2, 10, 0, src, world.props_of(src));
+        assert_eq!(
+            recompute(&world, (1, 10, 0), Fluid::Water),
+            Some(Cell {
+                fluid: Fluid::Water,
+                level: 0
+            })
+        );
+        // The waterlogged block has no waterlogged state of its own to
+        // replace: flow cannot occupy it.
+        assert!(!can_replace(&world, stairs, Fluid::Water));
+    }
+
+    #[test]
+    fn freshly_generated_flowing_fluid_is_woken_on_chunk_load() {
+        use aether_api::{FlatGenerator, MemStore, World};
+        let world = World::new(MemStore::new(), FlatGenerator::classic());
+        let flowing = state_of(Cell {
+            fluid: Fluid::Water,
+            level: 3,
+        });
+        world.set_block_id(0, 10, 0, flowing, world.props_of(flowing));
+        let still = state_of(Cell {
+            fluid: Fluid::Water,
+            level: 0,
+        });
+        // A lone source over air would spread, so it is woken...
+        world.set_block_id(5, 10, 5, still, world.props_of(still));
+        // ...but a source resting on another source is settled and is not.
+        world.set_block_id(8, 10, 0, still, world.props_of(still));
+        world.set_block_id(8, 9, 0, still, world.props_of(still));
+
+        // The fluid queue is process-global; isolate this test's view.
+        *queue().lock().unwrap() = Scheduler::new();
+        wake_generated(&world, 0, 0);
+        let due: Vec<Pos> = queue()
+            .lock()
+            .unwrap()
+            .entries()
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect();
+        assert!(due.contains(&(0, 10, 0)), "flowing water woken: {due:?}");
+        assert!(due.contains(&(5, 10, 5)), "source over air woken: {due:?}");
+        assert!(!due.contains(&(8, 10, 0)), "settled source left: {due:?}");
+        *queue().lock().unwrap() = Scheduler::new();
+    }
+
+    #[test]
+    fn waking_generated_fluid_from_the_column_hook_does_not_deadlock() {
+        // The hook runs inside `ensure_column`; `wake_generated` reads the
+        // column back with `copy_section`, which materializes it again. The
+        // latch is released first, so the nested call must return rather than
+        // wait on itself.
+        use aether_api::{FlatGenerator, MemStore, World};
+        let world = World::new(MemStore::new(), FlatGenerator::classic())
+            .with_column_load_hook(wake_generated);
+        assert_eq!(world.get_block(0, 0, 0), block_ids::BEDROCK);
+    }
+
+    #[test]
+    fn push_body_carries_a_body_with_the_flow() {
+        use aether_api::{FlatGenerator, MemStore, Vector3, World};
+        let world = World::new(MemStore::new(), FlatGenerator::classic());
+        for (x, level) in [(0, 0u8), (1, 1), (2, 2)] {
+            let id = state_of(Cell {
+                fluid: Fluid::Water,
+                level,
+            });
+            world.set_block_id(x, 10, 0, id, world.props_of(id));
+        }
+        let mut body = aether_api::Body::player(Vector3::new(1.5, 10.0, 0.5));
+        push_body(&world, &mut body);
+        assert!(body.velocity.x > 0.0, "pushed east: {:?}", body.velocity);
+        assert!(body.velocity.y.abs() < 1e-9 && body.velocity.z.abs() < 1e-9);
+        // A body out of the water is untouched.
+        let mut dry = aether_api::Body::player(Vector3::new(8.5, 40.0, 0.5));
+        push_body(&world, &mut dry);
+        assert_eq!(dry.velocity.x, 0.0);
     }
 }

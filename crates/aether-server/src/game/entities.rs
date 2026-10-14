@@ -709,6 +709,8 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                         v.z *= 0.95;
                         v.y = (v.y * 0.9 + 0.09).min(0.06);
                     }
+                    // Flowing water carries the item downstream.
+                    super::fluids::push_body(world, &mut e.body);
                     world.step_body_with(&mut e.body, ITEM_PHYSICS);
                     if it.pickup_delay > 0 {
                         it.pickup_delay -= 1;

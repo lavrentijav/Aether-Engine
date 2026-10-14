@@ -133,6 +133,9 @@ fn main() -> std::process::ExitCode {
         .with_column_load_hook(|world, cx, cz| {
             game::blockticks::load_column(world, cx, cz);
             game::fluids::load_column(world, cx, cz);
+            // Generated fluid that can flow needs a first tick, since the
+            // generator schedules none.
+            game::fluids::wake_generated(world, cx, cz);
         });
     if let Some(sink) = open_history_mirror(&cfg.database) {
         world = world.with_journal_sink(sink);

@@ -123,7 +123,7 @@ modern versions run a server-side survival game).
 | Chunks stream on a per-player thread — input is read while the horizon generates | ✅ |
 | **Clients 1.20.2, 1.20.3 and 1.20.4** (protocols 764–765): their own codecs, built on the 1.20.1 blob — the 1.20.2 **configuration phase** with the registry NBT in one anonymous-rooted blob, chunk-batch flow control, and 1.20.3's differences (System Chat as NBT, resource-pack UUID, game event 13, player entity-type id). Encode/decode tests only; no live client of these versions was available | ✅ |
 | Gameplay events on the 20 codecs before 1.21.11 (they keep the older subset) | ❌ |
-| Water and lava flow: vanilla delays and levels, falls, slope-seeking, infinite water, lava/water → obsidian/cobblestone/stone | ✅ |
+| Water and lava flow: vanilla delays and levels, falls, slope-seeking, infinite water, lava/water → obsidian/cobblestone/stone; the `getFlow` vector carries mobs and items at the vanilla `0.014`, waterlogged blocks are contained sources, and loaded generated fluid that can flow is woken | ✅ |
 | Falling blocks: sand, red sand, gravel and the sixteen concrete powders move to where they would land on their scheduled tick (no falling entity); concrete powder sets on contact with water | ✅ |
 | Crop growth: wheat, carrots, potatoes, beetroot, sugar cane and cactus grow on vanilla-rate random ticks (3 per 16³ section per tick) with vanilla farmland/crowding rules; sugar cane and cactus break when their support is gone | ✅ |
 | Leaf decay: a leaf recomputes `distance` to the nearest log one tick after a neighbour changes, and a non-persistent leaf at distance 7 drops its loot and disappears on a random tick | ✅ |
