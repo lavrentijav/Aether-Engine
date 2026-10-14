@@ -112,12 +112,14 @@ impl Redstone {
         behaviour::behaviour(state).on_place(&mut ctx, state, pos, behaviour::AIR);
         behaviour::behaviour(state).set_placed_by(&mut ctx, state, pos);
         ctx.fan_out(pos, pos, state, None, None);
+        // Vanilla's `Level.setBlock(pos, state, 3)` uses the default limit 512
+        // and then runs the shape passes at `j - 1`.
         ctx.update_shapes(
             pos,
             behaviour::AIR,
             state,
             SetBlockFlags::UPDATE_NEIGHBORS,
-            SHAPE_UPDATE_LIMIT,
+            SHAPE_UPDATE_LIMIT - 1,
         );
     }
 
@@ -132,7 +134,7 @@ impl Redstone {
             old,
             behaviour::AIR,
             SetBlockFlags::NONE,
-            SHAPE_UPDATE_LIMIT,
+            SHAPE_UPDATE_LIMIT - 1,
         );
     }
 

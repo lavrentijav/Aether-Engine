@@ -767,6 +767,13 @@ fn build() -> Registry {
         "minecraft:note_block",
         &blocks::test_spy::Spy,
     );
+    // A test-only block that never settles, for the shape-update budget.
+    #[cfg(test)]
+    register(
+        &mut by_state,
+        "minecraft:jukebox",
+        &blocks::test_chain::Chain,
+    );
 
     Registry { by_state }
 }
@@ -916,5 +923,31 @@ mod tests {
         engine.set_block(&mut w, block, ids::AIR, SetBlockFlags::PLACE);
         let count = test_spy::take().iter().filter(|n| n.pos == spy).count();
         assert_eq!(count, 1, "the neighbour must be notified exactly once");
+    }
+
+    #[test]
+    fn the_shape_update_budget_matches_vanilla() {
+        // D4: `Level.setBlock` runs the shape passes at `j - 1` with the default
+        // j = 512, so a placement's first nested shape pass carries 511 and the
+        // cascade reaches 512 cells before the budget hits 0. A line of
+        // never-settling chain blocks measures the recursion budget exactly; the
+        // pre-fix code started at 512 and reached 513.
+        use crate::blocks::test_chain;
+        let engine = Redstone::new();
+        let mut w = MemWorld::new();
+        let seed = p(0, 0, 0);
+        w.put(seed, "minecraft:stone");
+        for x in 1..=600 {
+            w.put(p(x, 0, 0), "minecraft:jukebox");
+        }
+        test_chain::reset();
+
+        engine.on_placed(&mut w, seed);
+
+        assert_eq!(
+            test_chain::calls(),
+            512,
+            "a placement's shape cascade must run the j-1 = 511 budget"
+        );
     }
 }

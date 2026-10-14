@@ -15,6 +15,8 @@ mod torch;
 mod wire;
 
 #[cfg(test)]
+pub mod test_chain;
+#[cfg(test)]
 mod test_observer;
 #[cfg(test)]
 pub mod test_spy;
