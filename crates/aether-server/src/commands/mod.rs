@@ -454,6 +454,10 @@ fn inventory(handle: &PlayerHandle, world: &DemoWorld) -> Reply {
             stack.uid.0
         ));
     }
+    // Release the inventory before touching the entity list: the tick holds
+    // the entity lock and takes player locks, so the reverse here would be a
+    // lock-order inversion. See docs/storage-v2/lock-order.md.
+    drop(inv);
     // Anything of theirs on the floor is part of the answer to "what do I
     // have": it is theirs, it is just not in a slot yet.
     let mine = crate::game::entities::owned_items(handle.uuid);
