@@ -638,11 +638,10 @@ mod tests {
             _ => panic!("held slot must decode"),
         }
 
-        // A 1.20.4 creative slot is the old NBT `Slot`: presence, id, count,
-        // NBT. The shared reader takes presence for the count and the id for
-        // the item, which is what the slot means.
+        // A 1.20.4 creative slot is the old NBT `Slot`: presence, id, `i8`
+        // count, NBT. The shared reader decodes that pre-1.20.5 form.
         let mut data = 36u16.to_be_bytes().to_vec();
-        data.extend_from_slice(&[1, 1, 1, 0]); // present, id=stone, count=1, TAG_End
+        data.extend_from_slice(&[1, 1, 7, 0]); // present, id=stone, count=7, TAG_End
         let pkt = RawPacket {
             id: p.sb_set_creative_mode_slot,
             data,
@@ -651,7 +650,7 @@ mod tests {
             ClientEvent::CreativeSlot { slot, item, count } => {
                 assert_eq!(slot, 36);
                 assert_eq!(item, Some(crate::inventory::item("minecraft:stone")));
-                assert_eq!(count, 1);
+                assert_eq!(count, 7);
             }
             _ => panic!("creative slot must decode"),
         }

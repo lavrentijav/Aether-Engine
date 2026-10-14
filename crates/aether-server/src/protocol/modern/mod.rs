@@ -510,25 +510,42 @@ impl ProtocolCodec for Codec {
                 Err(_) => ClientEvent::Ignored,
             },
             id if id == p.sb_set_creative_mode_slot => {
-                // Only the head of the stack is read: the count tells us
-                // whether anything is there, the id says what. The component
-                // arrays that follow are the client's business, and the rest
-                // of the packet is discarded either way.
                 let Ok(slot) = pin.u16() else {
                     return ClientEvent::Ignored;
                 };
-                let (item, count) = match pin.var_int() {
-                    Ok(0) | Err(_) => (None, 0),
-                    Ok(n) => (
-                        // An id this version has but the engine does not maps
-                        // to `AIR`, i.e. nothing: the item renders as air on
-                        // the way out, so it must not enter the inventory.
-                        pin.var_int()
-                            .ok()
-                            .and_then(|id| self.0.engine_item(id))
-                            .filter(|id| *id != aether_world::ItemTypeId::AIR),
-                        n.clamp(0, u8::MAX as i32) as u8,
-                    ),
+                let (item, count) = if self.0.gen < Gen::V1_20_5 {
+                    // Pre-1.20.5 `Slot`: a presence flag, then the id, an `i8`
+                    // count and NBT. Reading the presence byte as the count
+                    // (the 1.20.5 shape) would store one item of every stack
+                    // the client reports and silently destroy the rest.
+                    match pin.bool() {
+                        Ok(false) | Err(_) => (None, 0),
+                        Ok(true) => {
+                            let item = pin
+                                .var_int()
+                                .ok()
+                                .and_then(|id| self.0.engine_item(id))
+                                .filter(|id| *id != aether_world::ItemTypeId::AIR);
+                            (item, pin.u8().unwrap_or(0))
+                        }
+                    }
+                } else {
+                    // 1.20.5+: a VarInt count, then the id and the two data
+                    // component lists. Only the head of the stack is read; the
+                    // rest of the packet is discarded either way.
+                    match pin.var_int() {
+                        Ok(0) | Err(_) => (None, 0),
+                        Ok(n) => (
+                            // An id this version has but the engine does not
+                            // maps to `AIR`, i.e. nothing: it renders as air on
+                            // the way out, so it must not enter the inventory.
+                            pin.var_int()
+                                .ok()
+                                .and_then(|id| self.0.engine_item(id))
+                                .filter(|id| *id != aether_world::ItemTypeId::AIR),
+                            n.clamp(0, u8::MAX as i32) as u8,
+                        ),
+                    }
                 };
                 ClientEvent::CreativeSlot {
                     slot: slot as i16,
@@ -1234,6 +1251,48 @@ mod tests {
         match C.decode(&pkt, any_pos()) {
             ClientEvent::CreativeSlot { item, .. } => assert_eq!(item, None),
             _ => panic!("an emptied creative slot must still decode"),
+        }
+    }
+
+    #[test]
+    fn a_pre_1_20_5_creative_slot_keeps_its_i8_count() {
+        // 764/765 `set_creative_mode_slot` carries the old NBT `Slot`:
+        // slot i16, present bool, itemId varint, count i8, nbt. The shared
+        // decoder read the presence byte as the 1.20.5 VarInt count, so every
+        // stack the client reported became one item.
+        for (v, proto) in [(&version::V1_20_2, 764), (&version::V1_20_4, 765)] {
+            let mut data = 36u16.to_be_bytes().to_vec();
+            data.push(1); // present
+            data.push(1); // itemId = stone
+            data.push(64); // i8 count
+            data.push(0); // TAG_End: no NBT
+            let pkt = RawPacket {
+                id: v.packets.sb_set_creative_mode_slot,
+                data,
+            };
+            match Codec(v).decode(&pkt, any_pos()) {
+                ClientEvent::CreativeSlot { slot, item, count } => {
+                    assert_eq!(slot, 36, "{proto}");
+                    assert_eq!(
+                        item,
+                        Some(crate::inventory::item("minecraft:stone")),
+                        "{proto}"
+                    );
+                    assert_eq!(count, 64, "{proto}: the i8 count must survive");
+                }
+                _ => panic!("{proto}: expected a creative slot"),
+            }
+        }
+        // 1.20.5 keeps the VarInt count form.
+        let mut data = 36u16.to_be_bytes().to_vec();
+        data.extend_from_slice(&[64, 1, 0, 0]); // count, id, two component counts
+        let pkt = RawPacket {
+            id: version::V1_20_5.packets.sb_set_creative_mode_slot,
+            data,
+        };
+        match Codec(&version::V1_20_5).decode(&pkt, any_pos()) {
+            ClientEvent::CreativeSlot { count, .. } => assert_eq!(count, 64),
+            _ => panic!("1.20.5: expected a creative slot"),
         }
     }
 
