@@ -18,6 +18,7 @@ use crate::players::{PlayerHandle, PosLook};
 use crate::proto::{Conn, PacketOut, RawPacket};
 
 pub mod commands;
+pub mod compat;
 pub mod modern;
 pub mod nbt;
 pub mod v47;
@@ -763,6 +764,17 @@ pub trait ProtocolCodec: Sync + Send {
     /// it was.
     fn block_for_item(&self, _item: &str) -> Option<BlockStateId> {
         None
+    }
+
+    /// Map an item a client reported in a slot back to the real engine item.
+    ///
+    /// A client that was handed a *substitute* for an item its version lacks
+    /// reports the substitute back. The server keeps its own stack rather than
+    /// the stand-in, so a client cannot turn a spear into a real trident by
+    /// moving the slot around — see `compat::items`. The default trusts the
+    /// report, which is right for a version whose ids the engine itself uses.
+    fn resolve_reported_item(&self, _server: ItemTypeId, reported: ItemTypeId) -> ItemTypeId {
+        reported
     }
 }
 

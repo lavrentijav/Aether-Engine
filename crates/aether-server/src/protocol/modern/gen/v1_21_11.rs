@@ -1763,6 +1763,7 @@ pub const MENU_CRAFTING: i32 = 12;
 pub const MENU_FURNACE: i32 = 14;
 pub const COMPONENT_DAMAGE: i32 = 3;
 pub const COMPONENT_CUSTOM_NAME: i32 = 6;
+pub const COMPONENT_LORE: i32 = 11;
 pub const PARTICLE_EXPLOSION: i32 = 23;
 pub const PARTICLE_EXPLOSION_EMITTER: i32 = 22;
 
