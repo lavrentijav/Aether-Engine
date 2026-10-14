@@ -159,6 +159,21 @@ fn schedule(pos: Pos, delay: u64) {
     queue().lock().unwrap().schedule(pos, super::now() + delay);
 }
 
+/// Persist the pending fluid ticks, one blob per chunk, beside the chunks.
+pub fn save(store: &dyn super::tickstore::TickStore) {
+    let entries = queue().lock().unwrap().entries();
+    super::tickstore::save(store, super::tickstore::FLUID_TICKS, entries);
+}
+
+/// Restore the pending fluid ticks of the chunk `(cx, cz)` when it loads.
+pub fn load_column(store: &dyn super::tickstore::TickStore, cx: i32, cz: i32) {
+    let entries = super::tickstore::load(store, super::tickstore::FLUID_TICKS, cx, cz);
+    if entries.is_empty() {
+        return;
+    }
+    super::tickstore::restore(&mut queue().lock().unwrap(), entries);
+}
+
 const SIDES: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 const AROUND: [Pos; 6] = [
     (1, 0, 0),
