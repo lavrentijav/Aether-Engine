@@ -123,6 +123,19 @@ impl State {
         self.sent.insert((cx, cz), mask);
     }
 
+    /// The mask to render column `(cx, cz)` with, updating what the client
+    /// holds.
+    ///
+    /// `bypass` is the caller's current flag. It matters even on the last
+    /// column: `/visibility off` re-renders the columns it had masked, and
+    /// recording the zero mask here is what tells the planner the client now
+    /// holds the real blocks (round-2 N4 / round-3 New-2).
+    pub fn mask_for_render(&mut self, cx: i32, cz: i32, bypass: bool) -> u32 {
+        let mask = if bypass { 0 } else { self.hidden_for(cx, cz) };
+        self.record_sent(cx, cz, mask);
+        mask
+    }
+
     /// Forget a column the client no longer has.
     pub fn forget(&mut self, cx: i32, cz: i32) {
         self.sent.remove(&(cx, cz));
@@ -392,14 +405,14 @@ pub fn hidden_mask_for_render(
     cx: i32,
     cz: i32,
 ) -> u32 {
-    if !crate::visibility_config().enabled || handle.visibility().bypass {
+    if !crate::visibility_enabled() {
         return 0;
     }
-    ensure_visible(handle, world);
-    let mut st = handle.visibility();
-    let mask = st.hidden_for(cx, cz);
-    st.record_sent(cx, cz, mask);
-    mask
+    let bypass = handle.visibility().bypass;
+    if !bypass {
+        ensure_visible(handle, world);
+    }
+    handle.visibility().mask_for_render(cx, cz, bypass)
 }
 
 /// Forget a column the client no longer has.
@@ -876,6 +889,33 @@ mod tests {
         let mut got = masked_columns(&sent);
         got.sort();
         assert_eq!(got, vec![(1, 0), (2, 0)]);
+    }
+
+    #[test]
+    fn rendering_a_bypassed_column_records_a_zero_mask() {
+        // N4 / New-2: `/visibility off` re-renders the masked columns; each
+        // must record a zero mask, or the planner keeps believing the client
+        // holds stone and re-plans columns it already has.
+        let columns = [(0, 0), (1, 0)];
+        let mut st = state_showing(&columns, 1);
+        for &col in &columns {
+            st.record_sent(col.0, col.1, u32::MAX);
+        }
+        assert_eq!(masked_columns(st.sent()).len(), 2, "both start masked");
+
+        // The reveal pass re-renders each column with bypass on.
+        for (cx, cz) in masked_columns(st.sent()) {
+            assert_eq!(st.mask_for_render(cx, cz, true), 0);
+        }
+        assert!(
+            masked_columns(st.sent()).is_empty(),
+            "after reveal the client holds real columns and `sent` says so"
+        );
+
+        // A non-bypassed render still records the real mask: a column the
+        // player cannot see comes back with every section hidden.
+        let all_hidden = (1u32 << SECTION_COUNT) - 1;
+        assert_eq!(st.mask_for_render(9, 9, false), all_hidden);
     }
 
     #[test]
