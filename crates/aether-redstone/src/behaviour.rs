@@ -647,166 +647,161 @@ impl<'a> Context<'a> {
 // Registry
 // ---------------------------------------------------------------------------
 
-/// External registrations, applied over the built-ins on every rebuild.
-static REGISTRATIONS: std::sync::Mutex<Vec<(&'static str, &'static dyn BlockBehaviour)>> =
-    std::sync::Mutex::new(Vec::new());
+/// The compiled behaviour table: one slot per block state.
+///
+/// Built once, then mutated in place by [`register`] under the write lock, so a
+/// late registration is race-free and costs no rebuild and no extra allocation.
+struct Registry {
+    by_state: Box<[&'static dyn BlockBehaviour]>,
+}
 
-/// The compiled table, or `None` until it is built (and again after a
-/// registration invalidates it). Leaked to `'static` so [`behaviour`] can return
-/// a bare reference with no lock held.
-static REGISTRY: std::sync::RwLock<Option<&'static [&'static dyn BlockBehaviour]>> =
-    std::sync::RwLock::new(None);
+/// The registry, initialised on first use.
+static REGISTRY: std::sync::OnceLock<std::sync::RwLock<Registry>> = std::sync::OnceLock::new();
+
+fn registry() -> &'static std::sync::RwLock<Registry> {
+    REGISTRY.get_or_init(|| std::sync::RwLock::new(Registry::build()))
+}
 
 /// Register `behaviour` for the block named `name` (e.g. `minecraft:observer`).
 ///
 /// This is the extension point: an external crate adds a component by writing a
 /// [`BlockBehaviour`] and calling this, with **no edit to this file**. A later
-/// registration wins over an earlier one and over the built-ins. Cheap enough to
-/// call at start-up; the table is rebuilt on the next lookup.
+/// registration wins over an earlier one and over the built-ins; it is applied
+/// under the write lock, so it is never lost to a concurrent lookup.
 pub fn register(name: &'static str, behaviour: &'static dyn BlockBehaviour) {
-    REGISTRATIONS.lock().unwrap().push((name, behaviour));
-    *REGISTRY.write().unwrap() = None;
+    registry().write().unwrap().set(name, behaviour);
 }
 
 /// The behaviour of a block state. One array index; no string comparison.
 pub fn behaviour(state: BlockStateId) -> &'static dyn BlockBehaviour {
-    let cached = *REGISTRY.read().unwrap();
-    let table = match cached {
-        Some(table) => table,
-        None => {
-            let built = build();
-            *REGISTRY.write().unwrap() = Some(built);
-            built
-        }
-    };
-    table
-        .get(state.raw() as usize)
-        .copied()
-        .unwrap_or(&blocks::DEFAULT)
+    registry().read().unwrap().get(state)
 }
 
-/// Build (and leak) the table: the built-ins plus every external registration.
-fn build() -> &'static [&'static dyn BlockBehaviour] {
-    let mut by_state: Vec<&'static dyn BlockBehaviour> =
-        vec![&blocks::DEFAULT; blocks::STATE_COUNT];
+impl Registry {
+    fn build() -> Self {
+        let mut by_state: Box<[&'static dyn BlockBehaviour]> =
+            vec![&blocks::DEFAULT as &'static dyn BlockBehaviour; blocks::STATE_COUNT]
+                .into_boxed_slice();
 
-    fn put(
-        by_state: &mut [&'static dyn BlockBehaviour],
-        name: &str,
-        b: &'static dyn BlockBehaviour,
-    ) {
-        if let Some(range) = world_blocks::states_of(name) {
-            for state in range {
-                by_state[state as usize] = b;
-            }
+        put(&mut by_state, "minecraft:redstone_wire", &blocks::Wire);
+        put(&mut by_state, "minecraft:repeater", &blocks::Repeater);
+        put(&mut by_state, "minecraft:comparator", &blocks::Comparator);
+        put(&mut by_state, "minecraft:redstone_torch", &blocks::Torch);
+        put(
+            &mut by_state,
+            "minecraft:redstone_wall_torch",
+            &blocks::WallTorch,
+        );
+        put(&mut by_state, "minecraft:lever", &blocks::Lever);
+        put(
+            &mut by_state,
+            "minecraft:redstone_block",
+            &blocks::RedstoneBlock,
+        );
+        put(&mut by_state, "minecraft:redstone_lamp", &blocks::Lamp);
+        put(
+            &mut by_state,
+            "minecraft:stone_button",
+            &blocks::StoneButton,
+        );
+        put(
+            &mut by_state,
+            "minecraft:polished_blackstone_button",
+            &blocks::StoneButton,
+        );
+        put(&mut by_state, "minecraft:oak_button", &blocks::WoodButton);
+        put(
+            &mut by_state,
+            "minecraft:spruce_button",
+            &blocks::WoodButton,
+        );
+        put(&mut by_state, "minecraft:birch_button", &blocks::WoodButton);
+        put(
+            &mut by_state,
+            "minecraft:jungle_button",
+            &blocks::WoodButton,
+        );
+        put(
+            &mut by_state,
+            "minecraft:acacia_button",
+            &blocks::WoodButton,
+        );
+        put(
+            &mut by_state,
+            "minecraft:dark_oak_button",
+            &blocks::WoodButton,
+        );
+        put(
+            &mut by_state,
+            "minecraft:mangrove_button",
+            &blocks::WoodButton,
+        );
+        put(
+            &mut by_state,
+            "minecraft:cherry_button",
+            &blocks::WoodButton,
+        );
+        put(
+            &mut by_state,
+            "minecraft:bamboo_button",
+            &blocks::WoodButton,
+        );
+        put(
+            &mut by_state,
+            "minecraft:crimson_button",
+            &blocks::WoodButton,
+        );
+        put(
+            &mut by_state,
+            "minecraft:warped_button",
+            &blocks::WoodButton,
+        );
+        put(
+            &mut by_state,
+            "minecraft:pale_oak_button",
+            &blocks::WoodButton,
+        );
+
+        // A test-only block registered over the observer's states, proving that a
+        // new component decides its own wire connection without a core edit.
+        #[cfg(test)]
+        put(&mut by_state, "minecraft:observer", &blocks::TestObserver);
+        // A test-only recording block for the notification-order findings.
+        #[cfg(test)]
+        put(
+            &mut by_state,
+            "minecraft:note_block",
+            &blocks::test_spy::Spy,
+        );
+        // A test-only block that never settles, for the shape-update budget.
+        #[cfg(test)]
+        put(
+            &mut by_state,
+            "minecraft:jukebox",
+            &blocks::test_chain::Chain,
+        );
+
+        Registry { by_state }
+    }
+
+    fn get(&self, state: BlockStateId) -> &'static dyn BlockBehaviour {
+        self.by_state
+            .get(state.raw() as usize)
+            .copied()
+            .unwrap_or(&blocks::DEFAULT)
+    }
+
+    fn set(&mut self, name: &str, behaviour: &'static dyn BlockBehaviour) {
+        put(&mut self.by_state, name, behaviour);
+    }
+}
+
+fn put(by_state: &mut [&'static dyn BlockBehaviour], name: &str, b: &'static dyn BlockBehaviour) {
+    if let Some(range) = world_blocks::states_of(name) {
+        for state in range {
+            by_state[state as usize] = b;
         }
     }
-
-    put(&mut by_state, "minecraft:redstone_wire", &blocks::Wire);
-    put(&mut by_state, "minecraft:repeater", &blocks::Repeater);
-    put(&mut by_state, "minecraft:comparator", &blocks::Comparator);
-    put(&mut by_state, "minecraft:redstone_torch", &blocks::Torch);
-    put(
-        &mut by_state,
-        "minecraft:redstone_wall_torch",
-        &blocks::WallTorch,
-    );
-    put(&mut by_state, "minecraft:lever", &blocks::Lever);
-    put(
-        &mut by_state,
-        "minecraft:redstone_block",
-        &blocks::RedstoneBlock,
-    );
-    put(&mut by_state, "minecraft:redstone_lamp", &blocks::Lamp);
-    put(
-        &mut by_state,
-        "minecraft:stone_button",
-        &blocks::StoneButton,
-    );
-    put(
-        &mut by_state,
-        "minecraft:polished_blackstone_button",
-        &blocks::StoneButton,
-    );
-    put(&mut by_state, "minecraft:oak_button", &blocks::WoodButton);
-    put(
-        &mut by_state,
-        "minecraft:spruce_button",
-        &blocks::WoodButton,
-    );
-    put(&mut by_state, "minecraft:birch_button", &blocks::WoodButton);
-    put(
-        &mut by_state,
-        "minecraft:jungle_button",
-        &blocks::WoodButton,
-    );
-    put(
-        &mut by_state,
-        "minecraft:acacia_button",
-        &blocks::WoodButton,
-    );
-    put(
-        &mut by_state,
-        "minecraft:dark_oak_button",
-        &blocks::WoodButton,
-    );
-    put(
-        &mut by_state,
-        "minecraft:mangrove_button",
-        &blocks::WoodButton,
-    );
-    put(
-        &mut by_state,
-        "minecraft:cherry_button",
-        &blocks::WoodButton,
-    );
-    put(
-        &mut by_state,
-        "minecraft:bamboo_button",
-        &blocks::WoodButton,
-    );
-    put(
-        &mut by_state,
-        "minecraft:crimson_button",
-        &blocks::WoodButton,
-    );
-    put(
-        &mut by_state,
-        "minecraft:warped_button",
-        &blocks::WoodButton,
-    );
-    put(
-        &mut by_state,
-        "minecraft:pale_oak_button",
-        &blocks::WoodButton,
-    );
-
-    // A test-only block registered over the observer's states, proving that a
-    // new component decides its own wire connection without a core edit.
-    #[cfg(test)]
-    put(&mut by_state, "minecraft:observer", &blocks::TestObserver);
-    // A test-only recording block for the notification-order findings.
-    #[cfg(test)]
-    put(
-        &mut by_state,
-        "minecraft:note_block",
-        &blocks::test_spy::Spy,
-    );
-    // A test-only block that never settles, for the shape-update budget.
-    #[cfg(test)]
-    put(
-        &mut by_state,
-        "minecraft:jukebox",
-        &blocks::test_chain::Chain,
-    );
-
-    // External registrations win, so a host can override a built-in.
-    let registrations = REGISTRATIONS.lock().unwrap();
-    for (name, b) in registrations.iter() {
-        put(&mut by_state, name, *b);
-    }
-
-    Box::leak(by_state.into_boxed_slice())
 }
 
 /// Default state ids for the blocks the engine refers to by name.
