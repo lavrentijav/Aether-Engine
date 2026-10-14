@@ -47,6 +47,9 @@ pub struct Container {
     pub burn_max: u32,
     /// Ticks the current item has cooked, out of 200.
     pub cook: u32,
+    /// Experience a furnace has stored, waiting for a player to take the
+    /// output (vanilla's `recipeCookingTime`).
+    pub xp: f32,
 }
 
 impl Container {
@@ -57,6 +60,7 @@ impl Container {
             burn: 0,
             burn_max: 0,
             cook: 0,
+            xp: 0.0,
         }
     }
 }
@@ -83,10 +87,11 @@ fn key(pos: Pos) -> [u8; 13] {
 }
 
 fn encode(c: &Container) -> Vec<u8> {
-    let mut out = vec![1u8, matches!(c.kind, ContainerKind::Furnace) as u8];
+    let mut out = vec![2u8, matches!(c.kind, ContainerKind::Furnace) as u8];
     out.extend_from_slice(&c.burn.to_be_bytes());
     out.extend_from_slice(&c.burn_max.to_be_bytes());
     out.extend_from_slice(&c.cook.to_be_bytes());
+    out.extend_from_slice(&c.xp.to_be_bytes());
     let mut inv = crate::inventory::Inventory::new();
     for (i, s) in c.slots.iter().enumerate() {
         inv.put_slot(i, s.clone());
@@ -96,7 +101,16 @@ fn encode(c: &Container) -> Vec<u8> {
 }
 
 fn decode(b: &[u8]) -> Option<Container> {
-    if b.len() < 14 || b[0] != 1 {
+    // Version 1 containers predate smelting experience and have none.
+    let (xp, inv_at) = match *b.first()? {
+        1 => (0.0f32, 14usize),
+        2 => (
+            f32::from_be_bytes(b.get(14..18)?.try_into().unwrap()),
+            18usize,
+        ),
+        _ => return None,
+    };
+    if b.len() < inv_at {
         return None;
     }
     let kind = if b[1] == 1 {
@@ -105,11 +119,12 @@ fn decode(b: &[u8]) -> Option<Container> {
         ContainerKind::Chest
     };
     let u = |o: usize| u32::from_be_bytes(b[o..o + 4].try_into().unwrap());
-    let inv = crate::inventory::decode(&b[14..])?;
+    let inv = crate::inventory::decode(&b[inv_at..])?;
     let mut c = Container::new(kind);
     c.burn = u(2);
     c.burn_max = u(6);
     c.cook = u(10);
+    c.xp = xp;
     for i in 0..c.slots.len() {
         c.slots[i] = inv.slot(i).cloned();
     }
@@ -211,9 +226,8 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
             // Fuel burnt, input smelted, output made: journalled as the
             // difference, by the server.
             let before = c.slots.clone();
-            let result = c.slots[0]
-                .as_ref()
-                .and_then(|s| super::tables::smelt(&s.item));
+            let input = c.slots[0].as_ref().map(|s| s.item.clone());
+            let result = input.as_deref().and_then(super::tables::smelt);
             let output_ok = result.is_some_and(|r| match &c.slots[2] {
                 None => true,
                 Some(o) => o.item == r && o.count < o.max_stack(),
@@ -255,6 +269,11 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
                         Some(o) => o.count += 1,
                         None => c.slots[2] = Some(Stack::new(r, 1)),
                     }
+                    // The smelted item's experience waits in the furnace
+                    // until a player takes the output.
+                    if let Some(item) = &input {
+                        c.xp += super::tables::smelt_xp(item);
+                    }
                 }
             } else if c.cook > 0 {
                 c.cook = c.cook.saturating_sub(2);
@@ -289,8 +308,24 @@ mod tests {
         c.burn = 120;
         c.burn_max = 1600;
         c.cook = 33;
+        c.xp = 2.8;
         let back = decode(&encode(&c)).unwrap();
         assert_eq!(back.slots, c.slots);
         assert_eq!((back.burn, back.burn_max, back.cook), (120, 1600, 33));
+        assert_eq!(back.xp, 2.8);
+    }
+
+    #[test]
+    fn a_version_one_container_has_no_stored_experience() {
+        // A blob written before smelting experience existed still loads.
+        let mut old = vec![1u8, 1u8];
+        old.extend_from_slice(&0u32.to_be_bytes());
+        old.extend_from_slice(&0u32.to_be_bytes());
+        old.extend_from_slice(&0u32.to_be_bytes());
+        old.extend_from_slice(&crate::inventory::encode(
+            &crate::inventory::Inventory::new(),
+        ));
+        let back = decode(&old).expect("a version 1 blob decodes");
+        assert_eq!(back.xp, 0.0);
     }
 }

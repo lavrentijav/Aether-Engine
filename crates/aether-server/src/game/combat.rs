@@ -361,8 +361,12 @@ pub fn on_mob_hurt(
             .unwrap_or(aether_world::journal::ActorId::SERVER),
         None,
     );
-    if let Some(k) = killer {
-        give_xp(k, world, hit.xp);
+    // Experience is left on the ground for whoever is near, not credited to
+    // the killer: `LivingEntity.dropExperience`. Mobs only pay it out when a
+    // player did the kill (`lastHurtByPlayer`), so an arrow from one mob into
+    // another drops none.
+    if killer.is_some() {
+        entities::award_xp(hit.pos, hit.xp);
     }
 }
 

@@ -189,6 +189,16 @@ pub fn on_broken(
         aether_world::journal::ActorId(handle.uuid),
         cause,
     );
+    // Ores drop experience as orbs, on the ground, regardless of the tool.
+    if let Some((min, max)) = tables::block_xp(&name) {
+        let xp = entities::with_rng(|r| r.range(min as i32, max as i32));
+        if xp > 0 {
+            entities::award_xp(
+                Vector3::new(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5),
+                xp,
+            );
+        }
+    }
     handle.game().exhaust(0.005);
     let hard = tables::block_info(&name).map(|i| i.hardness).unwrap_or(0.0);
     if hard > 0.0 {

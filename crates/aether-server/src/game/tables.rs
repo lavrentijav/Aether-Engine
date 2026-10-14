@@ -302,6 +302,22 @@ pub fn block_drops(block: &str, tool: Option<&str>, rng: &mut Rng) -> Vec<(Strin
     }
 }
 
+/// The experience range a block drops when a player mines it, for vanilla's
+/// `DropExperienceBlock`s. Iron, gold and copper ore are absent on purpose:
+/// their experience comes from smelting, not from the block.
+pub fn block_xp(block: &str) -> Option<(u8, u8)> {
+    Some(match block {
+        "minecraft:coal_ore" | "minecraft:deepslate_coal_ore" => (0, 2),
+        "minecraft:diamond_ore" | "minecraft:deepslate_diamond_ore" => (3, 7),
+        "minecraft:emerald_ore" | "minecraft:deepslate_emerald_ore" => (3, 7),
+        "minecraft:lapis_ore" | "minecraft:deepslate_lapis_ore" => (2, 5),
+        "minecraft:nether_quartz_ore" => (2, 5),
+        "minecraft:redstone_ore" | "minecraft:deepslate_redstone_ore" => (1, 5),
+        "minecraft:nether_gold_ore" => (0, 1),
+        _ => return None,
+    })
+}
+
 /// What killing a `kind` mob drops.
 pub fn mob_drops(kind: &str, player_kill: bool, rng: &mut Rng) -> Vec<(String, u8)> {
     let Some(drops) = find(&data::ENTITY_LOOT, kind) else {
@@ -549,6 +565,33 @@ pub fn smelt(item: &str) -> Option<&'static str> {
     })
 }
 
+/// The experience a furnace stores per item it smelts, awarded when a player
+/// takes from the output — vanilla's per-recipe `experience`.
+pub fn smelt_xp(item: &str) -> f32 {
+    let short = item.strip_prefix("minecraft:").unwrap_or(item);
+    match short {
+        "raw_iron" | "iron_ore" | "deepslate_iron_ore" => 0.7,
+        "raw_gold" | "gold_ore" | "deepslate_gold_ore" | "nether_gold_ore" => 1.0,
+        "raw_copper" | "copper_ore" | "deepslate_copper_ore" => 0.7,
+        "coal_ore" | "deepslate_coal_ore" => 0.1,
+        "diamond_ore" | "deepslate_diamond_ore" => 1.0,
+        "emerald_ore" | "deepslate_emerald_ore" => 1.0,
+        "lapis_ore" | "deepslate_lapis_ore" => 0.2,
+        "redstone_ore" | "deepslate_redstone_ore" => 0.7,
+        "nether_quartz_ore" => 0.2,
+        "ancient_debris" => 2.0,
+        "clay_ball" => 0.3,
+        "clay" => 0.35,
+        "cactus" => 0.2,
+        "kelp" => 0.1,
+        "wet_sponge" => 0.15,
+        s if s.ends_with("_log") || s.ends_with("_wood") => 0.15,
+        "beef" | "porkchop" | "chicken" | "mutton" | "rabbit" | "cod" | "salmon" | "potato" => 0.35,
+        _ if smelt(item).is_some() => 0.1,
+        _ => 0.0,
+    }
+}
+
 /// How many ticks `item` burns as furnace fuel.
 pub fn fuel_ticks(item: &str) -> u32 {
     let Some(short) = item.strip_prefix("minecraft:") else {
@@ -677,5 +720,32 @@ mod tests {
     fn entity_types_resolve() {
         assert_eq!(entity_type("minecraft:zombie").map(|t| t.0), Some(150));
         assert_eq!(entity_type("minecraft:item").map(|t| t.0), Some(71));
+        assert_eq!(
+            entity_type("minecraft:experience_orb").map(|t| t.0),
+            Some(49)
+        );
+    }
+
+    #[test]
+    fn ores_pay_experience_and_iron_does_not() {
+        assert_eq!(block_xp("minecraft:coal_ore"), Some((0, 2)));
+        assert_eq!(block_xp("minecraft:deepslate_diamond_ore"), Some((3, 7)));
+        assert_eq!(block_xp("minecraft:redstone_ore"), Some((1, 5)));
+        // Iron, gold and copper ore have no block experience: theirs is
+        // earned by smelting.
+        assert_eq!(block_xp("minecraft:iron_ore"), None);
+        assert_eq!(block_xp("minecraft:gold_ore"), None);
+        assert_eq!(block_xp("minecraft:copper_ore"), None);
+        assert_eq!(block_xp("minecraft:stone"), None);
+    }
+
+    #[test]
+    fn smelting_experience_matches_vanilla() {
+        assert!((smelt_xp("minecraft:raw_iron") - 0.7).abs() < 1e-6);
+        assert!((smelt_xp("minecraft:gold_ore") - 1.0).abs() < 1e-6);
+        assert!((smelt_xp("minecraft:sand") - 0.1).abs() < 1e-6);
+        assert!((smelt_xp("minecraft:oak_log") - 0.15).abs() < 1e-6);
+        assert!((smelt_xp("minecraft:beef") - 0.35).abs() < 1e-6);
+        assert_eq!(smelt_xp("minecraft:diamond"), 0.0);
     }
 }

@@ -99,7 +99,8 @@ server a vanilla 1.8.9 client can connect to.
 | Mobs: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider — natural spawning, wander/flee/chase AI, melee, skeleton arrows, creeper explosions, undead burn in daylight, loot and XP | 🚧 Preview |
 | Combat: 1.9 attack cooldown, critical hits, knockback, armour reduction and wear, tool durability, PvP | ✅ |
 | Item entities: block drops from loot tables, Q / drop stack, pickup with the collect animation, merging, 5-minute expiry | ✅ |
-| Server-authoritative windows: every click mode, 2×2 and 3×3 crafting over all 1,359 shaped + shapeless recipes, single and **double chests** (54 slots, `type=left`/`right`) and furnaces persisted as block entities, smelting + fuel | ✅ |
+| Experience orbs: ores, mob kills and smelting drop `minecraft:experience_orb` entities instead of crediting the killer; they drift to a nearby player, merge up to the orb cap, and are picked up with vanilla's ladder of orb values | ✅ |
+| Server-authoritative windows: every click mode, 2×2 and 3×3 crafting over all 1,359 shaped + shapeless recipes, single and **double chests** (54 slots, `type=left`/`right`) and furnaces persisted as block entities, smelting + fuel + stored experience released on taking the output | ✅ |
 | Survival mining: vanilla dig times, harvest tools, tool wear; placement consumes items; buckets, hoes, flint and steel, beds (spawn point, skip night), eating, bows | ✅ |
 | Entity tracker: entities spawn/despawn per client by range, updates only to those tracking them | ✅ |
 | Player state persisted (position, health, food, XP, mode, spawn); gameplay commands `/gamemode /time /give /summon /tp /heal /food /killall /kill /spawn /block` | ✅ |

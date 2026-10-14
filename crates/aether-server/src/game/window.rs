@@ -666,7 +666,16 @@ pub fn click(
                         ctx.drops
                     }
                     Some(ContainerTarget::Single(kind, pos)) => {
-                        containers::with(world, pos, kind, |c| {
+                        let (drops, xp) = containers::with(world, pos, kind, |c| {
+                            let furnace = c.kind == ContainerKind::Furnace;
+                            let before = if furnace {
+                                c.slots
+                                    .get(2)
+                                    .and_then(|s| s.as_ref())
+                                    .map_or(0, |s| s.count)
+                            } else {
+                                0
+                            };
                             let mut ctx = Ctx {
                                 layout,
                                 inv: &mut inv,
@@ -677,8 +686,33 @@ pub fn click(
                                 drops: Vec::new(),
                             };
                             ctx.click(slot, button, mode, drag);
-                            ctx.drops
-                        })
+                            let drops = ctx.drops;
+                            // Taking from a furnace's output releases the
+                            // experience its smelting stored, as orbs where
+                            // the player stands — vanilla's `onTake`.
+                            let xp = if furnace {
+                                let after = c
+                                    .slots
+                                    .get(2)
+                                    .and_then(|s| s.as_ref())
+                                    .map_or(0, |s| s.count);
+                                if after < before {
+                                    let whole = c.xp.floor();
+                                    c.xp -= whole;
+                                    whole as i32
+                                } else {
+                                    0
+                                }
+                            } else {
+                                0
+                            };
+                            (drops, xp)
+                        });
+                        if xp > 0 {
+                            let p = handle.pos();
+                            super::entities::award_xp(aether_api::Vector3::new(p.x, p.y, p.z), xp);
+                        }
+                        drops
                     }
                     Some(ContainerTarget::Double(a, b)) => {
                         containers::with_pair(world, a, b, |ca, cb| {
