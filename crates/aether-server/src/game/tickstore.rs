@@ -183,6 +183,9 @@ pub fn restore(scheduler: &mut Scheduler<Pos>, entries: Vec<(Pos, u64)>) {
 
 #[cfg(test)]
 mod tests {
+    // Each test uses its own key prefix: `owned` is process-wide per prefix,
+    // and tests run in parallel with the block/fluid tick tests that use the
+    // real prefixes.
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -222,9 +225,9 @@ mod tests {
 
     #[test]
     fn a_key_is_ten_bytes_and_cannot_be_a_subchunk_key() {
-        let k = key(BLOCK_TICKS, i32::MAX, i32::MIN);
+        let k = key(b"Z3", i32::MAX, i32::MIN);
         assert_eq!(k.len(), 10);
-        assert_eq!(&k[..2], BLOCK_TICKS);
+        assert_eq!(&k[..2], b"Z3");
         assert_ne!(
             k.as_slice(),
             aether_api::SubChunkKey::new(i32::MAX, 0, i32::MIN)
@@ -236,39 +239,32 @@ mod tests {
     #[test]
     fn saving_groups_entries_by_chunk_and_removes_consumed_ones() {
         let store = Fake::default();
-        save(
-            &store,
-            BLOCK_TICKS,
-            vec![(10, (3, 5, 7)), (12, (-1, 0, 20))],
-        );
-        assert_eq!(load(&store, BLOCK_TICKS, 0, 0), vec![((3, 5, 7), 10)]);
-        assert_eq!(load(&store, BLOCK_TICKS, -1, 1), vec![((-1, 0, 20), 12)]);
-        assert_eq!(load(&store, BLOCK_TICKS, 2, 2), vec![], "another chunk");
+        save(&store, b"Z4", vec![(10, (3, 5, 7)), (12, (-1, 0, 20))]);
+        assert_eq!(load(&store, b"Z4", 0, 0), vec![((3, 5, 7), 10)]);
+        assert_eq!(load(&store, b"Z4", -1, 1), vec![((-1, 0, 20), 12)]);
+        assert_eq!(load(&store, b"Z4", 2, 2), vec![], "another chunk");
 
         // The (0, 0) tick runs; the next save must not leave its blob behind
         // to be replayed after a restart.
-        save(&store, BLOCK_TICKS, vec![(12, (-1, 0, 20))]);
-        assert_eq!(load(&store, BLOCK_TICKS, 0, 0), vec![]);
-        assert_eq!(load(&store, BLOCK_TICKS, -1, 1), vec![((-1, 0, 20), 12)]);
+        save(&store, b"Z4", vec![(12, (-1, 0, 20))]);
+        assert_eq!(load(&store, b"Z4", 0, 0), vec![]);
+        assert_eq!(load(&store, b"Z4", -1, 1), vec![((-1, 0, 20), 12)]);
     }
 
     #[test]
     fn a_save_keeps_the_ticks_of_a_chunk_not_loaded_since_the_start() {
         // Distinct coordinates: the owned set is process-wide.
         let store = Fake::default();
-        store.tick_put(
-            &key(BLOCK_TICKS, 500, 500),
-            &encode(&[((8000, 1, 8000), 40)]),
-        );
+        store.tick_put(&key(b"Z5", 500, 500), &encode(&[((8000, 1, 8000), 40)]));
         // Restart: nothing loaded yet, an autosave with an unrelated entry.
-        save(&store, BLOCK_TICKS, vec![(41, (8100, 1, 8100))]);
+        save(&store, b"Z5", vec![(41, (8100, 1, 8100))]);
         assert_eq!(
-            load(&store, BLOCK_TICKS, 500, 500),
+            load(&store, b"Z5", 500, 500),
             vec![((8000, 1, 8000), 40)],
             "the unloaded chunk's tick must survive the save"
         );
         // Now loaded (owned) and consumed: the next save deletes it.
-        save(&store, BLOCK_TICKS, vec![(41, (8100, 1, 8100))]);
-        assert_eq!(load(&store, BLOCK_TICKS, 500, 500), vec![]);
+        save(&store, b"Z5", vec![(41, (8100, 1, 8100))]);
+        assert_eq!(load(&store, b"Z5", 500, 500), vec![]);
     }
 }
