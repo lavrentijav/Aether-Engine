@@ -156,16 +156,24 @@ pub trait RedstoneView {
     /// anything. The engine generates its own update cascade around it.
     fn set_block(&mut self, pos: BlockPos, state: BlockStateId);
 
-    /// Schedule `pos` to be re-evaluated after `delay` game ticks.
+    /// Schedule `pos` to be re-evaluated after `delay` game ticks, for `block`.
     ///
-    /// Scheduling the same position again while it is pending is a no-op: the
-    /// first delay wins, as in vanilla.
-    fn schedule_block_tick(&mut self, pos: BlockPos, delay: u32, priority: TickPriority);
+    /// Vanilla keys a scheduled tick by `(block, pos)`, and when the tick runs
+    /// it is dropped unless the cell still holds that block
+    /// (`ServerLevel.tickBlock`). Scheduling the same `(block, pos)` again while
+    /// it is pending is a no-op: the first delay wins.
+    fn schedule_block_tick(
+        &mut self,
+        block: u16,
+        pos: BlockPos,
+        delay: u32,
+        priority: TickPriority,
+    );
 
-    /// Whether a tick is already pending for `pos` *this* game tick.
+    /// Whether a tick for `(block, pos)` is already pending *this* game tick.
     ///
     /// Used to avoid scheduling the same tick twice. Defaults to `false`.
-    fn will_tick_this_tick(&self, _pos: BlockPos) -> bool {
+    fn will_tick_this_tick(&self, _block: u16, _pos: BlockPos) -> bool {
         false
     }
 
@@ -173,34 +181,21 @@ pub trait RedstoneView {
     fn game_time(&self) -> u64 {
         0
     }
-
-    /// Record that the torch at `pos` toggled at `when`.
-    ///
-    /// Only redstone torches call this; a world that never hosts one can leave
-    /// the default in place.
-    fn push_toggle(&mut self, _pos: BlockPos, _when: u64) {}
-
-    /// How many times the torch at `pos` has toggled at or after `since`.
-    fn toggles_since(&self, _pos: BlockPos, _since: u64) -> u32 {
-        0
-    }
 }
 
-/// An in-memory world: a map of states, a tick queue and enough bookkeeping for
-/// redstone torches.
+/// An in-memory world: a map of states and a block-tick queue.
 ///
 /// Enough to build and run a circuit in a test. Not a real world — it has one
 /// flat coordinate space, no storage and no entities.
 #[derive(Debug, Default, Clone)]
 pub struct MemWorld {
     blocks: HashMap<BlockPos, BlockStateId>,
-    /// `(due tick, priority, sequence) -> position`. The sequence keeps the
-    /// queue stable for identical `(due, priority)` pairs.
-    due: BTreeMap<(u64, i8, u64), BlockPos>,
-    pending: HashMap<BlockPos, u64>,
+    /// `(due tick, priority, sequence) -> (block, position)`. The sequence
+    /// keeps the queue stable for identical `(due, priority)` pairs.
+    due: BTreeMap<(u64, i8, u64), (u16, BlockPos)>,
+    pending: HashMap<(u16, BlockPos), u64>,
     seq: u64,
     game_time: u64,
-    toggles: HashMap<BlockPos, Vec<u64>>,
 }
 
 impl MemWorld {
@@ -244,7 +239,9 @@ impl MemWorld {
     ///
     /// Ticks are drained until none remain for `now` or earlier, so a tick that
     /// schedules another for the same instant is resolved in the same step,
-    /// exactly as vanilla's tick loop does within a tick.
+    /// exactly as vanilla's tick loop does within a tick. Each due tick carries
+    /// the block it was scheduled for; the engine drops it unless the cell still
+    /// holds that block (`ServerLevel.tickBlock`).
     pub fn step(&mut self, engine: &Redstone) {
         self.game_time += 1;
         loop {
@@ -253,9 +250,9 @@ impl MemWorld {
             if key.0 > self.game_time {
                 break;
             }
-            let pos = self.due.remove(&key).expect("key just read");
-            self.pending.remove(&pos);
-            engine.on_scheduled_tick(self, pos);
+            let (block, pos) = self.due.remove(&key).expect("key just read");
+            self.pending.remove(&(block, pos));
+            engine.on_scheduled_tick(self, block, pos);
         }
     }
 
@@ -276,33 +273,29 @@ impl RedstoneView for MemWorld {
         self.blocks.insert(pos, state);
     }
 
-    fn schedule_block_tick(&mut self, pos: BlockPos, delay: u32, priority: TickPriority) {
-        if self.pending.contains_key(&pos) {
+    fn schedule_block_tick(
+        &mut self,
+        block: u16,
+        pos: BlockPos,
+        delay: u32,
+        priority: TickPriority,
+    ) {
+        let key = (block, pos);
+        if self.pending.contains_key(&key) {
             return;
         }
         let due = self.game_time + u64::from(delay);
-        self.pending.insert(pos, due);
+        self.pending.insert(key, due);
         self.seq += 1;
-        self.due.insert((due, priority.value(), self.seq), pos);
+        self.due.insert((due, priority.value(), self.seq), key);
     }
 
-    fn will_tick_this_tick(&self, pos: BlockPos) -> bool {
-        self.pending.get(&pos) == Some(&self.game_time)
+    fn will_tick_this_tick(&self, block: u16, pos: BlockPos) -> bool {
+        self.pending.get(&(block, pos)) == Some(&self.game_time)
     }
 
     fn game_time(&self) -> u64 {
         self.game_time
-    }
-
-    fn push_toggle(&mut self, pos: BlockPos, when: u64) {
-        self.toggles.entry(pos).or_default().push(when);
-    }
-
-    fn toggles_since(&self, pos: BlockPos, since: u64) -> u32 {
-        self.toggles
-            .get(&pos)
-            .map(|v| v.iter().filter(|&&w| w >= since).count() as u32)
-            .unwrap_or(0)
     }
 }
 
@@ -351,24 +344,22 @@ impl RedstoneView for TraceWorld {
         self.inner.set_block(pos, state);
     }
 
-    fn schedule_block_tick(&mut self, pos: BlockPos, delay: u32, priority: TickPriority) {
-        self.inner.schedule_block_tick(pos, delay, priority);
+    fn schedule_block_tick(
+        &mut self,
+        block: u16,
+        pos: BlockPos,
+        delay: u32,
+        priority: TickPriority,
+    ) {
+        self.inner.schedule_block_tick(block, pos, delay, priority);
     }
 
-    fn will_tick_this_tick(&self, pos: BlockPos) -> bool {
-        self.inner.will_tick_this_tick(pos)
+    fn will_tick_this_tick(&self, block: u16, pos: BlockPos) -> bool {
+        self.inner.will_tick_this_tick(block, pos)
     }
 
     fn game_time(&self) -> u64 {
         self.inner.game_time()
-    }
-
-    fn push_toggle(&mut self, pos: BlockPos, when: u64) {
-        self.inner.push_toggle(pos, when);
-    }
-
-    fn toggles_since(&self, pos: BlockPos, since: u64) -> u32 {
-        self.inner.toggles_since(pos, since)
     }
 }
 
@@ -380,10 +371,10 @@ mod tests {
     fn scheduling_is_first_wins() {
         let mut w = MemWorld::new();
         let p = BlockPos::new(0, 0, 0);
-        w.schedule_block_tick(p, 5, TickPriority::Normal);
-        w.schedule_block_tick(p, 1, TickPriority::Normal);
-        // The later, shorter schedule is ignored: position already pending.
-        assert_eq!(w.pending.get(&p), Some(&5));
+        w.schedule_block_tick(1, p, 5, TickPriority::Normal);
+        w.schedule_block_tick(1, p, 1, TickPriority::Normal);
+        // The later, shorter schedule is ignored: `(block, pos)` already pending.
+        assert_eq!(w.pending.get(&(1, p)), Some(&5));
     }
 
     #[test]

@@ -22,6 +22,7 @@ use aether_world::BlockStateId;
 
 use crate::blocks::{self, BlockBehaviour};
 use crate::dir::Direction;
+use crate::engine::Redstone;
 use crate::pos::BlockPos;
 use crate::view::{Orientation, RedstoneView, SetBlockFlags, TickPriority};
 
@@ -179,6 +180,7 @@ enum NeighborUpdate {
 /// The mutable world a behaviour acts through, plus the update cascade.
 pub struct Context<'a> {
     pub(crate) view: &'a mut dyn RedstoneView,
+    engine: &'a Redstone,
     stack: Vec<NeighborUpdate>,
     added: Vec<NeighborUpdate>,
     count: usize,
@@ -186,10 +188,11 @@ pub struct Context<'a> {
 }
 
 impl<'a> Context<'a> {
-    /// Wrap a world for the duration of one engine call.
-    pub fn new(view: &'a mut dyn RedstoneView) -> Self {
+    /// Wrap a world and engine for the duration of one engine call.
+    pub fn new(view: &'a mut dyn RedstoneView, engine: &'a Redstone) -> Self {
         Self {
             view,
+            engine,
             stack: Vec::new(),
             added: Vec::new(),
             count: 0,
@@ -280,24 +283,29 @@ impl<'a> Context<'a> {
 
     // -- scheduling ---------------------------------------------------------
 
-    /// Schedule a block tick (position-keyed this stage; block-keyed in R8).
+    /// Schedule a block tick, keyed by the block currently at `pos`.
     pub fn schedule_tick(&mut self, pos: BlockPos, delay: u32, priority: TickPriority) {
-        self.view.schedule_block_tick(pos, delay, priority);
+        if let Some(block) = block_id_of(self.get_block(pos)) {
+            self.view.schedule_block_tick(block, pos, delay, priority);
+        }
     }
 
-    /// Whether a tick is already pending for `pos` this game tick.
+    /// Whether a tick for the block currently at `pos` is pending this game tick.
     pub fn will_tick_this_tick(&self, pos: BlockPos) -> bool {
-        self.view.will_tick_this_tick(pos)
+        match block_id_of(self.get_block(pos)) {
+            Some(block) => self.view.will_tick_this_tick(block, pos),
+            None => false,
+        }
     }
 
-    /// Record a redstone-torch toggle for the burnout clock.
+    /// Record a redstone-torch toggle for the engine's burnout clock.
     pub fn push_toggle(&mut self, pos: BlockPos, when: u64) {
-        self.view.push_toggle(pos, when);
+        self.engine.record_toggle(pos, when);
     }
 
-    /// Toggles recorded at or after `since`.
+    /// Toggles recorded at or after `since`, from the engine's burnout clock.
     pub fn toggles_since(&self, pos: BlockPos, since: u64) -> u32 {
-        self.view.toggles_since(pos, since)
+        self.engine.toggle_count(pos, since)
     }
 
     // -- neighbour updates --------------------------------------------------
