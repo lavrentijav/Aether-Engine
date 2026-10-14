@@ -5,7 +5,7 @@
 > Current problems, engineering risks, and the **Known Deviations Registry** (Phase 1
 > compatibility gaps that are accepted on purpose).
 >
-> Last reviewed: 2026-07-28
+> Last reviewed: 2026-10-14
 
 ---
 
@@ -14,7 +14,7 @@
 2. **SIMD parity only partially validated.** `Scalar / SSE4.2 / AVX2` paths are implemented and unit-tested; `AVX-512` is *detected* but routed to the AVX2 path — there is no native AVX-512 backend yet.
 3. **Determinism unproven.** Parallel subsystems must merge at Safe Points; the merge points are specified but not validated, and the work-stealing scheduler that would exercise them does not exist yet.
 4. **Experimental 1.8.9 server is unverified against a live client.** `aether-server` speaks protocol 47 in offline mode with no compression/encryption, and its framing is checked only against a raw socket client. A real Minecraft 1.8.9 client may still reject some packets (chunk-data format is the most likely gap). It binds to loopback by default and must not be exposed publicly.
-5. **Players are visible but not tab-listed.** Connected players spawn, move and despawn for each other (Spawn Player / Entity Teleport / Entity Head Look / Destroy Entities), but no Player List Item (0x38) packet is sent, so there's no tab list entry and a live client will likely render default Steve/Alex skins rather than each player's real one. Accepted for this preview — closing it means implementing the Player List Item packet's binary-UUID + GameProfile-properties encoding, which differs from Spawn Player's own string-UUID field.
+5. ~~**Players are visible but not tab-listed.**~~ **Fixed:** the Player List Item packet (0x38, protocol 47) now goes out on join and leave — action 0 adds an entry with the player's **binary** UUID (16 raw bytes, the same form Spawn Player uses; only Login Success is the hyphenated string), name, an empty GameProfile property list (offline mode has no skin signature to send) and a synthetic game mode/ping; action 4 removes it. Each add is emitted *before* the corresponding Spawn Player, because a 1.8 client drops a spawn for a UUID it has no tab entry for. With no properties a client shows the default Steve/Alex skin, which is the correct result for offline mode. The exact byte layout is pinned by a unit test.
 
 6. **Block states work, except where they depend on a neighbour.** `BlockStateId` is now the vanilla flattened block-state id (29,671 states over 1,166 blocks — see [DESIGN_NOTES §9](DESIGN_NOTES.md)), and placement chooses a state from the player's yaw and pitch, the clicked face and the cursor. Re-measured against a live 1.21.11 client (`tools/probe/states3.js`):
 

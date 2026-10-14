@@ -40,7 +40,7 @@ server a vanilla 1.8.9 client can connect to.
 | Runnable demo: `aether` binary (worldgen + physics + storage + telemetry) with TOML config | ✅ |
 | Player entity + `FullBright` lighting fallback (always max light) | ✅ |
 | Experimental join server `aether-server` (1.8.9 / protocol 47, noise terrain, creative, full-bright) — protocol verified against a raw socket client, **not yet against a live client** | 🚧 Preview |
-| Multiplayer visibility on `aether-server`: connected players spawn, move and despawn for each other (no tab list / skins yet — see [Known Issues](KNOWN_ISSUES.md)) | ✅ |
+| Multiplayer visibility on `aether-server`: connected players spawn, move and despawn for each other, and each is added to the tab list on join (Player List Item 0x38, binary UUID + empty GameProfile properties) and removed on leave — emitted before its Spawn Player, which a 1.8 client otherwise drops | ✅ |
 | Packet compression (zlib, `Set Compression`, per-connection threshold) — a spawn column drops ~45 KB → ~0.2 KB | ✅ |
 | Block-change acknowledgement (1.19+ prediction sequence) — without it a client's placement predictions are never released | ✅ |
 | World history (`aether-world::journal`): append-only event log, deterministic generator as the baseline, so unedited columns are never stored | ✅ |
