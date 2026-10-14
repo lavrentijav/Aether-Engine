@@ -661,6 +661,25 @@ fn the_bound_advances_by_a_whole_block_when_the_counter_reaches_it() {
 }
 
 #[test]
+fn a_bound_near_u64_max_fails_loudly_instead_of_wrapping_to_zero() {
+    // A corrupted 8-byte bound, or an id at the very top of the range: the
+    // next whole block does not fit in a u64. Wrapping would publish 0, the
+    // reserved "no id" value; the reservation must error and leave the store
+    // untouched rather than hand that out to everything that follows.
+    let store = MemStore::new();
+    let r = Reservation::new(b"U", ledger::UID_BLOCK, u64::MAX - 1);
+    let err = r.ensure(&store, u64::MAX).unwrap_err();
+    assert!(
+        matches!(err, StorageError::Codec(_)),
+        "expected a loud codec error, got {err:?}"
+    );
+    assert!(
+        store.get(b"U").unwrap().is_none(),
+        "a failed raise must not write a bound"
+    );
+}
+
+#[test]
 fn a_reopened_allocator_resumes_at_or_after_the_persisted_bound() {
     // The failure this guards against is silent: an allocator that restarted
     // its numbering would hand a new stack the uid of an old one, and the
