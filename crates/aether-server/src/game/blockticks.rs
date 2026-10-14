@@ -12,20 +12,22 @@
 //!   landed, which is the same end state without the animation. Concrete powder
 //!   also sets when it touches water, before it ever falls.
 //!
-//! Crops and leaf decay join this module in their own submodules; see
-//! `KNOWN_ISSUES` A.11 for what each of them still does not do.
+//! Crops join this module in their own submodule; see `KNOWN_ISSUES` A.11 for
+//! what they still do not do.
 
 use std::sync::{Mutex, OnceLock};
 
 use aether_api::block_ids;
-use aether_world::registry::blocks;
+use aether_world::registry::{blocks, props};
 use aether_world::BlockStateId;
 
 use super::scheduler::Scheduler;
+use crate::game::tables::Rng;
 use crate::players::SharedRegistry;
 use crate::protocol::ServerEvent;
 use crate::session::DemoWorld;
 
+mod crops;
 mod falling;
 
 /// A block position.
@@ -44,6 +46,14 @@ const BUDGET: usize = 4096;
 
 /// Ticks before a falling block notices it is unsupported (vanilla's 2).
 const FALL_DELAY: u64 = 2;
+
+/// Ticks before sugar cane or cactus checks it still has support (vanilla's
+/// `tick` runs one tick after the change).
+const SUPPORT_DELAY: u64 = 1;
+
+/// Blocks sampled per 16³ section per tick — vanilla's default
+/// `randomTickSpeed`.
+const RANDOM_TICK_SPEED: usize = 3;
 
 const AROUND: [Pos; 6] = [
     (1, 0, 0),
@@ -155,6 +165,52 @@ fn is_free(state: BlockStateId) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Reading and writing state properties
+// ---------------------------------------------------------------------------
+
+/// The value of `key` in `state`, or `None` if the block has no such property.
+fn prop(state: BlockStateId, key: &str) -> Option<&'static str> {
+    let (id, _) = blocks::block_of_state(state)?;
+    let (lo, _) = blocks::STATE_RANGE[id as usize];
+    props::values_of(id, state.raw() - lo)
+        .into_iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| v)
+}
+
+/// `state` with `key` set to `value`, every other property kept, or `None` if
+/// the block has no such property.
+fn with_prop(state: BlockStateId, key: &str, value: &str) -> Option<BlockStateId> {
+    let (id, _) = blocks::block_of_state(state)?;
+    let (lo, _) = blocks::STATE_RANGE[id as usize];
+    let mut vals = props::values_of(id, state.raw() - lo);
+    let slot = vals.iter_mut().find(|(k, _)| *k == key)?;
+    slot.1 = value;
+    props::state_with(id, &vals).map(BlockStateId)
+}
+
+/// Whether `state` is air in any of its flavours.
+fn is_air(state: BlockStateId) -> bool {
+    state == block_ids::AIR || matches!(name_of(state).map(short), Some("cave_air" | "void_air"))
+}
+
+/// Whether a random tick should even look at `state`: a crop below its max
+/// age, a decaying leaf, or a sugar cane / cactus that may still lengthen.
+fn is_random_tickable(state: BlockStateId) -> bool {
+    let Some(name) = name_of(state) else {
+        return false;
+    };
+    if crops::is_crop(name) {
+        let max = crops::max_age(name).unwrap_or(0);
+        let age = prop(state, "age")
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(max);
+        return age < max;
+    }
+    crops::is_sugar_cane(name) || crops::is_cactus(name)
+}
+
+// ---------------------------------------------------------------------------
 // Waking the queue, and running it
 // ---------------------------------------------------------------------------
 
@@ -175,20 +231,24 @@ pub fn notify(world: &DemoWorld, x: i32, y: i32, z: i32) {
         };
         if is_falling(name) {
             schedule(p, FALL_DELAY);
+        } else if crops::is_sugar_cane(name) || crops::is_cactus(name) {
+            schedule(p, SUPPORT_DELAY);
         }
     }
 }
 
-/// Run the scheduled ticks. Called once per game tick.
-pub fn tick(world: &DemoWorld, registry: &SharedRegistry) {
+/// Run the scheduled ticks, then vanilla's random-tick pass. Called once per
+/// game tick.
+pub fn tick(world: &DemoWorld, registry: &SharedRegistry, rng: &mut Rng) {
     let now = super::now();
     let batch = queue().lock().unwrap().due(now, BUDGET);
     for pos in batch {
-        scheduled_update(world, registry, pos);
+        scheduled_update(world, registry, rng, pos);
     }
+    random_ticks(world, registry, rng);
 }
 
-fn scheduled_update(world: &DemoWorld, registry: &SharedRegistry, pos: Pos) {
+fn scheduled_update(world: &DemoWorld, registry: &SharedRegistry, rng: &mut Rng, pos: Pos) {
     let state = world.get_block(pos.0, pos.1, pos.2);
     if state == block_ids::AIR {
         return;
@@ -196,9 +256,89 @@ fn scheduled_update(world: &DemoWorld, registry: &SharedRegistry, pos: Pos) {
     let Some(name) = name_of(state) else {
         return;
     };
+    let get = |x, y, z| world.get_block(x, y, z);
     if is_falling(name) {
         falling::fall(world, registry, pos, state);
+    } else if (crops::is_sugar_cane(name) && !crops::can_survive_sugar_cane(&get, pos))
+        || (crops::is_cactus(name) && !crops::can_survive_cactus(&get, pos))
+    {
+        destroy(world, registry, rng, pos, state);
     }
+}
+
+/// Vanilla's random-tick pass: `RANDOM_TICK_SPEED` random blocks inside every
+/// resident 16³ section, of which the ones that act on their own get their
+/// tick. The sampling runs under the world's cache read lock, so it only
+/// collects positions; the work happens afterwards.
+fn random_ticks(world: &DemoWorld, registry: &SharedRegistry, rng: &mut Rng) {
+    let mut hits: Vec<Pos> = Vec::new();
+    world.for_each_random_tick(
+        RANDOM_TICK_SPEED,
+        &mut |bound| rng.range(0, bound as i32 - 1) as u32,
+        &mut |x, y, z, state| {
+            if state != block_ids::AIR && is_random_tickable(state) {
+                hits.push((x, y, z));
+            }
+        },
+    );
+    for pos in hits {
+        random_tick(world, registry, rng, pos);
+    }
+}
+
+/// One random-tick sample that landed on a block that acts on its own.
+fn random_tick(world: &DemoWorld, registry: &SharedRegistry, rng: &mut Rng, pos: Pos) {
+    let state = world.get_block(pos.0, pos.1, pos.2);
+    let Some(name) = name_of(state) else {
+        return;
+    };
+    let get = |x, y, z| world.get_block(x, y, z);
+    if crops::is_crop(name) {
+        if let Some(next) = crops::grow_crop(&get, rng, pos, state, name) {
+            set(world, registry, pos, next);
+        }
+    } else if crops::is_sugar_cane(name) {
+        if let Some(changes) = crops::grow_sugar_cane(&get, pos, state) {
+            for (p, to) in changes {
+                set(world, registry, p, to);
+            }
+        }
+    } else if crops::is_cactus(name) {
+        if let Some(changes) = crops::grow_cactus(&get, rng, pos, state) {
+            for (p, to) in changes {
+                set(world, registry, p, to);
+            }
+        }
+    }
+}
+
+/// Remove a block that lost its support, dropping its loot — vanilla's
+/// `destroyBlock(pos, true)`.
+fn destroy(
+    world: &DemoWorld,
+    registry: &SharedRegistry,
+    rng: &mut Rng,
+    pos: Pos,
+    state: BlockStateId,
+) {
+    let Some(name) = name_of(state) else {
+        return;
+    };
+    let stacks: Vec<crate::inventory::Stack> = crate::game::tables::block_drops(name, None, rng)
+        .into_iter()
+        .map(|(item, n)| crate::inventory::Stack::named(&item, n))
+        .collect();
+    if !stacks.is_empty() {
+        crate::game::entities::drop_at_block(
+            pos.0,
+            pos.1,
+            pos.2,
+            stacks,
+            aether_world::journal::ActorId::SERVER,
+            None,
+        );
+    }
+    set(world, registry, pos, block_ids::AIR);
 }
 
 /// Write a block, tell everyone, and wake what the change touches.

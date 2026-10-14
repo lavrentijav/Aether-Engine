@@ -61,8 +61,9 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
     }
     entities::update_tracking(registry, world);
     super::fluids::tick(world, registry);
-    // Falling sand, gravel and concrete powder: the scheduled queue.
-    super::blockticks::tick(world, registry);
+    // Falling sand, gravel and concrete powder, leaf distance, crop growth:
+    // the scheduled queue and the random-tick pass.
+    super::blockticks::tick(world, registry, rng);
 
     let players = registry.snapshot();
     for p in &players {
