@@ -20,6 +20,8 @@ use crate::pos::BlockPos;
 pub struct Notified {
     /// The cell that was notified.
     pub pos: BlockPos,
+    /// The source block's cell, as passed to `neighbor_changed`.
+    pub from_pos: BlockPos,
     /// The source block's state, as passed to `neighbor_changed`.
     pub from: BlockStateId,
     /// The state at the source position at notification time.
@@ -46,6 +48,7 @@ impl BlockBehaviour for Spy {
             LOG.with(|log| {
                 log.borrow_mut().push(Notified {
                     pos,
+                    from_pos: from.pos,
                     from: from.state,
                     source_now,
                 });

@@ -111,7 +111,7 @@ impl Redstone {
         let state = ctx.get_block(pos);
         behaviour::behaviour(state).on_place(&mut ctx, state, pos, behaviour::AIR);
         behaviour::behaviour(state).set_placed_by(&mut ctx, state, pos);
-        ctx.update_neighbors_at_with(pos, state, None);
+        ctx.fan_out(pos, pos, state, None, None);
         ctx.update_shapes(
             pos,
             behaviour::AIR,
@@ -126,7 +126,7 @@ impl Redstone {
     pub fn on_removed<V: RedstoneView>(&self, view: &mut V, pos: BlockPos, old: BlockStateId) {
         let mut ctx = Context::new(view);
         behaviour::behaviour(old).on_remove(&mut ctx, old, pos);
-        ctx.update_neighbors_at_with(pos, old, None);
+        ctx.fan_out(pos, pos, old, None, None);
         ctx.update_shapes(
             pos,
             old,

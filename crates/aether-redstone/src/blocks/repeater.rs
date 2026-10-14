@@ -250,9 +250,9 @@ fn check_tick(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
 fn update_neighbors_in_front(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
     // `DiodeBlock.updateNeighborsInFront`: notify the block behind the diode and
     // its neighbours, skipping the facing, with **the diode itself** as the
-    // source block.
+    // source block — so `NeighborSource::pos` is the diode, not the output cell.
     let facing = props::facing(state);
     let output = pos.offset(facing.opposite());
-    ctx.neighbor_changed_at(output, state);
-    ctx.update_neighbors_at_except_from_facing(output, state, facing, None);
+    ctx.neighbor_changed_at(output, pos, state);
+    ctx.update_neighbors_at_except_from_facing(output, pos, state, facing, None);
 }

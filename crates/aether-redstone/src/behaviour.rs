@@ -149,17 +149,24 @@ impl SignalCtx<'_> {
 
 /// One pending neighbour update — the records vanilla's `CollectingNeighborUpdater`
 /// keeps.
+///
+/// `changed` is the cell whose change caused the update (the source block's
+/// position, which becomes [`NeighborSource::pos`]); `center` is the cell the
+/// fan-out is measured from. They differ for the diode's except-facing update
+/// and for a wire's seven-cell blast, where the source block is elsewhere.
 enum NeighborUpdate {
     /// `SimpleNeighborUpdate`: notify a single cell.
     Simple {
         pos: BlockPos,
+        changed: BlockPos,
         source: BlockStateId,
         orientation: Option<Orientation>,
     },
     /// `MultiNeighborUpdate`: notify a cell's neighbours in `UPDATE_ORDER`,
     /// optionally skipping one face, yielding between each.
     Multi {
-        source_pos: BlockPos,
+        center: BlockPos,
+        changed: BlockPos,
         source: BlockStateId,
         skip: Option<Direction>,
         orientation: Option<Orientation>,
@@ -278,7 +285,7 @@ impl<'a> Context<'a> {
         }
 
         if flags.contains(SetBlockFlags::UPDATE_NEIGHBORS) {
-            self.update_neighbors_at_with(pos, old, None);
+            self.fan_out(pos, pos, old, None, None);
         }
 
         if !flags.contains(SetBlockFlags::UPDATE_KNOWN_SHAPE) && limit > 0 {
@@ -323,38 +330,46 @@ impl<'a> Context<'a> {
 
     // -- neighbour updates --------------------------------------------------
 
-    /// `Level.updateNeighborsAt`: notify a cell's six neighbours.
+    /// `Level.updateNeighborsAt`: notify a cell's six neighbours because that
+    /// cell itself changed.
     pub fn update_neighbors_at(&mut self, pos: BlockPos) {
         let source = self.get_block(pos);
-        self.update_neighbors_at_with(pos, source, None);
+        self.fan_out(pos, pos, source, None, None);
     }
 
-    /// Notify a cell's neighbours, with an explicit source block.
-    pub fn update_neighbors_at_with(
+    /// Notify `center`'s neighbours, reporting `changed` as the source cell —
+    /// a wire's seven-cell blast re-centres without moving the source.
+    pub fn fan_out(
         &mut self,
-        pos: BlockPos,
+        center: BlockPos,
+        changed: BlockPos,
         source: BlockStateId,
+        skip: Option<Direction>,
         orientation: Option<Orientation>,
     ) {
         self.add_and_run(NeighborUpdate::Multi {
-            source_pos: pos,
+            center,
+            changed,
             source,
-            skip: None,
+            skip,
             orientation,
             idx: 0,
         });
     }
 
-    /// `Level.updateNeighborsAtExceptFromFacing`.
+    /// `Level.updateNeighborsAtExceptFromFacing`: notify `center`'s neighbours
+    /// (skipping `skip`), with `source` at `changed` as the source block.
     pub fn update_neighbors_at_except_from_facing(
         &mut self,
-        pos: BlockPos,
+        center: BlockPos,
+        changed: BlockPos,
         source: BlockStateId,
         skip: Direction,
         orientation: Option<Orientation>,
     ) {
         self.add_and_run(NeighborUpdate::Multi {
-            source_pos: pos,
+            center,
+            changed,
             source,
             skip: Some(skip),
             orientation,
@@ -362,23 +377,20 @@ impl<'a> Context<'a> {
         });
     }
 
-    /// Notify a cell's neighbours, skipping the face in `skip`.
-    pub fn update_neighbors_except(&mut self, pos: BlockPos, skip: Direction) {
-        let source = self.get_block(pos);
-        self.update_neighbors_at_except_from_facing(pos, source, skip, None);
-    }
-
-    /// `Level.neighborChanged(pos, block)`: notify one cell.
-    pub fn neighbor_changed_at(&mut self, pos: BlockPos, source: BlockStateId) {
+    /// `Level.neighborChanged(pos, block)`: notify one cell, with `source` at
+    /// `changed` as the source block.
+    pub fn neighbor_changed_at(&mut self, pos: BlockPos, changed: BlockPos, source: BlockStateId) {
         self.add_and_run(NeighborUpdate::Simple {
             pos,
+            changed,
             source,
             orientation: None,
         });
     }
 
     /// The seven-cell blast a wire uses when its power changes: the wire and
-    /// its six neighbours, each then notifying its own neighbours.
+    /// its six neighbours, each then notifying its own neighbours. The source
+    /// cell is always the wire at `pos`.
     pub fn notify_around(&mut self, pos: BlockPos) {
         let source = self.get_block(pos);
         let mut cells = vec![pos];
@@ -389,7 +401,7 @@ impl<'a> Context<'a> {
             }
         }
         for cell in cells {
-            self.update_neighbors_at_with(cell, source, None);
+            self.fan_out(cell, pos, source, None, None);
         }
     }
 
@@ -484,11 +496,12 @@ impl<'a> Context<'a> {
         match update {
             NeighborUpdate::Simple {
                 pos,
+                changed,
                 source,
                 orientation,
             } => {
                 let source = NeighborSource {
-                    pos: *pos,
+                    pos: *changed,
                     state: *source,
                     orientation: *orientation,
                 };
@@ -496,7 +509,8 @@ impl<'a> Context<'a> {
                 false
             }
             NeighborUpdate::Multi {
-                source_pos,
+                center,
+                changed,
                 source,
                 skip,
                 orientation,
@@ -515,9 +529,9 @@ impl<'a> Context<'a> {
                     }
                     return *idx < Direction::UPDATE_ORDER.len();
                 }
-                let target = source_pos.offset(dir);
+                let target = center.offset(dir);
                 let source = NeighborSource {
-                    pos: *source_pos,
+                    pos: *changed,
                     state: *source,
                     orientation: *orientation,
                 };
@@ -841,8 +855,47 @@ mod tests {
         );
         for n in to_spy {
             assert_eq!(
+                n.from_pos, repeater,
+                "the source cell must be the repeater, not the output cell"
+            );
+            assert_eq!(
                 n.from, repeater_state,
                 "the source must be the repeater, not the stone at the output"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wire_blast_reports_the_wire_as_source() {
+        // D2: `notify_around` re-centres on each satellite but the source block
+        // is the wire that changed, so `NeighborSource::pos` is the wire.
+        let engine = Redstone::new();
+        let mut w = MemWorld::new();
+        let lever = p(0, 0, 0);
+        let wire = p(1, 0, 0);
+        let spy = p(2, 0, 0);
+        for x in 0..=2 {
+            w.put(p(x, -1, 0), "minecraft:stone");
+        }
+        w.put(lever, "minecraft:lever[face=floor,facing=east]");
+        w.put(wire, "minecraft:redstone_wire");
+        w.put(spy, "minecraft:note_block");
+        for x in 0..=2 {
+            engine.on_placed(&mut w, p(x, -1, 0));
+        }
+        engine.on_placed(&mut w, lever);
+        engine.on_placed(&mut w, wire);
+        test_spy::take();
+
+        engine.on_use(&mut w, lever);
+
+        let log = test_spy::take();
+        let to_spy: Vec<_> = log.iter().filter(|n| n.pos == spy).collect();
+        assert!(!to_spy.is_empty(), "the wire must notify its neighbour");
+        for n in to_spy {
+            assert_eq!(
+                n.from_pos, wire,
+                "the source cell must be the wire, not the notified satellite"
             );
         }
     }
