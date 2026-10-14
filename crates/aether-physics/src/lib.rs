@@ -4,20 +4,36 @@
 //! **movement** resolution per axis, and a simple **gravity + friction** step.
 //!
 //! The physics layer never touches storage directly — it reads the world
-//! through the [`BlockView`] trait (`is_solid(x, y, z)`), so it can run against
-//! the real engine world, a generated chunk, or a hand-built test fixture.
+//! through the [`BlockView`] trait, so it can run against the real engine
+//! world, a generated chunk, or a hand-built test fixture.
 //!
 //! The collision algorithm mirrors the classic Minecraft approach: gather the
-//! solid unit-cubes overlapping the swept region, then clip the motion one axis
-//! at a time (Y, then X, then Z), moving the box after each axis.
+//! collision boxes overlapping the swept region, then clip the motion one axis
+//! at a time (Y, then X, then Z), moving the box after each axis. A block
+//! contributes as many boxes as its **state** says: a slab one half-height
+//! box, a fence a handful of 1.5-tall ones, an open door or gate none at all.
 
 use aether_core::math::{Aabb, Vec3};
 
-/// Read-only access to block solidity for collision.
+/// Read-only access to block collision for movement.
 pub trait BlockView {
     /// Whether the block at integer coordinate `(x, y, z)` is a full collision
     /// cube. Out-of-world coordinates should return `false` (open air).
     fn is_solid(&self, x: i32, y: i32, z: i32) -> bool;
+
+    /// Append the collision boxes of the block at `(x, y, z)`, in **world**
+    /// coordinates, to `out`.
+    ///
+    /// The default is the coarse answer — one unit cube for a solid block,
+    /// nothing otherwise — which keeps a plain [`BlockView`] a valid physics
+    /// view. A state-aware view overrides it to return the real boxes (slab
+    /// halves, fence rails, the empty shape of an open gate). A block with no
+    /// boxes is passable, whatever its `is_solid` says.
+    fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+        if self.is_solid(x, y, z) {
+            out.push(Aabb::block(x, y, z));
+        }
+    }
 }
 
 /// Outcome of a [`collide`] call: the resolved box and which axes were blocked.
@@ -107,31 +123,43 @@ fn clip_z(block: Aabb, e: Aabb, dz: f64) -> f64 {
 // tick thread. A tick never legitimately moves this far.
 const MAX_SWEEP_BLOCKS: i32 = 256;
 
-/// Collect the solid block boxes overlapping the region swept by `aabb + motion`.
-fn solid_boxes<V: BlockView>(view: &V, swept: Aabb) -> Vec<Aabb> {
-    let x0 = swept.min.x.floor() as i32;
-    let y0 = swept.min.y.floor() as i32;
-    let z0 = swept.min.z.floor() as i32;
-    let x1 = ((swept.max.x - EPS).floor() as i32).min(x0.saturating_add(MAX_SWEEP_BLOCKS));
-    let y1 = ((swept.max.y - EPS).floor() as i32).min(y0.saturating_add(MAX_SWEEP_BLOCKS));
-    let z1 = ((swept.max.z - EPS).floor() as i32).min(z0.saturating_add(MAX_SWEEP_BLOCKS));
+/// How far a block's collision box may reach outside its own cell, over every
+/// shape in the vanilla tables: a fence or wall is 1.5 tall, some shapes dip to
+/// −0.25.
+const MAX_PROTRUSION: f64 = 0.5;
+
+/// Collect the collision boxes overlapping the region swept by `aabb + motion`.
+///
+/// The swept hull is grown by [`MAX_PROTRUSION`] before its cells are taken, so
+/// a box that sticks out of its cell is still found. Without it a body resting
+/// exactly on a non-integer top — a fence at 1.5 — would sweep a region that
+/// starts in the cell *above* the block holding it up, and fall straight
+/// through it on the next tick.
+fn block_boxes<V: BlockView>(view: &V, swept: Aabb) -> Vec<Aabb> {
+    let x0 = (swept.min.x - MAX_PROTRUSION).floor() as i32;
+    let y0 = (swept.min.y - MAX_PROTRUSION).floor() as i32;
+    let z0 = (swept.min.z - MAX_PROTRUSION).floor() as i32;
+    let x1 = (swept.max.x + MAX_PROTRUSION - EPS).floor() as i32;
+    let y1 = (swept.max.y + MAX_PROTRUSION - EPS).floor() as i32;
+    let z1 = (swept.max.z + MAX_PROTRUSION - EPS).floor() as i32;
+    let x1 = x1.min(x0.saturating_add(MAX_SWEEP_BLOCKS));
+    let y1 = y1.min(y0.saturating_add(MAX_SWEEP_BLOCKS));
+    let z1 = z1.min(z0.saturating_add(MAX_SWEEP_BLOCKS));
 
     let mut boxes = Vec::new();
     for y in y0..=y1 {
         for z in z0..=z1 {
             for x in x0..=x1 {
-                if view.is_solid(x, y, z) {
-                    boxes.push(Aabb::block(x, y, z));
-                }
+                view.collision_boxes(x, y, z, &mut boxes);
             }
         }
     }
     boxes
 }
 
-/// Move `aabb` by `motion`, resolving collisions against solid blocks in `view`.
+/// Move `aabb` by `motion`, resolving collisions against the blocks in `view`.
 pub fn collide<V: BlockView>(view: &V, aabb: Aabb, motion: Vec3) -> MoveResult {
-    let boxes = solid_boxes(view, aabb.expand(motion));
+    let boxes = block_boxes(view, aabb.expand(motion));
     let mut current = aabb;
 
     // Y first, so landing on a floor is detected, then X, then Z.
@@ -176,6 +204,9 @@ pub struct PhysicsParams {
     pub ground_friction: f64,
     /// Horizontal multiplier while airborne.
     pub air_friction: f64,
+    /// Highest obstacle a grounded body auto-steps over when walking into it,
+    /// vanilla's `maxUpStep` (a living entity is 0.6, an item is 0).
+    pub step_height: f64,
 }
 
 impl Default for PhysicsParams {
@@ -185,6 +216,7 @@ impl Default for PhysicsParams {
             vertical_drag: 0.98,
             ground_friction: 0.546, // ~0.6 slipperiness * 0.91 air term
             air_friction: 0.91,
+            step_height: 0.6,
         }
     }
 }
@@ -234,11 +266,71 @@ impl Body {
     }
 }
 
+/// The horizontal displacement between two boxes' centres.
+fn horizontal_distance(from: Aabb, to: Aabb) -> f64 {
+    let dx = (to.min.x + to.max.x) - (from.min.x + from.max.x);
+    let dz = (to.min.z + to.max.z) - (from.min.z + from.max.z);
+    (dx * dx + dz * dz).sqrt() / 2.0
+}
+
+/// Resolve one move, stepping up a low obstacle the way a grounded walking
+/// entity does.
+///
+/// The plain move is tried first. If it was cut short horizontally and the
+/// body was on the ground, the same move is retried from `step_height` higher:
+/// if that gets the body further horizontally it is adopted, and the body
+/// settles back down onto whatever it stepped onto. This is how a slab (0.5),
+/// a carpet or a single rail is climbed without jumping, while a full block
+/// (1.0) still stops the body — 1.0 is taller than any `step_height` a walking
+/// entity has.
+fn collide_stepped<V: BlockView>(
+    view: &V,
+    aabb: Aabb,
+    motion: Vec3,
+    step_height: f64,
+    on_ground: bool,
+) -> MoveResult {
+    let res = collide(view, aabb, motion);
+    let want = Vec3::new(motion.x, 0.0, motion.z);
+    if !on_ground || step_height <= 0.0 || want.length_squared() <= EPS {
+        return res;
+    }
+    let base = horizontal_distance(aabb, res.aabb);
+    if base >= want.length() - EPS {
+        return res; // nothing was blocked horizontally
+    }
+
+    // Raise, cross at that height, then drop back down.
+    let raised = collide(view, aabb, Vec3::new(0.0, step_height, 0.0));
+    let up = raised.aabb.min.y - aabb.min.y;
+    if up <= EPS {
+        return res; // a ceiling lower than the step
+    }
+    let across = collide(view, raised.aabb, want);
+    if horizontal_distance(aabb, across.aabb) <= base + EPS {
+        return res; // crossing at step height bought nothing
+    }
+    let dropped = collide(view, across.aabb, Vec3::new(0.0, -up, 0.0));
+    MoveResult {
+        aabb: dropped.aabb,
+        collided_x: across.collided_x,
+        collided_z: across.collided_z,
+        collided_y: dropped.collided_y,
+        on_ground: dropped.collided_y || across.on_ground,
+    }
+}
+
 /// Advance `body` one tick: apply gravity, move-and-collide, then friction.
 pub fn step<V: BlockView>(view: &V, body: &mut Body, params: PhysicsParams) {
     body.velocity.y -= params.gravity;
 
-    let res = collide(view, body.aabb, body.velocity);
+    let res = collide_stepped(
+        view,
+        body.aabb,
+        body.velocity,
+        params.step_height,
+        body.on_ground,
+    );
     body.aabb = res.aabb;
     body.on_ground = res.on_ground;
 
@@ -286,6 +378,161 @@ mod tests {
         fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
             x == self.wx && y == self.wy && z == self.wz
         }
+    }
+
+    /// A flat floor at `y < 64` with a few blocks, each carrying an explicit
+    /// list of block-local collision boxes (an empty list is passable).
+    struct Field {
+        blocks: Vec<((i32, i32, i32), Vec<[f64; 6]>)>,
+    }
+    impl Field {
+        fn with(blocks: Vec<((i32, i32, i32), Vec<[f64; 6]>)>) -> Self {
+            Self { blocks }
+        }
+        fn boxes_at(&self, x: i32, y: i32, z: i32) -> Option<&Vec<[f64; 6]>> {
+            self.blocks
+                .iter()
+                .find(|(p, _)| *p == (x, y, z))
+                .map(|(_, b)| b)
+        }
+    }
+    impl BlockView for Field {
+        fn is_solid(&self, _x: i32, y: i32, _z: i32) -> bool {
+            y < 64
+        }
+        fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+            if y < 64 {
+                out.push(Aabb::block(x, y, z));
+            }
+            if let Some(boxes) = self.boxes_at(x, y, z) {
+                let (fx, fy, fz) = (x as f64, y as f64, z as f64);
+                for b in boxes {
+                    out.push(Aabb::new(
+                        Vec3::new(fx + b[0], fy + b[1], fz + b[2]),
+                        Vec3::new(fx + b[3], fy + b[4], fz + b[5]),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// A bottom slab: the lower half of the cell.
+    fn slab_box() -> Vec<[f64; 6]> {
+        vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]
+    }
+
+    #[test]
+    fn an_entity_walks_up_a_slab() {
+        // A long run of bottom slabs one block east of the spawn.
+        let field = Field::with(
+            (1..=4)
+                .map(|x| ((x, 64, 0), slab_box()))
+                .collect::<Vec<_>>(),
+        );
+        let mut body = Body::player(Vec3::new(0.5, 64.0, 0.5));
+        // Settle onto the floor first.
+        for _ in 0..5 {
+            step(&field, &mut body, PhysicsParams::default());
+        }
+        assert!(body.on_ground);
+        // Walk east at a steady pace with no jump input.
+        for _ in 0..25 {
+            body.velocity.x = 0.12;
+            step(&field, &mut body, PhysicsParams::default());
+        }
+        // It climbed the 0.5 slab instead of being stopped by it, and is
+        // standing on top of the run.
+        assert!(
+            (body.feet().y - 64.5).abs() < 1.0e-6,
+            "feet at {}, expected the slab top 64.5",
+            body.feet().y
+        );
+        assert!(
+            (2.0..4.5).contains(&body.feet().x),
+            "did not walk on: x {}",
+            body.feet().x
+        );
+        assert!(body.on_ground);
+    }
+
+    #[test]
+    fn an_entity_cannot_walk_up_a_full_block() {
+        // The same run, but full cubes: 0.6 step height cannot climb 1.0.
+        let field = Field::with(
+            (1..=4)
+                .map(|x| ((x, 64, 0), vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]))
+                .collect::<Vec<_>>(),
+        );
+        let mut body = Body::player(Vec3::new(0.5, 64.0, 0.5));
+        for _ in 0..5 {
+            step(&field, &mut body, PhysicsParams::default());
+        }
+        for _ in 0..40 {
+            body.velocity.x = 0.12;
+            step(&field, &mut body, PhysicsParams::default());
+        }
+        assert!(
+            body.feet().y < 64.1,
+            "should still be on the floor, feet at {}",
+            body.feet().y
+        );
+        assert!(body.feet().x < 1.0, "should not have entered the block");
+    }
+
+    #[test]
+    fn an_entity_stands_on_a_fence_at_1_5() {
+        // A fence post: a 1.5-tall shape in the middle of its cell.
+        let field = Field::with(vec![(
+            (0, 64, 0),
+            vec![[0.375, 0.0, 0.375, 0.625, 1.5, 0.625]],
+        )]);
+        let mut body = Body::player(Vec3::new(0.5, 66.0, 0.5));
+        for _ in 0..100 {
+            step(&field, &mut body, PhysicsParams::default());
+        }
+        assert!(body.on_ground);
+        assert!(
+            (body.feet().y - 65.5).abs() < 1.0e-6,
+            "feet at {}, expected the fence top 65.5",
+            body.feet().y
+        );
+    }
+
+    #[test]
+    fn an_entity_passes_through_an_open_gate() {
+        // The gate's cell is passable: an open gate contributes no boxes.
+        let open = Field::with(vec![((0, 64, 0), vec![])]);
+        let mut body = Body::player(Vec3::new(0.5, 64.0, -0.5));
+        for _ in 0..5 {
+            step(&open, &mut body, PhysicsParams::default());
+        }
+        for _ in 0..40 {
+            body.velocity.z = 0.12;
+            step(&open, &mut body, PhysicsParams::default());
+        }
+        assert!(
+            body.feet().z > 1.0,
+            "an open gate must not stop the body, z {}",
+            body.feet().z
+        );
+    }
+
+    #[test]
+    fn a_closed_gate_stops_an_entity() {
+        let closed = Field::with(vec![((0, 64, 0), vec![[0.0, 0.0, 0.0, 1.0, 1.5, 1.0]])]);
+        let mut body = Body::player(Vec3::new(0.5, 64.0, -0.5));
+        for _ in 0..5 {
+            step(&closed, &mut body, PhysicsParams::default());
+        }
+        for _ in 0..40 {
+            body.velocity.z = 0.12;
+            step(&closed, &mut body, PhysicsParams::default());
+        }
+        assert!(
+            body.feet().z < 0.0,
+            "a closed gate must stop the body, z {}",
+            body.feet().z
+        );
     }
 
     #[test]

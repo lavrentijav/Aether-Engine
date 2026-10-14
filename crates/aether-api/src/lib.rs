@@ -666,7 +666,10 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
     }
 }
 
-/// Blocks with the `collision` property act as solid unit cubes for physics.
+/// The world as a physics [`BlockView`]: the `collision` mask answers the
+/// coarse "is there a cube here", and the generated per-state shape table
+/// answers where that block's boxes actually are — a slab's half cell, a
+/// fence's 1.5-tall rails, an open gate's empty shape.
 impl<B: KvBackend, G: ChunkGenerator> BlockView for World<B, G> {
     fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
         let Some((key, lx, ly, lz)) = Self::key_of(x, y, z) else {
@@ -677,6 +680,17 @@ impl<B: KvBackend, G: ChunkGenerator> BlockView for World<B, G> {
         match cache.get(&key) {
             Some(sc) => sc.collision_mask().get(SubChunk::index(lx, ly, lz)),
             None => false,
+        }
+    }
+
+    fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+        let id = self.get_block(x, y, z);
+        let (fx, fy, fz) = (x as f64, y as f64, z as f64);
+        for b in aether_world::registry::shapes::collision_boxes(id.raw()) {
+            out.push(Aabb::new(
+                Vec3::new(fx + b[0] as f64, fy + b[1] as f64, fz + b[2] as f64),
+                Vec3::new(fx + b[3] as f64, fy + b[4] as f64, fz + b[5] as f64),
+            ));
         }
     }
 }
@@ -952,6 +966,43 @@ mod tests {
         let world = World::new(MemStore::new(), FlatGenerator::classic());
         assert!(world.is_solid(0, 0, 0)); // bedrock
         assert!(!world.is_solid(0, 10, 0)); // air
+    }
+
+    #[test]
+    fn collision_boxes_follow_the_block_state() {
+        let world = World::new(MemStore::new(), FlatGenerator::classic());
+        let boxes = |x, y, z| {
+            let mut out = Vec::new();
+            aether_physics::BlockView::collision_boxes(&world, x, y, z, &mut out);
+            out
+        };
+
+        // An open gate is passable; a closed one is not.
+        world.set_block(0, 10, 0, "minecraft:oak_fence_gate[open=true,facing=north]");
+        assert!(boxes(0, 10, 0).is_empty(), "an open gate must not collide");
+        world.set_block(
+            0,
+            10,
+            0,
+            "minecraft:oak_fence_gate[open=false,facing=north]",
+        );
+        assert!(!boxes(0, 10, 0).is_empty(), "a closed gate must collide");
+
+        // A slab's box is half a cell, in the half its `type` names.
+        world.set_block(1, 10, 0, "minecraft:oak_slab[type=bottom]");
+        let bottom = boxes(1, 10, 0);
+        assert_eq!(bottom.len(), 1);
+        assert_eq!((bottom[0].min.y, bottom[0].max.y), (10.0, 10.5));
+        world.set_block(1, 10, 0, "minecraft:oak_slab[type=top]");
+        let top = boxes(1, 10, 0);
+        assert_eq!(top.len(), 1);
+        assert_eq!((top[0].min.y, top[0].max.y), (10.5, 11.0));
+
+        // A fence reaches 1.5 up, so it can be walked on at that height.
+        world.set_block(2, 10, 0, "minecraft:oak_fence");
+        let fence = boxes(2, 10, 0);
+        assert!(!fence.is_empty());
+        assert!(fence.iter().all(|b| b.max.y == 11.5));
     }
 
     #[test]
