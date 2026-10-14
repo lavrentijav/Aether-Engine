@@ -496,7 +496,12 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
                     }
                 }
             } else {
-                p.i64(*time_of_day).bool(true);
+                p.i64(*time_of_day);
+                // `tickDayTime` was added in 1.21.2; writing it before that
+                // leaves a stray byte the client reads as the next packet.
+                if v.gen >= Gen::V1_21_3 {
+                    p.bool(true);
+                }
             }
             vec![p]
         }
@@ -1003,5 +1008,19 @@ mod tests {
         let v = &crate::protocol::modern::version::V1_21_9;
         assert_eq!(v.damage_types.len(), 47);
         assert_eq!(v.damage_type("minecraft:starve"), Some(37));
+    }
+
+    #[test]
+    fn the_time_packet_has_no_tick_day_time_before_1_21_2() {
+        // `tickDayTime` arrived in 1.21.2; writing it earlier leaves a stray
+        // byte the client reads as the next packet.
+        let ev = ServerEvent::Time {
+            age: 1,
+            time_of_day: 2,
+        };
+        let len = |v: &Version| encode(v, &ev).unwrap()[0].body().len();
+        assert_eq!(len(&crate::protocol::modern::version::V1_20_5), 1 + 16);
+        assert_eq!(len(&crate::protocol::modern::version::V1_21_1), 1 + 16);
+        assert_eq!(len(&crate::protocol::modern::version::V1_21_3), 1 + 17);
     }
 }
