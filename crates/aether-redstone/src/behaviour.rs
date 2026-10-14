@@ -81,6 +81,11 @@ impl SignalCtx<'_> {
         self.behaviour(state).is_conductor(state)
     }
 
+    /// The analog output the block at `pos` reports, if any.
+    pub fn analog_output(&self, pos: BlockPos) -> Option<u8> {
+        self.view.analog_output(pos)
+    }
+
     /// `getSignal(pos, dir)` — weak power emitted toward the neighbour in `dir`.
     pub fn get_signal(&self, pos: BlockPos, dir: Direction) -> u8 {
         let state = self.get_block(pos);

@@ -7,6 +7,7 @@
 mod button;
 mod comparator;
 mod default;
+pub(crate) mod diode;
 mod lamp;
 mod lever;
 mod redstone_block;

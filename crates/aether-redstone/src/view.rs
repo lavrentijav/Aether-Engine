@@ -224,6 +224,17 @@ pub trait RedstoneView {
     /// command that suppresses drops stays silent). The default does nothing; a
     /// host that wants items implements it.
     fn drop_block(&mut self, _pos: BlockPos, _state: BlockStateId) {}
+
+    /// The **analog output** signal (0–15) the block at `pos` provides to a
+    /// redstone comparator — a container's fill level, a cake's bites, a
+    /// composter's level, and so on. `None` if the block has no analog output.
+    ///
+    /// The crate has no inventory model, so the host computes this from
+    /// whatever it stores: vanilla's `Container.getRedstoneSignalFromContainer`
+    /// is `floor(1 + fillFraction * 14)`. The default reports no container.
+    fn analog_output(&self, _pos: BlockPos) -> Option<u8> {
+        None
+    }
 }
 
 /// An in-memory world: a map of states, a block-tick queue and the redstone
@@ -246,6 +257,8 @@ pub struct MemWorld {
     max_chained: Option<usize>,
     /// Blocks the engine destroyed, as `(pos, state)`, in order.
     drops: Vec<(BlockPos, BlockStateId)>,
+    /// Analog output a test sets for a container-like cell.
+    analog: HashMap<BlockPos, u8>,
 }
 
 impl MemWorld {
@@ -295,6 +308,11 @@ impl MemWorld {
     /// The blocks the engine destroyed, as `(pos, state)`, oldest first.
     pub fn dropped(&self) -> &[(BlockPos, BlockStateId)] {
         &self.drops
+    }
+
+    /// Set the analog output (0–15) a container-like cell reports.
+    pub fn set_analog_output(&mut self, pos: BlockPos, signal: u8) {
+        self.analog.insert(pos, signal);
     }
 
     /// Advance one game tick and run every block tick that has come due.
@@ -388,6 +406,10 @@ impl RedstoneView for MemWorld {
     fn drop_block(&mut self, pos: BlockPos, state: BlockStateId) {
         self.drops.push((pos, state));
     }
+
+    fn analog_output(&self, pos: BlockPos) -> Option<u8> {
+        self.analog.get(&pos).copied()
+    }
 }
 
 /// A world that records every state write, so a test can assert the exact
@@ -467,6 +489,10 @@ impl RedstoneView for TraceWorld {
 
     fn drop_block(&mut self, pos: BlockPos, state: BlockStateId) {
         self.inner.drop_block(pos, state);
+    }
+
+    fn analog_output(&self, pos: BlockPos) -> Option<u8> {
+        self.inner.analog_output(pos)
     }
 }
 

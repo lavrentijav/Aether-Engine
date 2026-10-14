@@ -2,12 +2,11 @@
 
 use aether_world::BlockStateId;
 
-use crate::behaviour::{behaviour, Context, NeighborSource, SignalCtx};
-use crate::blocks::BlockBehaviour;
+use crate::behaviour::{Context, NeighborSource, SignalCtx};
+use crate::blocks::{diode, BlockBehaviour};
 use crate::dir::Direction;
 use crate::pos::BlockPos;
 use crate::props;
-use crate::shapes;
 use crate::view::{SetBlockFlags, TickPriority};
 
 /// The redstone repeater.
@@ -70,11 +69,11 @@ impl BlockBehaviour for Repeater {
     }
 
     fn on_place(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos, _old: BlockStateId) {
-        update_neighbors_in_front(ctx, pos, state);
+        diode::update_neighbors_in_front(ctx, pos, state);
     }
 
     fn on_remove(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
-        update_neighbors_in_front(ctx, pos, state);
+        diode::update_neighbors_in_front(ctx, pos, state);
     }
 
     fn set_placed_by(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
@@ -113,14 +112,9 @@ impl BlockBehaviour for Repeater {
         dir: Direction,
     ) -> Option<BlockStateId> {
         // `RepeaterBlock.updateShape(DOWN)`: a repeater whose support is gone
-        // pops off. `DiodeBlock.canSurviveOn` is `isFaceSturdy(UP, SupportType.RIGID)`
-        // — the outer 2/16 frame, not the FULL face — so a hopper's rim, a
-        // fence post and a slab all hold a repeater.
-        if dir == Direction::Down {
-            let below = ctx.get_block(pos.offset(Direction::Down));
-            if !shapes::face_rigid(below, Direction::Up) {
-                return Some(crate::behaviour::AIR);
-            }
+        // pops off (`canSurviveOn` = RIGID).
+        if dir == Direction::Down && !diode::supported(ctx, pos) {
+            return Some(crate::behaviour::AIR);
         }
         // Then it recomputes LOCKED for any direction off the facing axis,
         // which includes UP and DOWN.
@@ -150,56 +144,12 @@ fn delay(state: BlockStateId) -> u32 {
     u32::from(props::delay(state)) * 2
 }
 
-fn wire_power(state: BlockStateId) -> u8 {
-    if behaviour(state).is_wire() {
-        props::power(state)
-    } else {
-        0
-    }
-}
-
-fn input_signal(ctx: &SignalCtx, pos: BlockPos, state: BlockStateId) -> u8 {
-    let dir = props::facing(state);
-    let input = pos.offset(dir);
-    let signal = ctx.get_signal(input, dir);
-    if signal >= 15 {
-        return signal;
-    }
-    signal.max(wire_power(ctx.get_block(input)))
-}
-
 fn should_turn_on(ctx: &SignalCtx, pos: BlockPos, state: BlockStateId) -> bool {
-    input_signal(ctx, pos, state) > 0
-}
-
-fn control_input(ctx: &SignalCtx, pos: BlockPos, dir: Direction, diodes_only: bool) -> u8 {
-    let state = ctx.get_block(pos);
-    if diodes_only {
-        if behaviour(state).is_diode() {
-            ctx.get_direct_signal(pos, dir)
-        } else {
-            0
-        }
-    } else if behaviour(state).is_redstone_block() {
-        15
-    } else if behaviour(state).is_wire() {
-        props::power(state)
-    } else if behaviour(state).is_signal_source(state) {
-        ctx.get_direct_signal(pos, dir)
-    } else {
-        0
-    }
-}
-
-fn alternate_signal(ctx: &SignalCtx, pos: BlockPos, state: BlockStateId) -> u8 {
-    let facing = props::facing(state);
-    let cw = facing.clockwise();
-    let ccw = facing.counter_clockwise();
-    control_input(ctx, pos.offset(cw), cw, true).max(control_input(ctx, pos.offset(ccw), ccw, true))
+    diode::base_input_signal(ctx, pos, state) > 0
 }
 
 fn is_locked(ctx: &SignalCtx, pos: BlockPos, state: BlockStateId) -> bool {
-    alternate_signal(ctx, pos, state) > 0
+    diode::alternate_signal(ctx, pos, state, true) > 0
 }
 
 fn update_locked(ctx: &mut Context, pos: BlockPos, state: BlockStateId) -> BlockStateId {
@@ -214,12 +164,6 @@ fn update_locked(ctx: &mut Context, pos: BlockPos, state: BlockStateId) -> Block
     new
 }
 
-fn should_prioritize(ctx: &SignalCtx, pos: BlockPos, state: BlockStateId) -> bool {
-    let opposite = props::facing(state).opposite();
-    let neighbour = ctx.get_block(pos.offset(opposite));
-    behaviour(neighbour).is_diode() && props::facing(neighbour) != opposite
-}
-
 fn check_tick(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
     if is_locked(&ctx.signals(), pos, state) {
         return;
@@ -229,7 +173,7 @@ fn check_tick(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
         (
             props::powered(state),
             should_turn_on(&signals, pos, state),
-            should_prioritize(&signals, pos, state),
+            diode::should_prioritize(&signals, pos, state),
         )
     };
     if is_on != should && !ctx.will_tick_this_tick(pos) {
@@ -242,14 +186,4 @@ fn check_tick(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
         };
         ctx.schedule_tick(pos, delay(state), priority);
     }
-}
-
-fn update_neighbors_in_front(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
-    // `DiodeBlock.updateNeighborsInFront`: notify the block behind the diode and
-    // its neighbours, skipping the facing, with **the diode itself** as the
-    // source block — so `NeighborSource::pos` is the diode, not the output cell.
-    let facing = props::facing(state);
-    let output = pos.offset(facing.opposite());
-    ctx.neighbor_changed_at(output, pos, state);
-    ctx.update_neighbors_at_except_from_facing(output, pos, state, facing, None);
 }
