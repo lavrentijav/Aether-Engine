@@ -33,6 +33,7 @@ pub mod palette;
 pub mod registry;
 pub mod storage;
 pub mod subchunk;
+pub mod visibility;
 
 pub use block::{BlockProperties, BlockStateId};
 pub use cell::AvxCell;
