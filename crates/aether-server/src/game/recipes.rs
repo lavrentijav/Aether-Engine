@@ -978,8 +978,8 @@ mod tests {
     }
 
     #[test]
-    fn a_shaped_recipe_matches_straight_and_mirrored() {
-        // A fake 3-tall shape over two item names; mirrored must match too.
+    fn a_shaped_recipe_matches_straight() {
+        // A pattern symmetric under mirror, drawn straight.
         let book = book_of(
             &[r##"{
                 "type": "minecraft:crafting_shaped",
@@ -994,18 +994,18 @@ mod tests {
         let boat = ItemTypeId::vanilla("minecraft:oak_boat").unwrap();
         // Pattern occupies 3x2; the grid is 3 wide.
         let straight = [Some(p), None, Some(p), None, Some(s), None];
-        let mirrored = [Some(p), None, Some(p), None, Some(s), None]; // symmetric here
         assert_eq!(book.craft(&straight, 3), Some((boat, 1)));
-        assert_eq!(book.craft(&mirrored, 3), Some((boat, 1)));
     }
 
     #[test]
-    fn an_asymmetric_shaped_recipe_matches_mirrored() {
+    fn an_asymmetric_shaped_recipe_matches_only_when_mirrored() {
+        // `["X  ", "SS "]` trims to a 2x2 pattern `[X, _, S, S]` — genuinely
+        // asymmetric. A grid placed the other way round must still match.
         let book = book_of(
             &[r##"{
                 "type": "minecraft:crafting_shaped",
                 "key": {"X": "minecraft:oak_planks", "S": "minecraft:stick"},
-                "pattern": ["X  ", "S  "],
+                "pattern": ["X  ", "SS "],
                 "result": {"id": "minecraft:oak_boat", "count": 1}
             }"##],
             vec![],
@@ -1013,9 +1013,13 @@ mod tests {
         let p = ItemTypeId::vanilla("minecraft:oak_planks").unwrap();
         let s = ItemTypeId::vanilla("minecraft:stick").unwrap();
         let boat = ItemTypeId::vanilla("minecraft:oak_boat").unwrap();
-        // Drawn as X over S, and mirrored as X over S on the other side.
-        let left = [Some(p), None, None, Some(s), None, None];
-        assert_eq!(book.craft(&left, 3), Some((boat, 1)));
+        // Straight: X top-left, two sticks below.
+        let straight = [Some(p), None, Some(s), Some(s)];
+        assert_eq!(book.craft(&straight, 2), Some((boat, 1)));
+        // Mirrored: the X sits top-right; the straight test fails and only the
+        // mirror branch can match.
+        let mirrored = [None, Some(p), Some(s), Some(s)];
+        assert_eq!(book.craft(&mirrored, 2), Some((boat, 1)));
     }
 
     #[test]
