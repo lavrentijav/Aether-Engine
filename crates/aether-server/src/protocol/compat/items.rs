@@ -108,6 +108,12 @@ impl ItemTable {
                 .any(|&e| e >= 0 && e & 0x1_0000 != 0 && (e & 0xffff) == wire)
     }
 
+    /// Whether this version shows `item` under a different item's wire id.
+    #[inline]
+    fn is_disguised(&self, item: ItemTypeId) -> bool {
+        self.wire(item).is_some_and(|w| w.disguised)
+    }
+
     /// Whether two engine items go out on the wire under the same id.
     ///
     /// The wire cannot tell a genuine item from a stand-in that shares its id
@@ -164,8 +170,18 @@ impl ItemTable {
     ) -> (Resolution, Option<ItemTypeId>) {
         match report {
             None => {
-                // The slot emptied: the client is now carrying what was in it.
-                (Resolution::Apply(None), previous)
+                // The slot emptied. If it held a disguised item, the client is
+                // now carrying the *real* item, so shadow it. A genuine item
+                // needs no shadow and supersedes any earlier one (the cursor
+                // holds one thing). But an already-empty slot reports nothing
+                // about the cursor, so a duplicate empty report must **not**
+                // clear the shadow — that would destroy the item (F4).
+                let carried = match previous {
+                    Some(p) if self.is_disguised(p) => Some(p),
+                    Some(_) => None,
+                    None => carried,
+                };
+                (Resolution::Apply(None), carried)
             }
             Some(r) => {
                 if let Some(p) = previous.filter(|p| self.same_wire(*p, r)) {
@@ -444,6 +460,29 @@ mod tests {
             Resolution::Apply(Some(id("minecraft:trident"))),
             "the source was spent, so the second report is a genuine creation"
         );
+    }
+
+    #[test]
+    fn an_empty_report_for_an_empty_slot_does_not_destroy_the_shadow() {
+        // F4 (MEDIUM): the old `None` arm set `carried = previous`
+        // unconditionally, so a client re-sending an empty stack for an
+        // already-empty slot cleared the shadow and the real item was lost.
+        let spear = id("minecraft:iron_spear");
+        let t = &V1_21_1;
+        let Some(shown) = shown_as(t, spear) else {
+            return;
+        };
+        // Pick the spear up: the shadow is now the spear.
+        let (_, carried) = t.resolve_change(None, Some(spear), None);
+        assert_eq!(carried, Some(spear));
+        // An empty report for a slot that was *already* empty says nothing
+        // about the cursor, so the shadow must survive.
+        let (res, carried) = t.resolve_change(None, None, carried);
+        assert_eq!(res, Resolution::Apply(None));
+        assert_eq!(carried, Some(spear), "the spear must not be lost");
+        // And it can still be placed as the real item.
+        let (res, _) = t.resolve_change(Some(shown), None, carried);
+        assert_eq!(res, Resolution::Apply(Some(spear)));
     }
 
     #[test]
