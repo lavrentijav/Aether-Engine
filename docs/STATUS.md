@@ -111,7 +111,7 @@ modern versions run a server-side survival game).
 | **Behaviour-preserving stand-ins** (`protocol::compat::behaviour`, task J4): the *real* item decides the action, so a client without spears — shown a trident (a sword on 1.8.9) — still runs the spear's jab on attack and its charged lunge on release, never a trident throw; mace and wind charge classified as the second and third users | ✅ |
 | **Survival gameplay on 1.21.11 and 26.1–26.3** (`game/`): 20 TPS world tick, day/night, hunger, regeneration, starvation, fall/void/lava damage, death screen, inventory dropped on death, respawn | ✅ |
 | Status effects (`game/effects.rs`): Update / Remove Mob Effect on 1.21.11 and 26.1–26.3; golden/enchanted apples, poisonous potato, spider eye, pufferfish, rotten flesh and suspicious stew; regeneration, poison (never below one heart), wither, hunger, absorption, resistance, fire resistance and speed/slowness (movement-speed attribute); tick, expire, milk cures, saved with the player | ✅ |
-| Mobs: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider — natural spawning, wander/flee/chase AI, melee, skeleton arrows, creeper explosions, undead burn in daylight, loot and XP | 🚧 Preview |
+| Mobs: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider — natural spawning, melee, skeleton arrows, creeper explosions, undead burn in daylight, loot and XP; ground movement is cached A\* over the block grid (`aether_world::pathfind`, a simplified `WalkNodeEvaluator`) with a per-tick node budget, so zombies chase around walls and animals wander to reachable targets; doors and spider climbing are not implemented ([Known Issues A.10](KNOWN_ISSUES.md)) | 🚧 Preview |
 | Combat: 1.9 attack cooldown, critical hits, knockback, armour reduction and wear, tool durability, PvP | ✅ |
 | Item entities: block drops from loot tables, Q / drop stack, pickup with the collect animation, merging, 5-minute expiry | ✅ |
 | Experience orbs: ores, mob kills and smelting drop `minecraft:experience_orb` entities instead of crediting the killer; they drift to a nearby player, merge up to the orb cap, and are picked up with vanilla's ladder of orb values | ✅ |
@@ -155,7 +155,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 - 🚧 Physics pipeline (basic collision + gravity ✅; SIMD broad-phase, cached environment 📋)
 - 📋 Graph-based redstone (DDG)
 - 🚧 Lighting: real block/sky light by mask dilation ships on 1.21.11 and 26.x; incremental relight, caching and cross-column propagation still 📋 (the demo and 1.8.9 codec keep the `FullBright` fallback)
-- 🚧 Entities + AI — server-side mobs with straight-line AI ship on 1.21.11 and 26.1–26.3; ECS storage + Flow-Field still 📋
+- 🚧 Entities + AI — server-side mobs with cached A\* pathfinding ship on 1.21.11 and 26.1–26.3; ECS storage + Flow-Field still 📋
 - ✅ KV storage (Fjall + Zstd)
 - 📋 Per-world process isolation + work-stealing scheduler
 
