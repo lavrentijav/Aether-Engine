@@ -75,12 +75,19 @@
 //! `updateIndirectNeighbourShapes`) run where vanilla runs them.
 //! See [`Redstone`] and `docs/KNOWN_ISSUES.md` for the full list of differences.
 //!
+//! ## Components
+//!
+//! Wire, repeater, comparator, observer, redstone torch and wall torch, lever,
+//! button, block of redstone, lamp, daylight detector, pressure plates
+//! (wood/stone and weighted), tripwire and hook, and the target block.
+//!
 //! ## Not in this stage
 //!
-//! Comparators, observers, pistons, hoppers, droppers and dispensers, doors and
-//! trapdoors reacting to power, rails, quasi-connectivity, the dependency-graph
-//! compiler, and wiring the engine into the server tick loop. Each is listed
-//! here so a later stage extends this crate instead of rewriting it.
+//! Pistons (and quasi-connectivity), hoppers, droppers and dispensers, doors and
+//! trapdoors reacting to power, rails, note block, TNT priming, the
+//! dependency-graph compiler, and wiring the engine into the server tick loop.
+//! Each is listed here so a later stage extends this crate instead of rewriting
+//! it.
 
 #![forbid(unsafe_code)]
 
