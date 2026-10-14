@@ -235,6 +235,19 @@ pub trait RedstoneView {
     fn analog_output(&self, _pos: BlockPos) -> Option<u8> {
         None
     }
+
+    /// A daylight detector's raw daylight at `pos`: vanilla's
+    /// `getBrightness(LightLayer.SKY, pos) - getSkyDarken()`. May be negative.
+    /// The default is 0 (night).
+    fn sky_light(&self, _pos: BlockPos) -> i32 {
+        0
+    }
+
+    /// The sun angle at `pos` in radians (vanilla's `SUN_ANGLE` environment
+    /// attribute). The default is 0 (midnight/noon of the raw term).
+    fn sun_angle(&self, _pos: BlockPos) -> f32 {
+        0.0
+    }
 }
 
 /// An in-memory world: a map of states, a block-tick queue and the redstone
@@ -259,6 +272,8 @@ pub struct MemWorld {
     drops: Vec<(BlockPos, BlockStateId)>,
     /// Analog output a test sets for a container-like cell.
     analog: HashMap<BlockPos, u8>,
+    /// The world's daylight: `(sky_light, sun_angle)`.
+    daylight: (i32, f32),
 }
 
 impl MemWorld {
@@ -313,6 +328,12 @@ impl MemWorld {
     /// Set the analog output (0–15) a container-like cell reports.
     pub fn set_analog_output(&mut self, pos: BlockPos, signal: u8) {
         self.analog.insert(pos, signal);
+    }
+
+    /// Set the world's daylight: the raw sky light and the sun angle (radians),
+    /// as a daylight detector reads them.
+    pub fn set_daylight(&mut self, sky_light: i32, sun_angle: f32) {
+        self.daylight = (sky_light, sun_angle);
     }
 
     /// Advance one game tick and run every block tick that has come due.
@@ -410,6 +431,14 @@ impl RedstoneView for MemWorld {
     fn analog_output(&self, pos: BlockPos) -> Option<u8> {
         self.analog.get(&pos).copied()
     }
+
+    fn sky_light(&self, _pos: BlockPos) -> i32 {
+        self.daylight.0
+    }
+
+    fn sun_angle(&self, _pos: BlockPos) -> f32 {
+        self.daylight.1
+    }
 }
 
 /// A world that records every state write, so a test can assert the exact
@@ -493,6 +522,14 @@ impl RedstoneView for TraceWorld {
 
     fn analog_output(&self, pos: BlockPos) -> Option<u8> {
         self.inner.analog_output(pos)
+    }
+
+    fn sky_light(&self, pos: BlockPos) -> i32 {
+        self.inner.sky_light(pos)
+    }
+
+    fn sun_angle(&self, pos: BlockPos) -> f32 {
+        self.inner.sun_angle(pos)
     }
 }
 

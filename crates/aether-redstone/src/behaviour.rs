@@ -245,6 +245,16 @@ impl<'a> Context<'a> {
         self.view.game_time()
     }
 
+    /// A daylight detector's raw daylight at `pos`.
+    pub fn sky_light(&self, pos: BlockPos) -> i32 {
+        self.view.sky_light(pos)
+    }
+
+    /// The sun angle at `pos` in radians.
+    pub fn sun_angle(&self, pos: BlockPos) -> f32 {
+        self.view.sun_angle(pos)
+    }
+
     // -- mutation -----------------------------------------------------------
 
     /// Vanilla's `Level.setBlock(pos, state, flags)`.
@@ -692,6 +702,11 @@ impl Registry {
         put(&mut by_state, "minecraft:repeater", &blocks::Repeater);
         put(&mut by_state, "minecraft:comparator", &blocks::Comparator);
         put(&mut by_state, "minecraft:observer", &blocks::Observer);
+        put(
+            &mut by_state,
+            "minecraft:daylight_detector",
+            &blocks::DaylightDetector,
+        );
         put(&mut by_state, "minecraft:redstone_torch", &blocks::Torch);
         put(
             &mut by_state,

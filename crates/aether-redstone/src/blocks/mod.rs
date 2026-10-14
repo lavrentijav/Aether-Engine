@@ -6,6 +6,7 @@
 
 mod button;
 mod comparator;
+mod daylight_detector;
 mod default;
 pub(crate) mod diode;
 mod lamp;
@@ -25,6 +26,7 @@ pub mod test_spy;
 
 pub use button::{StoneButton, WoodButton};
 pub use comparator::Comparator;
+pub use daylight_detector::DaylightDetector;
 pub use default::DefaultBehaviour;
 pub use lamp::Lamp;
 pub use lever::Lever;
