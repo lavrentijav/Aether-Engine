@@ -47,6 +47,15 @@ fn carries(boxes: &[Box6]) -> bool {
     !boxes.is_empty() && boxes.iter().all(|b| b[4] <= 1.0 + 1e-4)
 }
 
+/// Whether a cell is empty of collision. The feet cell may hold a step
+/// ([`blocking`] allows a shape up to [`STEP_HEIGHT`]); the head cell may not,
+/// because a walking mob's body fills it — a bottom slab or closed trapdoor
+/// belongs to the feet cell as a step, but at head height it is a wall.
+#[inline]
+fn free(boxes: &[Box6]) -> bool {
+    boxes.is_empty()
+}
+
 /// Whether a mob can stand in this cell: the cell and the one above are clear,
 /// nothing lethal is there, and the block below can carry it.
 ///
@@ -58,7 +67,7 @@ pub fn standable<N: Nav + ?Sized>(nav: &N, x: i32, y: i32, z: i32) -> bool {
     if nav.hazard(x, y, z) || nav.hazard(x, y + 1, z) || nav.hazard(x, y - 1, z) {
         return false;
     }
-    if blocking(nav.boxes(x, y, z)) || blocking(nav.boxes(x, y + 1, z)) {
+    if blocking(nav.boxes(x, y, z)) || !free(nav.boxes(x, y + 1, z)) {
         return false;
     }
     carries(nav.boxes(x, y - 1, z))
@@ -284,12 +293,15 @@ mod tests {
     use super::*;
 
     const FULL: [Box6; 1] = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+    /// A bottom slab: the top half of the cell is open.
+    const SLAB: [Box6; 1] = [[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]];
     const NONE: [Box6; 0] = [];
 
     /// A grid of full cubes over a floor. The mob's feet are at y = 1; the
     /// floor is y = 0 and walls are inserted at y = 1.
     struct Grid {
         solid: HashSet<[i32; 3]>,
+        slabs: HashSet<[i32; 3]>,
         hazards: HashSet<[i32; 3]>,
     }
 
@@ -303,6 +315,7 @@ mod tests {
             }
             Self {
                 solid,
+                slabs: HashSet::new(),
                 hazards: HashSet::new(),
             }
         }
@@ -311,6 +324,13 @@ mod tests {
         fn wall(mut self, x: i32, z: i32) -> Self {
             self.solid.insert([x, 1, z]);
             self.solid.insert([x, 2, z]);
+            self
+        }
+
+        /// A bottom slab — a step in the feet cell, an obstacle at head
+        /// height.
+        fn slab(mut self, x: i32, y: i32, z: i32) -> Self {
+            self.slabs.insert([x, y, z]);
             self
         }
 
@@ -325,7 +345,9 @@ mod tests {
 
     impl Nav for Grid {
         fn boxes(&self, x: i32, y: i32, z: i32) -> &'static [Box6] {
-            if self.solid.contains(&[x, y, z]) {
+            if self.slabs.contains(&[x, y, z]) {
+                &SLAB
+            } else if self.solid.contains(&[x, y, z]) {
                 &FULL
             } else {
                 &NONE
@@ -446,5 +468,25 @@ mod tests {
         // The search cannot cross the cactus on a one-wide corridor.
         let r = search(&grid, [0, 1, 0], [4, 1, 0], 0.0, 4096);
         assert!(!r.reached, "a corridor blocked by a cactus is unreachable");
+    }
+
+    #[test]
+    fn a_slab_at_head_height_blocks_the_cell() {
+        // A bottom slab in the feet cell is a step the mob stands on.
+        let stepped = Grid::floor(5, 1).slab(1, 1, 0);
+        assert!(
+            standable(&stepped, 1, 1, 0),
+            "a bottom slab in the feet cell is a step"
+        );
+        // The same slab in the head cell is where the mob's body goes, so it
+        // is a wall — its collision top (0.5) is below the step height, which
+        // the old `blocking` test wrongly called free.
+        let blocked = Grid::floor(5, 1).slab(1, 2, 0);
+        assert!(
+            !standable(&blocked, 1, 1, 0),
+            "a head-height slab must not be walkable"
+        );
+        let r = search(&blocked, [0, 1, 0], [4, 1, 0], 0.0, 4096);
+        assert!(!r.reached, "a head-height slab blocks a one-wide corridor");
     }
 }
