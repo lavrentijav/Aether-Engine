@@ -36,6 +36,9 @@ const REPATH_DISTANCE: f64 = 2.0;
 const REPATH_COOLDOWN: u32 = 10;
 /// A path counts as reaching the goal within this many horizontal blocks.
 const GOAL_RANGE: f64 = 1.2;
+/// Consecutive no-progress ticks before the cached path is thrown away and a
+/// fresh one is solved — how a block dropped onto the path is noticed.
+const STUCK_TICKS: u32 = 10;
 
 /// The per-tick pathfinding budget shared by every mob.
 ///
@@ -232,6 +235,9 @@ pub struct Mob {
     pub path_goal: Option<(f64, f64, f64)>,
     /// Ticks before a fresh path may be solved.
     pub repath: u32,
+    /// Consecutive ticks the mob wanted to move but barely did, so a block
+    /// dropped in its way can force a fresh path.
+    pub stuck: u32,
 }
 
 impl Mob {
@@ -274,6 +280,7 @@ impl Mob {
             path_at: 0,
             path_goal: None,
             repath: 0,
+            stuck: 0,
         }
     }
 
@@ -437,6 +444,30 @@ fn follow_path(m: &mut Mob, pos: Vector3, goal: (f64, f64, f64), ctx: &Ctx) -> O
     }
     let w = m.path[m.path_at];
     Some((w[0] as f64 + 0.5, w[2] as f64 + 0.5))
+}
+
+/// Note this tick's intended vs actual movement. A mob that wants to move but
+/// barely does — a block placed between it and the next waypoint while the
+/// waypoint cell itself stays standable — counts up; after [`STUCK_TICKS`] in
+/// a row the cached path is dropped and the cooldown cleared, so the next
+/// `follow_path` re-solves around the obstruction. Returns whether the path
+/// was thrown away.
+fn note_progress(m: &mut Mob, intended: f64, moved: f64) -> bool {
+    if intended > 0.01 && moved < intended * 0.4 {
+        m.stuck += 1;
+    } else {
+        m.stuck = 0;
+    }
+    if m.stuck >= STUCK_TICKS {
+        m.stuck = 0;
+        if !m.path.is_empty() {
+            m.path.clear();
+            m.path_at = 0;
+            m.repath = 0;
+            return true;
+        }
+    }
+    false
 }
 
 fn yaw_to(dx: f64, dz: f64) -> f32 {
@@ -824,6 +855,7 @@ pub fn tick(
     if intended > 0.01 && moved < intended * 0.4 {
         m.jump = true;
     }
+    note_progress(m, intended, moved);
     false
 }
 
@@ -1005,5 +1037,41 @@ mod tests {
         // Vanilla: yaw 0 faces +Z, 90 faces -X.
         assert!((yaw_to(0.0, 1.0) - 0.0).abs() < 1e-3);
         assert!((yaw_to(-1.0, 0.0) - 90.0).abs() < 1e-3);
+    }
+
+    fn mob_with_a_path() -> Mob {
+        let mut m = Mob::new(&ZOMBIE, &mut Rng::new(1));
+        m.path = vec![[1, 64, 0], [2, 64, 0]];
+        m.path_at = 0;
+        m.path_goal = Some((2.5, 64.0, 0.5));
+        m.repath = REPATH_COOLDOWN;
+        m
+    }
+
+    #[test]
+    fn a_wedged_mob_throws_its_path_away() {
+        // A block placed between the mob and its waypoint leaves the waypoint
+        // cell standable, so only the lack of progress can notice.
+        let mut m = mob_with_a_path();
+        for _ in 0..STUCK_TICKS {
+            note_progress(&mut m, 0.1, 0.0);
+        }
+        assert!(m.path.is_empty(), "the wedged path is dropped");
+        assert_eq!(m.repath, 0, "a fresh path may be solved at once");
+    }
+
+    #[test]
+    fn movement_resets_the_stuck_counter() {
+        let mut m = mob_with_a_path();
+        let mut forced = false;
+        for _ in 0..(STUCK_TICKS - 1) {
+            forced |= note_progress(&mut m, 0.1, 0.0);
+        }
+        assert!(!forced, "not yet");
+        // A single tick of real movement clears the count, so it never
+        // false-positives on a mob that is making its way.
+        assert!(!note_progress(&mut m, 0.1, 0.09));
+        assert_eq!(m.stuck, 0);
+        assert!(!m.path.is_empty(), "the path survives a moving mob");
     }
 }
