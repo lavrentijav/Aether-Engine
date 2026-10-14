@@ -22,7 +22,6 @@ use aether_world::BlockStateId;
 
 use crate::blocks::{self, BlockBehaviour};
 use crate::dir::Direction;
-use crate::engine::Redstone;
 use crate::pos::BlockPos;
 use crate::view::{Orientation, RedstoneView, SetBlockFlags, TickPriority};
 
@@ -180,7 +179,6 @@ enum NeighborUpdate {
 /// The mutable world a behaviour acts through, plus the update cascade.
 pub struct Context<'a> {
     pub(crate) view: &'a mut dyn RedstoneView,
-    engine: &'a Redstone,
     stack: Vec<NeighborUpdate>,
     added: Vec<NeighborUpdate>,
     count: usize,
@@ -188,11 +186,10 @@ pub struct Context<'a> {
 }
 
 impl<'a> Context<'a> {
-    /// Wrap a world and engine for the duration of one engine call.
-    pub fn new(view: &'a mut dyn RedstoneView, engine: &'a Redstone) -> Self {
+    /// Wrap a world for the duration of one engine call.
+    pub fn new(view: &'a mut dyn RedstoneView) -> Self {
         Self {
             view,
-            engine,
             stack: Vec::new(),
             added: Vec::new(),
             count: 0,
@@ -298,14 +295,14 @@ impl<'a> Context<'a> {
         }
     }
 
-    /// Record a redstone-torch toggle for the engine's burnout clock.
+    /// Record a redstone-torch toggle on the world's burnout log.
     pub fn push_toggle(&mut self, pos: BlockPos, when: u64) {
-        self.engine.record_toggle(pos, when);
+        self.view.record_toggle(pos, when);
     }
 
-    /// Toggles recorded at or after `since`, from the engine's burnout clock.
+    /// Toggles recorded at or after `since`, from the world's burnout log.
     pub fn toggles_since(&self, pos: BlockPos, since: u64) -> u32 {
-        self.engine.toggle_count(pos, since)
+        self.view.toggle_count(pos, since)
     }
 
     // -- neighbour updates --------------------------------------------------

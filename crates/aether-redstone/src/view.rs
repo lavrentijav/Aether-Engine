@@ -14,6 +14,10 @@ use aether_world::BlockStateId;
 use crate::engine::Redstone;
 use crate::pos::BlockPos;
 
+/// The window, in game ticks, over which redstone-torch toggles are counted for
+/// burnout — vanilla's `RECENT_TOGGLE_TIMER`.
+pub const TOGGLE_WINDOW: u64 = 60;
+
 /// How urgent a scheduled block tick is.
 ///
 /// Lower runs first. The values are vanilla's `TickPriority`; the names are the
@@ -181,9 +185,24 @@ pub trait RedstoneView {
     fn game_time(&self) -> u64 {
         0
     }
+
+    /// Record that the redstone torch at `pos` toggled at game time `when`.
+    ///
+    /// This is vanilla's `RECENT_TOGGLES`. It lives on the **world**, not the
+    /// engine, because a level's torch burnout is per level: one engine may
+    /// drive several worlds, and their logs must not be shared. The default is
+    /// a no-op, so a world that never hosts a torch needs nothing; a world that
+    /// does should prune entries older than 60 ticks.
+    fn record_toggle(&mut self, _pos: BlockPos, _when: u64) {}
+
+    /// How many toggles the torch at `pos` has recorded at or after `since`.
+    fn toggle_count(&self, _pos: BlockPos, _since: u64) -> u32 {
+        0
+    }
 }
 
-/// An in-memory world: a map of states and a block-tick queue.
+/// An in-memory world: a map of states, a block-tick queue and the redstone
+/// torch toggle log.
 ///
 /// Enough to build and run a circuit in a test. Not a real world — it has one
 /// flat coordinate space, no storage and no entities.
@@ -196,6 +215,8 @@ pub struct MemWorld {
     pending: HashMap<(u16, BlockPos), u64>,
     seq: u64,
     game_time: u64,
+    /// Per-position torch toggle times, pruned to the 60-tick burnout window.
+    toggles: HashMap<BlockPos, std::collections::VecDeque<u64>>,
 }
 
 impl MemWorld {
@@ -297,6 +318,27 @@ impl RedstoneView for MemWorld {
     fn game_time(&self) -> u64 {
         self.game_time
     }
+
+    fn record_toggle(&mut self, pos: BlockPos, when: u64) {
+        let log = self.toggles.entry(pos).or_default();
+        // Prune entries outside the 60-tick burnout window, so a clock torch
+        // does not grow the log without bound.
+        while let Some(&front) = log.front() {
+            if when.saturating_sub(front) > TOGGLE_WINDOW {
+                log.pop_front();
+            } else {
+                break;
+            }
+        }
+        log.push_back(when);
+    }
+
+    fn toggle_count(&self, pos: BlockPos, since: u64) -> u32 {
+        self.toggles
+            .get(&pos)
+            .map(|log| log.iter().filter(|&&w| w >= since).count() as u32)
+            .unwrap_or(0)
+    }
 }
 
 /// A world that records every state write, so a test can assert the exact
@@ -360,6 +402,14 @@ impl RedstoneView for TraceWorld {
 
     fn game_time(&self) -> u64 {
         self.inner.game_time()
+    }
+
+    fn record_toggle(&mut self, pos: BlockPos, when: u64) {
+        self.inner.record_toggle(pos, when);
+    }
+
+    fn toggle_count(&self, pos: BlockPos, since: u64) -> u32 {
+        self.inner.toggle_count(pos, since)
     }
 }
 

@@ -550,3 +550,45 @@ fn a_stale_tick_is_dropped_when_the_block_changed() {
         "the button releases after its own 20 ticks"
     );
 }
+
+#[test]
+fn two_worlds_do_not_share_torch_burnout_history() {
+    // N1: vanilla keys the torch toggle log per level (`RECENT_TOGGLES` is a
+    // `WeakHashMap<BlockGetter, ...>`). One engine driving two worlds must keep
+    // their logs apart: firing a torch in world A must not burn out a fresh
+    // torch at the same position in world B.
+    let engine = Redstone::new();
+
+    let build = || {
+        let mut w = MemWorld::new();
+        let block = p(0, 0, 0);
+        let lever = p(0, 1, 0);
+        let torch = p(1, 0, 0);
+        w.put(block, "minecraft:stone");
+        w.put(lever, "minecraft:lever[face=floor,facing=north]");
+        w.put(torch, "minecraft:redstone_wall_torch[facing=east]");
+        for pos in [block, lever, torch] {
+            engine.on_placed(&mut w, pos);
+        }
+        (w, lever, torch)
+    };
+
+    // World A: seven off-toggles (the eighth burns out; seven does not).
+    let (mut a, lever_a, torch_a) = build();
+    for _ in 0..7 {
+        engine.on_use(&mut a, lever_a);
+        a.run(&engine, 2);
+        engine.on_use(&mut a, lever_a);
+        a.run(&engine, 2);
+    }
+    assert!(is_lit(&a, torch_a), "seven toggles leave A's torch lit");
+
+    // World B: one off-toggle at the same position. If the log were shared this
+    // would be A's eighth and burn the torch out.
+    let (mut b, lever_b, torch_b) = build();
+    engine.on_use(&mut b, lever_b);
+    b.run(&engine, 2);
+    engine.on_use(&mut b, lever_b);
+    b.run(&engine, 2);
+    assert!(is_lit(&b, torch_b), "B's fresh torch must not be burnt out");
+}
