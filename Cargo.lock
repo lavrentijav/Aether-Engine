@@ -91,6 +91,7 @@ dependencies = [
  "aether-core",
  "criterion",
  "fjall",
+ "libc",
  "zstd",
 ]
 

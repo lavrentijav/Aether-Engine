@@ -24,9 +24,9 @@ use super::scheduler::Scheduler;
 pub type Pos = (i32, i32, i32);
 
 /// Key prefix for the scheduled block-tick queue (sand, leaves, crops).
-pub const BLOCK_TICKS: &[u8] = b"BT";
+pub const BLOCK_TICKS: &[u8] = aether_api::keys::SCHEDULED_BLOCK_TICKS;
 /// Key prefix for the scheduled fluid-tick queue (water, lava).
-pub const FLUID_TICKS: &[u8] = b"BF";
+pub const FLUID_TICKS: &[u8] = aether_api::keys::SCHEDULED_FLUID_TICKS;
 
 /// On-disk format version, bumped if the layout below ever changes.
 const VERSION: u8 = 1;

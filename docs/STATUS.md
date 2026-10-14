@@ -38,6 +38,8 @@ modern versions run a server-side survival game).
 | Telemetry: counters/gauges/timers + Prometheus exporter | ✅ |
 | SoA memory model: AVX-Cell, Sub-Chunk, Morton masks, palette compression | ✅ |
 | KV world storage (Fjall + Zstandard blobs, order-preserving keys) | ✅ |
+| One world, one process: opening a persistent world takes an exclusive `flock` on its directory for the process lifetime (`storage::lock`), so a second server or converter fails fast with an error naming the holder's PID instead of minting duplicate item uids and journal numbers | ✅ |
+| Central key-space registry (`aether_api::keys::KEY_PREFIXES`): every top-level KV prefix and its owner in one list, with a test that refuses two subsystems sharing a prefix; the server meta keys were moved off world-reserved bytes (`P`/`V`/`K` → `D`/`F`/`O`) and still read their pre-rename keys | ✅ |
 | `aether-convert`: Anvil `.mca` → KV migration (parallel, audited) | ✅ |
 | `aether-baseproxy`: live vanilla → core translation (network chunk sections, block states) | ✅ |
 | Basic physics: voxel AABB collision, movement + gravity (`aether-physics`) | ✅ |

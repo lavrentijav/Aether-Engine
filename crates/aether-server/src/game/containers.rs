@@ -106,7 +106,25 @@ fn active() -> &'static Mutex<HashSet<Pos>> {
     M.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Key for the container at a block position.
+///
+/// Thirteen bytes (three `i32`s) under the reserved `O` prefix (see
+/// [`aether_api::keys`]). It used to be `K`, which the world's per-column
+/// journal checkpoint also claims; the checkpoint is ten bytes and so never
+/// matched exactly, but the shared byte was a collision waiting to happen.
+/// [`legacy_key`] reads the old key so containers placed before the rename
+/// keep their contents.
 fn key(pos: Pos) -> [u8; 13] {
+    let mut k = [0u8; 13];
+    k[0] = aether_api::keys::BLOCK_CONTAINER[0];
+    k[1..5].copy_from_slice(&pos.0.to_be_bytes());
+    k[5..9].copy_from_slice(&pos.1.to_be_bytes());
+    k[9..13].copy_from_slice(&pos.2.to_be_bytes());
+    k
+}
+
+/// The pre-rename key (`K`). Read fallback only; nothing is ever written here.
+fn legacy_key(pos: Pos) -> [u8; 13] {
     let mut k = [0u8; 13];
     k[0] = b'K';
     k[1..5].copy_from_slice(&pos.0.to_be_bytes());
@@ -166,13 +184,21 @@ fn decode(b: &[u8]) -> Option<Container> {
 }
 
 /// Load the container at `pos` from the world, or a fresh empty one of `kind`.
+///
+/// Consults the current key first and the pre-rename one after, so a container
+/// that predates the prefix change is found; the next save writes it back under
+/// the current key.
 fn load(world: &DemoWorld, pos: Pos, kind: ContainerKind) -> Container {
-    world
-        .get_meta(&key(pos))
-        .ok()
-        .flatten()
-        .and_then(|b| decode(&b))
-        .filter(|c| c.kind == kind)
+    let read = |k: [u8; 13]| {
+        world
+            .get_meta(&k)
+            .ok()
+            .flatten()
+            .and_then(|b| decode(&b))
+            .filter(|c| c.kind == kind)
+    };
+    read(key(pos))
+        .or_else(|| read(legacy_key(pos)))
         .unwrap_or_else(|| Container::new(kind))
 }
 
