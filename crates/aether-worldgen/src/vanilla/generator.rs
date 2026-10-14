@@ -35,10 +35,12 @@ use super::carver::Carvers;
 use super::chunk::ProtoChunk;
 use super::climate::ParameterList;
 use super::density::{BuildError, DataPack};
+use super::feature::level::Level;
 use super::feature::Decorator;
 use super::json::Json;
 use super::ore_veins::NoiseBlock;
 use super::overworld::OverworldBiomeSource;
+use super::structure::{self, igloo::IglooStructure, template::TemplateManager};
 use super::surface::{SurfaceEnv, SurfaceSystem};
 use super::terrain::Terrain;
 use crate::{ChunkGenerator, ColumnBiomes, ColumnBuilder, GeneratedColumn};
@@ -187,6 +189,10 @@ pub struct VanillaGenerator {
     registry: BlockRegistry,
     base_cache: Mutex<Lru<Arc<ProtoChunk>>>,
     decor_cache: Mutex<Lru<Arc<Vec<(i32, i32, i32, BlockStateId)>>>>,
+    structures: structure::StructureRegistry,
+    igloo: Option<IglooStructure>,
+    igloo_biomes: Vec<bool>,
+    struct_cache: Mutex<Lru<Arc<Vec<(i32, i32, i32, BlockStateId)>>>>,
 }
 
 /// Quart biomes around one chunk, filled on first use: the jittered lookup
@@ -317,6 +323,23 @@ impl VanillaGenerator {
             s.height,
             terrain.noises(),
         )?;
+        // Structure sets and template layouts, read from the same pack.
+        let pack_root_path = pack_root.as_ref().to_path_buf();
+        let structures = structure::StructureRegistry::load(
+            &pack,
+            &biome_source,
+            &biomes,
+            &entry_ids,
+            seed as i64,
+        )?;
+        let templates = TemplateManager::new(&pack_root_path);
+        let igloo = IglooStructure::load(&templates);
+        let mut igloo_biomes = vec![false; biomes.all().len()];
+        for b in structure::structure_biomes(&pack, &biomes, "minecraft:igloo") {
+            if let Some(slot) = igloo_biomes.get_mut(b as usize) {
+                *slot = true;
+            }
+        }
         let core = Core {
             seed: seed as i64,
             terrain: Arc::new(terrain),
@@ -337,6 +360,10 @@ impl VanillaGenerator {
             registry: BlockRegistry::new(),
             base_cache: Mutex::new(Lru::new(1024)),
             decor_cache: Mutex::new(Lru::new(1024)),
+            structures,
+            igloo,
+            igloo_biomes,
+            struct_cache: Mutex::new(Lru::new(1024)),
         })
     }
 
@@ -576,6 +603,63 @@ impl VanillaGenerator {
             .collect()
     }
 
+    /// Every structure write chunk `(cx, cz)` begins, anywhere reachable. The
+    /// starts are decided by [`structure::StructureRegistry`]; the igloo is the
+    /// only layout placed so far. Cached per start chunk.
+    fn structure_of(&self, cx: i32, cz: i32) -> Arc<Vec<(i32, i32, i32, BlockStateId)>> {
+        if let Some(w) = self.struct_cache.lock().unwrap().get((cx, cz)) {
+            return w;
+        }
+        let starts = self.structures.starts_at(self.core.seed, cx, cz);
+        let writes = if starts.is_empty() {
+            Vec::new()
+        } else {
+            let mut region = [[None, None, None], [None, None, None], [None, None, None]];
+            for (dz, row) in region.iter_mut().enumerate() {
+                for (dx, slot) in row.iter_mut().enumerate() {
+                    *slot = Some(self.base(cx + dx as i32 - 1, cz + dz as i32 - 1));
+                }
+            }
+            let region = region.map(|r| r.map(|c| c.expect("filled")));
+            let mut lv = Level::new(&self.core, cx, cz, &region);
+            for start in &starts {
+                if start.structure != "minecraft:igloo" {
+                    continue;
+                }
+                let Some(igloo) = &self.igloo else { continue };
+                let allowed =
+                    |b: BiomeId| self.igloo_biomes.get(b as usize).copied().unwrap_or(false);
+                igloo.place(&self.core, &mut lv, self.core.seed, cx, cz, &allowed);
+            }
+            lv.into_writes()
+        };
+        let writes = Arc::new(writes);
+        self.struct_cache
+            .lock()
+            .unwrap()
+            .put((cx, cz), Arc::clone(&writes));
+        writes
+    }
+
+    /// Every structure write that lands in chunk `(cx, cz)`, from starts in it
+    /// and its eight neighbours. A structure wider than a chunk would need a
+    /// wider scan; the igloo is not.
+    fn structures_around(&self, cx: i32, cz: i32) -> Vec<(i32, i32, i32, BlockStateId)> {
+        let (x0, z0) = (cx * 16, cz * 16);
+        let mut out = Vec::new();
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let w = self.structure_of(cx + dx, cz + dz);
+                for &(x, y, z, s) in w.iter() {
+                    if (x0..x0 + 16).contains(&x) && (z0..z0 + 16).contains(&z) {
+                        out.push((x, y, z, s));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Per-section biomes for the column, as the client wants them.
     fn column_biomes(&self, c: &ProtoChunk) -> ColumnBiomes {
         let mut palette: Vec<String> = Vec::new();
@@ -610,7 +694,19 @@ impl ChunkGenerator for VanillaGenerator {
     fn generate_column(&self, cx: i32, cz: i32) -> GeneratedColumn {
         let base = self.base(cx, cz);
         let mut c = (*base).clone();
+        // Decoration features are computed from the undecorated terrain and so
+        // cannot see a structure. Vanilla interleaves structures with the
+        // decoration steps (a structure is placed at its own step, before the
+        // later features) and lets each feature query the world it has built;
+        // here the features would overwrite the structure with the block they
+        // chose for the bare terrain — a snow layer landing on the igloo's
+        // interior floor, for instance. Placing the structures last lets the
+        // solid structure blocks win, which is what the feature checks would
+        // have produced against a structure-aware world.
         for (x, y, z, s) in self.decoration_around(cx, cz) {
+            c.set((x - c.min_x()) as usize, y, (z - c.min_z()) as usize, s);
+        }
+        for (x, y, z, s) in self.structures_around(cx, cz) {
             c.set((x - c.min_x()) as usize, y, (z - c.min_z()) as usize, s);
         }
         let mut b = ColumnBuilder::new(&self.registry);
