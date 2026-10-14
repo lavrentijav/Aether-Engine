@@ -49,10 +49,18 @@ pub const GRID_SLOT: i16 = -10;
 struct Entry {
     place: Place,
     count: u8,
-    item: String,
+    item: aether_world::ItemTypeId,
 }
 
 type Seen = HashMap<ItemUid, Entry>;
+
+/// The name an event still records for an item id (P1d moves the events onto
+/// ids too). A modded id has no name here.
+fn event_item_name(item: aether_world::ItemTypeId) -> String {
+    crate::inventory::item_name(item)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("item#{}", item.0))
+}
 
 fn add(seen: &mut Seen, s: &Stack, place: Place) {
     if s.count > 0 {
@@ -61,7 +69,7 @@ fn add(seen: &mut Seen, s: &Stack, place: Place) {
             Entry {
                 place,
                 count: s.count,
-                item: s.item.clone(),
+                item: s.item,
             },
         );
     }
@@ -183,7 +191,7 @@ pub fn mint_on_ground(
         actor,
         EventBody::ItemMint {
             uid: stack.uid,
-            item: stack.item.clone(),
+            item: event_item_name(stack.item),
             count: stack.count,
             to: at,
         },
@@ -340,13 +348,13 @@ fn diff(before: &Seen, after: &Seen) -> Vec<EventBody> {
             }),
             None if sources.is_empty() => made.push(EventBody::ItemMint {
                 uid: *uid,
-                item: a.item.clone(),
+                item: event_item_name(a.item),
                 count: a.count,
                 to: a.place,
             }),
             None => made.push(EventBody::ItemDerive {
                 uid: *uid,
-                item: a.item.clone(),
+                item: event_item_name(a.item),
                 count: a.count,
                 to: a.place,
                 from: sources.clone(),
@@ -386,7 +394,7 @@ mod tests {
         Entry {
             place,
             count,
-            item: item.into(),
+            item: crate::inventory::item(item),
         }
     }
 

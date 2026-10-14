@@ -182,7 +182,7 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
             let before = c.slots.clone();
             let result = c.slots[0]
                 .as_ref()
-                .and_then(|s| super::tables::smelt(&s.item));
+                .and_then(|s| super::tables::smelt_id(s.item));
             let output_ok = result.is_some_and(|r| match &c.slots[2] {
                 None => true,
                 Some(o) => o.item == r && o.count < o.max_stack(),
@@ -193,14 +193,14 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
             }
             if c.burn == 0 && output_ok {
                 if let Some(fuel) = &mut c.slots[1] {
-                    let t = super::tables::fuel_ticks(&fuel.item);
+                    let t = super::tables::fuel_ticks_id(fuel.item);
                     if t > 0 {
                         c.burn = t;
                         c.burn_max = t;
-                        let empty = fuel.item == "minecraft:lava_bucket";
+                        let empty = fuel.item == crate::inventory::item("minecraft:lava_bucket");
                         fuel.count -= 1;
                         if empty {
-                            c.slots[1] = Some(Stack::new("minecraft:bucket", 1));
+                            c.slots[1] = Some(Stack::named("minecraft:bucket", 1));
                         } else if fuel.count == 0 {
                             c.slots[1] = None;
                         }
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn containers_round_trip() {
         let mut c = Container::new(ContainerKind::Furnace);
-        c.slots[0] = Some(Stack::new("minecraft:raw_iron", 5));
+        c.slots[0] = Some(Stack::named("minecraft:raw_iron", 5));
         c.burn = 120;
         c.burn_max = 1600;
         c.cook = 33;

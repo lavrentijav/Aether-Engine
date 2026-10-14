@@ -249,14 +249,14 @@ fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now:
                     inv.held_index()
                 };
                 if let Some(food) = inv.slot(slot).cloned() {
-                    if let Some(f) = tables::food(&food.item) {
+                    if let Some(f) = tables::food_id(food.item) {
                         st.food = (st.food + f.nutrition as i32).min(20);
                         st.saturation = (st.saturation + f.saturation).min(st.food as f32);
-                        consume_one(&mut inv, slot, &food.item, st.survival());
+                        consume_one(&mut inv, slot, food.item, st.survival());
                         ate = true;
-                    } else if food.item == "minecraft:milk_bucket" {
+                    } else if food.item == crate::inventory::item("minecraft:milk_bucket") {
                         if st.survival() {
-                            inv.put_slot(slot, Some(Stack::new("minecraft:bucket", 1)));
+                            inv.put_slot(slot, Some(Stack::named("minecraft:bucket", 1)));
                         }
                         ate = true;
                     }
@@ -340,37 +340,45 @@ fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now:
 
 /// Use up one of `item` from `slot`, leaving a bowl or bottle where vanilla
 /// does.
-fn consume_one(inv: &mut crate::inventory::Inventory, slot: usize, item: &str, survival: bool) {
+fn consume_one(
+    inv: &mut crate::inventory::Inventory,
+    slot: usize,
+    item: aether_world::ItemTypeId,
+    survival: bool,
+) {
     if !survival {
         return;
     }
-    let remainder = match item {
-        "minecraft:mushroom_stew"
-        | "minecraft:rabbit_stew"
-        | "minecraft:beetroot_soup"
-        | "minecraft:suspicious_stew" => Some("minecraft:bowl"),
-        "minecraft:honey_bottle" => Some("minecraft:glass_bottle"),
-        _ => None,
+    let remainder = if item == crate::inventory::item("minecraft:mushroom_stew")
+        || item == crate::inventory::item("minecraft:rabbit_stew")
+        || item == crate::inventory::item("minecraft:beetroot_soup")
+        || item == crate::inventory::item("minecraft:suspicious_stew")
+    {
+        Some("minecraft:bowl")
+    } else if item == crate::inventory::item("minecraft:honey_bottle") {
+        Some("minecraft:glass_bottle")
+    } else {
+        None
     };
     if let Some(Some(s)) = inv.slot_mut(slot) {
         s.count -= 1;
         if s.count == 0 {
-            inv.put_slot(slot, remainder.map(|r| Stack::new(r, 1)));
+            inv.put_slot(slot, remainder.map(|r| Stack::named(r, 1)));
             return;
         }
     }
     if let Some(r) = remainder {
-        if let Some(left) = inv.insert(Stack::new(r, 1)) {
+        if let Some(left) = inv.insert(Stack::named(r, 1)) {
             let _ = left;
         }
     }
 }
 
-type Gear = Vec<(u8, Option<(String, u16)>)>;
+type Gear = Vec<(u8, Option<(aether_world::ItemTypeId, u16)>)>;
 
 fn worn(p: &PlayerHandle) -> Gear {
     let inv = p.inventory();
-    let at = |i: usize| inv.slot(i).map(|s| (s.item.clone(), s.damage));
+    let at = |i: usize| inv.slot(i).map(|s| (s.item, s.damage));
     vec![
         (0, at(inv.held_index())),
         (1, at(crate::inventory::OFFHAND)),

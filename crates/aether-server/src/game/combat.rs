@@ -27,7 +27,7 @@ fn worn_armor(handle: &PlayerHandle) -> (f32, f32) {
     let inv = handle.inventory();
     (5..=8)
         .filter_map(|i| inv.slot(i))
-        .map(|s| tables::armor_points(&s.item))
+        .map(|s| tables::armor_points_id(s.item))
         .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1))
 }
 
@@ -38,7 +38,7 @@ fn wear_armor(handle: &PlayerHandle, damage: f32) {
     for i in 5..=8 {
         if let Some(slot) = inv.slot_mut(i) {
             if let Some(s) = slot {
-                let max = tables::max_durability(&s.item);
+                let max = tables::max_durability_id(s.item);
                 if max > 0 {
                     s.damage += wear;
                     if s.damage >= max {
@@ -237,7 +237,7 @@ pub fn player_attack(
         return;
     }
     let held = attacker.held_item();
-    let (base, speed) = tables::weapon(held.as_deref());
+    let (base, speed) = tables::weapon_id(held);
     let pos = attacker.pos();
     let from = Vector3::new(pos.x, pos.y, pos.z);
     let (scale, crit) = {
@@ -347,9 +347,12 @@ pub fn on_mob_hurt(
         world,
     );
     let drops = entities::with_rng(|r| tables::mob_drops(hit.kind, killer.is_some(), r));
-    let mut stacks: Vec<Stack> = drops.into_iter().map(|(i, n)| Stack::new(&i, n)).collect();
+    let mut stacks: Vec<Stack> = drops
+        .into_iter()
+        .map(|(i, n)| Stack::named(&i, n))
+        .collect();
     if hit.kind == "minecraft:sheep" {
-        stacks.push(Stack::new("minecraft:white_wool", 1));
+        stacks.push(Stack::named("minecraft:white_wool", 1));
     }
     entities::drop_at_block(
         hit.pos.x.floor() as i32,
@@ -384,7 +387,7 @@ pub fn wear_held(handle: &PlayerHandle, world: &DemoWorld, n: u16) {
         let i = inv.held_index();
         let Some(slot) = inv.slot_mut(i) else { return };
         let Some(s) = slot else { return };
-        let max = tables::max_durability(&s.item);
+        let max = tables::max_durability_id(s.item);
         if max == 0 {
             return;
         }
@@ -526,7 +529,10 @@ pub fn explode(pos: Vector3, radius: f32, registry: &SharedRegistry, world: &Dem
                 *x,
                 *y,
                 *z,
-                drops.into_iter().map(|(i, n)| Stack::new(&i, n)).collect(),
+                drops
+                    .into_iter()
+                    .map(|(i, n)| Stack::named(&i, n))
+                    .collect(),
                 actor,
                 seq,
             );

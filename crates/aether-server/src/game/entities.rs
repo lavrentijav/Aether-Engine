@@ -374,14 +374,14 @@ pub fn mob_count() -> usize {
 
 /// Items on the ground owned by `owner`, for `/inv`: `(item, count, pos,
 /// seconds left)`.
-pub fn owned_items(owner: u128) -> Vec<(String, u8, Vector3, u32)> {
+pub fn owned_items(owner: u128) -> Vec<(aether_world::ItemTypeId, u8, Vector3, u32)> {
     entities()
         .lock()
         .unwrap()
         .iter()
         .filter_map(|e| match &e.kind {
             Kind::Item(it) if it.owner == Some(owner) => Some((
-                it.stack.item.clone(),
+                it.stack.item,
                 it.stack.count,
                 e.pos(),
                 ITEM_LIFETIME.saturating_sub(e.age) / 20,
@@ -455,7 +455,7 @@ pub fn hurt_mob(
 
 /// Use (right-click) an entity with `item`. Returns what the player gets in
 /// exchange for what they held, if anything happened.
-pub fn interact(id: i32, item: Option<&str>) -> Option<Interaction> {
+pub fn interact(id: i32, item: Option<aether_world::ItemTypeId>) -> Option<Interaction> {
     let mut all = entities().lock().unwrap();
     let e = all.iter_mut().find(|e| e.id == id && !e.dead)?;
     let pos = e.pos();
@@ -463,10 +463,12 @@ pub fn interact(id: i32, item: Option<&str>) -> Option<Interaction> {
         return None;
     };
     match (m.def.kind, item) {
-        ("minecraft:cow", Some("minecraft:bucket")) => {
-            Some(Interaction::Replace("minecraft:milk_bucket"))
-        }
-        ("minecraft:sheep", Some("minecraft:shears")) if !m.sheared => {
+        ("minecraft:cow", Some(id)) if id == crate::inventory::item("minecraft:bucket") => Some(
+            Interaction::Replace(crate::inventory::item("minecraft:milk_bucket")),
+        ),
+        ("minecraft:sheep", Some(id))
+            if id == crate::inventory::item("minecraft:shears") && !m.sheared =>
+        {
             m.sheared = true;
             m.meta_dirty = true;
             let n = with_rng(|r| r.range(1, 3)) as u8;
@@ -476,7 +478,7 @@ pub fn interact(id: i32, item: Option<&str>) -> Option<Interaction> {
                 pos.x.floor() as i32,
                 pos.y.floor() as i32 + 1,
                 pos.z.floor() as i32,
-                vec![Stack::new(&wool, n)],
+                vec![Stack::named(&wool, n)],
                 ActorId::SERVER,
                 None,
             );
@@ -489,7 +491,7 @@ pub fn interact(id: i32, item: Option<&str>) -> Option<Interaction> {
 /// The outcome of using an entity.
 pub enum Interaction {
     /// Swap the held item for this one (a bucket of milk).
-    Replace(&'static str),
+    Replace(aether_world::ItemTypeId),
     /// The held tool takes a point of wear.
     Wear,
 }
@@ -820,7 +822,7 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                             && near_player(view.pos, ib, 1.0, 0.5)
                             && handle
                                 .inventory()
-                                .insert(Stack::new("minecraft:arrow", 1))
+                                .insert(Stack::named("minecraft:arrow", 1))
                                 .is_none()
                         {
                             {
@@ -1056,7 +1058,7 @@ pub fn update_tracking(registry: &SharedRegistry, world: &DemoWorld) {
                         x: ep.x,
                         y: ep.y,
                         z: ep.z,
-                        item: it.stack.item.clone(),
+                        item: it.stack.item,
                         count: it.stack.count as u64,
                     });
                 }

@@ -24,7 +24,7 @@ pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
         inventory::write_empty(p);
         return;
     };
-    let Some(id) = v.item_id(&s.item) else {
+    let Some(id) = v.wire_item(s.item) else {
         inventory::write_empty(p);
         return;
     };

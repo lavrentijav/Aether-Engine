@@ -217,24 +217,28 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
     let Some(item) = handle.held_item() else {
         return Reply(vec!["you are not holding anything".into()]);
     };
+    // The economy still speaks names (P1d moves its listings onto ids).
+    let item_name = world
+        .item_name(item)
+        .unwrap_or_else(|| format!("item#{}", item.0));
 
     // Checked before anything moves, so a short seller gets a message rather
     // than a partly-emptied inventory that has to be put back.
-    let have = handle.inventory().count_of(&item);
+    let have = handle.inventory().count_of(item);
     if have < count {
-        return Reply(vec![format!("you have {have} of {item}, not {count}")]);
+        return Reply(vec![format!("you have {have} of {item_name}, not {count}")]);
     }
     // Taken from the inventory *before* the listing exists. The other order
     // leaves a window in which the same stack backs two offers.
-    handle.inventory().take(&item, count);
+    handle.inventory().take(item, count);
     handle.sync_inventory(world);
 
-    match econ.list(ActorId(handle.uuid), &item, count, price, expires) {
+    match econ.list(ActorId(handle.uuid), &item_name, count, price, expires) {
         Ok(id) => {
             journal_move(
                 world,
                 ActorId(handle.uuid),
-                &item,
+                &item_name,
                 count,
                 Place::Inventory {
                     owner: ActorId(handle.uuid),
@@ -243,7 +247,7 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
                 Place::Nowhere,
             );
             Reply(vec![format!(
-                "listed {count}x {item} at {price} each — #{id}"
+                "listed {count}x {item_name} at {price} each — #{id}"
             )])
         }
         Err(e) => {
@@ -251,7 +255,7 @@ fn sell(args: &[&str], handle: &PlayerHandle, world: &DemoWorld, econ: &dyn Econ
             // database hiccup eats the seller's items.
             handle
                 .inventory()
-                .give(&item, count.min(u8::MAX as u64) as u8);
+                .give(item, count.min(u8::MAX as u64) as u8);
             handle.sync_inventory(world);
             err(e)
         }
@@ -359,8 +363,10 @@ fn buy(
             // and can be picked up once they make room. This is why the seam
             // between the committed transaction and the inventory is
             // survivable rather than merely reported.
-            let (_, dropped) =
-                crate::ground::give_or_drop(handle, registry, world, &p.item, p.count);
+            let (_, dropped) = match world.item_id(&p.item) {
+                Some(item) => crate::ground::give_or_drop(handle, registry, world, item, p.count),
+                None => (0, p.count),
+            };
             journal_move(
                 world,
                 me,
@@ -415,8 +421,10 @@ fn unlist(
     match econ.cancel(ActorId(handle.uuid), id) {
         Ok(l) => {
             let me = ActorId(handle.uuid);
-            let (_, dropped) =
-                crate::ground::give_or_drop(handle, registry, world, &l.item, l.count);
+            let (_, dropped) = match world.item_id(&l.item) {
+                Some(item) => crate::ground::give_or_drop(handle, registry, world, item, l.count),
+                None => (0, l.count),
+            };
             journal_move(
                 world,
                 me,

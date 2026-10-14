@@ -101,22 +101,16 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    fn grid_cells(&self) -> (Vec<Option<String>>, usize) {
+    fn grid_cells(&self) -> (Vec<Option<aether_world::ItemTypeId>>, usize) {
         match self.layout {
             Layout::Player => (
-                (1..=4)
-                    .map(|i| self.inv.slot(i).map(|s| s.item.clone()))
-                    .collect(),
+                (1..=4).map(|i| self.inv.slot(i).map(|s| s.item)).collect(),
                 2,
             ),
             Layout::Crafting => (
                 self.grid
                     .as_ref()
-                    .map(|g| {
-                        g.iter()
-                            .map(|s| s.as_ref().map(|s| s.item.clone()))
-                            .collect()
-                    })
+                    .map(|g| g.iter().map(|s| s.as_ref().map(|s| s.item)).collect())
                     .unwrap_or_default(),
                 3,
             ),
@@ -129,8 +123,13 @@ impl<'a> Ctx<'a> {
         if w == 0 {
             return None;
         }
-        let refs: Vec<Option<&str>> = cells.iter().map(|c| c.as_deref()).collect();
-        tables::craft(&refs, w).map(|(item, n)| Stack::new(item, n))
+        // Recipes are keyed by name; a modded id has no name here and cannot
+        // match one. `craft` answers a name, back to an id.
+        let refs: Vec<Option<&str>> = cells
+            .iter()
+            .map(|c| c.and_then(aether_world::ItemTypeId::vanilla_name))
+            .collect();
+        tables::craft(&refs, w).map(|(item, n)| Stack::named(item, n))
     }
 
     /// Use up one of every ingredient.
@@ -142,10 +141,13 @@ impl<'a> Ctx<'a> {
         };
         for r in cells {
             if let Some(mut s) = self.get(r) {
-                let bucket = s.item.ends_with("_bucket");
+                let bucket = s
+                    .item
+                    .vanilla_name()
+                    .is_some_and(|n| n.ends_with("_bucket"));
                 s.count -= 1;
                 if s.count == 0 {
-                    self.put(r, bucket.then(|| Stack::new("minecraft:bucket", 1)));
+                    self.put(r, bucket.then(|| Stack::named("minecraft:bucket", 1)));
                 } else {
                     self.put(r, Some(s));
                 }
@@ -190,10 +192,11 @@ impl<'a> Ctx<'a> {
     fn accepts(&self, r: Ref, s: &Stack) -> bool {
         match r {
             Ref::Result => false,
-            Ref::Inv(i @ 5..=8) => tables::armor_slot(&s.item) == Some(i),
+            Ref::Inv(i @ 5..=8) => tables::armor_slot_id(s.item) == Some(i),
             Ref::Cont(2) if self.layout == Layout::Furnace => false,
             Ref::Cont(1) if self.layout == Layout::Furnace => {
-                tables::fuel_ticks(&s.item) > 0 || s.item == "minecraft:bucket"
+                tables::fuel_ticks_id(s.item) > 0
+                    || s.item == crate::inventory::item("minecraft:bucket")
             }
             _ => true,
         }
@@ -253,7 +256,7 @@ impl<'a> Ctx<'a> {
                 0 => rev(9, 45),
                 1..=8 | 45 => fwd(9, 45),
                 _ => {
-                    if let Some(a) = tables::armor_slot(&stack.item) {
+                    if let Some(a) = tables::armor_slot_id(stack.item) {
                         if self.inv.slot(a).is_none() {
                             return vec![a];
                         }
@@ -281,9 +284,9 @@ impl<'a> Ctx<'a> {
             Layout::Furnace => {
                 if slot < main {
                     rev(main, end)
-                } else if tables::smelt(&stack.item).is_some() {
+                } else if tables::smelt_id(stack.item).is_some() {
                     vec![0]
-                } else if tables::fuel_ticks(&stack.item) > 0 {
+                } else if tables::fuel_ticks_id(stack.item) > 0 {
                     vec![1]
                 } else if slot < hotbar {
                     fwd(hotbar, end)
@@ -725,9 +728,9 @@ fn open_window_slots(st: &PlayerState, inv: &Inventory, world: &DemoWorld) -> Op
         WindowKind::Crafting { grid } => {
             let cells: Vec<Option<&str>> = grid
                 .iter()
-                .map(|s| s.as_ref().map(|s| s.item.as_str()))
+                .map(|s| s.as_ref().and_then(|s| s.item.vanilla_name()))
                 .collect();
-            let res = tables::craft(&cells, 3).map(|(i, n)| Stack::new(i, n));
+            let res = tables::craft(&cells, 3).map(|(i, n)| Stack::named(i, n));
             let mut v = vec![res];
             v.extend(grid.iter().cloned());
             v.append(&mut player_part);
@@ -751,9 +754,9 @@ fn open_window_slots(st: &PlayerState, inv: &Inventory, world: &DemoWorld) -> Op
 
 fn player_window_slots(inv: &Inventory) -> Vec<Option<Stack>> {
     let cells: Vec<Option<&str>> = (1..=4)
-        .map(|i| inv.slot(i).map(|s| s.item.as_str()))
+        .map(|i| inv.slot(i).and_then(|s| s.item.vanilla_name()))
         .collect();
-    let res = tables::craft(&cells, 2).map(|(i, n)| Stack::new(i, n));
+    let res = tables::craft(&cells, 2).map(|(i, n)| Stack::named(i, n));
     let mut v = vec![res];
     v.extend((1..46).map(|i| inv.slot(i).cloned()));
     v
@@ -896,7 +899,7 @@ mod tests {
     #[test]
     fn left_click_picks_up_and_puts_down() {
         let mut inv = Inventory::new();
-        inv.put_slot(36, Some(Stack::new("minecraft:dirt", 10)));
+        inv.put_slot(36, Some(Stack::named("minecraft:dirt", 10)));
         let mut cur = None;
         let mut drag = None;
         let mut c = ctx(&mut inv, &mut cur);
@@ -910,7 +913,7 @@ mod tests {
     #[test]
     fn right_click_splits_and_places_one() {
         let mut inv = Inventory::new();
-        inv.put_slot(36, Some(Stack::new("minecraft:dirt", 9)));
+        inv.put_slot(36, Some(Stack::named("minecraft:dirt", 9)));
         let mut cur = None;
         let mut drag = None;
         let mut c = ctx(&mut inv, &mut cur);
@@ -925,13 +928,13 @@ mod tests {
     #[test]
     fn crafting_in_the_inventory_grid() {
         let mut inv = Inventory::new();
-        inv.put_slot(1, Some(Stack::new("minecraft:oak_log", 2)));
+        inv.put_slot(1, Some(Stack::named("minecraft:oak_log", 2)));
         let mut cur = None;
         let mut drag = None;
         let mut c = ctx(&mut inv, &mut cur);
         assert_eq!(
             c.craft_result().map(|s| s.item),
-            Some("minecraft:oak_planks".into())
+            Some(crate::inventory::item("minecraft:oak_planks"))
         );
         c.click(0, 0, 0, &mut drag);
         assert_eq!(c.cursor.as_ref().map(|s| s.count), Some(4));
@@ -940,29 +943,33 @@ mod tests {
         *c.cursor = None;
         c.click(0, 0, 1, &mut drag);
         assert!(c.inv.slot(1).is_none());
-        assert_eq!(c.inv.count_of("minecraft:oak_planks"), 4);
+        assert_eq!(
+            c.inv
+                .count_of(crate::inventory::item("minecraft:oak_planks")),
+            4
+        );
     }
 
     #[test]
     fn armour_slots_take_only_matching_armour() {
         let mut inv = Inventory::new();
-        let mut cur = Some(Stack::new("minecraft:dirt", 1));
+        let mut cur = Some(Stack::named("minecraft:dirt", 1));
         let mut drag = None;
         let mut c = ctx(&mut inv, &mut cur);
         c.click(5, 0, 0, &mut drag);
         assert!(c.inv.slot(5).is_none(), "dirt is not a helmet");
-        *c.cursor = Some(Stack::new("minecraft:iron_helmet", 1));
+        *c.cursor = Some(Stack::named("minecraft:iron_helmet", 1));
         c.click(5, 0, 0, &mut drag);
         assert_eq!(
-            c.inv.slot(5).map(|s| s.item.as_str()),
-            Some("minecraft:iron_helmet")
+            c.inv.slot(5).map(|s| s.item),
+            Some(crate::inventory::item("minecraft:iron_helmet"))
         );
     }
 
     #[test]
     fn shift_click_moves_between_hotbar_and_main() {
         let mut inv = Inventory::new();
-        inv.put_slot(36, Some(Stack::new("minecraft:cobblestone", 64)));
+        inv.put_slot(36, Some(Stack::named("minecraft:cobblestone", 64)));
         let mut cur = None;
         let mut drag = None;
         let mut c = ctx(&mut inv, &mut cur);
@@ -974,7 +981,7 @@ mod tests {
     #[test]
     fn dragging_splits_evenly() {
         let mut inv = Inventory::new();
-        let mut cur = Some(Stack::new("minecraft:dirt", 10));
+        let mut cur = Some(Stack::named("minecraft:dirt", 10));
         let mut drag = None;
         let mut c = ctx(&mut inv, &mut cur);
         c.click(-999, 0, 5, &mut drag);
@@ -991,7 +998,7 @@ mod tests {
     #[test]
     fn clicking_outside_drops_the_cursor() {
         let mut inv = Inventory::new();
-        let mut cur = Some(Stack::new("minecraft:dirt", 10));
+        let mut cur = Some(Stack::named("minecraft:dirt", 10));
         let mut drag = None;
         let mut c = ctx(&mut inv, &mut cur);
         c.click(-999, 1, 0, &mut drag);

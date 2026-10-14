@@ -105,7 +105,7 @@ pub fn dispatch(
         "lookup" | "l" => lookup(&args, handle, registry, world),
         "rollback" | "rb" => rollback(&args, handle, registry, world),
         "page" | "pg" => page(&args, handle),
-        "inv" | "inventory" => inventory(handle),
+        "inv" | "inventory" => inventory(handle, world),
         "stash" => crate::stash::open_command(handle, world),
         "audit" => audit(world),
         "cache" => cache(world),
@@ -396,7 +396,12 @@ pub fn inspect_block(
 /// view and the client's can drift — in creative the client is the one filling
 /// slots — and this is the only way to see that they have, short of reading a
 /// database.
-fn inventory(handle: &PlayerHandle) -> Reply {
+fn inventory(handle: &PlayerHandle, world: &DemoWorld) -> Reply {
+    let name = |id: aether_world::ItemTypeId| {
+        world
+            .item_name(id)
+            .unwrap_or_else(|| format!("item#{}", id.0))
+    };
     let inv = handle.inventory();
     if inv.is_empty() {
         return Reply::one("the server has you carrying nothing");
@@ -415,7 +420,9 @@ fn inventory(handle: &PlayerHandle) -> Reply {
         // follow this exact stack through /audit.
         lines.push(format!(
             "  {where_}: {}x {}  [{:016x}]",
-            stack.count, stack.item, stack.uid.0
+            stack.count,
+            name(stack.item),
+            stack.uid.0
         ));
     }
     // Anything of theirs on the floor is part of the answer to "what do I
@@ -425,8 +432,11 @@ fn inventory(handle: &PlayerHandle) -> Reply {
         lines.push(format!("On the ground ({} stack(s)):", mine.len()));
         for (item, count, p, left) in mine {
             lines.push(format!(
-                "  {count}x {item} at {:.0} {:.0} {:.0} — walk over it ({left}s left)",
-                p.x, p.y, p.z
+                "  {count}x {} at {:.0} {:.0} {:.0} — walk over it ({left}s left)",
+                name(item),
+                p.x,
+                p.y,
+                p.z
             ));
         }
     }
