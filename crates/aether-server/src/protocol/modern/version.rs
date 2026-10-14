@@ -109,14 +109,27 @@ pub struct Packets {
 /// The generations of the modern protocol, oldest first.
 ///
 /// The variants below [`Gen::V1_21_11`] are the releases the older codecs
-/// (protocols 766-773) share with the modern gameplay path; they are ordered
+/// (protocols 764-773) share with the modern gameplay path; they are ordered
 /// so `gen >= Gen::V1_21_3` and friends mean "this release or newer", while
-/// `gen < Gen::V1_21_3` is exactly the older codecs' range. The modern codec
-/// itself only ever sees `V1_21_11` and later.
+/// `gen < Gen::V1_20_5` is exactly the pre-data-component codecs. The modern
+/// codec itself only ever sees `V1_21_11` and later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Gen {
-    /// 1.20.5 – 1.20.6 (766). Attribute-modifier ids are UUIDs, not
-    /// identifiers; there is no `pick_item_from_block`.
+    /// 1.20.2 (764): the first release with the configuration phase. Item
+    /// stacks are the NBT `Slot` (no data components), an attribute is named
+    /// by identifier rather than indexed, the entity-metadata pose serializer
+    /// is 20, text components are JSON strings (system chat, window titles,
+    /// death messages) and the respawn packet carries the pre-SpawnInfo
+    /// layout.
+    V1_20_2,
+    /// 1.20.3 – 1.20.4 (765): 1.20.3 turned the JSON text fields into NBT
+    /// components (system chat, window titles, death messages) and added the
+    /// `level_chunks_load_start` game event; everything else matches 1.20.2.
+    V1_20_4,
+    /// 1.20.5 – 1.20.6 (766). Item stacks become data components, attributes
+    /// are registry indices, the pose serializer moves to 21, and
+    /// attribute-modifier ids are UUIDs, not identifiers; there is no
+    /// `pick_item_from_block`.
     V1_20_5,
     /// 1.21 – 1.21.1 (767).
     V1_21_1,
@@ -125,10 +138,14 @@ pub enum Gen {
     /// SpawnInfo gains a sea level, the player-position packet is reordered,
     /// and attribute-modifier ids become identifiers.
     V1_21_3,
-    /// 1.21.5 – 1.21.6 (770, 771): the attribute set is reordered
-    /// (`camera_distance` before the entity-interaction range), and
-    /// `pick_item_from_block` exists.
+    /// 1.21.5 (770): the attribute set is reordered (`camera_distance`
+    /// before the entity-interaction range), and `pick_item_from_block`
+    /// exists.
     V1_21_5,
+    /// 1.21.6 (771): `entity_action` drops its sneak entries, so its sprint
+    /// ids move from 3/4 to 1/2 and sneaking comes through `player_input`
+    /// instead. Its attribute set matches 1.21.5's.
+    V1_21_6,
     /// 1.21.7 – 1.21.8 (772).
     V1_21_8,
     /// 1.21.9 – 1.21.10 (773): the quantized `lpVec3` velocity.
@@ -229,8 +246,12 @@ pub struct Version {
     pub compat_items: Option<&'static ItemTable>,
     /// Engine attribute id (1.21.11 order) → this release's id, for the older
     /// codecs. Empty for the modern releases, whose attribute set is the
-    /// engine's.
+    /// engine's, and for the pre-1.20.5 codecs, which name attributes instead
+    /// of indexing them (see [`Version::attribute_names`]).
     pub attribute_map: &'static [i32],
+    /// Engine attribute id (1.21.11 order) → the identifier this release names
+    /// it by on the wire, for the codecs before 1.20.5. Empty elsewhere.
+    pub attribute_names: &'static [&'static str],
     /// Damage-type names in *registry order* (the index is the wire id), for
     /// the older codecs. Empty for the modern releases.
     pub damage_types: &'static [&'static str],
@@ -510,6 +531,7 @@ macro_rules! version {
             items: super::gen::$m::ITEMS,
             compat_items: None,
             attribute_map: &[],
+            attribute_names: &[],
             damage_types: &[],
             item_ids: OnceLock::new(),
             entity_types: super::gen::$m::ENTITY_TYPES,
@@ -572,6 +594,7 @@ macro_rules! legacy_version {
             items: &[],
             compat_items: Some(&crate::protocol::compat::items::$compat),
             attribute_map: super::legacy_gen::$m::ATTRIBUTE_MAP,
+            attribute_names: super::legacy_gen::$m::ATTRIBUTE_NAMES,
             damage_types: super::legacy_gen::$m::DAMAGE_TYPES,
             item_ids: OnceLock::new(),
             entity_types: super::legacy_gen::$m::ENTITY_TYPES,
@@ -594,12 +617,14 @@ macro_rules! legacy_version {
     };
 }
 
+pub static V1_20_2: Version = legacy_version!("1.20.2", 764, Gen::V1_20_2, v1_20_2, V1_20_2);
+pub static V1_20_4: Version = legacy_version!("1.20.3/1.20.4", 765, Gen::V1_20_4, v1_20_4, V1_20_4);
 pub static V1_20_5: Version = legacy_version!("1.20.5/1.20.6", 766, Gen::V1_20_5, v1_20_5, V1_20_5);
 pub static V1_21_1: Version = legacy_version!("1.21/1.21.1", 767, Gen::V1_21_1, v1_21_1, V1_21_1);
 pub static V1_21_3: Version = legacy_version!("1.21.3", 768, Gen::V1_21_3, v1_21_3, V1_21_3);
 pub static V1_21_4: Version = legacy_version!("1.21.4", 769, Gen::V1_21_3, v1_21_4, V1_21_4);
 pub static V1_21_5: Version = legacy_version!("1.21.5", 770, Gen::V1_21_5, v1_21_5, V1_21_5);
-pub static V1_21_6: Version = legacy_version!("1.21.6", 771, Gen::V1_21_5, v1_21_6, V1_21_6);
+pub static V1_21_6: Version = legacy_version!("1.21.6", 771, Gen::V1_21_6, v1_21_6, V1_21_6);
 pub static V1_21_8: Version = legacy_version!("1.21.8", 772, Gen::V1_21_8, v1_21_8, V1_21_8);
 pub static V1_21_9: Version =
     legacy_version!("1.21.9/1.21.10", 773, Gen::V1_21_9, v1_21_9, V1_21_9);
@@ -654,18 +679,25 @@ mod tests {
         assert_eq!(V1_21_6.component_potion_contents, 42);
         assert_eq!(V1_21_8.component_potion_contents, 42);
         assert_eq!(V1_21_9.component_potion_contents, 42);
+        // 1.20.2-1.20.4 predate the data-component slot entirely: their potion
+        // is the NBT `Potion` tag, so the component id is unused (0).
+        assert_eq!(V1_20_2.component_potion_contents, 0);
+        assert_eq!(V1_20_4.component_potion_contents, 0);
     }
 
     #[test]
     fn brewing_stand_menu_ids_match_each_releases_own_registry() {
         // `minecraft:menu` in `MenuType` registration order: `brewing_stand`
         // follows `blast_furnace`. 1.21.11 puts it at 11; the crafter menu
-        // added in 1.21 shifts 1.20.5's entry one lower (10), and every later
-        // release keeps 11.
+        // added in 1.21 shifts the pre-1.21 entries one lower (10), and every
+        // release from 1.21.1 keeps 11. The registry is built-in and unchanged
+        // from 1.20.2 through 1.20.6, so 1.20.2/1.20.4 match 1.20.5.
         assert_eq!(V1_21_11.menu_brewing_stand, 11);
         assert_eq!(V26_1.menu_brewing_stand, 11);
         assert_eq!(V26_2.menu_brewing_stand, 11);
         assert_eq!(V26_3.menu_brewing_stand, 11);
+        assert_eq!(V1_20_2.menu_brewing_stand, 10);
+        assert_eq!(V1_20_4.menu_brewing_stand, 10);
         assert_eq!(V1_20_5.menu_brewing_stand, 10);
         assert_eq!(V1_21_1.menu_brewing_stand, 11);
         assert_eq!(V1_21_3.menu_brewing_stand, 11);

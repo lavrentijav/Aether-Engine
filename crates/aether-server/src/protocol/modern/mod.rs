@@ -425,11 +425,16 @@ impl ProtocolCodec for Codec {
                 // them, and the window then shows as empty with no error
                 // anywhere.
                 let mut open = PacketOut::new(self.0.packets.cb_open_screen);
-                open.var_int(STASH_WINDOW)
-                    .var_int(self.0.menu_double_chest)
-                    // The title is an *anonymous* NBT component, the same
-                    // shape System Chat uses in this generation.
-                    .bytes(&super::nbt::string(title).to_network());
+                open.var_int(STASH_WINDOW).var_int(self.0.menu_double_chest);
+                // 1.20.3 made the window title an *anonymous* NBT text
+                // component; 1.20.2 still reads a length-prefixed JSON string,
+                // so sending it the NBT way makes the client read the tag byte
+                // as the string length and disconnect.
+                if self.0.gen < Gen::V1_20_4 {
+                    open.string(&play::json_text(title));
+                } else {
+                    open.bytes(&super::nbt::string(title).to_network());
+                }
 
                 let mut items = PacketOut::new(self.0.packets.cb_container_set_content);
                 items
@@ -505,25 +510,42 @@ impl ProtocolCodec for Codec {
                 Err(_) => ClientEvent::Ignored,
             },
             id if id == p.sb_set_creative_mode_slot => {
-                // Only the head of the stack is read: the count tells us
-                // whether anything is there, the id says what. The component
-                // arrays that follow are the client's business, and the rest
-                // of the packet is discarded either way.
                 let Ok(slot) = pin.u16() else {
                     return ClientEvent::Ignored;
                 };
-                let (item, count) = match pin.var_int() {
-                    Ok(0) | Err(_) => (None, 0),
-                    Ok(n) => (
-                        // An id this version has but the engine does not maps
-                        // to `AIR`, i.e. nothing: the item renders as air on
-                        // the way out, so it must not enter the inventory.
-                        pin.var_int()
-                            .ok()
-                            .and_then(|id| self.0.engine_item(id))
-                            .filter(|id| *id != aether_world::ItemTypeId::AIR),
-                        n.clamp(0, u8::MAX as i32) as u8,
-                    ),
+                let (item, count) = if self.0.gen < Gen::V1_20_5 {
+                    // Pre-1.20.5 `Slot`: a presence flag, then the id, an `i8`
+                    // count and NBT. Reading the presence byte as the count
+                    // (the 1.20.5 shape) would store one item of every stack
+                    // the client reports and silently destroy the rest.
+                    match pin.bool() {
+                        Ok(false) | Err(_) => (None, 0),
+                        Ok(true) => {
+                            let item = pin
+                                .var_int()
+                                .ok()
+                                .and_then(|id| self.0.engine_item(id))
+                                .filter(|id| *id != aether_world::ItemTypeId::AIR);
+                            (item, pin.u8().unwrap_or(0))
+                        }
+                    }
+                } else {
+                    // 1.20.5+: a VarInt count, then the id and the two data
+                    // component lists. Only the head of the stack is read; the
+                    // rest of the packet is discarded either way.
+                    match pin.var_int() {
+                        Ok(0) | Err(_) => (None, 0),
+                        Ok(n) => (
+                            // An id this version has but the engine does not
+                            // maps to `AIR`, i.e. nothing: it renders as air on
+                            // the way out, so it must not enter the inventory.
+                            pin.var_int()
+                                .ok()
+                                .and_then(|id| self.0.engine_item(id))
+                                .filter(|id| *id != aether_world::ItemTypeId::AIR),
+                            n.clamp(0, u8::MAX as i32) as u8,
+                        ),
+                    }
                 };
                 ClientEvent::CreativeSlot {
                     slot: slot as i16,
@@ -642,12 +664,26 @@ impl ProtocolCodec for Codec {
                 }
                 Err(_) => ClientEvent::Ignored,
             },
+            // `entity_action`. 1.21.6 dropped the sneak entries, moving sprint
+            // from 3/4 to 1/2 and sneaking to `player_input`; before that this
+            // packet carries both.
             id if id == p.sb_player_command => {
-                let _ = pin.var_int();
-                match pin.var_int() {
-                    Ok(1) => ClientEvent::Sprint(true),
-                    Ok(2) => ClientEvent::Sprint(false),
-                    _ => ClientEvent::Ignored,
+                let _ = pin.var_int(); // entity id
+                let action = pin.var_int();
+                if self.0.gen >= Gen::V1_21_6 {
+                    match action {
+                        Ok(1) => ClientEvent::Sprint(true),
+                        Ok(2) => ClientEvent::Sprint(false),
+                        _ => ClientEvent::Ignored,
+                    }
+                } else {
+                    match action {
+                        Ok(0) => ClientEvent::Input { sneak: true },
+                        Ok(1) => ClientEvent::Input { sneak: false },
+                        Ok(3) => ClientEvent::Sprint(true),
+                        Ok(4) => ClientEvent::Sprint(false),
+                        _ => ClientEvent::Ignored,
+                    }
                 }
             }
             id if id == p.sb_player_input => match pin.u8() {
@@ -778,6 +814,12 @@ fn write_container_slot(v: &version::Version, p: &mut PacketOut, slot: &super::C
         .item_id(&slot.item)
         .or_else(|| v.item_id("minecraft:barrier"))
         .unwrap_or(0);
+    // Pre-1.20.5 a slot is NBT-based, so the name rides in `display.Name`
+    // rather than a data component.
+    if v.gen < Gen::V1_20_5 {
+        play::write_legacy_container_slot(p, id, slot.wire_count() as u8, &slot.label);
+        return;
+    }
     // The badge shows `wire_count`, which is one for anything past a stack;
     // the real number rides in the name. The wire could carry 4000 — the count
     // is a VarInt since 1.20.5 — but the client renders that badge into the
@@ -1227,6 +1269,102 @@ mod tests {
     }
 
     #[test]
+    fn a_pre_1_20_5_creative_slot_keeps_its_i8_count() {
+        // 764/765 `set_creative_mode_slot` carries the old NBT `Slot`:
+        // slot i16, present bool, itemId varint, count i8, nbt. The shared
+        // decoder read the presence byte as the 1.20.5 VarInt count, so every
+        // stack the client reported became one item.
+        for (v, proto) in [(&version::V1_20_2, 764), (&version::V1_20_4, 765)] {
+            let mut data = 36u16.to_be_bytes().to_vec();
+            data.push(1); // present
+            data.push(1); // itemId = stone
+            data.push(64); // i8 count
+            data.push(0); // TAG_End: no NBT
+            let pkt = RawPacket {
+                id: v.packets.sb_set_creative_mode_slot,
+                data,
+            };
+            match Codec(v).decode(&pkt, any_pos()) {
+                ClientEvent::CreativeSlot { slot, item, count } => {
+                    assert_eq!(slot, 36, "{proto}");
+                    assert_eq!(
+                        item,
+                        Some(crate::inventory::item("minecraft:stone")),
+                        "{proto}"
+                    );
+                    assert_eq!(count, 64, "{proto}: the i8 count must survive");
+                }
+                _ => panic!("{proto}: expected a creative slot"),
+            }
+        }
+        // 1.20.5 keeps the VarInt count form.
+        let mut data = 36u16.to_be_bytes().to_vec();
+        data.extend_from_slice(&[64, 1, 0, 0]); // count, id, two component counts
+        let pkt = RawPacket {
+            id: version::V1_20_5.packets.sb_set_creative_mode_slot,
+            data,
+        };
+        match Codec(&version::V1_20_5).decode(&pkt, any_pos()) {
+            ClientEvent::CreativeSlot { count, .. } => assert_eq!(count, 64),
+            _ => panic!("1.20.5: expected a creative slot"),
+        }
+    }
+
+    #[test]
+    fn entity_action_maps_per_release_through_1_21_5() {
+        // `entity_action` action ids: sneak is 0/1 and sprint 3/4 up to 1.21.5;
+        // 1.21.6 moved sprint to 1/2 and dropped the sneak entries (they come
+        // through `player_input` from then on). Decode action `a` on `v`.
+        let action = |v: &'static version::Version, a: i32| {
+            let pkt = RawPacket {
+                id: v.packets.sb_player_command,
+                data: vec![1, a as u8], // entity id 1, then the action
+            };
+            Codec(v).decode(&pkt, any_pos())
+        };
+        for (v, proto) in [
+            (&version::V1_20_2, 764),
+            (&version::V1_20_4, 765),
+            (&version::V1_20_5, 766),
+            (&version::V1_21_1, 767),
+            (&version::V1_21_3, 768),
+            (&version::V1_21_4, 769),
+            (&version::V1_21_5, 770),
+        ] {
+            assert!(
+                matches!(action(v, 0), ClientEvent::Input { sneak: true }),
+                "{proto}: action 0 starts sneaking"
+            );
+            assert!(
+                matches!(action(v, 1), ClientEvent::Input { sneak: false }),
+                "{proto}: action 1 stops sneaking"
+            );
+            assert!(
+                matches!(action(v, 3), ClientEvent::Sprint(true)),
+                "{proto}: action 3 starts sprinting"
+            );
+            assert!(
+                matches!(action(v, 4), ClientEvent::Sprint(false)),
+                "{proto}: action 4 stops sprinting"
+            );
+        }
+        for (v, proto) in [
+            (&version::V1_21_6, 771),
+            (&version::V1_21_8, 772),
+            (&version::V1_21_9, 773),
+        ] {
+            assert!(
+                matches!(action(v, 1), ClientEvent::Sprint(true)),
+                "{proto}: action 1 starts sprinting"
+            );
+            assert!(
+                matches!(action(v, 2), ClientEvent::Sprint(false)),
+                "{proto}: action 2 stops sprinting"
+            );
+        }
+    }
+
+    #[test]
     fn the_hotbar_we_hand_out_maps_back_to_its_blocks() {
         // Placement resolves the held item through this table, so every item
         // the join hotbar contains has to resolve back to the block it came
@@ -1360,6 +1498,41 @@ mod tests {
             crate::protocol::ContainerSlot::block("minecraft:stone", 32, "stone").with_quantity();
         assert_eq!(slot.wire_count(), 32);
         assert_eq!(slot.label, "stone", "no suffix when the badge suffices");
+    }
+
+    #[test]
+    fn open_container_title_is_json_on_1_20_2_and_nbt_from_1_20_3() {
+        // The stash window (`OpenContainer`) takes the same 1.20.3 title
+        // change as `OpenWindow`: 1.20.2's open_window.windowTitle is a
+        // length-prefixed JSON string, from 1.20.3 an anonymous NBT
+        // component. Sending NBT to a 1.20.2 client makes it read the tag byte
+        // as the string length and disconnect.
+        struct Empty;
+        impl BlockSource for Empty {
+            fn block_at(&self, _x: i32, _y: i32, _z: i32) -> BlockStateId {
+                BlockStateId::AIR
+            }
+        }
+        let ev = ServerEvent::OpenContainer {
+            title: "Stash".into(),
+            slots: Vec::new(),
+        };
+
+        let pkts = Codec(&version::V1_20_2).encode(&ev, &Empty);
+        assert_eq!(pkts.len(), 2, "open screen, then contents");
+        let body = pkts[0].body();
+        let mut pin = crate::proto::PacketIn::new(&body[1..]);
+        assert_eq!(pin.var_int().unwrap(), STASH_WINDOW);
+        assert_eq!(pin.var_int().unwrap(), version::V1_20_2.menu_double_chest);
+        assert_eq!(pin.string().unwrap(), r#"{"text":"Stash"}"#);
+
+        // 1.20.3 sends the NBT component form: tag byte then payload.
+        let pkts = Codec(&version::V1_20_4).encode(&ev, &Empty);
+        let body = pkts[0].body();
+        let mut pin = crate::proto::PacketIn::new(&body[1..]);
+        assert_eq!(pin.var_int().unwrap(), STASH_WINDOW);
+        assert_eq!(pin.var_int().unwrap(), version::V1_20_4.menu_double_chest);
+        assert_eq!(pin.u8().unwrap(), 0x08, "TAG_String NBT component");
     }
 
     #[test]

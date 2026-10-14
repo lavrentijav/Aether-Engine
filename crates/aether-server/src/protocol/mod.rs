@@ -888,17 +888,15 @@ mod tests {
     }
 
     #[test]
-    fn every_1_20_5_to_1_21_10_codec_runs_the_full_game() {
-        // Task J9 routes protocols 766-773 through the shared gameplay path:
-        // entities, combat, health, hunger, windows and effects, not the old
-        // client-trusting subset.
-        for proto in 766..=773 {
+    fn every_1_20_2_to_1_21_10_codec_runs_the_full_game() {
+        // J9 routed 766-773 through the shared gameplay path; T1 extends it to
+        // 764/765. Entities, combat, health, hunger, windows and effects, not
+        // the old client-trusting subset.
+        for proto in 764..=773 {
             let c = codec_for(proto).unwrap_or_else(|| panic!("no codec for {proto}"));
             assert!(c.full_gameplay(), "{proto} must run the full game");
             assert!(c.supports_containers(), "{proto} must support windows");
         }
-        // 1.20.2-1.20.4 (764/765) are a different queue and stay on the subset.
-        assert!(!codec_for(765).unwrap().full_gameplay());
     }
 
     #[test]

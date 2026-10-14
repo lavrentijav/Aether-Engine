@@ -7,6 +7,7 @@ use super::version::{Gen, Version};
 use super::{angle, encode_position, inventory};
 use crate::inventory::Stack;
 use crate::proto::PacketOut;
+use crate::protocol::nbt::Nbt;
 use crate::protocol::{GameMode, Menu, MetaValue, ServerEvent};
 
 /// `minecraft:menu` registry ids.
@@ -24,6 +25,13 @@ fn menu_id(v: &Version, m: Menu) -> i32 {
 
 /// Append a stack in this version's slot format.
 pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
+    // Before 1.20.5 a slot is a presence flag, an item id and count, then an
+    // optional NBT compound (`Slot`); 1.20.5 replaced the NBT with the two
+    // data-component lists.
+    if v.gen < Gen::V1_20_5 {
+        write_legacy_stack(v, p, stack.filter(|s| s.count > 0));
+        return;
+    }
     let Some(s) = stack.filter(|s| s.count > 0) else {
         inventory::write_empty(p);
         return;
@@ -99,13 +107,7 @@ fn stand_in_id(v: &Version) -> i32 {
 /// genuine trident. The component ids are per-version; a wrong id makes the
 /// client reject the whole stack, so they are generated, never guessed.
 fn write_disguised_stack(v: &Version, p: &mut PacketOut, s: &Stack, id: i32) {
-    let name = crate::protocol::compat::items::english(s.item)
-        .map(str::to_owned)
-        .unwrap_or_else(|| aether_world::registry::items::display_name(s.item));
-    let marker = match s.item.vanilla_name() {
-        Some(real) => format!("Aether: {real}"),
-        None => "Aether: unknown item".to_owned(),
-    };
+    let (name, marker) = disguise_labels(s);
     p.var_int(s.count as i32)
         .var_int(id)
         .var_int(2) // custom_name and lore added...
@@ -115,6 +117,87 @@ fn write_disguised_stack(v: &Version, p: &mut PacketOut, s: &Stack, id: i32) {
         .var_int(v.component_lore)
         .var_int(1) // one lore line
         .bytes(&crate::protocol::nbt::string(&marker).to_network());
+}
+
+/// The English name and the `Aether:` marker a disguised stack carries.
+fn disguise_labels(s: &Stack) -> (String, String) {
+    let name = crate::protocol::compat::items::english(s.item)
+        .map(str::to_owned)
+        .unwrap_or_else(|| aether_world::registry::items::display_name(s.item));
+    let marker = match s.item.vanilla_name() {
+        Some(real) => format!("Aether: {real}"),
+        None => "Aether: unknown item".to_owned(),
+    };
+    (name, marker)
+}
+
+/// A `{"text": ...}` JSON text component, the pre-1.20.3 form.
+pub(super) fn json_text(text: &str) -> String {
+    format!("{{\"text\":\"{}\"}}", crate::protocol::json_escape(text))
+}
+
+/// Append a pre-1.20.5 `Slot`: presence flag, item id, `i8` count, then an
+/// optional NBT compound.
+///
+/// The compound carries `Damage` for a worn tool and, for a stand-in, the
+/// `display` compound whose `Name` and `Lore` are JSON text components (the
+/// NBT-component form arrives with 1.20.3).
+fn write_legacy_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
+    let Some(s) = stack else {
+        p.bool(false);
+        return;
+    };
+    let (id, disguised) = match v.wire_stack_item(s.item) {
+        Some(w) => (w.id, w.disguised),
+        None => (stand_in_id(v), true),
+    };
+    p.bool(true).var_int(id).u8(s.count);
+    let mut fields: Vec<(String, Nbt)> = Vec::new();
+    if s.damage > 0 {
+        fields.push(("Damage".to_owned(), Nbt::Int(s.damage as i32)));
+    }
+    // A potion names itself in the NBT `Potion` tag before 1.20.5, where
+    // 1.20.5+ uses the `minecraft:potion_contents` component. The value is the
+    // `minecraft:potion` registry *name* — which is why the older form needs
+    // no component id and why the registry ordering cannot drift here.
+    if let Some(id) = potion_contents(s) {
+        if let Some(def) = crate::game::brewing::def_of(id) {
+            fields.push((
+                "Potion".to_owned(),
+                Nbt::Str(format!("minecraft:{}", def.name)),
+            ));
+        }
+    }
+    if disguised {
+        let (name, marker) = disguise_labels(s);
+        fields.push((
+            "display".to_owned(),
+            crate::protocol::nbt::compound([
+                ("Name", Nbt::Str(json_text(&name))),
+                ("Lore", Nbt::List(vec![Nbt::Str(json_text(&marker))])),
+            ]),
+        ));
+    }
+    if fields.is_empty() {
+        p.u8(0); // no NBT: a lone TAG_End
+    } else {
+        p.bytes(&Nbt::Compound(fields).to_network());
+    }
+}
+
+/// Append a pre-1.20.5 container slot carrying a display name.
+///
+/// A server-driven window says what it holds through the display name; the
+/// pre-1.20.5 form puts it in the NBT `display.Name` as a JSON text component.
+pub fn write_legacy_container_slot(p: &mut PacketOut, item_id: i32, count: u8, name: &str) {
+    p.bool(true).var_int(item_id).u8(count);
+    p.bytes(
+        &Nbt::Compound(vec![(
+            "display".to_owned(),
+            crate::protocol::nbt::compound([("Name", Nbt::Str(json_text(name)))]),
+        )])
+        .to_network(),
+    );
 }
 
 /// Entity Position Sync: absolute position and look. 26.3 made the
@@ -313,8 +396,14 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
                         write_stack(v, &mut p, s.as_ref());
                     }
                     MetaValue::Pose(pose) => {
-                        // The pose serializer is 21 before 1.21.9 and 20 after.
-                        let id = if v.gen >= Gen::V1_21_9 { 20 } else { 21 };
+                        // The pose serializer is 20 before 1.20.5 (1.20.5 grew
+                        // a `particles` serializer ahead of it), 21 from 1.20.5
+                        // to 1.21.8, and 20 again from 1.21.9.
+                        let id = if v.gen >= Gen::V1_21_9 || v.gen < Gen::V1_20_5 {
+                            20
+                        } else {
+                            21
+                        };
                         p.var_int(id).var_int(*pose);
                     }
                 }
@@ -439,11 +528,17 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
         } => {
             let mut p = PacketOut::new(ids.cb_update_mob_effect);
             let flags = (*ambient as u8) | ((*visible as u8) << 1) | ((*show_icon as u8) << 2);
-            p.var_int(*entity_id)
-                .var_int(*effect as i32)
-                .var_int(*amplifier as i32)
-                .var_int(*duration)
-                .u8(flags);
+            p.var_int(*entity_id).var_int(*effect as i32);
+            if v.gen < Gen::V1_20_5 {
+                // Pre-1.20.5: the amplifier is a signed byte and the flags
+                // byte is followed by an *optional* factor-data compound,
+                // which this server never sends — but the presence bool is
+                // not optional, and omitting it leaves the packet a byte
+                // short so the client rejects it.
+                p.u8(*amplifier).var_int(*duration).u8(flags).bool(false);
+            } else {
+                p.var_int(*amplifier as i32).var_int(*duration).u8(flags);
+            }
             vec![p]
         }
         ServerEvent::RemoveMobEffect { entity_id, effect } => {
@@ -460,6 +555,32 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             // than sent a malformed one.
             if ids.cb_update_attributes < 0 {
                 return Some(Vec::new());
+            }
+            // Before 1.20.5 an attribute is named by its identifier on the
+            // wire; the registry index arrived with 1.20.5. Drop a property
+            // whose name this release has none for.
+            if v.gen < Gen::V1_20_5 {
+                let named: Vec<(&str, f64, &Vec<(String, f64, i8)>)> = properties
+                    .iter()
+                    .filter_map(|(key, value, modifiers)| {
+                        let name = v
+                            .attribute_names
+                            .get(*key as usize)
+                            .copied()
+                            .filter(|n| !n.is_empty())?;
+                        Some((name, *value, modifiers))
+                    })
+                    .collect();
+                let mut p = PacketOut::new(ids.cb_update_attributes);
+                p.var_int(*entity_id).var_int(named.len() as i32);
+                for (name, value, modifiers) in named {
+                    p.string(name).f64(value).var_int(modifiers.len() as i32);
+                    for (id, amount, operation) in modifiers {
+                        p.uuid(modifier_uuid(id)); // modifiers are UUIDs here
+                        p.f64(*amount).u8(*operation as u8);
+                    }
+                }
+                return Some(vec![p]);
             }
             // The attribute registry was reordered between releases, and
             // 1.20.5 still names a modifier by UUID where 1.21 uses an
@@ -560,9 +681,14 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             title,
         } => {
             let mut p = PacketOut::new(ids.cb_open_screen);
-            p.var_int(*window_id as i32)
-                .var_int(menu_id(v, *menu))
-                .bytes(&crate::protocol::nbt::string(title).to_network());
+            p.var_int(*window_id as i32).var_int(menu_id(v, *menu));
+            // 1.20.3 made the title an NBT text component; 1.20.2 still sends
+            // the JSON string form.
+            if v.gen < Gen::V1_20_4 {
+                p.string(&json_text(title));
+            } else {
+                p.bytes(&crate::protocol::nbt::string(title).to_network());
+            }
             vec![p]
         }
         ServerEvent::CloseWindow(id) => {
@@ -616,6 +742,30 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             vec![p]
         }
         ServerEvent::Respawn { game_mode } => {
+            // Before 1.20.5 the respawn packet predates the `SpawnInfo`
+            // compound: the dimension type is named directly and the flags
+            // and death location follow it.
+            if v.gen < Gen::V1_20_5 {
+                let mut p = PacketOut::new(ids.cb_respawn);
+                p.string(super::registry::DIMENSION_NAME) // dimension type
+                    .string(super::registry::DIMENSION_NAME) // world name
+                    .i64(0) // hashed seed
+                    .u8(game_mode.wire()) // game mode (an i8: same byte)
+                    .u8(0xFF) // previous game mode: none
+                    .bool(false) // not a debug world
+                    .bool(false) // not superflat
+                    .bool(false) // no death location
+                    .var_int(0) // portal cooldown
+                    .bool(false); // keep nothing
+                                  // Game event 13 ("level chunks load start") arrives with
+                                  // 1.20.3; a 1.20.2 client would not know it.
+                if v.gen >= Gen::V1_20_4 {
+                    let mut wait = PacketOut::new(ids.cb_game_event);
+                    wait.u8(13).f32(0.0);
+                    return Some(vec![p, abilities(v, *game_mode), wait]);
+                }
+                return Some(vec![p, abilities(v, *game_mode)]);
+            }
             let mut p = PacketOut::new(ids.cb_respawn);
             p.var_int(super::dimension_type_id(v))
                 .string(super::registry::DIMENSION_NAME)
@@ -686,8 +836,13 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
         }
         ServerEvent::DeathMessage { entity_id, text } => {
             let mut p = PacketOut::new(ids.cb_player_combat_kill);
-            p.var_int(*entity_id)
-                .bytes(&crate::protocol::nbt::string(text).to_network());
+            p.var_int(*entity_id);
+            // 1.20.3 switched the death message to an NBT component.
+            if v.gen < Gen::V1_20_4 {
+                p.string(&json_text(text));
+            } else {
+                p.bytes(&crate::protocol::nbt::string(text).to_network());
+            }
             vec![p]
         }
         ServerEvent::Explosion {
@@ -1118,5 +1273,297 @@ mod tests {
         assert_eq!(len(&crate::protocol::modern::version::V1_20_5), 1 + 16);
         assert_eq!(len(&crate::protocol::modern::version::V1_21_1), 1 + 16);
         assert_eq!(len(&crate::protocol::modern::version::V1_21_3), 1 + 17);
+        // 1.20.2-1.20.4 match 1.20.5 here.
+        assert_eq!(len(&crate::protocol::modern::version::V1_20_2), 1 + 16);
+        assert_eq!(len(&crate::protocol::modern::version::V1_20_4), 1 + 16);
+    }
+
+    #[test]
+    fn a_pre_1_20_5_slot_is_the_old_nbt_form_not_a_component_stack() {
+        // 1.20.5 replaced the NBT `Slot` with count/id/two component counts.
+        // The older form is presence, id, `i8` count, then optional NBT.
+        let v = &crate::protocol::modern::version::V1_20_4;
+
+        // Empty: a lone `present = false` (after the packet id).
+        let mut p = PacketOut::new(0);
+        write_stack(v, &mut p, None);
+        assert_eq!(p.body(), &[0, 0]);
+
+        // One stone: present, id, `i8` count, then `TAG_End` (no NBT).
+        let mut p = PacketOut::new(0);
+        write_stack(v, &mut p, Some(&Stack::new(id("minecraft:stone"), 1)));
+        let body = p.body()[1..].to_vec();
+        let mut pin = crate::proto::PacketIn::new(&body);
+        assert!(pin.bool().unwrap(), "present");
+        assert_eq!(
+            pin.var_int().unwrap(),
+            v.item_id("minecraft:stone").unwrap()
+        );
+        assert_eq!(pin.u8().unwrap(), 1, "i8 count");
+        assert_eq!(pin.u8().unwrap(), 0, "no NBT: a lone TAG_End");
+        assert!(pin.u8().is_err(), "nothing may trail the slot");
+    }
+
+    #[test]
+    fn a_worn_tool_carries_its_damage_in_the_old_nbt_slot() {
+        let v = &crate::protocol::modern::version::V1_20_4;
+        let mut s = Stack::new(id("minecraft:diamond_pickaxe"), 1);
+        s.damage = 7;
+        let mut p = PacketOut::new(0);
+        write_stack(v, &mut p, Some(&s));
+        let body = p.body()[1..].to_vec();
+        assert!(contains(&body, b"Damage"), "the Damage tag is present");
+        assert!(contains(&body, &7i32.to_be_bytes()), "and carries the wear");
+    }
+
+    #[test]
+    fn a_potion_carries_its_name_in_the_old_nbt_slot() {
+        // Before 1.20.5 a potion names itself through the NBT `Potion` tag —
+        // the registry *name*, not an index — rather than the
+        // `minecraft:potion_contents` component. This is why 764/765 need no
+        // component id.
+        for v in [
+            &crate::protocol::modern::version::V1_20_2,
+            &crate::protocol::modern::version::V1_20_4,
+        ] {
+            let potion = crate::game::brewing::potion_id("minecraft:long_swiftness").unwrap();
+            let s = Stack::potion("minecraft:potion", potion, 1);
+            let mut p = PacketOut::new(0);
+            write_stack(v, &mut p, Some(&s));
+            let body = p.body()[1..].to_vec();
+            let mut pin = crate::proto::PacketIn::new(&body);
+            assert!(pin.bool().unwrap(), "{}: present", v.name);
+            assert_eq!(
+                pin.var_int().unwrap(),
+                v.item_id("minecraft:potion").unwrap(),
+                "{}: the potion item",
+                v.name
+            );
+            assert_eq!(pin.u8().unwrap(), 1, "{}: i8 count", v.name);
+            assert_eq!(pin.u8().unwrap(), 0x0A, "{}: TAG_Compound", v.name);
+            // The compound holds the `Potion` string with the registry name.
+            assert!(
+                contains(&body, b"Potion"),
+                "{}: the Potion tag is present",
+                v.name
+            );
+            assert!(
+                contains(&body, b"minecraft:long_swiftness"),
+                "{}: and carries the registry name",
+                v.name
+            );
+        }
+        // A non-potion stack carries no `Potion` tag.
+        let v = &crate::protocol::modern::version::V1_20_4;
+        let mut p = PacketOut::new(0);
+        write_stack(v, &mut p, Some(&Stack::new(id("minecraft:diamond"), 1)));
+        assert!(!contains(&p.body()[1..], b"Potion"));
+    }
+
+    #[test]
+    fn the_pose_serializer_is_20_before_1_20_5() {
+        // 1.20.5 grew a `particles` serializer ahead of `pose`, shifting it
+        // from 20 to 21; 1.21.9 moved it back. Older codecs must keep 20.
+        let ev = ServerEvent::EntityMeta {
+            entity_id: 1,
+            entries: vec![(0, MetaValue::Pose(0))],
+        };
+        let check = |v: &Version, want: i32| {
+            let pkts = encode(v, &ev).unwrap();
+            let body = pkts[0].body();
+            let mut pin = crate::proto::PacketIn::new(&body[1..]);
+            pin.var_int().unwrap(); // entity id
+            pin.u8().unwrap(); // index
+            assert_eq!(pin.var_int().unwrap(), want, "{}: pose serializer", v.name);
+        };
+        check(&crate::protocol::modern::version::V1_20_2, 20);
+        check(&crate::protocol::modern::version::V1_20_4, 20);
+        check(&crate::protocol::modern::version::V1_20_5, 21);
+    }
+
+    #[test]
+    fn a_pre_1_20_5_attribute_is_named_and_its_modifier_is_a_uuid() {
+        let ev = ServerEvent::UpdateAttributes {
+            entity_id: 5,
+            properties: vec![(20, 0.1, vec![("minecraft:effect.speed".to_owned(), 0.2, 2)])],
+        };
+        for v in [
+            &crate::protocol::modern::version::V1_20_2,
+            &crate::protocol::modern::version::V1_20_4,
+        ] {
+            let pkts = encode(v, &ev).unwrap();
+            let body = pkts[0].body();
+            assert_eq!(body[0] as i32, v.packets.cb_update_attributes);
+            let mut pin = crate::proto::PacketIn::new(&body[1..]);
+            assert_eq!(pin.var_int().unwrap(), 5);
+            assert_eq!(pin.var_int().unwrap(), 1, "one property");
+            assert_eq!(
+                pin.string().unwrap(),
+                "minecraft:generic.movement_speed",
+                "{}: the attribute is named",
+                v.name
+            );
+            assert_eq!(pin.f64().unwrap(), 0.1);
+            assert_eq!(pin.var_int().unwrap(), 1, "one modifier");
+            for _ in 0..16 {
+                pin.u8().unwrap(); // a UUID, not an identifier
+            }
+            assert_eq!(pin.f64().unwrap(), 0.2);
+            assert_eq!(pin.u8().unwrap(), 2);
+            assert!(pin.u8().is_err(), "{}: no identifier trails", v.name);
+        }
+
+        // 1.20.5 indexes the attribute and also uses a UUID here.
+        let v = &crate::protocol::modern::version::V1_20_5;
+        let pkts = encode(v, &ev).unwrap();
+        let mut pin = crate::proto::PacketIn::new(&pkts[0].body()[1..]);
+        assert_eq!(pin.var_int().unwrap(), 5);
+        assert_eq!(pin.var_int().unwrap(), 1);
+        assert_eq!(pin.var_int().unwrap(), v.attribute_map[20]);
+        assert_eq!(pin.f64().unwrap(), 0.1);
+        assert_eq!(pin.var_int().unwrap(), 1);
+        for _ in 0..16 {
+            pin.u8().unwrap(); // 1.20.5 still a UUID
+        }
+        assert_eq!(pin.f64().unwrap(), 0.2);
+        assert_eq!(pin.u8().unwrap(), 2);
+    }
+
+    #[test]
+    fn the_respawn_packet_predates_spawn_info_before_1_20_5() {
+        let ev = ServerEvent::Respawn {
+            game_mode: GameMode::Survival,
+        };
+        // 1.20.2-1.20.4: dimension type name, world name, seed, game mode,
+        // previous, debug, flat, death, portal cooldown, copyMetadata.
+        let pkts = encode(&crate::protocol::modern::version::V1_20_2, &ev).unwrap();
+        assert_eq!(pkts.len(), 2, "respawn + abilities; no wait-for-chunks");
+        let body = pkts[0].body();
+        assert_eq!(
+            body[0] as i32,
+            crate::protocol::modern::version::V1_20_2.packets.cb_respawn
+        );
+        let mut pin = crate::proto::PacketIn::new(&body[1..]);
+        assert_eq!(pin.string().unwrap(), "minecraft:overworld");
+        assert_eq!(pin.string().unwrap(), "minecraft:overworld");
+        assert_eq!(pin.i64().unwrap(), 0);
+        assert_eq!(pin.u8().unwrap(), 0);
+        assert_eq!(pin.u8().unwrap(), 0xFF);
+        assert!(!pin.bool().unwrap());
+        assert!(!pin.bool().unwrap());
+        assert!(!pin.bool().unwrap());
+        assert_eq!(pin.var_int().unwrap(), 0);
+        assert!(!pin.bool().unwrap());
+        assert!(pin.u8().is_err(), "nothing may trail the respawn");
+
+        // 1.20.3 adds the wait-for-chunks game event after the abilities.
+        let pkts = encode(&crate::protocol::modern::version::V1_20_4, &ev).unwrap();
+        assert_eq!(pkts.len(), 3);
+        assert_eq!(
+            pkts[2].body()[0] as i32,
+            crate::protocol::modern::version::V1_20_4
+                .packets
+                .cb_game_event
+        );
+    }
+
+    #[test]
+    fn open_screen_and_death_messages_are_json_in_1_20_2() {
+        let open = ServerEvent::OpenWindow {
+            window_id: 1,
+            menu: Menu::Chest,
+            title: "Stash".to_owned(),
+        };
+        // 1.20.2: a length-prefixed JSON string, not an NBT component.
+        let pkts = encode(&crate::protocol::modern::version::V1_20_2, &open).unwrap();
+        let body = pkts[0].body();
+        let mut pin = crate::proto::PacketIn::new(&body[1..]);
+        assert_eq!(pin.var_int().unwrap(), 1);
+        assert_eq!(
+            pin.var_int().unwrap(),
+            crate::protocol::modern::version::V1_20_2.menu_chest
+        );
+        assert_eq!(pin.string().unwrap(), r#"{"text":"Stash"}"#);
+
+        // 1.20.3 sends the NBT component form: tag byte then payload.
+        let pkts = encode(&crate::protocol::modern::version::V1_20_4, &open).unwrap();
+        assert_eq!(pkts[0].body()[3], 0x08, "TAG_String NBT component");
+
+        // The same open-screen path carries the brewing-stand menu id, which
+        // is one below 1.21's on 764/765.
+        for v in [
+            &crate::protocol::modern::version::V1_20_2,
+            &crate::protocol::modern::version::V1_20_4,
+        ] {
+            let ev = ServerEvent::OpenWindow {
+                window_id: 1,
+                menu: Menu::BrewingStand,
+                title: "Brewing Stand".to_owned(),
+            };
+            let pkts = encode(v, &ev).unwrap();
+            let mut pin = crate::proto::PacketIn::new(&pkts[0].body()[1..]);
+            assert_eq!(pin.var_int().unwrap(), 1);
+            assert_eq!(
+                pin.var_int().unwrap(),
+                v.menu_brewing_stand,
+                "{}: brewing-stand menu id",
+                v.name
+            );
+            assert_eq!(v.menu_brewing_stand, 10, "{}", v.name);
+        }
+
+        let death = ServerEvent::DeathMessage {
+            entity_id: 3,
+            text: "Steve died".to_owned(),
+        };
+        let pkts = encode(&crate::protocol::modern::version::V1_20_2, &death).unwrap();
+        let body = pkts[0].body();
+        let mut pin = crate::proto::PacketIn::new(&body[1..]);
+        assert_eq!(pin.var_int().unwrap(), 3);
+        assert_eq!(pin.string().unwrap(), r#"{"text":"Steve died"}"#);
+    }
+
+    #[test]
+    fn update_mob_effect_uses_the_pre_1_20_5_body_on_764_and_765() {
+        // 764/765 `entity_effect`, per minecraft-data:
+        // entityId varint, effectId varint, amplifier **i8**, duration varint,
+        // hideParticles **i8**, factorCodec **option**<anonymousNbt>.
+        // 1.20.5 replaced the tail with a single flags u8. Omitting the
+        // option bool leaves the packet a byte short and kicks the client.
+        let ev = ServerEvent::UpdateMobEffect {
+            entity_id: 7,
+            effect: 20,
+            amplifier: 2,
+            duration: 300,
+            ambient: false,
+            visible: true,
+            show_icon: true,
+        };
+        for v in [
+            &crate::protocol::modern::version::V1_20_2,
+            &crate::protocol::modern::version::V1_20_4,
+        ] {
+            let pkts = encode(v, &ev).unwrap();
+            let body = pkts[0].body();
+            assert_eq!(body[0] as i32, v.packets.cb_update_mob_effect);
+            let mut pin = crate::proto::PacketIn::new(&body[1..]);
+            assert_eq!(pin.var_int().unwrap(), 7, "{}", v.name);
+            assert_eq!(pin.var_int().unwrap(), 20, "{}", v.name);
+            assert_eq!(pin.u8().unwrap(), 2, "{}: amplifier is an i8", v.name);
+            assert_eq!(pin.var_int().unwrap(), 300, "{}", v.name);
+            assert_eq!(pin.u8().unwrap(), 0b110, "{}: visible|show_icon", v.name);
+            assert!(!pin.bool().unwrap(), "{}: factorCodec is absent", v.name);
+            assert!(pin.u8().is_err(), "{}: nothing may trail", v.name);
+        }
+        // 1.20.5 uses the VarInt amplifier and no factor option.
+        let v = &crate::protocol::modern::version::V1_20_5;
+        let pkts = encode(v, &ev).unwrap();
+        let mut pin = crate::proto::PacketIn::new(&pkts[0].body()[1..]);
+        assert_eq!(pin.var_int().unwrap(), 7);
+        assert_eq!(pin.var_int().unwrap(), 20);
+        assert_eq!(pin.var_int().unwrap(), 2, "amplifier is a VarInt here");
+        assert_eq!(pin.var_int().unwrap(), 300);
+        assert_eq!(pin.u8().unwrap(), 0b110);
+        assert!(pin.u8().is_err(), "no factor option from 1.20.5");
     }
 }
