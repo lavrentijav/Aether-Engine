@@ -478,7 +478,140 @@ impl<B: KvBackend> Journal<B> {
         Ok(out)
     }
 
-    /// The whole history, oldest first. For tooling and the item ledger.
+    /// Stream every event, oldest first, decoding one at a time.
+    ///
+    /// The event is borrowed for the call only; clone it to keep it. Blobs
+    /// that will not decode are skipped, as in [`Self::all_events`]: a
+    /// corrupt tail must not hide the events before it.
+    pub fn for_each_event<F>(&self, mut f: F) -> Result<(), StorageError>
+    where
+        F: FnMut(&Event) -> Result<(), StorageError>,
+    {
+        self.backend.scan_prefix_each(&[K_EVENT], &mut |_k, v| {
+            if let Ok(e) = Event::decode(v) {
+                f(&e)?;
+            }
+            Ok(true)
+        })
+    }
+
+    /// Stream `actor`'s events, oldest first, decoding one at a time.
+    pub fn for_each_actor_event<F>(&self, actor: ActorId, mut f: F) -> Result<(), StorageError>
+    where
+        F: FnMut(&Event) -> Result<(), StorageError>,
+    {
+        self.backend
+            .scan_prefix_each(&actor_prefix(actor), &mut |k, _| {
+                if k.len() >= 25 {
+                    let seq = u64::from_be_bytes(k[17..25].try_into().unwrap());
+                    if let Some(e) = self.get(seq)? {
+                        f(&e)?;
+                    }
+                }
+                Ok(true)
+            })
+    }
+
+    /// The `limit` newest events overall, oldest first.
+    ///
+    /// Walks sequence numbers down from the head — a bounded number of point
+    /// reads — rather than scanning the event index into a `Vec`. The gap the
+    /// reservation can leave at the head is at most [`SEQ_BLOCK`].
+    pub fn recent_events(&self, limit: usize) -> Result<Vec<Event>, StorageError> {
+        let mut out = Vec::with_capacity(limit);
+        let mut seq = self.head();
+        while out.len() < limit && seq > 0 {
+            seq -= 1;
+            if let Some(e) = self.get(seq)? {
+                out.push(e);
+            }
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    /// The `limit` newest events by `actor`, oldest first.
+    ///
+    /// Uses the actor index, whose entries carry no payload, so only the
+    /// chosen events are read.
+    pub fn actor_events_recent(
+        &self,
+        actor: ActorId,
+        limit: usize,
+    ) -> Result<Vec<Event>, StorageError> {
+        let seqs = self.recent_index_seqs(&actor_prefix(actor), 17, limit)?;
+        self.decode_seqs(&seqs)
+    }
+
+    /// The `limit` newest events affecting column `(cx, cz)`, oldest first.
+    pub fn column_events_recent(
+        &self,
+        cx: i32,
+        cz: i32,
+        limit: usize,
+    ) -> Result<Vec<Event>, StorageError> {
+        let seqs = self.recent_index_seqs(&column_prefix(cx, cz), 9, limit)?;
+        self.decode_seqs(&seqs)
+    }
+
+    /// Events numbered `since` or later, oldest first, at most `limit` — a
+    /// bounded forward read for a caller following the journal with a cursor.
+    pub fn events_since(&self, since: u64, limit: usize) -> Result<Vec<Event>, StorageError> {
+        let mut out = Vec::with_capacity(limit);
+        let head = self.head();
+        let mut seq = since;
+        while out.len() < limit && seq < head {
+            if let Some(e) = self.get(seq)? {
+                out.push(e);
+            }
+            seq += 1;
+        }
+        Ok(out)
+    }
+
+    /// The highest `limit` sequence numbers under `prefix`, oldest first.
+    ///
+    /// The index entries carry no payload, so they are scanned lazily and
+    /// only a ring buffer of their sequence numbers is kept: a bounded query
+    /// never holds the whole index, let alone the whole history.
+    fn recent_index_seqs(
+        &self,
+        prefix: &[u8],
+        seq_at: usize,
+        limit: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut ring: std::collections::VecDeque<u64> =
+            std::collections::VecDeque::with_capacity(limit + 1);
+        self.backend.scan_prefix_each(prefix, &mut |k, _| {
+            if k.len() >= seq_at + 8 {
+                let seq = u64::from_be_bytes(k[seq_at..seq_at + 8].try_into().unwrap());
+                if ring.len() == limit {
+                    ring.pop_front();
+                }
+                ring.push_back(seq);
+            }
+            Ok(true)
+        })?;
+        Ok(ring.into_iter().collect())
+    }
+
+    fn decode_seqs(&self, seqs: &[u64]) -> Result<Vec<Event>, StorageError> {
+        let mut out = Vec::with_capacity(seqs.len());
+        for &s in seqs {
+            if let Some(e) = self.get(s)? {
+                out.push(e);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The whole history, oldest first — for tests and tooling that genuinely
+    /// needs it in memory at once. The server's commands use the bounded
+    /// queries ([`Self::recent_events`], [`Self::actor_events_recent`],
+    /// [`Self::column_events_recent`]) and [`Self::for_each_event`] instead.
     pub fn all_events(&self) -> Result<Vec<Event>, StorageError> {
         let mut out = Vec::new();
         for (_, v) in self.backend.scan_prefix(&[K_EVENT])? {
@@ -504,62 +637,61 @@ impl<B: KvBackend> Journal<B> {
 
     /// [`Journal::plan_rollback`] with an extra predicate applied after the
     /// filter — for conditions no index can narrow, such as a block name.
+    ///
+    /// The journal is streamed oldest-first, so a rollback over the whole
+    /// history does not materialise every event in memory: only the plan and
+    /// one index entry per touched position are kept.
     pub fn plan_rollback_where(
         &self,
         filter: &Filter,
         accept: &dyn Fn(&Event) -> bool,
     ) -> Result<Vec<Restore>, StorageError> {
-        let candidates = match filter.actor {
-            Some(a) => self.actor_events(a)?,
-            None => self.all_events()?,
-        };
-        let selected: Vec<Restore> = candidates
-            .iter()
-            .rev()
-            .filter(|e| filter.matches(e) && accept(e))
-            .filter_map(|e| match &e.body {
-                EventBody::BlockSet { x, y, z, from, to } => Some(Restore {
-                    x: *x,
-                    y: *y,
-                    z: *z,
-                    block: *from,
-                    removed: *to,
-                    undoing: e.seq,
-                }),
-                _ => None,
-            })
-            .collect();
-
         // A position touched several times collapses to one restoration, and
-        // the two halves of it come from opposite ends of the walk:
+        // the two halves come from opposite ends of the oldest-first walk:
         //
         // * `block` — what to put back — is the **oldest** selected `from`,
-        //   the state before the first edit being undone. Taking the newest
-        //   would restore the block to a state it held midway through, which
-        //   is the classic off-by-one in a rollback and stays invisible until
-        //   two people edit the same block.
+        //   the state before the first edit being undone. Taking a newer one
+        //   would restore the block to a state it held midway through.
         // * `removed` — what the undo takes away, and therefore what the
         //   recovery stash is owed — is the **newest** selected `to`, the last
         //   thing the filter's subject actually put there.
         //
-        // The walk is newest-first, so the first sighting of a position gives
-        // `removed` and the last gives `block`.
-        let mut index: std::collections::HashMap<(i32, i32, i32), usize> =
+        // So the first sighting sets both and later sightings update `removed`.
+        let mut order: std::collections::HashMap<(i32, i32, i32), (usize, u64)> =
             std::collections::HashMap::new();
         let mut plan: Vec<Restore> = Vec::new();
-        for r in selected {
-            match index.get(&(r.x, r.y, r.z)) {
-                Some(&i) => {
-                    // Older than what we have: it wins the restore target.
-                    plan[i].block = r.block;
-                    plan[i].undoing = r.undoing;
-                }
-                None => {
-                    index.insert((r.x, r.y, r.z), plan.len());
-                    plan.push(r);
+        let mut visit = |e: &Event| -> Result<(), StorageError> {
+            if !filter.matches(e) || !accept(e) {
+                return Ok(());
+            }
+            if let EventBody::BlockSet { x, y, z, from, to } = &e.body {
+                match order.get(&(*x, *y, *z)) {
+                    Some(&(i, _)) => {
+                        plan[i].removed = *to;
+                        order.insert((*x, *y, *z), (i, e.seq));
+                    }
+                    None => {
+                        order.insert((*x, *y, *z), (plan.len(), e.seq));
+                        plan.push(Restore {
+                            x: *x,
+                            y: *y,
+                            z: *z,
+                            block: *from,
+                            removed: *to,
+                            undoing: e.seq,
+                        });
+                    }
                 }
             }
+            Ok(())
+        };
+        match filter.actor {
+            Some(a) => self.for_each_actor_event(a, &mut visit)?,
+            None => self.for_each_event(&mut visit)?,
         }
+        // The former newest-first walk pushed a position on its newest
+        // sighting; keep that order for callers that read the plan.
+        plan.sort_by_key(|r| std::cmp::Reverse(order.get(&(r.x, r.y, r.z)).map_or(0, |&(_, s)| s)));
         Ok(plan)
     }
 }

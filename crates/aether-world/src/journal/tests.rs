@@ -5,7 +5,7 @@
 //! test that shares it.
 
 use super::*;
-use crate::storage::MemStore;
+use crate::storage::{KvBackend, MemStore, StorageError};
 use crate::{BlockStateId, ItemTypeId};
 
 const DIRT: BlockStateId = BlockStateId(3);
@@ -907,4 +907,91 @@ fn a_malformed_reservation_bound_refuses_to_open_rather_than_restart_numbering()
     assert!(ledger::UidAllocator::open(std::sync::Arc::clone(&store)).is_err());
     store.put(b"N", &[0; 5]).unwrap();
     assert!(Journal::open(std::sync::Arc::clone(&store)).is_err());
+}
+
+/// A backend that counts the work a query does — proof that a bounded command
+/// reads a bounded amount instead of materialising the whole history.
+struct Counting<B> {
+    inner: B,
+    gets: std::sync::atomic::AtomicUsize,
+    scans: std::sync::atomic::AtomicUsize,
+}
+
+impl<B: KvBackend> Counting<B> {
+    fn new(inner: B) -> Self {
+        Self {
+            inner,
+            gets: std::sync::atomic::AtomicUsize::new(0),
+            scans: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+    fn reset(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.gets.store(0, SeqCst);
+        self.scans.store(0, SeqCst);
+    }
+    fn get_calls(&self) -> usize {
+        self.gets.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn scan_prefix_calls(&self) -> usize {
+        self.scans.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl<B: KvBackend> KvBackend for Counting<B> {
+    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.inner.put(key, value)
+    }
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.get(key)
+    }
+    fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete(key)
+    }
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        self.scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.scan_prefix(prefix)
+    }
+}
+
+#[test]
+fn a_bounded_query_over_100k_events_reads_only_what_it_returns() {
+    // `/lookup` and `/audit` used to pull every event into a `Vec`; on a long
+    // history that is seconds of work and all of it in RAM. The bounded queries
+    // must touch a bounded number of entries.
+    let store = std::sync::Arc::new(Counting::new(MemStore::new()));
+    let j = Journal::open(std::sync::Arc::clone(&store)).unwrap();
+    for i in 0..100_000u64 {
+        j.append_at(alice(), set(i as i32, 64, 0, DIRT, STONE), i)
+            .unwrap();
+    }
+
+    store.reset();
+    let recent = j.recent_events(10).unwrap();
+    assert_eq!(recent.len(), 10);
+    assert_eq!(recent.first().unwrap().seq, 99_991);
+    assert_eq!(recent.last().unwrap().seq, 100_000);
+    assert_eq!(
+        store.scan_prefix_calls(),
+        0,
+        "recent_events scanned the whole event index"
+    );
+    assert!(
+        store.get_calls() <= 10,
+        "read {} events to answer for 10",
+        store.get_calls()
+    );
+
+    // By actor: the index is scanned lazily and only the newest few events
+    // are read.
+    store.reset();
+    let by_actor = j.actor_events_recent(alice(), 5).unwrap();
+    assert_eq!(by_actor.len(), 5);
+    assert_eq!(by_actor.last().unwrap().seq, 100_000);
+    assert!(
+        store.get_calls() <= 5,
+        "read {} events to answer for 5",
+        store.get_calls()
+    );
 }

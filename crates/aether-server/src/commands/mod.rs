@@ -256,6 +256,14 @@ fn describe_age(ms: u64) -> String {
     }
 }
 
+/// How many of the newest matching events `/lookup` and `/inspect` read.
+///
+/// A bound, not the whole history: an operator pages through recent activity,
+/// and loading 400k events to render the newest few would cost seconds and all
+/// of it in RAM. The queries behind it ([`aether_world::journal::Journal`]'s
+/// bounded reads) stop after this many and never materialise the rest.
+const HISTORY_LIMIT: usize = 500;
+
 fn lookup(
     args: &[&str],
     handle: &PlayerHandle,
@@ -272,7 +280,14 @@ fn lookup(
         Ok(q) => q,
         Err(e) => return Reply::one(e.to_string()),
     };
-    let events = match world.journal().all_events() {
+    // Narrow by the player index when the query names one: that reads only
+    // that player's events rather than the newest few of everyone's.
+    let journal = world.journal();
+    let events = match q.filter.actor {
+        Some(a) => journal.actor_events_recent(a, HISTORY_LIMIT),
+        None => journal.recent_events(HISTORY_LIMIT),
+    };
+    let events = match events {
         Ok(e) => e,
         Err(e) => return Reply::one(format!("history unreadable: {e}")),
     };
@@ -376,7 +391,10 @@ pub fn inspect_block(
     y: i32,
     z: i32,
 ) -> Reply {
-    let events = match world.journal().column_events(x >> 4, z >> 4) {
+    let events = match world
+        .journal()
+        .column_events_recent(x >> 4, z >> 4, HISTORY_LIMIT)
+    {
         Ok(e) => e,
         Err(e) => return Reply::one(format!("history unreadable: {e}")),
     };
@@ -457,11 +475,15 @@ fn inventory(handle: &PlayerHandle, world: &DemoWorld) -> Reply {
 }
 
 fn audit(world: &DemoWorld) -> Reply {
-    let events = match world.journal().all_events() {
-        Ok(e) => e,
-        Err(e) => return Reply::one(format!("history unreadable: {e}")),
-    };
-    let ledger = Ledger::replay(&events);
+    // Streamed: the ledger still tracks every instance, but the events
+    // themselves are decoded one at a time and never held as a `Vec`.
+    let mut ledger = Ledger::default();
+    if let Err(e) = world.journal().for_each_event(|ev| {
+        ledger.apply(ev);
+        Ok(())
+    }) {
+        return Reply::one(format!("history unreadable: {e}"));
+    }
     if ledger.anomalies().is_empty() {
         return Reply::one(format!(
             "{} item instance(s) tracked, nothing anomalous",

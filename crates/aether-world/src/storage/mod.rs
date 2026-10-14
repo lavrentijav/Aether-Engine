@@ -65,6 +65,25 @@ pub trait KvBackend: Send + Sync {
     /// rollback walk a player's edits backwards without holding the whole
     /// world's history in memory.
     fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
+    /// Visit every entry whose key starts with `prefix`, in ascending key
+    /// order, **without collecting them first**. The visitor returns whether
+    /// to keep going, so a bounded query can stop early instead of reading a
+    /// whole history into memory.
+    ///
+    /// The default walks [`Self::scan_prefix`], which is all an in-memory
+    /// store can do; a real backend overrides it so the scan is lazy.
+    fn scan_prefix_each(
+        &self,
+        prefix: &[u8],
+        f: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, StorageError>,
+    ) -> Result<(), StorageError> {
+        for (k, v) in self.scan_prefix(prefix)? {
+            if !f(&k, &v)? {
+                break;
+            }
+        }
+        Ok(())
+    }
     /// Flush any buffered writes to durable storage.
     fn flush(&self) -> Result<(), StorageError> {
         Ok(())
@@ -89,6 +108,13 @@ impl<B: KvBackend + ?Sized> KvBackend for std::sync::Arc<B> {
     fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
         (**self).scan_prefix(prefix)
     }
+    fn scan_prefix_each(
+        &self,
+        prefix: &[u8],
+        f: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, StorageError>,
+    ) -> Result<(), StorageError> {
+        (**self).scan_prefix_each(prefix, f)
+    }
     fn flush(&self) -> Result<(), StorageError> {
         (**self).flush()
     }
@@ -106,6 +132,13 @@ impl<B: KvBackend + ?Sized> KvBackend for &B {
     }
     fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
         (**self).scan_prefix(prefix)
+    }
+    fn scan_prefix_each(
+        &self,
+        prefix: &[u8],
+        f: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, StorageError>,
+    ) -> Result<(), StorageError> {
+        (**self).scan_prefix_each(prefix, f)
     }
     fn flush(&self) -> Result<(), StorageError> {
         (**self).flush()
@@ -220,6 +253,19 @@ mod fjall_backend {
                         .map_err(|e| StorageError::Backend(e.to_string()))
                 })
                 .collect()
+        }
+        fn scan_prefix_each(
+            &self,
+            prefix: &[u8],
+            f: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, StorageError>,
+        ) -> Result<(), StorageError> {
+            for item in self.partition.prefix(prefix) {
+                let (k, v) = item.map_err(|e| StorageError::Backend(e.to_string()))?;
+                if !f(&k, &v)? {
+                    break;
+                }
+            }
+            Ok(())
         }
         fn flush(&self) -> Result<(), StorageError> {
             self.partition
