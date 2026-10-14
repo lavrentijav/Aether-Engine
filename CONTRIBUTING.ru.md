@@ -29,13 +29,19 @@
 5. Обновляйте соответствующие документы (`docs/STATUS.md`, `docs/ROADMAP.md`), когда функция готова или план меняется.
 
 ### Локальные проверки
+Тулчейн закреплён в [`rust-toolchain.toml`](rust-toolchain.toml) (Rust **1.99.0**
+с `rustfmt` и `clippy`), поэтому `rustup` сам берёт нужную версию и компоненты.
+
 ```bash
 cargo fmt --all -- --check                        # форматирование
 cargo clippy --workspace --all-targets -- -D warnings   # линты (предупреждения = ошибки)
 cargo test --workspace                            # корректность
 cargo test --workspace --no-default-features      # сборка без default-фич
+cargo deny check                                  # лицензии, advisories, баны, источники
 cargo bench -p aether-core                        # производительность (без регрессий против QA-гейтов)
 ```
+`cargo deny check` читает [`deny.toml`](deny.toml); CI гоняет его на каждый push
+и PR через `cargo-deny-action`. Если команды нет локально — `cargo install cargo-deny`.
 PR, влияющие на производительность, должны включать захват Tracy или соответствующий результат бенчмарка. QA-гейты (редстоун/сущности/взрыв/миграция) — в [README](README.md#benchmark-targets-qa-gates).
 
 ### Стиль коммитов и PR

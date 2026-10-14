@@ -30,13 +30,21 @@ These come straight from the spec and are what makes Aether *Aether*:
 5. Update the relevant docs (`docs/STATUS.md`, `docs/ROADMAP.md`) when a feature lands or a plan changes.
 
 ### Local checks
+The toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml) (Rust
+**1.99.0** with `rustfmt` and `clippy`), so `rustup` uses the right version and
+components automatically.
+
 ```bash
 cargo fmt --all -- --check                        # formatting
 cargo clippy --workspace --all-targets -- -D warnings   # lints (warnings are errors)
 cargo test --workspace                            # correctness
 cargo test --workspace --no-default-features      # no-default-features build
+cargo deny check                                  # licenses, advisories, bans, sources
 cargo bench -p aether-core                        # performance (no regressions vs. QA gates)
 ```
+`cargo deny check` reads [`deny.toml`](deny.toml); CI runs it on every push and
+PR via `cargo-deny-action`. Install it with `cargo install cargo-deny` if the
+command is missing locally.
 Performance-sensitive PRs should include a Tracy capture or the relevant benchmark result. The QA gates (redstone/entity/explosion/migration) live in the [README](README.md#benchmark-targets-qa-gates).
 
 ### Commit & PR style
