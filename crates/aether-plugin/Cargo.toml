@@ -1,0 +1,22 @@
+[package]
+name = "aether-plugin"
+description = "WebAssembly plugin host for Aether Engine: Wasmtime component-model loader, sandbox limits and the event bus."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# `wasmtime` is the component-model runtime; `wasmtime-wasi` satisfies the
+# WASI 0.2 imports a `wasm32-wasip2` Rust component carries for its standard
+# library, under a context that grants it nothing. `serde`/`toml` read
+# `plugin.toml`.
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+
+[lints]
+workspace = true

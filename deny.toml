@@ -12,6 +12,10 @@ allow = [
     "Zlib",
     "0BSD",
     "BSL-1.0",
+    # `encoding_rs` (via the Wasmtime component model) is
+    # `(Apache-2.0 OR MIT) AND BSD-3-Clause`; the BSD clause is permissive and
+    # imposes nothing beyond attribution.
+    "BSD-3-Clause",
 ]
 confidence-threshold = 0.8
 
