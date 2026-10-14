@@ -216,7 +216,7 @@ impl RecipeBook {
                 root.display()
             )
         })?;
-        let tags = load_item_tags(&data_mc);
+        let tags = load_item_tags(&data_mc)?;
         let entries = read_json_dir(&data_mc.join("recipe"))?;
         Ok(Self::build(entries, &tags))
     }
@@ -781,12 +781,52 @@ fn read_json_dir(dir: &Path) -> Result<Vec<(String, Json)>, String> {
     Ok(out)
 }
 
+/// Read every `*.json` under `dir` **recursively**, keying each by its path
+/// relative to `dir` (subdirectories become path segments, e.g.
+/// `enchantable/sharp_weapon`), sorted. Item tags live in subdirectories, so a
+/// flat listing would miss `tags/item/enchantable/*`.
+fn read_json_tree(dir: &Path, prefix: &str, out: &mut Vec<(String, Json)>) -> Result<(), String> {
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("cannot list {}: {e}", dir.display()))?;
+    for e in rd {
+        let e = e.map_err(|e| format!("cannot list {}: {e}", dir.display()))?;
+        let path = e.path();
+        if path.is_dir() {
+            let name = path.file_name().map(|s| s.to_string_lossy().into_owned());
+            read_json_tree(
+                &path,
+                &format!("{prefix}{}/", name.unwrap_or_default()),
+                out,
+            )?;
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let j = Json::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        out.push((format!("{prefix}{stem}"), j));
+    }
+    Ok(())
+}
+
 /// Every item tag under `data/minecraft/tags/item`, resolved recursively.
-fn load_item_tags(data_mc: &Path) -> HashMap<String, Vec<ItemTypeId>> {
+///
+/// A malformed tag file is an error, not a silently empty tag: a recipe that
+/// references a tag the pack failed to parse would otherwise become
+/// unsupported with no sign of why.
+fn load_item_tags(data_mc: &Path) -> Result<HashMap<String, Vec<ItemTypeId>>, String> {
     // Raw values first: a tag entry is an item name or a nested `#tag`.
     let mut raw: HashMap<String, Vec<RawValue>> = HashMap::new();
-    if let Ok(entries) = read_json_dir(&data_mc.join("tags/item")) {
-        for (stem, j) in entries {
+    let dir = data_mc.join("tags/item");
+    if dir.is_dir() {
+        let mut entries = Vec::new();
+        read_json_tree(&dir, "", &mut entries)?;
+        for (name, j) in entries {
             let mut vals = Vec::new();
             for v in j.get("values").and_then(Json::as_arr).unwrap_or(&[]) {
                 let name = match v {
@@ -803,7 +843,7 @@ fn load_item_tags(data_mc: &Path) -> HashMap<String, Vec<ItemTypeId>> {
                     vals.push(RawValue::Item(with_ns(name)));
                 }
             }
-            raw.insert(format!("minecraft:{stem}"), vals);
+            raw.insert(format!("minecraft:{name}"), vals);
         }
     }
 
@@ -813,7 +853,7 @@ fn load_item_tags(data_mc: &Path) -> HashMap<String, Vec<ItemTypeId>> {
     for k in keys {
         resolve_tag(&k, &raw, &mut memo, &mut resolving);
     }
-    memo
+    Ok(memo)
 }
 
 enum RawValue {
@@ -1069,6 +1109,53 @@ mod tests {
             book.craft(&[Some(slab), None, None, None], 2),
             Some((boat, 1))
         );
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn item_tags_are_read_from_subdirectories() {
+        let root =
+            std::env::temp_dir().join(format!("aether-recipes-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_file(
+            &root.join("data/minecraft/recipe/thing.json"),
+            r##"{"type":"minecraft:crafting_shapeless",
+                "ingredients":["#minecraft:enchantable/sharp"],
+                "result":{"id":"minecraft:stick"}}"##,
+        );
+        write_file(
+            &root.join("data/minecraft/tags/item/enchantable/sharp.json"),
+            r##"{"values":["minecraft:oak_planks"]}"##,
+        );
+        let book = RecipeBook::load(&root).unwrap();
+        let oak = ItemTypeId::vanilla("minecraft:oak_planks").unwrap();
+        assert_eq!(
+            book.craft(&[Some(oak), None, None, None], 2),
+            Some((ItemTypeId::vanilla("minecraft:stick").unwrap(), 1)),
+            "a tag under a subdirectory must resolve"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_malformed_tag_is_an_error_not_an_empty_tag() {
+        let root = std::env::temp_dir().join(format!("aether-recipes-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_file(
+            &root.join("data/minecraft/recipe/thing.json"),
+            r##"{"type":"minecraft:crafting_shapeless",
+                "ingredients":["#minecraft:bad"],"result":{"id":"minecraft:stick"}}"##,
+        );
+        write_file(&root.join("data/minecraft/tags/item/bad.json"), "{not json");
+        assert!(
+            RecipeBook::load(&root).is_err(),
+            "a bad tag file must fail the load, not silently empty every tag"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
