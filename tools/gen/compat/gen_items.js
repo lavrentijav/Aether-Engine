@@ -44,26 +44,29 @@ const d = require(require.resolve('minecraft-data', { paths: requirePaths }))
 const BASE = '1.21.11'
 const base = d(BASE)
 
-// codec module name -> minecraft-data version.
+// codec module name -> (minecraft-data version, flattened?). Only 1.8 is
+// pre-flattening, so only it sees the legacy-only block rules (T4); a
+// flattened version's item stand-in must match its block table's, which drops
+// them.
 const VERSIONS = [
-  ['v1_8', '1.8'],
-  ['v1_17', '1.17'],
-  ['v1_17_1', '1.17.1'],
-  ['v1_18', '1.18'],
-  ['v1_18_2', '1.18.2'],
-  ['v1_19', '1.19'],
-  ['v1_19_2', '1.19.2'],
-  ['v1_19_3', '1.19.3'],
-  ['v1_19_4', '1.19.4'],
-  ['v1_20_1', '1.20.1'],
-  ['v1_20_5', '1.20.5'],
-  ['v1_21_1', '1.21.1'],
-  ['v1_21_3', '1.21.3'],
-  ['v1_21_4', '1.21.4'],
-  ['v1_21_5', '1.21.5'],
-  ['v1_21_6', '1.21.6'],
-  ['v1_21_8', '1.21.8'],
-  ['v1_21_9', '1.21.9'],
+  ['v1_8', '1.8', false],
+  ['v1_17', '1.17', true],
+  ['v1_17_1', '1.17.1', true],
+  ['v1_18', '1.18', true],
+  ['v1_18_2', '1.18.2', true],
+  ['v1_19', '1.19', true],
+  ['v1_19_2', '1.19.2', true],
+  ['v1_19_3', '1.19.3', true],
+  ['v1_19_4', '1.19.4', true],
+  ['v1_20_1', '1.20.1', true],
+  ['v1_20_5', '1.20.5', true],
+  ['v1_21_1', '1.21.1', true],
+  ['v1_21_3', '1.21.3', true],
+  ['v1_21_4', '1.21.4', true],
+  ['v1_21_5', '1.21.5', true],
+  ['v1_21_6', '1.21.6', true],
+  ['v1_21_8', '1.21.8', true],
+  ['v1_21_9', '1.21.9', true],
 ]
 
 // The block-rule resolver, rule loader and name helpers all live in `gen.js`
@@ -88,6 +91,8 @@ function buildItems(mcVersion, itemRules, blockRules) {
   // block name; the item of that name is the stand-in (they always share a
   // name), so it is looked up in `byName`.
   const blockNames = new Set((t.blocksArray || []).map(b => b.name))
+  // The shared resolver returns `{ name, rule, cap }`; the item layer only
+  // needs the name, but `gen.js` uses the rule's metadata for the 1.8 blocks.
   const resolveItem = resolver(names, itemRules)
   const resolveBlock = resolver(blockNames, blockRules)
   const stone = names.has('stone') ? 'stone' : null
@@ -102,14 +107,14 @@ function buildItems(mcVersion, itemRules, blockRules) {
     if (names.has(name)) {
       id = byName[name].id
     } else {
-      let sub = resolveItem(name)
+      let sub = resolveItem(name)?.name ?? null
       // A block item follows its *block's* substitution. The block rules can
       // chain (a target that is itself missing is resolved again) and a block
       // no rule covers becomes stone, exactly as the block table does — so a
       // block item never ends in `ITEM_FALLBACKS`. If the resolved block has
       // no item of that name in this version, stone is the last resort.
       if (!sub && BASE_BLOCKS.has(name)) {
-        const block = resolveBlock(name)
+        const block = resolveBlock(name)?.name ?? null
         sub = block && names.has(block) ? block : stone
       }
       if (sub && byName[sub]) {
@@ -203,8 +208,12 @@ function main() {
       `block rules ${blockRules.length} for block items`,
   )
   let total = 0
-  for (const [mod, mcVersion] of VERSIONS) {
-    const it = itemLines(mcVersion, itemRules, blockRules)
+  for (const [mod, mcVersion, flat] of VERSIONS) {
+    // A flattened version drops the legacy-only block rules (T4), so a block
+    // item's stand-in is exactly the one its block table uses.
+    const br = flat ? blockRules.filter(r => !r.legacy) : blockRules
+    const ir = flat ? itemRules.filter(r => !r.legacy) : itemRules
+    const it = itemLines(mcVersion, ir, br)
     const out = [
       `//! Compat **item** tables for ${mcVersion} (module \`${mod}\`).`,
       '//!',

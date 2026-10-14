@@ -44,6 +44,18 @@ impl<T: Copy + Eq + std::hash::Hash> Scheduler<T> {
         }
     }
 
+    /// Every pending key with the tick it is due at, in due-tick order.
+    ///
+    /// This is the state that must survive a restart (see
+    /// [`super::blockticks::save`]): the keys not yet taken by [`Self::due`],
+    /// each with the tick it was scheduled for.
+    pub fn entries(&self) -> Vec<(u64, T)> {
+        self.due
+            .iter()
+            .flat_map(|(&at, list)| list.iter().map(move |&k| (at, k)))
+            .collect()
+    }
+
     /// Take up to `budget` keys due at or before `now`, oldest first.
     ///
     /// What does not fit stays queued for the next call, so a flood of due

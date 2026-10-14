@@ -218,7 +218,21 @@ const LEGACY_LEN: usize = 1 + 6 * 8 + 4 * 4 + 4 + 4 + 1;
 const SAVE_VERSION: u8 = 2;
 
 /// KV key for a player's saved state.
+///
+/// Seventeen bytes under the reserved `D` prefix (see
+/// [`aether_api::keys`]). It used to be `P`, which the journal's actor index
+/// also claims: `/lookup player:` scans `P` + a 16-byte actor, so a saved
+/// player and an actor index entry shared a prefix. [`legacy_key`] still reads
+/// the old key so a player who saved before the rename keeps their state.
 pub fn key(uuid: u128) -> [u8; 17] {
+    let mut k = [0u8; 17];
+    k[0] = aether_api::keys::PLAYER_SAVE[0];
+    k[1..].copy_from_slice(&uuid.to_be_bytes());
+    k
+}
+
+/// The pre-rename key (`P`). Read fallback only; nothing is ever written here.
+pub fn legacy_key(uuid: u128) -> [u8; 17] {
     let mut k = [0u8; 17];
     k[0] = b'P';
     k[1..].copy_from_slice(&uuid.to_be_bytes());

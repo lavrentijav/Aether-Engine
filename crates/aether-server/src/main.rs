@@ -53,6 +53,10 @@ fn spawn_autosave(world: Arc<DemoWorld>, secs: u64) {
     let period = Duration::from_secs(secs.max(1));
     std::thread::spawn(move || loop {
         std::thread::sleep(period);
+        // The scheduled queues are not part of the world's dirty set, so they
+        // are written here, beside the chunks they belong to.
+        game::blockticks::save(&world);
+        game::fluids::save(&world);
         if let Err(e) = world.flush() {
             log::error(&format!("autosave failed: {e}"));
         }
@@ -122,7 +126,17 @@ fn main() -> std::process::ExitCode {
         revision,
         &cfg.cache.to_config(),
     );
-    let mut world = World::new(store, generator).with_snapshot_policy(snapshot_policy(revision));
+    let mut world = World::new(store, generator)
+        .with_snapshot_policy(snapshot_policy(revision))
+        // Reload a chunk's pending scheduled ticks as it comes in; they were
+        // written next to it (see `game::tickstore`).
+        .with_column_load_hook(|world, cx, cz| {
+            game::blockticks::load_column(world, cx, cz);
+            game::fluids::load_column(world, cx, cz);
+            // Generated fluid that can flow needs a first tick, since the
+            // generator schedules none.
+            game::fluids::wake_generated(world, cx, cz);
+        });
     if let Some(sink) = open_history_mirror(&cfg.database) {
         world = world.with_journal_sink(sink);
     }
@@ -321,26 +335,25 @@ fn open_history_mirror(
         ..Default::default()
     };
     #[cfg(feature = "postgres")]
-    {
-        match db::PostgresSink::connect(&url) {
-            Ok(sink) => {
-                log::info("history    : mirroring to PostgreSQL");
-                return Some(aether_world::journal::BatchingSink::start(sink, batch));
-            }
-            Err(e) => {
-                log::warn(&format!(
-                    "history mirror disabled: cannot reach the database: {e}"
-                ));
-                return None;
-            }
+    let sink = match db::PostgresSink::connect(&url) {
+        Ok(sink) => {
+            log::info("history    : mirroring to PostgreSQL");
+            Some(aether_world::journal::BatchingSink::start(sink, batch))
         }
-    }
+        Err(e) => {
+            log::warn(&format!(
+                "history mirror disabled: cannot reach the database: {e}"
+            ));
+            None
+        }
+    };
+    // Refused at startup; see `main`.
     #[cfg(not(feature = "postgres"))]
-    {
-        // Refused at startup; see `main`.
+    let sink = {
         let _ = batch;
         None
-    }
+    };
+    sink
 }
 
 /// Connect the economy, if one is configured and compiled in.
@@ -354,20 +367,19 @@ fn open_economy(cfg: &config::DatabaseConfig) -> Option<Box<dyn economy::Economy
         return None;
     }
     #[cfg(feature = "postgres")]
-    {
-        match economy::pg::PgEconomy::connect(&url) {
-            Ok(e) => {
-                log::info("economy    : PostgreSQL");
-                return Some(Box::new(e));
-            }
-            Err(e) => {
-                log::warn(&format!("economy disabled: {e}"));
-                return None;
-            }
+    let economy: Option<Box<dyn economy::Economy>> = match economy::pg::PgEconomy::connect(&url) {
+        Ok(e) => {
+            log::info("economy    : PostgreSQL");
+            Some(Box::new(e))
         }
-    }
+        Err(e) => {
+            log::warn(&format!("economy disabled: {e}"));
+            None
+        }
+    };
     #[cfg(not(feature = "postgres"))]
-    None
+    let economy = None;
+    economy
 }
 
 /// The configuration, installed at startup.

@@ -57,6 +57,8 @@ pub fn spawn_shutdown(registry: SharedRegistry, world: Arc<DemoWorld>) {
                 p.disconnect("server stopping");
             }
             crate::game::tick::save_time(&world);
+            crate::game::blockticks::save(&world);
+            crate::game::fluids::save(&world);
             match world.flush() {
                 Ok(()) => crate::log::info(&format!(
                     "stopped cleanly ({} player(s) saved)",

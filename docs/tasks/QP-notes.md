@@ -39,7 +39,28 @@ Branch `oc/QP`, worktree `/srv/dev/projects/Aether-Engine-wt/QP`.
 ## Checks
 
 `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -j4 --
--D warnings`, `cargo test -p aether-server` (760 passed) all pass.
+-D warnings`, `cargo-locked test -p aether-server` (796 passed) all pass.
+
+## Merge with main (T4 + QO)
+
+`git merge main` conflicted in `tools/gen/compat/gen.js` (T4 added `META_MAPS`
+and the `meta`/`legacy` rule fields with a richer `resolver` returning
+`{ name, rule, cap }`) and in `docs/KNOWN_ISSUES.md`. Resolved so both survive:
+
+* `loadRules(file = 'blocks.json')` keeps the parameter (J10) and also parses
+  `metaMaps` and the `meta`/`legacy` fields (T4); `main()` keeps the
+  require-safe exports and the `flatRules = rules.filter(r => !r.legacy)`
+  split, so a flattened version drops the legacy-only rules.
+* `gen_items.js` follows the object-returning resolver (`resolveItem(name)?.name`)
+  and passes all rules to 1.8 but the legacy-filtered set to flattened
+  versions, so its block-item stand-ins exactly match the block tables'.
+* Docs: kept T4's item 14 and J10's item 15; synced the Russian item 14 to
+  T4's (main had updated only the English one and left the stale 422-block
+  list).
+
+`node tools/gen/compat/gen.js` regenerates `compat/gen/*` **byte-identical to
+main's**; `gen_items.js` regenerates only `item_gen/v1_8.rs` differently from
+the pre-merge J10 tables (the legacy rules), the flattened tables unchanged.
 
 ## Left / interface note for the J5 (J9) agent
 

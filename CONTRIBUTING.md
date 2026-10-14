@@ -22,6 +22,23 @@ These come straight from the spec and are what makes Aether *Aether*:
 - **No global locks.** Heavy work goes to the work-stealing pool and merges at deterministic Safe Points.
 - **Determinism.** Parallel results must merge identically every run.
 
+### Core or plugin?
+The engine core is for what every server needs and what must be fast: world model, storage and
+journal, worldgen, physics, the tick, vanilla mechanics, redstone, light, the protocol and the compat
+layer. **Features that are optional for a server and not performance-critical are written as
+plugins** on the plugin API ([`docs/design/plugins.md`](docs/design/plugins.md)), not in the core:
+economy and shops, rewards, stashes, kits, chat/moderation tools, admin UIs, integrations with web
+services, custom game modes, custom enchantments/items, minigames.
+
+Rules of thumb:
+- *Would a vanilla-like server run without it?* Yes → plugin.
+- *Is it on the per-tick hot path (runs for every block/entity/packet)?* Yes → core, with a plugin
+  event or registry hook if behaviour must be customisable.
+- *Does it need data the plugin API does not expose?* Extend the API (a new event, registry or host
+  import, versioned and behind `supports()`), do not move the feature into the core.
+- Built-ins that already exist and are optional (economy, `/stash`, rewards) migrate to plugins; the
+  core keeps only the service interface they implement.
+
 ### Workflow
 1. Fork and branch from the default branch: `git checkout -b feature/short-description`.
 2. Keep changes focused; one logical change per pull request.

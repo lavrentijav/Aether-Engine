@@ -89,6 +89,27 @@ fn schedule(pos: Pos, delay: u64) {
     queue().lock().unwrap().schedule(pos, super::now() + delay);
 }
 
+/// Persist the pending ticks, one blob per chunk, beside the chunks they
+/// belong to. Called at autosave and on a clean stop (and every so often from
+/// the tick), so a restart resumes falls, growth and leaf decay instead of
+/// dropping them.
+pub fn save(store: &dyn super::tickstore::TickStore) {
+    let entries = queue().lock().unwrap().entries();
+    super::tickstore::save(store, super::tickstore::BLOCK_TICKS, entries);
+}
+
+/// Restore the pending ticks of the chunk `(cx, cz)` when its column loads.
+///
+/// A tick due in the past runs on the next [`tick`], which is vanilla's
+/// catch-up: the block never gets its update missed, only late.
+pub fn load_column(store: &dyn super::tickstore::TickStore, cx: i32, cz: i32) {
+    let entries = super::tickstore::load(store, super::tickstore::BLOCK_TICKS, cx, cz);
+    if entries.is_empty() {
+        return;
+    }
+    super::tickstore::restore(&mut queue().lock().unwrap(), entries);
+}
+
 // ---------------------------------------------------------------------------
 // Reading states
 // ---------------------------------------------------------------------------
@@ -466,5 +487,28 @@ mod tests {
             .put((0, 2, 0), "minecraft:water");
         // The sand at y=4 comes to rest in the lowest free cell, y=1.
         assert_eq!(falling::landing(&m.get(), (0, 4, 0)), Some((0, 1, 0)));
+    }
+
+    #[test]
+    fn a_scheduled_tick_survives_a_world_reload() {
+        use aether_api::{FlatGenerator, MemStore, World};
+        use std::sync::Arc;
+
+        // One store, two worlds: the second `World::new` is the restart.
+        let store = Arc::new(MemStore::new());
+        let pos: Pos = (100, 70, 100); // chunk (6, 6)
+        let (cx, cz) = (pos.0.div_euclid(16), pos.2.div_euclid(16));
+        {
+            let world = World::new(Arc::clone(&store), FlatGenerator::classic());
+            schedule(pos, 5);
+            save(&world);
+        }
+        // The restart drops the in-memory queue...
+        *queue().lock().unwrap() = Scheduler::new();
+        // ...and loading the chunk brings its pending tick back.
+        let world = World::new(Arc::clone(&store), FlatGenerator::classic());
+        load_column(&world, cx, cz);
+        let due = queue().lock().unwrap().due(crate::game::now() + 5, 16);
+        assert!(due.contains(&pos), "the saved tick came back: {due:?}");
     }
 }

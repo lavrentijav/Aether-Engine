@@ -438,9 +438,21 @@ pub fn decode(blob: &[u8]) -> Option<Inventory> {
 
 /// KV key holding one player's inventory.
 ///
-/// Seventeen bytes, where sub-chunk keys are nine, column markers ten and
-/// journal event keys nine, so it can collide with none of them.
+/// Seventeen bytes under the reserved `F` prefix (see [`aether_api::keys`]).
+/// It used to be `V`, which the storage layer's snapshot-revision key also
+/// claims; the two never had the same length so they did not collide in
+/// practice, but one prefix byte for two owners is the sort of thing the
+/// key-space test exists to stop. [`legacy_key`] reads the old key so a
+/// returning player keeps their inventory across the rename.
 pub fn key(uuid: u128) -> [u8; 17] {
+    let mut k = [0u8; 17];
+    k[0] = aether_api::keys::PLAYER_INVENTORY[0];
+    k[1..].copy_from_slice(&uuid.to_be_bytes());
+    k
+}
+
+/// The pre-rename key (`V`). Read fallback only; nothing is ever written here.
+pub fn legacy_key(uuid: u128) -> [u8; 17] {
     let mut k = [0u8; 17];
     k[0] = b'V';
     k[1..].copy_from_slice(&uuid.to_be_bytes());
@@ -685,11 +697,14 @@ mod tests {
     fn the_key_cannot_collide_with_a_sub_chunk_or_a_journal_entry() {
         let k = key(1);
         assert_eq!(k.len(), 17);
-        assert_eq!(k[0], b'V');
+        assert_eq!(k[0], aether_api::keys::PLAYER_INVENTORY[0]);
         // Journal event keys are 9 bytes and start with 'E'; column indexes
         // are 17 bytes but start with 'X'; actor indexes are 25.
         assert_ne!(k[0], b'E');
         assert_ne!(k[0], b'X');
         assert_ne!(k[0], b'C');
+        // The pre-rename key is still readable, and is the old `V`.
+        assert_eq!(legacy_key(1)[0], b'V');
+        assert_ne!(key(1), legacy_key(1));
     }
 }

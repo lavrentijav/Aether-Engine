@@ -219,7 +219,7 @@ fn describe_body(
             to,
             count,
         } => Some(format!(
-            "  {ago} {} moved {count}x item {:016x} {} → {}  #{}",
+            "  {ago} {} moved {count}x item {} {} → {}  #{}",
             actor_name(e.actor.0),
             uid.0,
             short_place(from),
@@ -227,7 +227,7 @@ fn describe_body(
             e.seq
         )),
         EventBody::ItemDestroy { uid, .. } => {
-            Some(format!("  {ago} item {:016x} destroyed  #{}", uid.0, e.seq))
+            Some(format!("  {ago} item {} destroyed  #{}", uid.0, e.seq))
         }
         EventBody::ItemDerive {
             item, count, from, ..
@@ -445,10 +445,10 @@ fn inventory(handle: &PlayerHandle, world: &DemoWorld) -> Reply {
         } else {
             format!("slot {slot}")
         };
-        // The uid is shown, short: it is the handle an operator needs to
-        // follow this exact stack through /audit.
+        // The uid is shown in decimal: the same spelling the mirror stores and
+        // `/audit` prints, so an operator can copy it between the two.
         lines.push(format!(
-            "  {where_}: {}x {}  [{:016x}]",
+            "  {where_}: {}x {}  [{}]",
             stack.count,
             name(stack.item),
             stack.uid.0

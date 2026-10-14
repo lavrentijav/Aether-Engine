@@ -207,17 +207,31 @@ fn login_and_play(
     // read must not become a fresh start, or the first save would write that
     // fresh start over it. See `crate::stored`.
     let saved = if codec.full_gameplay() {
-        stored::classify(
+        // Current key, then the pre-rename one: a player who last saved before
+        // the key prefix changed keeps their position and effects.
+        match stored::classify(
             world.get_meta(&crate::game::player::key(player.uuid)),
             crate::game::player::decode,
-        )
+        ) {
+            Stored::Missing => stored::classify(
+                world.get_meta(&crate::game::player::legacy_key(player.uuid)),
+                crate::game::player::decode,
+            ),
+            found => found,
+        }
     } else {
         Stored::Missing
     };
-    let saved_inventory = stored::classify(
+    let saved_inventory = match stored::classify(
         world.get_meta(&crate::inventory::key(player.uuid)),
         crate::inventory::decode,
-    );
+    ) {
+        Stored::Missing => stored::classify(
+            world.get_meta(&crate::inventory::legacy_key(player.uuid)),
+            crate::inventory::decode,
+        ),
+        found => found,
+    };
     for (what, record) in [
         ("player state", saved.unreadable()),
         ("inventory", saved_inventory.unreadable()),

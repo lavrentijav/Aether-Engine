@@ -21,7 +21,7 @@ use crate::session::DemoWorld;
 pub const TICK: Duration = Duration::from_millis(50);
 
 /// KV key for the world clock.
-const TIME_KEY: &[u8] = b"Wtime";
+const TIME_KEY: &[u8] = aether_api::keys::WORLD_TIME;
 
 /// Start the game: install the shared handles and run the tick forever.
 pub fn start(registry: SharedRegistry, world: Arc<DemoWorld>) {
@@ -117,6 +117,10 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
 
     if now % 600 == 0 {
         save_time(world);
+        // Bound what a crash loses of the pending scheduled ticks, the same
+        // thirty-second horizon the world clock gets.
+        super::blockticks::save(world);
+        super::fluids::save(world);
     }
 }
 
