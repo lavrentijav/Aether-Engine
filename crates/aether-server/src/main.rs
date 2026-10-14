@@ -425,8 +425,14 @@ pub fn visibility_config() -> config::VisibilityConfig {
 }
 
 /// The chunk radius kept loaded around a player, from the config.
+///
+/// Clamped the same way the streamer clamps it, so the visibility search and
+/// the columns actually sent cannot disagree about how far the view reaches.
 pub fn server_view_radius() -> i32 {
-    CONFIG.get().map(|c| c.server.view_radius).unwrap_or(8)
+    CONFIG
+        .get()
+        .map(|c| c.server.clamped_view_radius())
+        .unwrap_or(8)
 }
 
 /// The mode this server runs, installed at startup.

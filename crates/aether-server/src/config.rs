@@ -115,6 +115,16 @@ impl ServerConfig {
     pub fn per_ip_connection_limit(&self) -> u32 {
         self.max_connections_per_ip
     }
+
+    /// The chunk radius the client and the streamer actually use.
+    ///
+    /// Clamped to `1..=12`. The load accepts any integer, and a `0` would make
+    /// the streamer send a 3×3 area while the visibility search seeded only the
+    /// player's own section — every other section of those columns would be
+    /// masked as stone, invisible walls the client can plainly see.
+    pub fn clamped_view_radius(&self) -> i32 {
+        self.view_radius.clamp(1, 12)
+    }
 }
 
 /// `[resource_pack]` settings.
@@ -544,6 +554,20 @@ mod tests {
         assert_eq!(cfg.server.host, "127.0.0.1");
         assert_eq!(cfg.server.world_dir, "world");
         assert_eq!(cfg.server.autosave_secs, 30);
+    }
+
+    #[test]
+    fn the_view_radius_is_clamped_to_the_range_the_streamer_uses() {
+        // A raw 0 would make the streamer send a 3x3 area while the visibility
+        // search seeded only the player's own section (finding 6).
+        let radius = |v: i32| ServerConfig {
+            view_radius: v,
+            ..ServerConfig::default()
+        };
+        assert_eq!(radius(0).clamped_view_radius(), 1);
+        assert_eq!(radius(-5).clamped_view_radius(), 1);
+        assert_eq!(radius(100).clamped_view_radius(), 12);
+        assert_eq!(radius(8).clamped_view_radius(), 8);
     }
 
     #[test]
