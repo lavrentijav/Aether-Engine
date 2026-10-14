@@ -1265,6 +1265,7 @@ pub(crate) fn set_and_broadcast(
     // without an author is invisible to `/rollback` and to any later question
     // about who did what.
     let seq = world.set_block_by(JournalActor(handle.uuid), x, y, z, block, props);
+    crate::visibility::invalidate_block(x, y, z);
     let ev = ServerEvent::BlockChange { x, y, z, block };
     handle.emit(&ev, world);
     registry.broadcast_except(handle.entity_id, &ev, world);

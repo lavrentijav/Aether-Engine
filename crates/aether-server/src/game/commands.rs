@@ -209,6 +209,26 @@ pub fn dispatch(
             st.saturation = 5.0;
             vec!["Healed".into()]
         }
+        "visibility" => {
+            if !op {
+                return deny();
+            }
+            let mut st = handle.visibility();
+            match args.first().copied() {
+                Some("on") => {
+                    st.bypass = false;
+                    vec!["Visibility culling on".into()]
+                }
+                Some("off") => {
+                    st.bypass = true;
+                    vec!["Visibility culling off: you are sent every section".into()]
+                }
+                _ => vec![format!(
+                    "Visibility culling is {}",
+                    if st.bypass { "off" } else { "on" }
+                )],
+            }
+        }
         _ => return None,
     })
 }

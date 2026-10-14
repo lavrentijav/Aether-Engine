@@ -33,6 +33,7 @@ mod rewards;
 mod session;
 mod stash;
 mod stored;
+mod visibility;
 mod worldgen;
 
 use std::io;
@@ -412,6 +413,20 @@ fn warn_if_exposed(cfg: &Config) {
             cfg.server.host
         ));
     }
+}
+
+/// The `[visibility]` settings, or the defaults (off) before startup installs
+/// the config.
+pub fn visibility_config() -> config::VisibilityConfig {
+    CONFIG
+        .get()
+        .map(|c| c.visibility.clone())
+        .unwrap_or_default()
+}
+
+/// The chunk radius kept loaded around a player, from the config.
+pub fn server_view_radius() -> i32 {
+    CONFIG.get().map(|c| c.server.view_radius).unwrap_or(8)
 }
 
 /// The mode this server runs, installed at startup.
