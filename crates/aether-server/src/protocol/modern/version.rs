@@ -445,6 +445,20 @@ mod tests {
     }
 
     #[test]
+    fn potion_component_ids_match_each_releases_own_registry() {
+        // The `minecraft:data_component_type` registry assigns ids in
+        // registration order. Dumped from each release's own DataComponents
+        // `<clinit>`: 1.21.11 registers `potion_contents` 49th, 26.1.2/26.2
+        // add `charged_projectiles` and `bundle_contents` before it (51), and
+        // 26.3 adds two more (53). A wrong id makes the client decode the
+        // payload as another component and reject the stack.
+        assert_eq!(V1_21_11.component_potion_contents, 49);
+        assert_eq!(V26_1.component_potion_contents, 51);
+        assert_eq!(V26_2.component_potion_contents, 51);
+        assert_eq!(V26_3.component_potion_contents, 53);
+    }
+
+    #[test]
     fn packet_ids_come_from_the_versions_own_table() {
         assert_eq!(V1_21_11.packets.cb_level_chunk_with_light, 0x2C);
         assert_eq!(V1_21_11.packets.sb_move_player_pos, 0x1D);

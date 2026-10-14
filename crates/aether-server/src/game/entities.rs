@@ -1383,24 +1383,53 @@ pub fn potion_impact(
     lingering: bool,
     _shooter: Option<i32>,
 ) {
+    // 2007 is the instant-effect splash (a colour flash and a louder sound);
+    // 2002 the ordinary one. The data is the potion's own colour, so the
+    // particles match the potion the way the client's own do.
+    let event = if super::brewing::has_instant_effects(potion) {
+        2007
+    } else {
+        2002
+    };
     registry.broadcast(
         &ServerEvent::WorldEvent {
-            event: 2002,
+            event,
             x: pos.x.floor() as i32,
             y: pos.y.floor() as i32,
             z: pos.z.floor() as i32,
-            data: 0,
+            data: super::brewing::potion_color(potion),
         },
         world,
     );
-    if lingering {
-        spawn_cloud(pos, potion);
+    // A lingering potion leaves only its cloud; it applies nothing at the
+    // point of impact. A splash applies to everything in range at once.
+    match impact_of(lingering) {
+        Impact::Splash => apply_potion_area(registry, world, pos, potion, Area::Splash, 4.0),
+        Impact::Lingering => {
+            spawn_cloud(pos, potion);
+        }
     }
-    apply_potion_area(registry, world, pos, potion, true, 4.0);
 }
 
-/// A lingering cloud drips its effects on everything within `radius`, at full
-/// strength (vanilla's `AreaEffectCloud`).
+/// What a thrown potion does where it breaks. A splash applies its effects
+/// at the point of impact; a lingering potion applies nothing there and only
+/// leaves its cloud — vanilla's `ThrownLingeringPotion.onHitAsPotion`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Impact {
+    Splash,
+    Lingering,
+}
+
+fn impact_of(lingering: bool) -> Impact {
+    if lingering {
+        Impact::Lingering
+    } else {
+        Impact::Splash
+    }
+}
+
+/// A lingering cloud drips its effects on everything within `radius`, at the
+/// lingering duration scale (vanilla's `AreaEffectCloud`).
 pub fn cloud_pulse(
     registry: &SharedRegistry,
     world: &DemoWorld,
@@ -1408,17 +1437,39 @@ pub fn cloud_pulse(
     potion: u16,
     radius: f64,
 ) {
-    apply_potion_area(registry, world, pos, potion, false, radius.max(0.0));
+    apply_potion_area(registry, world, pos, potion, Area::Cloud, radius.max(0.0));
 }
 
-/// Apply `potion` to every player and mob within `range` of `pos`. A splash
-/// scales by distance and drops short effects; a cloud applies them in full.
+/// How a potion reaches a target: a splash scales by distance and drops short
+/// effects; a lingering cloud applies its quarter-duration list.
+#[derive(Clone, Copy)]
+enum Area {
+    Splash,
+    Cloud,
+}
+
+impl Area {
+    /// The effects for a target `distance` away, and the factor instant
+    /// effects use. A splash's factor is its distance falloff; a cloud's
+    /// instant factor is vanilla's fixed `0.5`.
+    fn for_target(self, potion: u16, d2: f64) -> (Vec<super::effects::Effect>, f64) {
+        match self {
+            Area::Splash => {
+                let factor = (1.0 - d2.sqrt() / 4.0).clamp(0.0, 1.0);
+                (super::brewing::effects_of_scaled(potion, factor), factor)
+            }
+            Area::Cloud => (super::brewing::effects_of_lingering(potion), 0.5),
+        }
+    }
+}
+
+/// Apply `potion` to every player and mob within `range` of `pos`.
 fn apply_potion_area(
     registry: &SharedRegistry,
     world: &DemoWorld,
     pos: Vector3,
     potion: u16,
-    splash: bool,
+    area: Area,
     range: f64,
 ) {
     let cutoff = range * range;
@@ -1429,16 +1480,7 @@ fn apply_potion_area(
         if d2 > cutoff {
             continue;
         }
-        let factor = if splash {
-            (1.0 - d2.sqrt() / 4.0).clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
-        let effects = if splash {
-            super::brewing::effects_of_scaled(potion, factor)
-        } else {
-            super::brewing::effects_of(potion)
-        };
+        let (effects, factor) = area.for_target(potion, d2);
         apply_to_player(&handle, registry, world, &effects, factor);
     }
     let mut all = entities().lock().unwrap();
@@ -1453,28 +1495,10 @@ fn apply_potion_area(
         if d2 > cutoff {
             continue;
         }
-        let factor = if splash {
-            (1.0 - d2.sqrt() / 4.0).clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
-        let effects = if splash {
-            super::brewing::effects_of_scaled(potion, factor)
-        } else {
-            super::brewing::effects_of(potion)
-        };
+        let (effects, factor) = area.for_target(potion, d2);
         for effect in &effects {
             if super::effects::is_instant(effect.id) {
-                if effect.id == super::effects::INSTANT_HEALTH {
-                    m.health = (m.health + super::effects::instant_heal(effect.amplifier, factor))
-                        .min(m.def.health);
-                } else {
-                    m.health -= super::effects::instant_damage(effect.amplifier, factor);
-                    if m.health <= 0.0 {
-                        m.health = 0.0;
-                        m.death = Some(0);
-                    }
-                }
+                apply_instant_to_mob(m, effect, factor);
                 m.meta_dirty = true;
             } else {
                 m.effects.apply(*effect);
@@ -1483,8 +1507,28 @@ fn apply_potion_area(
     }
 }
 
+/// Apply one instant effect to a mob, honouring the undead's inversion of
+/// heal and harm — vanilla's `HealOrHarmMobEffect.applyInstantenousEffect`
+/// branches on `livingEntity.isInvertedHealAndHarm()`.
+fn apply_instant_to_mob(m: &mut super::mobs::Mob, effect: &super::effects::Effect, factor: f64) {
+    let is_harm = effect.id == super::effects::INSTANT_DAMAGE;
+    if is_harm == m.def.undead {
+        // Heals (instant health on the living, instant damage on the undead).
+        m.health =
+            (m.health + super::effects::instant_heal(effect.amplifier, factor)).min(m.def.health);
+    } else {
+        m.health -= super::effects::instant_damage(effect.amplifier, factor);
+        if m.health <= 0.0 {
+            m.health = 0.0;
+            m.death = Some(0);
+        }
+    }
+}
+
 /// Apply already-scaled effects to one player: instant effects at once, the
-/// rest through [`super::effects::give`].
+/// rest through [`super::effects::give`]. A player is never undead, so instant
+/// health always heals and instant damage always hurts — unlike
+/// [`apply_instant_to_mob`].
 fn apply_to_player(
     handle: &PlayerHandle,
     registry: &SharedRegistry,
@@ -1671,5 +1715,55 @@ mod tests {
             .collect();
         assert_eq!(values, vec![3, 4]);
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn a_lingering_potion_leaves_only_a_cloud() {
+        // Vanilla's `ThrownLingeringPotion.onHitAsPotion` creates the cloud
+        // and applies nothing at the point of impact; only a splash applies
+        // directly.
+        assert_eq!(impact_of(true), Impact::Lingering);
+        assert_eq!(impact_of(false), Impact::Splash);
+    }
+
+    #[test]
+    fn a_cloud_uses_half_strength_instants_and_quarter_durations() {
+        use crate::game::brewing;
+        let swiftness = brewing::potion_id("minecraft:swiftness").unwrap();
+        let harming = brewing::potion_id("minecraft:harming").unwrap();
+        // Vanilla's `AreaEffectCloud.serverTick` passes factor 0.5 to every
+        // instant effect, and quartered durations to the rest.
+        let (effects, factor) = Area::Cloud.for_target(swiftness, 0.0);
+        assert_eq!(factor, 0.5);
+        assert_eq!(effects[0].duration, 900);
+        let (_, instant_factor) = Area::Cloud.for_target(harming, 0.0);
+        assert_eq!(instant_factor, 0.5);
+        // A splash at the centre is full strength.
+        let (_, sf) = Area::Splash.for_target(swiftness, 0.0);
+        assert_eq!(sf, 1.0);
+        let (se, _) = Area::Splash.for_target(swiftness, 0.0);
+        assert_eq!(se[0].duration, 3600);
+    }
+
+    #[test]
+    fn the_undead_invert_instant_health_and_damage() {
+        let mut rng = crate::game::tables::Rng::new(1);
+        let heal = crate::game::effects::Effect::new(crate::game::effects::INSTANT_HEALTH, 0, 1);
+        let harm = crate::game::effects::Effect::new(crate::game::effects::INSTANT_DAMAGE, 0, 1);
+        // A zombie (undead): instant health hurts it, instant damage heals it.
+        let mut zombie = Mob::new(&crate::game::mobs::ZOMBIE, &mut rng);
+        zombie.health = 10.0;
+        apply_instant_to_mob(&mut zombie, &heal, 1.0);
+        assert_eq!(zombie.health, 4.0, "instant health hurts the undead");
+        zombie.health = 4.0;
+        apply_instant_to_mob(&mut zombie, &harm, 1.0);
+        assert_eq!(zombie.health, 8.0, "instant damage heals the undead");
+        // A cow: the ordinary way round.
+        let mut cow = Mob::new(&crate::game::mobs::COW, &mut rng);
+        cow.health = 4.0;
+        apply_instant_to_mob(&mut cow, &heal, 1.0);
+        assert_eq!(cow.health, 8.0, "instant health heals the living");
+        apply_instant_to_mob(&mut cow, &harm, 1.0);
+        assert_eq!(cow.health, 2.0, "instant damage hurts the living");
     }
 }

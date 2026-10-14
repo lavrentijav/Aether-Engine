@@ -27,6 +27,28 @@ fn block_name(world: &DemoWorld, x: i32, y: i32, z: i32) -> String {
     crate::game::block_name(world, world.get_block(x, y, z)).unwrap_or_default()
 }
 
+/// Whether `state` is a *source* water block (`level=0`), as opposed to a
+/// flowing cell. A bottle fills only from a source, vanilla's
+/// `ClipContext.Fluid.SOURCE_ONLY`.
+fn source_water(state: BlockStateId) -> bool {
+    matches!(
+        super::fluids::cell_of(state),
+        Some(c) if c.fluid == super::fluids::Fluid::Water && c.level == 0
+    )
+}
+
+/// Whether the block `state` carries a source water fluid as its waterlogged
+/// property — a waterlogged block is a source the same way a water block is.
+fn waterlogged(state: BlockStateId) -> bool {
+    let Some((id, _)) = aether_world::registry::blocks::block_of_state(state) else {
+        return false;
+    };
+    let (lo, _) = aether_world::registry::blocks::STATE_RANGE[id as usize];
+    aether_world::registry::props::values_of(id, state.raw() - lo)
+        .iter()
+        .any(|(k, v)| *k == "waterlogged" && *v == "true")
+}
+
 /// The player started mining. Returns `true` when the block should break
 /// right now (creative, or a block that breaks instantly).
 pub fn start_dig(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i32) -> bool {
@@ -443,12 +465,23 @@ pub fn use_item(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWo
         }
         handle.sync_inventory(world);
     } else if item == crate::inventory::item("minecraft:glass_bottle") {
-        // A glass bottle filled from a water source becomes a water bottle.
+        // A glass bottle fills from a water *source* only: flowing water is
+        // transparent to the ray, and a waterlogged source block fills the
+        // same way a water block does (vanilla's `ClipContext.Fluid.SOURCE_ONLY`).
         let hit = raycast(handle, 5.0, |x, y, z| {
-            world.get_block(x, y, z) != block_ids::AIR
+            let state = world.get_block(x, y, z);
+            if source_water(state) {
+                return true;
+            }
+            // Any other fluid (flowing water, lava) is transparent.
+            if super::fluids::cell_of(state).is_some() {
+                return false;
+            }
+            world.props_of(state).collision
         });
         let Some(((x, y, z), _)) = hit else { return };
-        if block_name(world, x, y, z) != "minecraft:water" {
+        let state = world.get_block(x, y, z);
+        if !source_water(state) && !waterlogged(state) {
             return;
         }
         if handle.game().survival() {
@@ -947,4 +980,33 @@ pub fn set_mode(handle: &PlayerHandle, world: &DemoWorld, mode: GameMode) {
     }
     handle.emit(&ServerEvent::GameModeChange(mode), world);
     handle.sync_inventory(world);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_world::registry::blocks;
+
+    #[test]
+    fn a_bottle_fills_only_from_a_source() {
+        let water = blocks::states_of("minecraft:water").expect("water is a block");
+        assert!(
+            source_water(BlockStateId(*water.start())),
+            "level 0 is a source"
+        );
+        assert!(
+            !source_water(BlockStateId(*water.start() + 1)),
+            "level 1 flows and a bottle must refuse it"
+        );
+        // A waterlogged block carries a source water fluid.
+        let stairs = blocks::default_state("minecraft:oak_stairs").unwrap();
+        let (id, _) = blocks::block_of_state(stairs).unwrap();
+        assert!(!waterlogged(stairs), "a fresh stair is dry");
+        let wet =
+            aether_world::registry::props::state_with(id, &[("waterlogged", "true")]).unwrap();
+        assert!(waterlogged(BlockStateId(wet)));
+        assert!(!waterlogged(
+            blocks::default_state("minecraft:stone").unwrap()
+        ));
+    }
 }

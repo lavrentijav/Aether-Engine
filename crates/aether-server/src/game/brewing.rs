@@ -129,6 +129,104 @@ pub fn effects_of_scaled(id: u16, factor: f64) -> Vec<Effect> {
     out
 }
 
+/// `Items.LINGERING_POTION`'s `POTION_DURATION_SCALE`: a lingering potion's
+/// cloud applies its effects at a quarter of the registry duration.
+pub const LINGERING_DURATION_SCALE: f64 = 0.25;
+
+/// The effects a lingering potion's cloud applies, from the registry entry at
+/// the lingering `POTION_DURATION_SCALE`. Vanilla's `AreaEffectCloud` builds
+/// the list with `forEachEffect(consumer, potionDurationScale)`, which floors
+/// the scaled duration and never drops a short one (unlike a splash).
+pub fn effects_of_lingering(id: u16) -> Vec<Effect> {
+    let Some(def) = def_of(id) else {
+        return Vec::new();
+    };
+    def.effects
+        .iter()
+        .map(|&(effect, amplifier, duration)| {
+            let scaled = if effects::is_instant(effect) {
+                duration
+            } else {
+                ((duration as f64 * LINGERING_DURATION_SCALE).floor() as i32).max(1)
+            };
+            Effect::new(effect, amplifier, scaled)
+        })
+        .collect()
+}
+
+/// Whether any of the potion's effects is instant — vanilla's
+/// `Potion.hasInstantEffects`, which chooses the 2007 (instant) over the 2002
+/// (splash) level event.
+pub fn has_instant_effects(id: u16) -> bool {
+    def_of(id)
+        .map(|d| d.effects.iter().any(|&(e, _, _)| effects::is_instant(e)))
+        .unwrap_or(false)
+}
+
+/// The colour a potion's particles and overlay use, vanilla's
+/// `PotionContents.getColorOptional`: the amplifier-weighted average of each
+/// effect's own colour, or `BASE_POTION_COLOR` when the potion has none.
+pub fn potion_color(id: u16) -> i32 {
+    let mut r = 0i32;
+    let mut g = 0i32;
+    let mut b = 0i32;
+    let mut total = 0i32;
+    for e in effects_of(id) {
+        let c = effect_color(e.id);
+        let n = e.amplifier as i32 + 1;
+        r += n * ((c >> 16) & 0xFF);
+        g += n * ((c >> 8) & 0xFF);
+        b += n * (c & 0xFF);
+        total += n;
+    }
+    if total == 0 {
+        BASE_POTION_COLOR
+    } else {
+        argb(r / total, g / total, b / total)
+    }
+}
+
+/// `PotionContents.BASE_POTION_COLOR`, the water potion's colour.
+pub const BASE_POTION_COLOR: i32 = -13083194;
+
+fn argb(r: i32, g: i32, b: i32) -> i32 {
+    (0xFF << 24) | (r << 16) | (g << 8) | b
+}
+
+/// One effect's colour, from `MobEffects`' own registration.
+fn effect_color(id: u8) -> i32 {
+    use effects::*;
+    match id {
+        SPEED => 3402751,
+        SLOWNESS => 9154528,
+        STRENGTH => 16762624,
+        INSTANT_HEALTH => 16262179,
+        INSTANT_DAMAGE => 11101546,
+        JUMP_BOOST => 16646020,
+        NAUSEA => 5578058,
+        REGENERATION => 13458603,
+        RESISTANCE => 9520880,
+        FIRE_RESISTANCE => 16750848,
+        WATER_BREATHING => 10017472,
+        INVISIBILITY => 16185078,
+        BLINDNESS => 2039587,
+        NIGHT_VISION => 12779366,
+        HUNGER => 5797459,
+        WEAKNESS => 4738376,
+        POISON => 8889187,
+        WITHER => 7561558,
+        ABSORPTION => 2445989,
+        SATURATION => 16262179,
+        LUCK => 5882118,
+        SLOW_FALLING => 15978425,
+        WIND_CHARGED => 12438015,
+        WEAVING => 7891290,
+        OOZING => 10092451,
+        INFESTED => 9214860,
+        _ => 0x00FF_FFFF,
+    }
+}
+
 /// Whether `item` is one of the three drinkable/thrown potion items.
 pub fn is_potion_item(item: &str) -> bool {
     matches!(short(item), "potion" | "splash_potion" | "lingering_potion")
@@ -594,5 +692,35 @@ mod tests {
         assert_eq!(effects::instant_damage(0, 1.0), 6.0);
         assert_eq!(effects::instant_damage(1, 1.0), 12.0);
         assert_eq!(effects::instant_heal(0, 0.5), 2.0);
+    }
+
+    #[test]
+    fn a_lingering_potions_effects_are_quartered() {
+        // `Items.LINGERING_POTION` carries `POTION_DURATION_SCALE = 0.25`, and
+        // `AreaEffectCloud` floors the scaled duration without dropping short
+        // effects the way a splash does.
+        assert_eq!(LINGERING_DURATION_SCALE, 0.25);
+        assert_eq!(effects_of_lingering(id("swiftness"))[0].duration, 900);
+        assert_eq!(effects_of_lingering(id("strong_slowness"))[0].duration, 100);
+        assert_eq!(effects_of_lingering(id("strong_poison"))[0].duration, 108);
+        assert_eq!(effects_of_lingering(id("harming")).len(), 1);
+    }
+
+    #[test]
+    fn potion_colours_are_the_amplifier_weighted_effect_colours() {
+        assert_eq!(potion_color(id("water")), BASE_POTION_COLOR);
+        // One effect is its own colour with full alpha.
+        assert_eq!(potion_color(id("swiftness")) as u32, 0xff33ebff);
+        assert_eq!(potion_color(id("slowness")) as u32, 0xff8bafe0);
+        assert_eq!(potion_color(id("harming")) as u32, 0xffa9656a);
+    }
+
+    #[test]
+    fn only_a_potion_with_an_instant_effect_uses_the_instant_event() {
+        assert!(has_instant_effects(id("harming")));
+        assert!(has_instant_effects(id("strong_healing")));
+        assert!(!has_instant_effects(id("swiftness")));
+        assert!(!has_instant_effects(id("water")));
+        assert!(!has_instant_effects(id("poison")));
     }
 }

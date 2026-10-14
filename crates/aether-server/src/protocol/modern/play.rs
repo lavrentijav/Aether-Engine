@@ -781,6 +781,37 @@ mod tests {
         assert!(!pin.bool().unwrap(), "no custom name");
     }
 
+    #[test]
+    fn a_potion_stack_uses_each_versions_own_component_id() {
+        // The component id is not shared: every modern codec must write its
+        // own release's. A test that pinned only 1.21.11 would miss a 26.x
+        // registry that grew a component before `potion_contents`.
+        use crate::protocol::modern::version::{V1_21_11, V26_1, V26_2, V26_3};
+        let potion = crate::game::brewing::potion_id("minecraft:swiftness").unwrap();
+        let stack = Stack::potion("minecraft:potion", potion, 1);
+        for v in [&V1_21_11, &V26_1, &V26_2, &V26_3] {
+            let mut p = PacketOut::new(0);
+            write_stack(v, &mut p, Some(&stack));
+            let body = p.body()[1..].to_vec();
+            let mut pin = crate::proto::PacketIn::new(&body);
+            assert_eq!(pin.var_int().unwrap(), 1, "{}: count", v.name);
+            assert_eq!(
+                pin.var_int().unwrap(),
+                v.item_id("minecraft:potion").unwrap(),
+                "{}: the potion item",
+                v.name
+            );
+            assert_eq!(pin.var_int().unwrap(), 1, "{}: component added", v.name);
+            assert_eq!(pin.var_int().unwrap(), 0, "{}: none removed", v.name);
+            assert_eq!(
+                pin.var_int().unwrap(),
+                v.component_potion_contents,
+                "{}: its own potion_contents id",
+                v.name
+            );
+        }
+    }
+
     /// Whether `hay` contains `needle` as a contiguous run.
     fn contains(hay: &[u8], needle: &[u8]) -> bool {
         hay.windows(needle.len()).any(|w| w == needle)

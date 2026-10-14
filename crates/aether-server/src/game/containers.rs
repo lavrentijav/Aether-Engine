@@ -336,8 +336,12 @@ pub fn move_one(world: &DemoWorld, from: Pos, to: Pos) -> bool {
             map.insert(to_parts[i], c);
         }
     }
-    // An item arriving at a furnace may start it cooking.
-    if to_kind == ContainerKind::Furnace {
+    // An item arriving at a furnace may start it cooking, one at a brewing
+    // stand may start a brew.
+    if matches!(
+        to_kind,
+        ContainerKind::Furnace | ContainerKind::BrewingStand
+    ) {
         for p in &to_parts {
             active().lock().unwrap().insert(*p);
         }
@@ -542,9 +546,11 @@ fn tick_brewing(c: &mut Container, dirty: &mut bool, idle: &mut bool) {
         c.ingredient = c.slots[3].as_ref().map(|s| s.item);
         *dirty = true;
     }
-    if c.burn == 0 && c.cook == 0 {
-        *idle = true;
-    }
+    // Unlike a furnace, a brewing stand's `burn` is a count of brews left, not
+    // a timer, so it can sit above zero indefinitely. The stand is only worth
+    // ticking while a brew runs or one can start; anything that could start
+    // one (a window click, a hopper) re-adds it to the active set.
+    *idle = c.cook == 0 && !(c.burn > 0 && is_brewable(c));
 }
 
 /// Whether this stand has an ingredient that would change at least one of its
@@ -571,24 +577,23 @@ fn do_brew(c: &mut Container) {
         .and_then(|s| s.item.vanilla_name())
         .unwrap_or_default();
     for i in 0..3 {
-        let Some(slot) = c.slots[i].as_ref() else {
+        let Some(slot) = c.slots[i].clone() else {
             continue;
         };
-        let (Some(item), potion) = (slot.item.vanilla_name(), slot.potion) else {
+        let Some(item) = slot.item.vanilla_name() else {
             continue;
         };
-        if let Some((out_item, out_potion)) = super::brewing::mix(item, potion, ingredient) {
-            let count = slot.count;
-            let uid = slot.uid;
-            let mut out = match out_potion {
+        if let Some((out_item, out_potion)) = super::brewing::mix(item, slot.potion, ingredient) {
+            // A brewed bottle is a new instance: its contents changed, and two
+            // potions are two different items. Minting a uid here is what lets
+            // the item journal see the transformation (a bottle whose contents
+            // change is not merely moved).
+            c.slots[i] = Some(match out_potion {
                 Some(p) if super::brewing::is_potion_item(&out_item) => {
-                    Stack::potion(&out_item, p, count)
+                    Stack::potion(&out_item, p, slot.count)
                 }
-                _ => Stack::named(&out_item, count),
-            };
-            out.uid = uid;
-            out.damage = slot.damage;
-            c.slots[i] = Some(out);
+                _ => Stack::named(&out_item, slot.count),
+            });
         }
     }
     if let Some(ing) = &mut c.slots[3] {
@@ -729,6 +734,44 @@ mod tests {
         tick_brewing(&mut c, &mut false, &mut idle);
         assert_eq!(c.cook, 0);
         assert!(idle, "a stand with nothing to burn sleeps");
+    }
+
+    #[test]
+    fn a_brewing_stand_with_fuel_but_nothing_to_brew_leaves_the_active_set() {
+        use crate::game::brewing::WATER;
+        let mut c = Container::new(ContainerKind::BrewingStand);
+        c.slots[4] = Some(Stack::named("minecraft:blaze_powder", 1));
+        let mut idle = false;
+        tick_brewing(&mut c, &mut false, &mut idle);
+        assert_eq!(c.burn, 20, "the powder is lit into twenty brews");
+        assert_eq!(c.cook, 0);
+        assert!(idle, "nothing to brew: the stand sleeps");
+        // A bottle and an ingredient wake it and start a brew.
+        c.slots[0] = Some(Stack::potion("minecraft:potion", WATER, 1));
+        c.slots[3] = Some(Stack::named("minecraft:nether_wart", 1));
+        let mut idle2 = false;
+        tick_brewing(&mut c, &mut false, &mut idle2);
+        assert!(!idle2, "a brew is running: the stand stays awake");
+        assert_eq!(c.cook, 400);
+    }
+
+    #[test]
+    fn a_brewed_bottle_is_a_new_instance() {
+        // The bottle's contents changed, so it is a new item instance: the
+        // new uid is what lets the item journal record the transformation.
+        use crate::game::brewing::{self, WATER};
+        let mut c = Container::new(ContainerKind::BrewingStand);
+        c.slots[0] = Some(Stack::potion("minecraft:potion", WATER, 1));
+        c.slots[3] = Some(Stack::named("minecraft:nether_wart", 1));
+        c.slots[4] = Some(Stack::named("minecraft:blaze_powder", 1));
+        let old_uid = c.slots[0].as_ref().unwrap().uid;
+        tick_until(&mut c, 401);
+        let new = c.slots[0].as_ref().unwrap();
+        assert_ne!(new.uid, old_uid, "the brewed bottle is a new instance");
+        assert_eq!(
+            new.potion,
+            Some(brewing::potion_id("minecraft:awkward").unwrap())
+        );
     }
 
     #[test]

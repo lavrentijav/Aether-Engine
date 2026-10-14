@@ -233,42 +233,41 @@ mod tests {
         );
     }
 
+    // The owned set is process-wide and keyed by prefix, so each test that
+    // drives `save`/`load` must use its own prefix or the tests, run in
+    // parallel, prune each other's ownership markers.
+    const P1: &[u8] = b"t1";
+    const P2: &[u8] = b"t2";
+
     #[test]
     fn saving_groups_entries_by_chunk_and_removes_consumed_ones() {
         let store = Fake::default();
-        save(
-            &store,
-            BLOCK_TICKS,
-            vec![(10, (3, 5, 7)), (12, (-1, 0, 20))],
-        );
-        assert_eq!(load(&store, BLOCK_TICKS, 0, 0), vec![((3, 5, 7), 10)]);
-        assert_eq!(load(&store, BLOCK_TICKS, -1, 1), vec![((-1, 0, 20), 12)]);
-        assert_eq!(load(&store, BLOCK_TICKS, 2, 2), vec![], "another chunk");
+        save(&store, P1, vec![(10, (3, 5, 7)), (12, (-1, 0, 20))]);
+        assert_eq!(load(&store, P1, 0, 0), vec![((3, 5, 7), 10)]);
+        assert_eq!(load(&store, P1, -1, 1), vec![((-1, 0, 20), 12)]);
+        assert_eq!(load(&store, P1, 2, 2), vec![], "another chunk");
 
         // The (0, 0) tick runs; the next save must not leave its blob behind
         // to be replayed after a restart.
-        save(&store, BLOCK_TICKS, vec![(12, (-1, 0, 20))]);
-        assert_eq!(load(&store, BLOCK_TICKS, 0, 0), vec![]);
-        assert_eq!(load(&store, BLOCK_TICKS, -1, 1), vec![((-1, 0, 20), 12)]);
+        save(&store, P1, vec![(12, (-1, 0, 20))]);
+        assert_eq!(load(&store, P1, 0, 0), vec![]);
+        assert_eq!(load(&store, P1, -1, 1), vec![((-1, 0, 20), 12)]);
     }
 
     #[test]
     fn a_save_keeps_the_ticks_of_a_chunk_not_loaded_since_the_start() {
         // Distinct coordinates: the owned set is process-wide.
         let store = Fake::default();
-        store.tick_put(
-            &key(BLOCK_TICKS, 500, 500),
-            &encode(&[((8000, 1, 8000), 40)]),
-        );
+        store.tick_put(&key(P2, 500, 500), &encode(&[((8000, 1, 8000), 40)]));
         // Restart: nothing loaded yet, an autosave with an unrelated entry.
-        save(&store, BLOCK_TICKS, vec![(41, (8100, 1, 8100))]);
+        save(&store, P2, vec![(41, (8100, 1, 8100))]);
         assert_eq!(
-            load(&store, BLOCK_TICKS, 500, 500),
+            load(&store, P2, 500, 500),
             vec![((8000, 1, 8000), 40)],
             "the unloaded chunk's tick must survive the save"
         );
         // Now loaded (owned) and consumed: the next save deletes it.
-        save(&store, BLOCK_TICKS, vec![(41, (8100, 1, 8100))]);
-        assert_eq!(load(&store, BLOCK_TICKS, 500, 500), vec![]);
+        save(&store, P2, vec![(41, (8100, 1, 8100))]);
+        assert_eq!(load(&store, P2, 500, 500), vec![]);
     }
 }
