@@ -34,6 +34,7 @@ pub mod blocks;
 mod item_names;
 pub mod items;
 pub mod props;
+pub mod shapes;
 
 pub mod ids {
     //! Default states of the blocks the engine itself refers to by name.
@@ -469,5 +470,33 @@ mod tests {
         assert!(p.solid && p.collision);
         assert_eq!(p.light_opacity, 15);
         assert_eq!(p.light_emission, 0);
+    }
+
+    #[test]
+    fn collision_shapes_follow_the_state() {
+        // The generated shapes table is in state order, so a state's own id
+        // must index its real boxes. Air and water are passable, a full cube
+        // is exactly one unit cell.
+        assert_eq!(shapes::STATE_SHAPE.len(), blocks::STATE_COUNT);
+        assert!(shapes::collision_boxes(ids::AIR.raw()).is_empty());
+        assert!(shapes::collision_boxes(ids::WATER.raw()).is_empty());
+        let stone = shapes::collision_boxes(ids::STONE.raw());
+        assert_eq!(stone.len(), 1);
+        assert_eq!(stone[0], [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+
+        // A top slab is the upper half; a fence reaches 1.5 and no further.
+        let top = shapes::collision_boxes(
+            BlockRegistry::new()
+                .get("minecraft:oak_slab[type=top]")
+                .unwrap()
+                .raw(),
+        );
+        assert_eq!(top.len(), 1);
+        assert_eq!((top[0][1], top[0][4]), (0.5, 1.0));
+        let fence = shapes::collision_boxes(
+            BlockRegistry::new().get("minecraft:oak_fence").unwrap().raw(),
+        );
+        assert!(!fence.is_empty());
+        assert!(fence.iter().all(|b| b[4] == 1.5));
     }
 }
