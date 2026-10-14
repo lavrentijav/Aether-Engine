@@ -96,11 +96,12 @@ fn toggle_count(ctx: &Context, pos: BlockPos, now: u64) -> u32 {
 }
 
 /// `BaseTorchBlock.updateShape`: a standing torch pops off when its support
-/// below is gone.
+/// below is gone. Support is `canSupportCenter(..., UP)` — the CENTER face test,
+/// not the FULL one, so a fence or hopper holds a torch.
 fn standing_support(ctx: &Context, pos: BlockPos, dir: Direction) -> Option<BlockStateId> {
     if dir == Direction::Down {
         let below = ctx.get_block(pos.offset(Direction::Down));
-        if !shapes::face_full(below, Direction::Up) {
+        if !shapes::can_support_center(below, Direction::Up) {
             return Some(crate::behaviour::AIR);
         }
     }

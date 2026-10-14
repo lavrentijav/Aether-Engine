@@ -872,3 +872,39 @@ fn the_neighbor_update_chain_limit_is_configurable() {
         "a tiny limit must truncate the cascade ({truncated} vs {full})"
     );
 }
+
+#[test]
+fn a_standing_torch_survives_on_a_fence_or_a_hopper() {
+    // D3: `BaseTorchBlock.canSurvive` uses `canSupportCenter` (SupportType.CENTER),
+    // not the FULL face test. A fence's central post and a hopper's funnel each
+    // centre-support a torch, so a DOWN shape update must not remove it.
+    let engine = Redstone::new();
+    for (support, other) in [
+        (
+            "minecraft:oak_fence",
+            "minecraft:oak_fence[waterlogged=true]",
+        ),
+        ("minecraft:hopper", "minecraft:hopper[enabled=false]"),
+    ] {
+        let mut w = MemWorld::new();
+        let below = p(0, 0, 0);
+        let torch = p(0, 1, 0);
+        w.put(below, support);
+        w.put(torch, "minecraft:redstone_torch");
+        engine.on_placed(&mut w, below);
+        engine.on_placed(&mut w, torch);
+        assert_eq!(w.block_name(torch), Some("minecraft:redstone_torch"));
+
+        // Re-place the support with a different state: that runs the shape pass
+        // and gives the torch a DOWN update_shape.
+        let other_state = BlockRegistry::new()
+            .get(other)
+            .unwrap_or_else(|| panic!("state {other}"));
+        engine.set_block(&mut w, below, other_state, SetBlockFlags::PLACE);
+        assert_eq!(
+            w.block_name(torch),
+            Some("minecraft:redstone_torch"),
+            "{support}: a centre-supported torch must survive"
+        );
+    }
+}

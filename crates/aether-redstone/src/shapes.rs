@@ -102,6 +102,33 @@ pub fn is_hopper(state: BlockStateId) -> bool {
     blocks::block_of_state(state).map(|(b, _)| b) == *hopper
 }
 
+/// `SupportType.CENTER`: the state's shape supports a block resting on its
+/// central column in `direction`.
+///
+/// Vanilla's `Block.canSupportCenter` (used by a standing torch, `BaseTorchBlock`)
+/// uses `isFaceSturdy(dir, SupportType.CENTER)`, which is weaker than `FULL`: a
+/// fence's central post, a slab or a hopper's funnel all centre-support a torch
+/// even though their whole face is not full. This approximates it as "some
+/// collision box covers the central 2×2 cross-section" perpendicular to `dir`.
+pub fn face_center(state: BlockStateId, direction: Direction) -> bool {
+    let boxes = shapes::collision_boxes(state.raw());
+    let (a1, a2) = match axis(direction) {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+    const LO: f32 = 7.0 / 16.0 - EPS;
+    const HI: f32 = 9.0 / 16.0 + EPS;
+    boxes
+        .iter()
+        .any(|b| b[a1] <= LO && b[a1 + 3] >= HI && b[a2] <= LO && b[a2 + 3] >= HI)
+}
+
+/// `Block.canSupportCenter(state, direction)`: a full or centre face.
+pub fn can_support_center(state: BlockStateId, direction: Direction) -> bool {
+    face_center(state, direction)
+}
+
 #[cfg(test)]
 mod tests {
     use aether_world::BlockRegistry;
@@ -147,5 +174,20 @@ mod tests {
         let hopper = s("minecraft:hopper");
         assert!(is_hopper(hopper));
         assert!(!face_full(hopper, Direction::Up));
+    }
+
+    #[test]
+    fn centre_support_is_weaker_than_full() {
+        // The torch-support predicate: a fence's post and a hopper's funnel
+        // centre-support, so they are not FULL but are CENTER; air is neither.
+        let fence = s("minecraft:oak_fence");
+        assert!(!face_full(fence, Direction::Up));
+        assert!(face_center(fence, Direction::Up));
+
+        let hopper = s("minecraft:hopper");
+        assert!(can_support_center(hopper, Direction::Up));
+
+        assert!(!can_support_center(s("minecraft:air"), Direction::Up));
+        assert!(!face_center(s("minecraft:redstone_torch"), Direction::Up));
     }
 }
