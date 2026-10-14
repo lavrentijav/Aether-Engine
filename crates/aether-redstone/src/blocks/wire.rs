@@ -28,6 +28,12 @@ impl BlockBehaviour for Wire {
         true
     }
 
+    fn connects_to_wire(&self, _state: BlockStateId, _dir: Option<Direction>) -> bool {
+        // A wire always connects to another wire, in any direction and for the
+        // direction-less query.
+        true
+    }
+
     fn get_signal(
         &self,
         ctx: &SignalCtx,
@@ -164,16 +170,10 @@ fn can_survive_on(state: BlockStateId) -> bool {
     shapes::face_full(state, Direction::Up) || shapes::is_hopper(state)
 }
 
-/// `RedStoneWireBlock.shouldConnectTo`.
+/// `RedStoneWireBlock.shouldConnectTo`, delegated to the neighbour's behaviour
+/// so every block decides its own wire connection.
 fn should_connect_to(state: BlockStateId, dir: Option<Direction>) -> bool {
-    if behaviour(state).is_wire() {
-        return true;
-    }
-    if behaviour(state).is_repeater() {
-        let facing = props::facing(state);
-        return dir == Some(facing) || Some(facing.opposite()) == dir;
-    }
-    behaviour(state).is_signal_source(state) && dir.is_some()
+    behaviour(state).connects_to_wire(state, dir)
 }
 
 fn connecting_side(

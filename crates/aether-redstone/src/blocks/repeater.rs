@@ -25,6 +25,18 @@ impl BlockBehaviour for Repeater {
         true
     }
 
+    fn connects_to_wire(&self, state: BlockStateId, dir: Option<Direction>) -> bool {
+        // `RedStoneWireBlock.shouldConnectTo` special-cases the repeater: it
+        // connects only along its facing axis.
+        match dir {
+            Some(d) => {
+                let f = props::facing(state);
+                d == f || d == f.opposite()
+            }
+            None => false,
+        }
+    }
+
     fn get_signal(
         &self,
         _ctx: &SignalCtx,

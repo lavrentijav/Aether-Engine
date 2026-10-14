@@ -672,6 +672,11 @@ fn build() -> Registry {
         &blocks::WoodButton,
     );
 
+    // A test-only block registered over the observer's states, proving that a
+    // new component decides its own wire connection without a core edit.
+    #[cfg(test)]
+    register(&mut by_state, "minecraft:observer", &blocks::TestObserver);
+
     Registry { by_state }
 }
 

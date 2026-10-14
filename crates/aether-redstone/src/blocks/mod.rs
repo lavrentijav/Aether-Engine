@@ -14,6 +14,9 @@ mod repeater;
 mod torch;
 mod wire;
 
+#[cfg(test)]
+mod test_observer;
+
 pub use button::{StoneButton, WoodButton};
 pub use comparator::Comparator;
 pub use default::DefaultBehaviour;
@@ -21,6 +24,8 @@ pub use lamp::Lamp;
 pub use lever::Lever;
 pub use redstone_block::RedstoneBlock;
 pub use repeater::Repeater;
+#[cfg(test)]
+pub use test_observer::TestObserver;
 pub use torch::{Torch, WallTorch};
 pub use wire::Wire;
 
@@ -64,6 +69,19 @@ pub trait BlockBehaviour: Sync {
     /// special-cases the repeater but not the comparator.
     fn is_repeater(&self) -> bool {
         false
+    }
+
+    /// `RedStoneWireBlock.shouldConnectTo`: whether redstone wire draws a
+    /// connection toward this state.
+    ///
+    /// `dir` is the direction from the wire to this block, or `None` for
+    /// vanilla's direction-less query (used when checking the cell above/below
+    /// a wire). A block that needs a bespoke rule — the observer, a piston —
+    /// overrides this in its own module; the wire core never changes. The
+    /// default is vanilla's fallback: an ordinary signal source connects on any
+    /// horizontal side, and nothing connects for the `None` query.
+    fn connects_to_wire(&self, state: BlockStateId, dir: Option<Direction>) -> bool {
+        self.is_signal_source(state) && dir.is_some()
     }
 
     /// Whether this is the block of redstone.
