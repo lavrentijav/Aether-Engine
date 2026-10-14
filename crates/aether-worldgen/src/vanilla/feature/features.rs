@@ -12,6 +12,9 @@ use super::super::json::Json;
 use super::super::noise::NormalNoise;
 use super::super::providers::IntProvider;
 use super::super::rng::Rng;
+use super::super::structure::{
+    self, bounding_box, zero_position, Processor, Rotation, StructureTemplate,
+};
 use super::super::surface::parse_block_state;
 use super::super::tags::BlockSet;
 use super::blocks::{
@@ -57,6 +60,17 @@ pub struct GeodeConfig {
     max_gen_offset: i32,
     noise_multiplier: f64,
     invalid_threshold: i32,
+}
+
+/// A `fossil` configuration: a base template and an overlay, plus the
+/// processor lists to run over each.
+#[derive(Debug)]
+pub struct FossilConfig {
+    fossil_processors: Vec<Processor>,
+    fossil_structures: Vec<Arc<StructureTemplate>>,
+    overlay_processors: Vec<Processor>,
+    overlay_structures: Vec<Arc<StructureTemplate>>,
+    max_empty_corners: i32,
 }
 
 /// A configured feature.
@@ -180,6 +194,8 @@ pub enum Configured {
     MonsterRoom,
     /// `geode` (amethyst).
     Geode(Box<GeodeConfig>),
+    /// `fossil`.
+    Fossil(Box<FossilConfig>),
     /// A type this port does not place.
     Unsupported(String),
 }
@@ -444,6 +460,32 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
                 max_gen_offset: c.i32_or("max_gen_offset", 16),
                 noise_multiplier: c.f64_or("noise_multiplier", 0.05),
                 invalid_threshold: c.i32_or("invalid_blocks_threshold", 1),
+            }))
+        }
+        "fossil" => {
+            let structures = |key: &str| -> Result<Vec<Arc<StructureTemplate>>, BuildError> {
+                let mut v = Vec::new();
+                for id in c.get(key).and_then(Json::as_arr).unwrap_or(&[]) {
+                    let id = id
+                        .as_str()
+                        .ok_or_else(|| BuildError::new(format!("fossil: bad `{key}` entry")))?;
+                    v.push(Arc::new(structure::load_from_pack(l.pack, id)?));
+                }
+                Ok(v)
+            };
+            let processors = |key: &str| -> Result<Vec<Processor>, BuildError> {
+                let id = c
+                    .str_of(key)
+                    .ok_or_else(|| BuildError::new(format!("fossil: no `{key}`")))?;
+                let pj = l.pack.read_json("processor_list", id)?;
+                structure::parse_processors(&pj, l.tags)
+            };
+            Configured::Fossil(Box::new(FossilConfig {
+                fossil_processors: processors("fossil_processors")?,
+                fossil_structures: structures("fossil_structures")?,
+                overlay_processors: processors("overlay_processors")?,
+                overlay_structures: structures("overlay_structures")?,
+                max_empty_corners: c.i32_or("max_empty_corners_allowed", 4),
             }))
         }
         other => {
@@ -721,6 +763,7 @@ pub(crate) fn place_configured(ctx: &mut Ctx, f: &Configured, pos: Pos) -> bool 
         Configured::DesertWell => desert_well(ctx, pos),
         Configured::MonsterRoom => monster_room(ctx, pos),
         Configured::Geode(cfg) => geode(ctx, cfg, pos),
+        Configured::Fossil(cfg) => fossil(ctx, cfg, pos),
         Configured::Unsupported(name) => {
             ctx.d.note_unsupported(&format!("feature:{name}"));
             false
@@ -1946,6 +1989,71 @@ fn geode(ctx: &mut Ctx, cfg: &GeodeConfig, origin: Pos) -> bool {
     true
 }
 
+/// `FossilFeature`. Places one of the pack's fossil templates (spines and
+/// skulls) rotated at a random underground height, then its overlay.
+fn fossil(ctx: &mut Ctx, cfg: &FossilConfig, origin: Pos) -> bool {
+    if cfg.fossil_structures.is_empty() || cfg.overlay_structures.is_empty() {
+        return false;
+    }
+    let rotation = Rotation::random(ctx.r);
+    let i = ctx.r.next_int_bounded(cfg.fossil_structures.len() as i32) as usize;
+    let template = &cfg.fossil_structures[i];
+    let overlay = &cfg.overlay_structures[i];
+    let size = rotation_size(rotation, template.size);
+    let p2 = origin.offset(-size[0] / 2, 0, -size[2] / 2);
+    let mut j = origin.y;
+    for k in 0..size[0] {
+        for l in 0..size[2] {
+            j = j.min(ctx.lv.height(Heightmap::OceanFloorWg, p2.x + k, p2.z + l));
+        }
+    }
+    let k = (j - 15 - ctx.r.next_int_bounded(10)).max(ctx.lv.min_y() + 10);
+    let base = zero_position(Pos::new(p2.x, k, p2.z), rotation, template.size);
+    let (min, max) = bounding_box(base, rotation, template.size);
+    let mut empty = 0;
+    for x in [min.x, max.x] {
+        for y in [min.y, max.y] {
+            for z in [min.z, max.z] {
+                let s = ctx.lv.get(Pos::new(x, y, z));
+                if blockinfo::is_air(s) || is(s, "minecraft:lava") || is(s, "minecraft:water") {
+                    empty += 1;
+                }
+            }
+        }
+    }
+    if empty > cfg.max_empty_corners {
+        return false;
+    }
+    let bbox = Some((min, max));
+    structure::place_in_world(
+        ctx.lv,
+        base,
+        template,
+        rotation,
+        &cfg.fossil_processors,
+        bbox,
+        ctx.r,
+    );
+    structure::place_in_world(
+        ctx.lv,
+        base,
+        overlay,
+        rotation,
+        &cfg.overlay_processors,
+        bbox,
+        ctx.r,
+    );
+    true
+}
+
+/// `StructureTemplate.getSize(rotation)`.
+fn rotation_size(rotation: Rotation, size: [i32; 3]) -> [i32; 3] {
+    match rotation {
+        Rotation::Cw90 | Rotation::Ccw90 => [size[2], size[1], size[0]],
+        _ => size,
+    }
+}
+
 fn huge_mushroom(
     ctx: &mut Ctx,
     red: bool,
@@ -2302,6 +2410,93 @@ mod tests {
         );
         let a = place(&gen, &w, &cfg, Pos::new(8, 64, 8), 7);
         let b = place(&gen, &w, &cfg, Pos::new(8, 64, 8), 7);
+        assert_eq!(a, b);
+    }
+
+    /// A solid stone 3×3 region the fossil templates can sink into.
+    fn fossil_world(gen: &crate::vanilla::generator::VanillaGenerator) -> World {
+        let mut w = World::new(gen, 0, 0);
+        w.fill(-16, 0, -16, 31, 48, 31, stone());
+        w
+    }
+
+    #[test]
+    fn fossil_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = fossil_world(&gen);
+        // The pack's own configured feature, with all eight templates and
+        // the real processor lists.
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:fossil_coal\"").unwrap(),
+        );
+        let origin = Pos::new(8, 49, 8);
+        let seed = (0..256)
+            .find(|s| count_name(&place(&gen, &w, &cfg, origin, *s), "minecraft:bone_block") > 0)
+            .expect("no seed in 0..256 placed a fossil");
+        let writes = place(&gen, &w, &cfg, origin, seed);
+        assert!(
+            count_name(&writes, "minecraft:bone_block") > 0,
+            "no bone block from the base template"
+        );
+        assert!(
+            count_name(&writes, "minecraft:coal_ore") > 0,
+            "no coal ore from the coal overlay"
+        );
+    }
+
+    #[test]
+    fn fossil_diamonds_overlay_replaces_coal() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = fossil_world(&gen);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:fossil_diamonds\"").unwrap(),
+        );
+        let origin = Pos::new(8, 49, 8);
+        let seed = (0..256)
+            .find(|s| {
+                count_name(
+                    &place(&gen, &w, &cfg, origin, *s),
+                    "minecraft:deepslate_diamond_ore",
+                ) > 0
+            })
+            .expect("no seed in 0..256 produced a diamond ore");
+        let writes = place(&gen, &w, &cfg, origin, seed);
+        assert!(
+            count_name(&writes, "minecraft:deepslate_diamond_ore") > 0,
+            "the rule processor did not turn surviving coal into diamond ore"
+        );
+        assert_eq!(
+            count_name(&writes, "minecraft:coal_ore"),
+            0,
+            "a surviving coal block was not converted"
+        );
+    }
+
+    #[test]
+    fn fossil_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = fossil_world(&gen);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:fossil_coal\"").unwrap(),
+        );
+        let origin = Pos::new(8, 49, 8);
+        let a = place(&gen, &w, &cfg, origin, 12345);
+        let b = place(&gen, &w, &cfg, origin, 12345);
         assert_eq!(a, b);
     }
 }
