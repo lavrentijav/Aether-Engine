@@ -40,7 +40,7 @@ server a vanilla 1.8.9 client can connect to.
 | Runnable demo: `aether` binary (worldgen + physics + storage + telemetry) with TOML config | ✅ |
 | Player entity + `FullBright` lighting fallback (always max light) | ✅ |
 | Experimental join server `aether-server` (1.8.9 / protocol 47, noise terrain, creative, full-bright) — protocol verified against a raw socket client, **not yet against a live client** | 🚧 Preview |
-| Multiplayer visibility on `aether-server`: connected players spawn, move and despawn for each other (no tab list / skins yet — see [Known Issues](KNOWN_ISSUES.md)) | ✅ |
+| Multiplayer visibility on `aether-server`: connected players spawn, move and despawn for each other, and each is added to the tab list on join (Player List Item 0x38, binary UUID + empty GameProfile properties) and removed on leave — emitted before its Spawn Player, which a 1.8 client otherwise drops | ✅ |
 | Packet compression (zlib, `Set Compression`, per-connection threshold) — a spawn column drops ~45 KB → ~0.2 KB | ✅ |
 | Block-change acknowledgement (1.19+ prediction sequence) — without it a client's placement predictions are never released | ✅ |
 | World history (`aether-world::journal`): append-only event log, deterministic generator as the baseline, so unedited columns are never stored | ✅ |
@@ -84,6 +84,7 @@ server a vanilla 1.8.9 client can connect to.
 | World height is `-64..=383` (448 blocks, taller than vanilla's 384); 1.17+ clients that cannot hold a negative Y are **shifted** by 64 and see the whole range as `0..=447` | ✅ |
 | 1.8.9 is the one version that cannot be widened: its section bitmask is a `u16`, so 256 blocks is a protocol limit. Shifted, it shows `-64..=191` | ⚠️ Limit |
 | Heightmap entry width derived from the world height instead of a literal 8 — at 384 tall it needs 9 bits, and the literal silently truncated everything above 255 | ✅ |
+| 1.17 / 1.17.1 chunk sections carry a non-air count and a **4-bit indirect** palette, and an all-air section is omitted from the bitmask (the single-valued form the encoder used is a 1.18 addition a 1.17 client reads as a length). See [Known Issues A.7](KNOWN_ISSUES.md) | ✅ |
 | Neighbour-dependent states — fence/wall/pane connections, redstone shape, chest doubling, door hinge — and *re-*computing a stair's shape when a neighbour changes: **need a block-update pass, not built**. See [Known Issues A.6](KNOWN_ISSUES.md) | ❌ |
 | **Real lighting**: sky and block light by level-by-level mask dilation, verified against a reference flood fill; live client reads 15 in air, 14 at the water surface, 11 three metres down | ✅ |
 | Uniform light sections + the protocol's empty bitsets: block light now sends **0** sections per join instead of 2,890; sky light 1,726 instead of 2,890 | ✅ |

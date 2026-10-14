@@ -75,13 +75,6 @@ fn write_varint(out: &mut Vec<u8>, v: i32) {
     }
 }
 
-/// A container holding one repeated value: `bits = 0`, no data array.
-fn write_single_valued(out: &mut Vec<u8>, value: u32) {
-    out.push(0);
-    write_varint(out, value as i32);
-    write_varint(out, 0);
-}
-
 /// An indirect container: palette, then packed indices.
 fn write_indirect(out: &mut Vec<u8>, palette: &[u32], indices: &[u32], bits: u8) {
     out.push(bits);
@@ -117,11 +110,12 @@ fn write_section(out: &mut Vec<u8>, states: &[u32; ENTRIES]) -> i16 {
     }
 
     out.extend_from_slice(&non_air.to_be_bytes());
-    if palette.len() == 1 {
-        write_single_valued(out, palette[0]);
-    } else {
-        write_indirect(out, &palette, &indices, BLOCK_BITS);
-    }
+    // Always the 4-bit indirect palette. The single-valued form (`bits = 0`)
+    // is a **1.18** addition; a 1.17 client reads it as an indirect palette
+    // whose length is the value, consumes the wrong number of bytes and dies
+    // on the next section. A section uniform in one block still sends a
+    // one-entry palette with a full data array.
+    write_indirect(out, &palette, &indices, BLOCK_BITS);
     non_air
 }
 
@@ -153,6 +147,13 @@ fn motion_blocking(cx: i32, cz: i32, world: &dyn BlockSource) -> Vec<i64> {
 /// Light is **not** part of this packet in 1.17 — see [`update_light_packet`].
 pub fn chunk_data_packet(id: i32, cx: i32, cz: i32, world: &dyn BlockSource) -> PacketOut {
     let mut column = Vec::new();
+    // Which sections the column carries. 1.17 has no single-valued palette
+    // (that arrives in 1.18), so an all-air section is **omitted** — its bit
+    // stays clear and it contributes no bytes — exactly what the vanilla
+    // server does. Sending every section and encoding an empty one with the
+    // single-valued form is what desynchronised a real client, which then
+    // failed reading the following section's block count.
+    let mut mask = 0i64;
     for sy in 0..SECTIONS {
         let mut states = [0u32; ENTRIES];
         for (i, slot) in states.iter_mut().enumerate() {
@@ -166,16 +167,19 @@ pub fn chunk_data_packet(id: i32, cx: i32, cz: i32, world: &dyn BlockSource) -> 
             let wy = MIN_Y + sy * AXIS + y - Y_OFFSET;
             *slot = block_state(world.block_at(cx * AXIS + x, wy, cz * AXIS + z));
         }
+        if states.iter().all(|s| *s == 0) {
+            continue;
+        }
+        mask |= 1i64 << sy;
         write_section(&mut column, &states);
     }
 
     let mut p = PacketOut::new(id);
     p.i32(cx).i32(cz);
 
-    // Section bitmask: every section of the column is written, so every bit
-    // below `SECTIONS` is set. A bit left clear here would make the client
-    // skip that section's bytes and desynchronise the rest of the column.
-    let mask = (1i64 << SECTIONS) - 1;
+    // Section bitmask: the sections that follow, in order. The client reads
+    // exactly the set bits, so a bit set with no section behind it (or the
+    // reverse) desynchronises the rest of the column.
     p.var_int(1).i64(mask);
 
     // Heightmaps, as a *named* root compound.
@@ -345,11 +349,43 @@ mod tests {
     }
 
     #[test]
-    fn uniform_section_uses_the_single_valued_form() {
+    fn one_section_is_a_block_count_then_a_4_bit_indirect_palette() {
+        // Pins the exact bytes of a single section: a big-endian non-air
+        // count, then a paletted container whose bits-per-entry is 4. A
+        // 1.17 client has no 0-bit single-valued form, so a section holding
+        // one block still carries a full data array — that is the whole
+        // difference the old encoder got wrong.
+        let mut states = [0u32; ENTRIES];
+        states[0] = 1; // stone at index 0; air everywhere else
+        let mut buf = Vec::new();
+        let count = write_section(&mut buf, &states);
+        assert_eq!(count, 1, "one non-air block");
+
+        assert_eq!(&buf[0..2], &[0x00, 0x01], "non-air count, big-endian");
+        assert_eq!(buf[2], 4, "bits per entry: 4, never 0");
+        assert_eq!(&buf[3..6], &[0x02, 0x01, 0x00], "palette [stone, air]");
+        // 4096 entries at 4 bits, 16 per long: 256 longs as a varint.
+        assert_eq!(&buf[6..8], &[0x80, 0x02], "256 longs");
+        // First long: entry 0 is palette index 0, entries 1..=15 are index 1.
+        let first = u64::from_be_bytes(buf[8..16].try_into().unwrap());
+        let mut want = 0u64;
+        for i in 1..16 {
+            want |= 1u64 << (i * 4);
+        }
+        assert_eq!(first, want);
+    }
+
+    #[test]
+    fn a_uniform_section_never_uses_the_single_valued_form() {
+        // 1.17 predates the single-valued palette. Even an all-air (or
+        // all-stone) section must be a 4-bit indirect palette, or a real
+        // client reads the value as a palette length and desynchronises.
         let states = [0u32; ENTRIES];
         let mut buf = Vec::new();
         assert_eq!(write_section(&mut buf, &states), 0, "no non-air blocks");
-        assert_eq!(buf[2], 0, "bits per entry must be 0");
+        assert_eq!(buf[2], 4, "bits per entry must be 4");
+        assert_eq!(buf[3], 1, "one palette entry");
+        assert_eq!(buf[4], 0, "the palette entry is air");
     }
 
     #[test]
@@ -411,11 +447,14 @@ mod tests {
         );
         pos += 4;
 
-        // Section bitmask: one long, every section present.
+        // Section bitmask: one long, and only the sections with blocks set.
+        // The flat world spans engine y=0..=31, which the 1.17 client sees as
+        // 64..=95 after the vertical shift — sections 4 and 5. Every empty
+        // section is omitted, as a vanilla 1.17 server does.
         assert_eq!(read_varint(&wire, &mut pos), 1, "one bitmask long");
         let mask = i64::from_be_bytes(wire[pos..pos + 8].try_into().unwrap());
         pos += 8;
-        assert_eq!(mask, (1i64 << SECTIONS) - 1, "all sections present");
+        assert_eq!(mask, (1i64 << 4) | (1i64 << 5), "the two occupied sections");
 
         // Heightmaps: named root compound.
         assert_eq!(wire[pos], 10, "root TAG_Compound");
@@ -439,7 +478,12 @@ mod tests {
 
         let data_len = read_varint(&wire, &mut pos) as usize;
         let data_end = pos + data_len;
+        let mut sections_seen = 0;
         for sy in 0..SECTIONS {
+            if mask & (1i64 << sy) == 0 {
+                continue; // omitted empty section: no bytes on the wire
+            }
+            sections_seen += 1;
             let count = i16::from_be_bytes([wire[pos], wire[pos + 1]]);
             pos += 2;
             let blocks = read_container(&wire, &mut pos, ENTRIES);
@@ -458,9 +502,32 @@ mod tests {
                 assert_eq!(*got, want, "block at section {sy} index {i}");
             }
         }
+        assert_eq!(sections_seen, 2, "one section per set bit, no empties");
         assert_eq!(pos, data_end, "sections must fill the declared buffer");
         assert_eq!(read_varint(&wire, &mut pos), 0, "no block entities");
         assert_eq!(pos, wire.len(), "light does not belong in this packet");
+    }
+
+    #[test]
+    fn an_empty_column_carries_no_sections_at_all() {
+        // With no non-air blocks every section bit is clear, so the data
+        // buffer is empty. A 1.17 client reads the mask, skips everything and
+        // renders air — it never sees a section, and so never a palette form
+        // it cannot parse.
+        let mut wire = Vec::new();
+        chunk_data_packet(0x22, 0, 0, &tests_support::Empty)
+            .write_to(&mut wire, None)
+            .unwrap();
+
+        let mut pos = 0usize;
+        let _frame = read_varint(&wire, &mut pos);
+        assert_eq!(read_varint(&wire, &mut pos), 0x22);
+        pos += 8; // chunk x, z
+        assert_eq!(read_varint(&wire, &mut pos), 1, "one bitmask long");
+        let mask = i64::from_be_bytes(wire[pos..pos + 8].try_into().unwrap());
+        assert_eq!(mask, 0, "nothing to send");
+        // The rest is heightmap, biomes and an empty chunkData; the mask is
+        // the part that matters, and a clear one cannot desynchronise.
     }
 
     #[test]
