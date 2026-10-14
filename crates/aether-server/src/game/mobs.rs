@@ -36,6 +36,8 @@ const REPATH_DISTANCE: f64 = 2.0;
 const REPATH_COOLDOWN: u32 = 10;
 /// A path counts as reaching the goal within this many horizontal blocks.
 const GOAL_RANGE: f64 = 1.2;
+/// How far up or down the goal's column a standable landing is sought.
+const GOAL_RESOLVE_DY: i32 = 4;
 /// Consecutive no-progress ticks before the cached path is thrown away and a
 /// fresh one is solved — how a block dropped onto the path is noticed.
 const STUCK_TICKS: u32 = 10;
@@ -416,11 +418,14 @@ fn find_path(ctx: &Ctx, pos: Vector3, goal: (f64, f64, f64)) -> Option<Vec<[i32;
             pos.z.floor() as i32,
         ],
     )?;
-    let target = [
+    let raw = [
         goal.0.floor() as i32,
         goal.1.floor() as i32,
         goal.2.floor() as i32,
     ];
+    // The goal is a point, not a node: settle it onto the surface in its own
+    // column so a wander pick on a slope, or a jumping player, is reachable.
+    let target = pathfind::resolve_goal(&nav, raw, GOAL_RESOLVE_DY).unwrap_or(raw);
     let budget = remaining.min(MAX_PATH_NODES);
     let result = pathfind::search(&nav, start, target, GOAL_RANGE, budget);
     ctx.nav.spend(result.expanded);

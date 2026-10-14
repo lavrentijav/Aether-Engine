@@ -97,6 +97,30 @@ pub fn resolve_start<N: Nav + ?Sized>(nav: &N, from: [i32; 3]) -> Option<[i32; 3
     None
 }
 
+/// The standable cell nearest `goal` in its own column: `goal` itself when it
+/// is standable, else the first landing up to `max_dy` cells below or above
+/// (below first, with gravity). `None` when the column offers no landing.
+///
+/// A goal given as a point — an animal's wander pick at the mob's own Y, or a
+/// player whose feet are mid-jump — rarely coincides with a standable cell,
+/// and [`search`]'s vertical tolerance is one, so an unresolved goal is
+/// declared unreachable. Resolving it to the surface is what vanilla does by
+/// picking a target *node*.
+pub fn resolve_goal<N: Nav + ?Sized>(nav: &N, goal: [i32; 3], max_dy: i32) -> Option<[i32; 3]> {
+    if standable(nav, goal[0], goal[1], goal[2]) {
+        return Some(goal);
+    }
+    for d in 1..=max_dy {
+        if standable(nav, goal[0], goal[1] - d, goal[2]) {
+            return Some([goal[0], goal[1] - d, goal[2]]);
+        }
+        if standable(nav, goal[0], goal[1] + d, goal[2]) {
+            return Some([goal[0], goal[1] + d, goal[2]]);
+        }
+    }
+    None
+}
+
 /// What a search produced.
 pub struct Search {
     /// The waypoints from just after the start through to the node that
@@ -504,5 +528,25 @@ mod tests {
         // From the high side a step lands at feet y = -3 (support -4): a drop
         // of four, one past MAX_DROP, so there is no step to take.
         assert!(step(&grid, [0, 1, 0], 1, 0).is_none());
+    }
+
+    #[test]
+    fn the_goal_resolves_to_the_surface_in_its_column() {
+        // A two-block trench at x = 2; a wander pick there is given at the
+        // mob's own level (y = 1).
+        let mut grid = Grid::floor(5, 1);
+        grid.solid.remove(&[2, 0, 0]);
+        grid.solid.insert([2, -2, 0]);
+        assert_eq!(resolve_goal(&grid, [2, 1, 0], 4), Some([2, -1, 0]));
+        // A goal in mid-air over a solid column resolves to its top.
+        assert_eq!(resolve_goal(&grid, [0, 5, 0], 4), Some([0, 1, 0]));
+        // An empty column offers nothing within reach.
+        assert_eq!(resolve_goal(&Grid::floor(0, 0), [0, 1, 0], 3), None);
+        // And the search reaches the resolved goal: the point alone, two
+        // levels above the mob's feet, would fail `search`'s ±1 tolerance.
+        let resolved = resolve_goal(&grid, [2, 1, 0], 4).unwrap();
+        let r = search(&grid, [0, 1, 0], resolved, 1.2, 4096);
+        assert!(r.reached, "{:?}", r.path);
+        assert_eq!(r.path.last(), Some(&[2, -1, 0]));
     }
 }
