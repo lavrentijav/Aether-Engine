@@ -130,8 +130,15 @@ for (const [mod, ver, proto] of RELEASES) {
   // entries alphabetically and so cannot give the order.
   const reg = fs.readFileSync(
     path.join(ROOT, `crates/aether-server/src/protocol/v${proto}/registry.rs`), 'utf8')
-  const dts = [...reg.matchAll(/^\s*\("([a-z0-9_]+)", "[A-Za-z]+", (?:ALIVE|ALWAYS), [0-9.]+\),/gm)]
+  // The message id may contain a `.` or `_` (`"explosion.player"`,
+  // `"sonic_boom"`); matching it loosely keeps every entry, in order.
+  const dts = [...reg.matchAll(/^\s*\("([a-z0-9_]+)", "[^"]+", (?:ALIVE|ALWAYS), [0-9.]+\),/gm)]
     .map(m => 'minecraft:' + m[1])
+  const declared = reg.match(/DAMAGE_TYPES: \[\(&str, &str, &str, f32\); (\d+)\]/)
+  if (!declared || Number(declared[1]) !== dts.length) {
+    throw new Error(
+      `v${proto}: parsed ${dts.length} damage types, registry declares ${declared && declared[1]}`)
+  }
   o('    /// Damage-type names in registry order; the index is the wire id.')
   o('    pub static DAMAGE_TYPES: &[&str] = &[' + dts.map(s => `"${s}"`).join(', ') + '];')
   o('')

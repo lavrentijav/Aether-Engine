@@ -976,4 +976,32 @@ mod tests {
             assert_eq!(p.body().len(), 1 + 1 + 48 + 8 + 1, "{}", v.name);
         }
     }
+
+    #[test]
+    fn a_legacy_versions_damage_types_match_its_own_registry_order() {
+        // The generated table is exactly the registry the codec sends, so a
+        // damage type's index here is its wire id. The first version of the
+        // generator dropped message ids containing `.` or `_`, silently
+        // shifting every later entry.
+        let v = &crate::protocol::modern::version::V1_20_5;
+        assert_eq!(v.damage_types.len(), 45);
+        assert_eq!(v.damage_type("minecraft:starve"), Some(36));
+        assert_eq!(v.damage_type("minecraft:player_explosion"), Some(32));
+
+        let v = &crate::protocol::modern::version::V1_21_1;
+        assert_eq!(v.damage_types.len(), 47);
+        assert_eq!(v.damage_type("minecraft:starve"), Some(37));
+        assert_eq!(v.damage_type("minecraft:player_explosion"), Some(33));
+        assert_eq!(v.damage_type("minecraft:sonic_boom"), Some(34));
+        assert_eq!(v.damage_type("minecraft:wind_charge"), Some(44));
+
+        let v = &crate::protocol::modern::version::V1_21_3;
+        assert_eq!(v.damage_types.len(), 49);
+        assert_eq!(v.damage_type("minecraft:starve"), Some(39));
+        assert_eq!(v.damage_type("minecraft:mace_smash"), Some(26));
+
+        let v = &crate::protocol::modern::version::V1_21_9;
+        assert_eq!(v.damage_types.len(), 47);
+        assert_eq!(v.damage_type("minecraft:starve"), Some(37));
+    }
 }
