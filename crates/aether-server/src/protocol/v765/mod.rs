@@ -424,7 +424,13 @@ impl ProtocolCodec for Codec {
                 x: bx + dx,
                 y: by + dy,
                 z: bz + dz,
-                block: aether_api::block_ids::STONE,
+                // This version's placement packet names only the hand, so the
+                // block placed is whatever the selected hotbar slot holds —
+                // which `decode` cannot see. Fall back to the slot every
+                // player is given selected on join, the same fallback the
+                // shared path uses.
+                block: super::modern::inventory::block_in_hotbar_slot(0)
+                    .unwrap_or(aether_api::block_ids::STONE),
                 seq,
                 face: face as u8,
                 cursor,
@@ -602,6 +608,33 @@ mod tests {
         let (id, body) = encode_one(&ServerEvent::AckBlockChange(300));
         assert_eq!(id, PLAY_BLOCK_CHANGED_ACK);
         assert_eq!(body, vec![0xAC, 0x02]);
+    }
+
+    #[test]
+    fn placement_falls_back_to_the_shared_hotbar_block() {
+        // The placement packet names only the hand, so the codec cannot see
+        // what is held; it must use the same join-hotbar fallback the shared
+        // path does rather than a hard-coded stone.
+        let mut data = Vec::new();
+        data.push(0); // hand
+        data.extend_from_slice(&encode_position(5, 70, -9).to_be_bytes());
+        data.push(1); // direction: up
+        data.extend_from_slice(&0.25f32.to_be_bytes());
+        data.extend_from_slice(&0.75f32.to_be_bytes());
+        data.extend_from_slice(&0.5f32.to_be_bytes());
+        data.push(0); // insideBlock
+        data.push(0); // sequence
+        let pkt = RawPacket {
+            id: SB_BLOCK_PLACE,
+            data,
+        };
+        match Codec.decode(&pkt, any_pos()) {
+            ClientEvent::Place { block, .. } => assert_eq!(
+                block,
+                crate::protocol::modern::inventory::block_in_hotbar_slot(0).unwrap()
+            ),
+            _ => panic!("expected a place event"),
+        }
     }
 
     #[test]

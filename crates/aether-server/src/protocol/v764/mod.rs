@@ -439,7 +439,13 @@ impl ProtocolCodec for Codec {
                 x: bx + dx,
                 y: by + dy,
                 z: bz + dz,
-                block: aether_api::block_ids::STONE,
+                // This version's placement packet names only the hand, so the
+                // block placed is whatever the selected hotbar slot holds —
+                // which `decode` cannot see. Fall back to the slot every
+                // player is given selected on join, the same fallback the
+                // shared path uses.
+                block: super::modern::inventory::block_in_hotbar_slot(0)
+                    .unwrap_or(aether_api::block_ids::STONE),
                 seq,
                 face: face as u8,
                 cursor,
@@ -729,11 +735,18 @@ mod tests {
                 z,
                 face,
                 cursor,
+                block,
                 ..
             } => {
                 assert_eq!((x, y, z), (5, 71, -9), "the clicked cell, offset up");
                 assert_eq!(face, 1);
                 assert_eq!(cursor, (0.25, 0.75, 0.5));
+                // The packet names only the hand, so the block falls back to
+                // the shared join-hotbar slot — not a hard-coded stone.
+                assert_eq!(
+                    block,
+                    crate::protocol::modern::inventory::block_in_hotbar_slot(0).unwrap()
+                );
             }
             _ => panic!("expected a place event"),
         }
