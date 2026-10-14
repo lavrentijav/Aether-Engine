@@ -41,6 +41,7 @@ pub struct CommonTags {
     pub big_dripleaf_placeable: BlockSet,
     pub features_cannot_replace: BlockSet,
     pub ice: BlockSet,
+    pub dripstone_replaceable: BlockSet,
 }
 
 impl CommonTags {
@@ -64,6 +65,7 @@ impl CommonTags {
             big_dripleaf_placeable: t.block_tag("minecraft:big_dripleaf_placeable"),
             features_cannot_replace: t.block_tag("minecraft:features_cannot_replace"),
             ice: t.block_tag("minecraft:ice"),
+            dripstone_replaceable: t.block_tag("minecraft:dripstone_replaceable_blocks"),
         }
     }
 }

@@ -122,6 +122,19 @@ impl IntProvider {
         }
     }
 
+    /// `getMinValue`.
+    pub fn min_value(&self) -> i32 {
+        match self {
+            IntProvider::Constant(v) => *v,
+            IntProvider::Uniform(a, _) | IntProvider::BiasedToBottom(a, _) => *a,
+            IntProvider::Clamped(s, lo, _) => s.min_value().max(*lo),
+            IntProvider::ClampedNormal { min, .. } => *min,
+            IntProvider::Weighted(items, _) => {
+                items.iter().map(|(p, _)| p.min_value()).min().unwrap_or(0)
+            }
+        }
+    }
+
     /// `getMaxValue`.
     pub fn max_value(&self) -> i32 {
         match self {

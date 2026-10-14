@@ -24,6 +24,7 @@
 //! are not generated.
 
 pub mod blocks;
+pub mod dripstone;
 pub mod extra;
 pub mod features;
 pub mod level;

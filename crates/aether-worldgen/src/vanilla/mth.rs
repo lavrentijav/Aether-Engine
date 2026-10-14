@@ -3,6 +3,8 @@
 
 use std::sync::OnceLock;
 
+use super::rng::Rng;
+
 fn table() -> &'static [f32] {
     static T: OnceLock<Vec<f32>> = OnceLock::new();
     T.get_or_init(|| {
@@ -59,4 +61,22 @@ pub fn clamped_map(v: f64, from_a: f64, from_b: f64, to_a: f64, to_b: f64) -> f6
     } else {
         lerp(t, to_a, to_b)
     }
+}
+
+/// `Mth.clampedMap` over `float`s (the game has both overloads and they
+/// round differently).
+pub fn clamped_map_f32(v: f32, from_a: f32, from_b: f32, to_a: f32, to_b: f32) -> f32 {
+    let t = (v - from_a) / (from_b - from_a);
+    if t < 0.0 {
+        to_a
+    } else if t > 1.0 {
+        to_b
+    } else {
+        to_a + t * (to_b - to_a)
+    }
+}
+
+/// `Mth.randomBetween(random, min, max)`.
+pub fn random_between_f32(r: &mut impl Rng, min: f32, max: f32) -> f32 {
+    r.next_float() * (max - min) + min
 }

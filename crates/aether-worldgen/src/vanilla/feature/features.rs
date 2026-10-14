@@ -196,6 +196,12 @@ pub enum Configured {
     Geode(Box<GeodeConfig>),
     /// `fossil`.
     Fossil(Box<FossilConfig>),
+    /// `dripstone_cluster`.
+    DripstoneCluster(Box<super::dripstone::DripstoneCluster>),
+    /// `large_dripstone`.
+    LargeDripstone(Box<super::dripstone::LargeDripstone>),
+    /// `pointed_dripstone`.
+    PointedDripstone(Box<super::dripstone::PointedDripstone>),
     /// A type this port does not place.
     Unsupported(String),
 }
@@ -488,6 +494,15 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
                 max_empty_corners: c.i32_or("max_empty_corners_allowed", 4),
             }))
         }
+        "dripstone_cluster" => {
+            Configured::DripstoneCluster(Box::new(super::dripstone::DripstoneCluster::parse(c)?))
+        }
+        "large_dripstone" => {
+            Configured::LargeDripstone(Box::new(super::dripstone::LargeDripstone::parse(c)?))
+        }
+        "pointed_dripstone" => {
+            Configured::PointedDripstone(Box::new(super::dripstone::PointedDripstone::parse(c)?))
+        }
         other => {
             l.unsupported.insert(format!("feature:{other}"));
             Configured::Unsupported(other.to_string())
@@ -764,6 +779,9 @@ pub(crate) fn place_configured(ctx: &mut Ctx, f: &Configured, pos: Pos) -> bool 
         Configured::MonsterRoom => monster_room(ctx, pos),
         Configured::Geode(cfg) => geode(ctx, cfg, pos),
         Configured::Fossil(cfg) => fossil(ctx, cfg, pos),
+        Configured::DripstoneCluster(cfg) => super::dripstone::dripstone_cluster(ctx, cfg, pos),
+        Configured::LargeDripstone(cfg) => super::dripstone::large_dripstone(ctx, cfg, pos),
+        Configured::PointedDripstone(cfg) => super::dripstone::pointed_dripstone(ctx, cfg, pos),
         Configured::Unsupported(name) => {
             ctx.d.note_unsupported(&format!("feature:{name}"));
             false
@@ -2498,5 +2516,160 @@ mod tests {
         let a = place(&gen, &w, &cfg, origin, 12345);
         let b = place(&gen, &w, &cfg, origin, 12345);
         assert_eq!(a, b);
+    }
+
+    fn dripstone() -> BlockStateId {
+        blockinfo::parse_state("minecraft:dripstone_block").unwrap()
+    }
+
+    #[test]
+    fn pointed_dripstone_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let mut w = World::new(&gen, 0, 0);
+        // A base below the origin: the tip grows up from it.
+        w.set(8, 39, 8, dripstone());
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(
+                r#"{"type":"minecraft:pointed_dripstone","config":{
+                    "chance_of_directional_spread":0.7,
+                    "chance_of_spread_radius2":0.5,
+                    "chance_of_spread_radius3":0.5,
+                    "chance_of_taller_dripstone":0.2
+                }}"#,
+            )
+            .unwrap(),
+        );
+        let writes = place(&gen, &w, &cfg, Pos::new(8, 40, 8), 7);
+        assert!(
+            count_name(&writes, "minecraft:pointed_dripstone") > 0,
+            "no pointed dripstone"
+        );
+    }
+
+    #[test]
+    fn pointed_dripstone_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let mut w = World::new(&gen, 0, 0);
+        w.set(8, 39, 8, dripstone());
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(
+                r#"{"type":"minecraft:pointed_dripstone","config":{
+                    "chance_of_directional_spread":0.7,
+                    "chance_of_spread_radius2":0.5,
+                    "chance_of_spread_radius3":0.5,
+                    "chance_of_taller_dripstone":0.2
+                }}"#,
+            )
+            .unwrap(),
+        );
+        let a = place(&gen, &w, &cfg, Pos::new(8, 40, 8), 11);
+        let b = place(&gen, &w, &cfg, Pos::new(8, 40, 8), 11);
+        assert_eq!(a, b);
+    }
+
+    /// A cave: stone floor below, stone ceiling above.
+    fn cave_world(
+        gen: &crate::vanilla::generator::VanillaGenerator,
+        floor: i32,
+        ceiling: i32,
+    ) -> World {
+        let mut w = World::new(gen, 0, 0);
+        w.fill(-16, 0, -16, 31, floor, 31, stone());
+        w.fill(-16, ceiling, -16, 31, 90, 31, stone());
+        w
+    }
+
+    #[test]
+    fn dripstone_cluster_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = cave_world(&gen, 30, 51);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:dripstone_cluster\"").unwrap(),
+        );
+        let origin = Pos::new(8, 40, 8);
+        let seed = (0..256)
+            .find(|s| {
+                let wr = place(&gen, &w, &cfg, origin, *s);
+                count_name(&wr, "minecraft:pointed_dripstone") > 0
+                    || count_name(&wr, "minecraft:dripstone_block") > 0
+            })
+            .expect("no seed in 0..256 placed a dripstone cluster");
+        let writes = place(&gen, &w, &cfg, origin, seed);
+        assert!(
+            count_name(&writes, "minecraft:pointed_dripstone") > 0
+                || count_name(&writes, "minecraft:dripstone_block") > 0,
+            "no dripstone cluster blocks"
+        );
+    }
+
+    #[test]
+    fn large_dripstone_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = cave_world(&gen, 30, 61);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:large_dripstone\"").unwrap(),
+        );
+        let origin = Pos::new(8, 45, 8);
+        let seed = (0..256)
+            .find(|s| {
+                count_name(
+                    &place(&gen, &w, &cfg, origin, *s),
+                    "minecraft:dripstone_block",
+                ) > 0
+            })
+            .expect("no seed in 0..256 placed a large dripstone");
+        let writes = place(&gen, &w, &cfg, origin, seed);
+        assert!(
+            count_name(&writes, "minecraft:dripstone_block") > 0,
+            "no large dripstone blocks"
+        );
+    }
+
+    #[test]
+    fn dripstone_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = cave_world(&gen, 30, 61);
+        let cluster = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:dripstone_cluster\"").unwrap(),
+        );
+        let large = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:large_dripstone\"").unwrap(),
+        );
+        let origin = Pos::new(8, 45, 8);
+        assert_eq!(
+            place(&gen, &w, &cluster, origin, 99),
+            place(&gen, &w, &cluster, origin, 99)
+        );
+        assert_eq!(
+            place(&gen, &w, &large, origin, 99),
+            place(&gen, &w, &large, origin, 99)
+        );
     }
 }

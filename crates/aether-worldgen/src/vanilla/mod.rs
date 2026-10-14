@@ -54,8 +54,8 @@
 //! game's seeding (`setDecorationSeed` / `setFeatureSeed`) and feature order;
 //! it is vanilla-like rather than exact, because vanilla's own result depends
 //! on the order in which neighbouring chunks were decorated. Not generated:
-//! structures, dripstone, sculk, root systems. Desert wells, dungeons
-//! (`monster_room`), geodes and fossils are ported.
+//! structures, sculk, root systems. Desert wells, dungeons (`monster_room`),
+//! geodes, fossils and pointed dripstone are ported.
 //!
 //! ## The one place parity is ambiguous
 //!
