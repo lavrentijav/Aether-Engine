@@ -14,13 +14,21 @@ authors.workspace = true
 # dependency-free build (in-memory store + raw blobs) — handy for CI matrices
 # and constrained targets.
 default = ["fjall", "zstd"]
-fjall = ["dep:fjall"]
+# The persistent backend also takes an exclusive `flock` on its directory so
+# two processes cannot share one world; that is what `dep:libc` (unix only) is
+# for. In-memory builds pull neither.
+fjall = ["dep:fjall", "dep:libc"]
 zstd = ["dep:zstd"]
 
 [dependencies]
 aether-core = { workspace = true }
 fjall = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# `flock` for the world-directory lock (see `storage::lock`). Only needed by
+# the persistent backend, so it is optional and activated by `fjall`.
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

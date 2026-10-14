@@ -132,7 +132,7 @@ impl ProtocolCodec for Codec {
                     (*y + Y_OFFSET) as i64,
                     *z as i64,
                 ))
-                .var_int((chunk::vanilla_id(*block) as i32) << 4); // meta 0
+                .var_int(chunk::vanilla_id(*block) as i32); // (id << 4) | meta
                 vec![p]
             }
             // 1.8 has no chunk-window centre: the client keeps every

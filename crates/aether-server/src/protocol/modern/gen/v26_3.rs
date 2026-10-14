@@ -19,6 +19,7 @@ pub static PACKETS: Packets = Packets {
     cb_container_set_data: 19,
     cb_damage_event: 25,
     cb_entity_event: 34,
+    cb_entity_teleport: -1,
     cb_entity_position_sync: 35,
     cb_explode: 36,
     cb_game_event: 39,

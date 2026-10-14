@@ -47,14 +47,6 @@ pub(super) fn write_empty(p: &mut PacketOut) {
     p.var_int(0);
 }
 
-/// Append one stack of `item_id`.
-pub(super) fn write_item(p: &mut PacketOut, item_id: i32, count: i32) {
-    p.var_int(count)
-        .var_int(item_id)
-        .var_int(0) // no components added to the default set
-        .var_int(0); // and none removed
-}
-
 /// Append one stack of `item_id` carrying a display name.
 ///
 /// The name is how a server-driven window says anything at all: a slot has no

@@ -888,6 +888,32 @@ mod tests {
     }
 
     #[test]
+    fn every_1_20_5_to_1_21_10_codec_runs_the_full_game() {
+        // Task J9 routes protocols 766-773 through the shared gameplay path:
+        // entities, combat, health, hunger, windows and effects, not the old
+        // client-trusting subset.
+        for proto in 766..=773 {
+            let c = codec_for(proto).unwrap_or_else(|| panic!("no codec for {proto}"));
+            assert!(c.full_gameplay(), "{proto} must run the full game");
+            assert!(c.supports_containers(), "{proto} must support windows");
+        }
+        // 1.20.2-1.20.4 (764/765) are a different queue and stay on the subset.
+        assert!(!codec_for(765).unwrap().full_gameplay());
+    }
+
+    #[test]
+    fn an_old_codec_places_blocks_and_keeps_a_spear_through_a_trident() {
+        let c = codec_for(767).unwrap();
+        assert_eq!(
+            c.block_for_item("minecraft:stone"),
+            Some(aether_api::block_ids::STONE),
+        );
+        let spear = crate::inventory::item("minecraft:iron_spear");
+        let trident = crate::inventory::item("minecraft:trident");
+        assert_eq!(c.resolve_reported_item(spear, trident), spear);
+    }
+
+    #[test]
     fn dispatch_maps_ids_to_codecs() {
         assert_eq!(codec_for(47).unwrap().version_name(), "1.8.9");
         assert_eq!(codec_for(774).unwrap().version_name(), "1.21.11");
