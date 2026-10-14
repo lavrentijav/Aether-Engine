@@ -15,8 +15,6 @@
 //! depth-first `CollectingNeighborUpdater`. [`SignalCtx`] is the read-only view
 //! the two signal methods use, so a power query cannot mutate the world.
 
-use std::sync::OnceLock;
-
 use aether_world::registry::{blocks as world_blocks, ids};
 use aether_world::BlockStateId;
 
@@ -645,27 +643,50 @@ impl<'a> Context<'a> {
 // Registry
 // ---------------------------------------------------------------------------
 
-struct Registry {
-    by_state: Vec<&'static dyn BlockBehaviour>,
-}
+/// External registrations, applied over the built-ins on every rebuild.
+static REGISTRATIONS: std::sync::Mutex<Vec<(&'static str, &'static dyn BlockBehaviour)>> =
+    std::sync::Mutex::new(Vec::new());
 
-static REGISTRY: OnceLock<Registry> = OnceLock::new();
+/// The compiled table, or `None` until it is built (and again after a
+/// registration invalidates it). Leaked to `'static` so [`behaviour`] can return
+/// a bare reference with no lock held.
+static REGISTRY: std::sync::RwLock<Option<&'static [&'static dyn BlockBehaviour]>> =
+    std::sync::RwLock::new(None);
+
+/// Register `behaviour` for the block named `name` (e.g. `minecraft:observer`).
+///
+/// This is the extension point: an external crate adds a component by writing a
+/// [`BlockBehaviour`] and calling this, with **no edit to this file**. A later
+/// registration wins over an earlier one and over the built-ins. Cheap enough to
+/// call at start-up; the table is rebuilt on the next lookup.
+pub fn register(name: &'static str, behaviour: &'static dyn BlockBehaviour) {
+    REGISTRATIONS.lock().unwrap().push((name, behaviour));
+    *REGISTRY.write().unwrap() = None;
+}
 
 /// The behaviour of a block state. One array index; no string comparison.
 pub fn behaviour(state: BlockStateId) -> &'static dyn BlockBehaviour {
-    let registry = REGISTRY.get_or_init(build);
-    registry
-        .by_state
+    let cached = *REGISTRY.read().unwrap();
+    let table = match cached {
+        Some(table) => table,
+        None => {
+            let built = build();
+            *REGISTRY.write().unwrap() = Some(built);
+            built
+        }
+    };
+    table
         .get(state.raw() as usize)
         .copied()
         .unwrap_or(&blocks::DEFAULT)
 }
 
-fn build() -> Registry {
+/// Build (and leak) the table: the built-ins plus every external registration.
+fn build() -> &'static [&'static dyn BlockBehaviour] {
     let mut by_state: Vec<&'static dyn BlockBehaviour> =
         vec![&blocks::DEFAULT; blocks::STATE_COUNT];
 
-    fn register(
+    fn put(
         by_state: &mut [&'static dyn BlockBehaviour],
         name: &str,
         b: &'static dyn BlockBehaviour,
@@ -677,80 +698,80 @@ fn build() -> Registry {
         }
     }
 
-    register(&mut by_state, "minecraft:redstone_wire", &blocks::Wire);
-    register(&mut by_state, "minecraft:repeater", &blocks::Repeater);
-    register(&mut by_state, "minecraft:comparator", &blocks::Comparator);
-    register(&mut by_state, "minecraft:redstone_torch", &blocks::Torch);
-    register(
+    put(&mut by_state, "minecraft:redstone_wire", &blocks::Wire);
+    put(&mut by_state, "minecraft:repeater", &blocks::Repeater);
+    put(&mut by_state, "minecraft:comparator", &blocks::Comparator);
+    put(&mut by_state, "minecraft:redstone_torch", &blocks::Torch);
+    put(
         &mut by_state,
         "minecraft:redstone_wall_torch",
         &blocks::WallTorch,
     );
-    register(&mut by_state, "minecraft:lever", &blocks::Lever);
-    register(
+    put(&mut by_state, "minecraft:lever", &blocks::Lever);
+    put(
         &mut by_state,
         "minecraft:redstone_block",
         &blocks::RedstoneBlock,
     );
-    register(&mut by_state, "minecraft:redstone_lamp", &blocks::Lamp);
-    register(
+    put(&mut by_state, "minecraft:redstone_lamp", &blocks::Lamp);
+    put(
         &mut by_state,
         "minecraft:stone_button",
         &blocks::StoneButton,
     );
-    register(
+    put(
         &mut by_state,
         "minecraft:polished_blackstone_button",
         &blocks::StoneButton,
     );
-    register(&mut by_state, "minecraft:oak_button", &blocks::WoodButton);
-    register(
+    put(&mut by_state, "minecraft:oak_button", &blocks::WoodButton);
+    put(
         &mut by_state,
         "minecraft:spruce_button",
         &blocks::WoodButton,
     );
-    register(&mut by_state, "minecraft:birch_button", &blocks::WoodButton);
-    register(
+    put(&mut by_state, "minecraft:birch_button", &blocks::WoodButton);
+    put(
         &mut by_state,
         "minecraft:jungle_button",
         &blocks::WoodButton,
     );
-    register(
+    put(
         &mut by_state,
         "minecraft:acacia_button",
         &blocks::WoodButton,
     );
-    register(
+    put(
         &mut by_state,
         "minecraft:dark_oak_button",
         &blocks::WoodButton,
     );
-    register(
+    put(
         &mut by_state,
         "minecraft:mangrove_button",
         &blocks::WoodButton,
     );
-    register(
+    put(
         &mut by_state,
         "minecraft:cherry_button",
         &blocks::WoodButton,
     );
-    register(
+    put(
         &mut by_state,
         "minecraft:bamboo_button",
         &blocks::WoodButton,
     );
-    register(
+    put(
         &mut by_state,
         "minecraft:crimson_button",
         &blocks::WoodButton,
     );
-    register(
+    put(
         &mut by_state,
         "minecraft:warped_button",
         &blocks::WoodButton,
     );
-    register(
+    put(
         &mut by_state,
         "minecraft:pale_oak_button",
         &blocks::WoodButton,
@@ -759,23 +780,29 @@ fn build() -> Registry {
     // A test-only block registered over the observer's states, proving that a
     // new component decides its own wire connection without a core edit.
     #[cfg(test)]
-    register(&mut by_state, "minecraft:observer", &blocks::TestObserver);
+    put(&mut by_state, "minecraft:observer", &blocks::TestObserver);
     // A test-only recording block for the notification-order findings.
     #[cfg(test)]
-    register(
+    put(
         &mut by_state,
         "minecraft:note_block",
         &blocks::test_spy::Spy,
     );
     // A test-only block that never settles, for the shape-update budget.
     #[cfg(test)]
-    register(
+    put(
         &mut by_state,
         "minecraft:jukebox",
         &blocks::test_chain::Chain,
     );
 
-    Registry { by_state }
+    // External registrations win, so a host can override a built-in.
+    let registrations = REGISTRATIONS.lock().unwrap();
+    for (name, b) in registrations.iter() {
+        put(&mut by_state, name, *b);
+    }
+
+    Box::leak(by_state.into_boxed_slice())
 }
 
 /// Default state ids for the blocks the engine refers to by name.

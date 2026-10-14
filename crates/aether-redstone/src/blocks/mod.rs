@@ -69,12 +69,6 @@ pub trait BlockBehaviour: Sync {
         false
     }
 
-    /// Whether this is specifically a repeater. Vanilla's wire connection
-    /// special-cases the repeater but not the comparator.
-    fn is_repeater(&self) -> bool {
-        false
-    }
-
     /// `RedStoneWireBlock.shouldConnectTo`: whether redstone wire draws a
     /// connection toward this state.
     ///

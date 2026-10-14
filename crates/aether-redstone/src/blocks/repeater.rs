@@ -22,10 +22,6 @@ impl BlockBehaviour for Repeater {
         true
     }
 
-    fn is_repeater(&self) -> bool {
-        true
-    }
-
     fn connects_to_wire(&self, state: BlockStateId, dir: Option<Direction>) -> bool {
         // `RedStoneWireBlock.shouldConnectTo` special-cases the repeater: it
         // connects only along its facing axis.

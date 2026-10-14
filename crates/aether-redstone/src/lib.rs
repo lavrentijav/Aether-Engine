@@ -33,12 +33,14 @@
 //!
 //! ## Extending it
 //!
-//! A redstone component is a type implementing [`blocks::BlockBehaviour`] in
-//! its own [`blocks`] module, registered in [`behaviour`] against a block name.
-//! The registry compiles that into a `BlockStateId`-indexed table **once**, so
-//! the hot path is an array index with no string comparison, and the engine
-//! never matches on a block name. Adding comparator, observer or piston later
-//! is "write a module and register it" — the engine and dispatch do not change.
+//! A redstone component is a type implementing [`blocks::BlockBehaviour`],
+//! registered against a block name with [`behaviour::register`]. The registry
+//! compiles that into a `BlockStateId`-indexed table, so the hot path is an
+//! array index with no string comparison, and the engine never matches on a
+//! block name. The registration API is **public**: an external crate adds a
+//! component — comparator, observer, piston — with no edit to this crate, and a
+//! block decides its own redstone-wire connection through
+//! [`blocks::BlockBehaviour::connects_to_wire`].
 //!
 //! ## Power model
 //!
