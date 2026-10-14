@@ -16,3 +16,7 @@
   admin UIs, web integrations, custom modes) is written as a plugin on the plugin API
   (`docs/design/plugins.md`), not in the core; if the API lacks something, extend the API. See
   "Core or plugin?" in `CONTRIBUTING.md`.
+- **Tests through `cargo-locked`:** worktrees share `CARGO_TARGET_DIR` and their artifacts have the
+  same file names there, so a plain `cargo test` can run a binary another agent just rebuilt. Run
+  `cargo-locked test ...` (and `cargo-locked run/bench`): it holds one lock for build + run. Plain
+  `cargo check`/`clippy`/`fmt` are fine. A report "tests pass" is only valid from `cargo-locked`.
