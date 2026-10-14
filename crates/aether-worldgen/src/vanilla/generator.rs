@@ -345,6 +345,18 @@ impl VanillaGenerator {
         &self.core.terrain
     }
 
+    /// The shared core, for tests that place a single feature by hand.
+    #[cfg(test)]
+    pub(crate) fn core_handle(&self) -> &Arc<Core> {
+        &self.core
+    }
+
+    /// The decoration stage, for tests that place a single feature by hand.
+    #[cfg(test)]
+    pub(crate) fn decorator_handle(&self) -> &Decorator {
+        &self.decorator
+    }
+
     /// The biome registry.
     pub fn biomes(&self) -> &BiomeRegistry {
         &self.core.biomes

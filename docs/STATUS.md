@@ -72,7 +72,7 @@ modern versions run a server-side survival game).
 | The vanilla generator serves a live join — 289 columns in ~21 s cold at view radius 8, inside five seconds once cached | ✅ |
 | Vanilla surface rules interpreted from the pack, all conditions including `temperature`, `steep`, `hole` and badlands banding — 99.9998% of blocks against the game's own surface stage | ✅ |
 | Vanilla carvers (caves, canyons, extra-underground caves) — matched against the game's carver stage | ✅ |
-| Vanilla decoration from the pack's placed features: ores, trees, grass and flowers, sugar cane, kelp and seagrass, lakes, springs, corals, icebergs… — vanilla-like, 99.7% of blocks against a vanilla server world, not position-exact | 🚧 Preview |
+| Vanilla decoration from the pack's placed features: ores, trees, grass and flowers, sugar cane, kelp and seagrass, lakes, springs, corals, icebergs, desert wells, dungeons, geodes, fossils, dripstone and glow lichen spreading… — vanilla-like, 99.7% of blocks against a vanilla server world, not position-exact | 🚧 Preview |
 | Per-section biome ids (4×4×4 quart grid) exposed on `GeneratedColumn` and kept by the column cache; the overworld biome table is built in, `biome_data` optional | ✅ |
 | Biomes on the wire (1.21.11): all 65 biomes registered, per-section paletted biome containers; block containers widen past 4 bits / go direct | ✅ |
 | Disk cache for unmodified generated columns, aged out after a day and swept above a cap — never a source of truth, every entry reproducible from the seed (`/cache`) | ✅ |
@@ -103,7 +103,7 @@ modern versions run a server-side survival game).
 | Economy in PostgreSQL — balances, `/pay`, listings, auction (`/sell` `/market` `/buy` `/listings` `/unlist`), operator grants (`/econ give`) | ✅ |
 | Economy integrity: every trade in one transaction, `SELECT … FOR UPDATE` on listings, `CHECK (balance >= 0)` | ✅ |
 | Vanilla terrain generation — noise stage bit-exact against the game (1,179,648/1,179,648 blocks); the default whenever `worldgen_data` is set, ~45 ms noise + ~170 ms per full decorated column | ✅ |
-| Structures, geodes, dungeons, fossils, dripstone and sculk are not generated. See [Known Issues A.8](KNOWN_ISSUES.md) | ❌ |
+| Structures and sculk are not generated. See [Known Issues A.8](KNOWN_ISSUES.md) | ❌ |
 | CI (build/test/clippy/fmt + `cargo-deny`) on a pinned toolchain + Criterion bench harness | ✅ |
 | **Clients 26.1.x, 26.2 and 26.3** (protocols 775–777) with the full survival game: one modern codec parameterized by per-release tables generated from the game's own reports (`tools/gen/versions.py` — packet ids, block states, items, entity types, menus, registries, tags) plus each release's layout changes (world clocks, the `attack` packet, section fluid counts, the swing packet, byte-array bitsets). Registries go by known pack with the overworld's height overridden, or with full data to a client without the pack. Every packet is checked by decoding it with the release's own codecs (`tools/wire`) | ✅ |
 | **Survival gameplay on 1.21.11 and 26.1–26.3** (`game/`): 20 TPS world tick, day/night, hunger, regeneration, starvation, fall/void/lava damage, death screen, inventory dropped on death, respawn | ✅ |

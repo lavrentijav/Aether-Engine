@@ -9,14 +9,19 @@ use aether_world::BlockStateId;
 use super::super::blockinfo::{self, prop};
 use super::super::density::BuildError;
 use super::super::json::Json;
+use super::super::noise::NormalNoise;
 use super::super::providers::IntProvider;
 use super::super::rng::Rng;
+use super::super::structure::{
+    self, bounding_box, zero_position, Processor, Rotation, StructureTemplate,
+};
 use super::super::surface::parse_block_state;
 use super::super::tags::BlockSet;
 use super::blocks::{
-    can_survive, is_water_source, legacy_solid, sturdy, BlockPredicate, RuleTest, StateProvider,
+    can_survive, is_water_source, legacy_solid, solid_render, sturdy, BlockPredicate, RuleTest,
+    StateProvider,
 };
-use super::level::{Dir, Heightmap, Pos};
+use super::level::{Dir, Heightmap, Level, Pos};
 use super::tree::{self, FallenTree, TreeConfig};
 use super::{place_placed, Ctx, Loader, Placed};
 
@@ -25,6 +30,47 @@ use super::{place_placed, Ctx, Loader, Placed};
 pub struct OreTarget {
     test: RuleTest,
     state: BlockStateId,
+}
+
+/// A `geode` configuration.
+#[derive(Debug)]
+pub struct GeodeConfig {
+    filling: StateProvider,
+    inner: StateProvider,
+    alternate_inner: StateProvider,
+    middle: StateProvider,
+    outer: StateProvider,
+    inner_placements: Vec<BlockStateId>,
+    cannot_replace: BlockSet,
+    invalid_blocks: BlockSet,
+    filling_layer: f64,
+    inner_layer: f64,
+    middle_layer: f64,
+    outer_layer: f64,
+    crack_chance: f64,
+    crack_base: f64,
+    crack_offset: i32,
+    use_potential: f64,
+    use_alternate: f64,
+    require_alternate: bool,
+    outer_wall: IntProvider,
+    distribution: IntProvider,
+    point_offset: IntProvider,
+    min_gen_offset: i32,
+    max_gen_offset: i32,
+    noise_multiplier: f64,
+    invalid_threshold: i32,
+}
+
+/// A `fossil` configuration: a base template and an overlay, plus the
+/// processor lists to run over each.
+#[derive(Debug)]
+pub struct FossilConfig {
+    fossil_processors: Vec<Processor>,
+    fossil_structures: Vec<Arc<StructureTemplate>>,
+    overlay_processors: Vec<Processor>,
+    overlay_structures: Vec<Arc<StructureTemplate>>,
+    max_empty_corners: i32,
 }
 
 /// A configured feature.
@@ -115,7 +161,7 @@ pub enum Configured {
         radius: i32,
         probability: f32,
     },
-    /// `multiface_growth` (no spreading).
+    /// `multiface_growth` (glow lichen), including the `MultifaceSpreader`.
     MultifaceGrowth {
         block: BlockStateId,
         search_range: i32,
@@ -142,6 +188,20 @@ pub enum Configured {
     Coral(super::extra::Coral, Arc<super::extra::CoralBlocks>),
     /// `iceberg`.
     Iceberg(BlockStateId),
+    /// `desert_well`.
+    DesertWell,
+    /// `monster_room` (dungeons).
+    MonsterRoom,
+    /// `geode` (amethyst).
+    Geode(Box<GeodeConfig>),
+    /// `fossil`.
+    Fossil(Box<FossilConfig>),
+    /// `dripstone_cluster`.
+    DripstoneCluster(Box<super::dripstone::DripstoneCluster>),
+    /// `large_dripstone`.
+    LargeDripstone(Box<super::dripstone::LargeDripstone>),
+    /// `pointed_dripstone`.
+    PointedDripstone(Box<super::dripstone::PointedDripstone>),
     /// A type this port does not place.
     Unsupported(String),
 }
@@ -358,6 +418,91 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
             Configured::Coral(kind, blocks)
         }
         "iceberg" => Configured::Iceberg(state_of(c, "state")?),
+        "desert_well" => Configured::DesertWell,
+        "monster_room" => Configured::MonsterRoom,
+        "geode" => {
+            let blocks = get(c, "blocks")?;
+            let layers = get(c, "layers")?;
+            let crack = get(c, "crack")?;
+            let placements = |k: &str| -> Vec<BlockStateId> {
+                blocks
+                    .get(k)
+                    .and_then(Json::as_arr)
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(parse_block_state)
+                    .collect()
+            };
+            Configured::Geode(Box::new(GeodeConfig {
+                filling: StateProvider::parse(get(blocks, "filling_provider")?, &l.noises)?,
+                inner: StateProvider::parse(get(blocks, "inner_layer_provider")?, &l.noises)?,
+                alternate_inner: StateProvider::parse(
+                    get(blocks, "alternate_inner_layer_provider")?,
+                    &l.noises,
+                )?,
+                middle: StateProvider::parse(get(blocks, "middle_layer_provider")?, &l.noises)?,
+                outer: StateProvider::parse(get(blocks, "outer_layer_provider")?, &l.noises)?,
+                inner_placements: placements("inner_placements"),
+                cannot_replace: l
+                    .tags
+                    .holder_set(blocks.get("cannot_replace").unwrap_or(&Json::Null)),
+                invalid_blocks: l
+                    .tags
+                    .holder_set(blocks.get("invalid_blocks").unwrap_or(&Json::Null)),
+                filling_layer: layers.f64_or("filling", 1.7),
+                inner_layer: layers.f64_or("inner_layer", 2.2),
+                middle_layer: layers.f64_or("middle_layer", 3.2),
+                outer_layer: layers.f64_or("outer_layer", 4.2),
+                crack_chance: crack.f64_or("generate_crack_chance", 1.0),
+                crack_base: crack.f64_or("base_crack_size", 2.0),
+                crack_offset: crack.i32_or("crack_point_offset", 2),
+                use_potential: c.f64_or("use_potential_placements_chance", 0.35),
+                use_alternate: c.f64_or("use_alternate_layer0_chance", 0.0),
+                require_alternate: c.bool_or("placements_require_layer0_alternate", true),
+                outer_wall: IntProvider::parse(get(c, "outer_wall_distance")?)?,
+                distribution: IntProvider::parse(get(c, "distribution_points")?)?,
+                point_offset: IntProvider::parse(get(c, "point_offset")?)?,
+                min_gen_offset: c.i32_or("min_gen_offset", -16),
+                max_gen_offset: c.i32_or("max_gen_offset", 16),
+                noise_multiplier: c.f64_or("noise_multiplier", 0.05),
+                invalid_threshold: c.i32_or("invalid_blocks_threshold", 1),
+            }))
+        }
+        "fossil" => {
+            let structures = |key: &str| -> Result<Vec<Arc<StructureTemplate>>, BuildError> {
+                let mut v = Vec::new();
+                for id in c.get(key).and_then(Json::as_arr).unwrap_or(&[]) {
+                    let id = id
+                        .as_str()
+                        .ok_or_else(|| BuildError::new(format!("fossil: bad `{key}` entry")))?;
+                    v.push(Arc::new(structure::load_from_pack(l.pack, id)?));
+                }
+                Ok(v)
+            };
+            let processors = |key: &str| -> Result<Vec<Processor>, BuildError> {
+                let id = c
+                    .str_of(key)
+                    .ok_or_else(|| BuildError::new(format!("fossil: no `{key}`")))?;
+                let pj = l.pack.read_json("processor_list", id)?;
+                structure::parse_processors(&pj, l.tags)
+            };
+            Configured::Fossil(Box::new(FossilConfig {
+                fossil_processors: processors("fossil_processors")?,
+                fossil_structures: structures("fossil_structures")?,
+                overlay_processors: processors("overlay_processors")?,
+                overlay_structures: structures("overlay_structures")?,
+                max_empty_corners: c.i32_or("max_empty_corners_allowed", 4),
+            }))
+        }
+        "dripstone_cluster" => {
+            Configured::DripstoneCluster(Box::new(super::dripstone::DripstoneCluster::parse(c)?))
+        }
+        "large_dripstone" => {
+            Configured::LargeDripstone(Box::new(super::dripstone::LargeDripstone::parse(c)?))
+        }
+        "pointed_dripstone" => {
+            Configured::PointedDripstone(Box::new(super::dripstone::PointedDripstone::parse(c)?))
+        }
         other => {
             l.unsupported.insert(format!("feature:{other}"));
             Configured::Unsupported(other.to_string())
@@ -386,6 +531,14 @@ pub(crate) struct States {
     pub sea_pickle: BlockStateId,
     pub vine: BlockStateId,
     pub cave_air: BlockStateId,
+    pub sand: BlockStateId,
+    pub sandstone: BlockStateId,
+    pub sandstone_slab: BlockStateId,
+    pub suspicious_sand: BlockStateId,
+    pub cobblestone: BlockStateId,
+    pub mossy_cobblestone: BlockStateId,
+    pub spawner: BlockStateId,
+    pub chest: BlockStateId,
 }
 
 pub(crate) fn states() -> &'static States {
@@ -412,6 +565,14 @@ pub(crate) fn states() -> &'static States {
             sea_pickle: s("minecraft:sea_pickle"),
             vine: s("minecraft:vine"),
             cave_air: s("minecraft:cave_air"),
+            sand: s("minecraft:sand"),
+            sandstone: s("minecraft:sandstone"),
+            sandstone_slab: s("minecraft:sandstone_slab"),
+            suspicious_sand: s("minecraft:suspicious_sand"),
+            cobblestone: s("minecraft:cobblestone"),
+            mossy_cobblestone: s("minecraft:mossy_cobblestone"),
+            spawner: s("minecraft:spawner"),
+            chest: s("minecraft:chest"),
         }
     })
 }
@@ -614,6 +775,13 @@ pub(crate) fn place_configured(ctx: &mut Ctx, f: &Configured, pos: Pos) -> bool 
         Configured::VegetationPatch(cfg) => super::extra::vegetation_patch(ctx, cfg, pos),
         Configured::Coral(kind, blocks) => super::extra::coral(ctx, *kind, blocks, pos),
         Configured::Iceberg(state) => super::extra::iceberg(ctx, *state, pos),
+        Configured::DesertWell => desert_well(ctx, pos),
+        Configured::MonsterRoom => monster_room(ctx, pos),
+        Configured::Geode(cfg) => geode(ctx, cfg, pos),
+        Configured::Fossil(cfg) => fossil(ctx, cfg, pos),
+        Configured::DripstoneCluster(cfg) => super::dripstone::dripstone_cluster(ctx, cfg, pos),
+        Configured::LargeDripstone(cfg) => super::dripstone::large_dripstone(ctx, cfg, pos),
+        Configured::PointedDripstone(cfg) => super::dripstone::pointed_dripstone(ctx, cfg, pos),
         Configured::Unsupported(name) => {
             ctx.d.note_unsupported(&format!("feature:{name}"));
             false
@@ -1414,25 +1582,27 @@ fn multiface(
     if wall {
         dirs.extend(Dir::HORIZONTAL);
     }
-    let shuffled = shuffle(ctx, &dirs);
-    if try_multiface(ctx, block, spread, on, pos, &shuffled) {
+    let list = shuffle(ctx, &dirs);
+    if place_growth_if_possible(ctx, block, spread, on, pos, &list) {
         return true;
     }
-    for d in shuffled.clone() {
-        let others: Vec<Dir> = dirs
+    for d in list {
+        let except: Vec<Dir> = dirs
             .iter()
             .copied()
             .filter(|x| *x != d.opposite())
             .collect();
-        let others = shuffle(ctx, &others);
-        let mut p = pos;
+        let list2 = shuffle(ctx, &except);
         for _ in 0..search {
-            p = p.rel(d);
+            // 1.21.11's `MultifaceGrowthFeature` re-sets to `origin + dir` on
+            // every step (`MutableBlockPos.setWithOffset(origin, dir)`), so
+            // this walk does not accumulate; the loop is the game's own.
+            let p = pos.rel(d);
             let s = ctx.lv.get(p);
             if !air_or_water(s) && blockinfo::block_of(s) != blockinfo::block_of(block) {
                 break;
             }
-            if try_multiface(ctx, block, spread, on, p, &others) {
+            if place_growth_if_possible(ctx, block, spread, on, p, &list2) {
                 return true;
             }
         }
@@ -1440,32 +1610,145 @@ fn multiface(
     false
 }
 
-fn try_multiface(
+/// `MultifaceGrowthFeature.placeGrowthIfPossible`.
+fn place_growth_if_possible(
     ctx: &mut Ctx,
     block: BlockStateId,
     spread: f32,
     on: &BlockSet,
-    p: Pos,
+    pos: Pos,
     dirs: &[Dir],
 ) -> bool {
     for d in dirs {
-        if on.contains(ctx.lv.get(p.rel(*d))) {
-            let here = ctx.lv.get(p);
-            let mut s = if blockinfo::block_of(here) == blockinfo::block_of(block) {
-                here
-            } else {
-                block
+        if on.contains(ctx.lv.get(pos.rel(*d))) {
+            let here = ctx.lv.get(pos);
+            let Some(s) = multiface_state_for_placement(block, here, ctx.lv.get(pos.rel(*d)), *d)
+            else {
+                return false;
             };
-            s = blockinfo::with_prop(s, d.name(), "true");
-            let wet = is(here, "minecraft:water");
-            s = blockinfo::with_prop(s, "waterlogged", if wet { "true" } else { "false" });
-            ctx.lv.set(p, s);
-            // Spreading to neighbouring faces is not ported; the draw is.
-            let _ = ctx.r.next_float() < spread;
+            ctx.lv.set(pos, s);
+            if ctx.r.next_float() < spread {
+                spread_from_face_toward_random_direction(ctx, block, s, pos, *d);
+            }
             return true;
         }
     }
     false
+}
+
+/// `MultifaceBlock.getStateForPlacement(state, getter, pos, direction)`.
+fn multiface_state_for_placement(
+    block: BlockStateId,
+    state: BlockStateId,
+    attach: BlockStateId,
+    direction: Dir,
+) -> Option<BlockStateId> {
+    if !multi_valid_for_placement(block, state, attach, direction) {
+        return None;
+    }
+    let base = if blockinfo::block_of(state) == blockinfo::block_of(block) {
+        state
+    } else if is_water_source(state) {
+        blockinfo::with_prop(block, "waterlogged", "true")
+    } else {
+        block
+    };
+    Some(blockinfo::with_prop(base, direction.name(), "true"))
+}
+
+/// `MultifaceBlock.isValidStateForPlacement`, with `canAttachTo`'s face test
+/// reduced to a full-collision test (no per-face shapes here).
+fn multi_valid_for_placement(
+    block: BlockStateId,
+    state: BlockStateId,
+    attach: BlockStateId,
+    direction: Dir,
+) -> bool {
+    if blockinfo::block_of(state) == blockinfo::block_of(block) && has_face(state, direction) {
+        return false;
+    }
+    sturdy(attach)
+}
+
+/// `MultifaceBlock.hasFace`.
+fn has_face(state: BlockStateId, direction: Dir) -> bool {
+    prop(state, direction.name()) == Some("true")
+}
+
+/// `MultifaceSpreader.spreadFromFaceTowardRandomDirection`.
+fn spread_from_face_toward_random_direction(
+    ctx: &mut Ctx,
+    block: BlockStateId,
+    state: BlockStateId,
+    pos: Pos,
+    direction: Dir,
+) {
+    for d2 in shuffle(ctx, &Dir::ALL) {
+        if spread_from_face_toward_direction(ctx, block, state, pos, direction, d2) {
+            return;
+        }
+    }
+}
+
+/// `MultifaceSpreader.spreadFromFaceTowardDirection`.
+fn spread_from_face_toward_direction(
+    ctx: &mut Ctx,
+    block: BlockStateId,
+    state: BlockStateId,
+    pos: Pos,
+    direction: Dir,
+    d2: Dir,
+) -> bool {
+    let Some((sp, face)) = spread_from_face(ctx, block, state, pos, direction, d2) else {
+        return false;
+    };
+    let here = ctx.lv.get(sp);
+    let Some(new_state) =
+        multiface_state_for_placement(block, here, ctx.lv.get(sp.rel(face)), face)
+    else {
+        return false;
+    };
+    ctx.lv.set(sp, new_state)
+}
+
+/// `getSpreadFromFaceTowardDirection` + `canSpreadInto`; returns the position
+/// and face of the first spread type that can be placed.
+fn spread_from_face(
+    ctx: &Ctx,
+    block: BlockStateId,
+    state: BlockStateId,
+    pos: Pos,
+    direction: Dir,
+    d2: Dir,
+) -> Option<(Pos, Dir)> {
+    if d2.axis() == direction.axis() {
+        return None;
+    }
+    if !(has_face(state, direction) && !has_face(state, d2)) {
+        return None;
+    }
+    // SAME_POSITION, SAME_PLANE, WRAP_AROUND.
+    let candidates = [
+        (pos, d2),
+        (pos.rel(d2), direction),
+        (pos.rel(d2).rel(direction), d2.opposite()),
+    ];
+    for (sp, face) in candidates {
+        if can_spread_into(ctx, block, sp, face) {
+            return Some((sp, face));
+        }
+    }
+    None
+}
+
+/// `DefaultSpreaderConfig.canSpreadInto`: the cell may be replaced and the
+/// face attaches.
+fn can_spread_into(ctx: &Ctx, block: BlockStateId, sp: Pos, face: Dir) -> bool {
+    let s = ctx.lv.get(sp);
+    let replaceable = blockinfo::is_air(s)
+        || blockinfo::block_of(s) == blockinfo::block_of(block)
+        || (is(s, "minecraft:water") && is_water_source(s));
+    replaceable && multi_valid_for_placement(block, s, ctx.lv.get(sp.rel(face)), face)
 }
 
 /// `Util.shuffledCopy`.
@@ -1478,6 +1761,430 @@ pub(crate) fn shuffle<T: Clone>(ctx: &mut Ctx, v: &[T]) -> Vec<T> {
         i -= 1;
     }
     out
+}
+
+/// `DesertWellFeature`.
+fn desert_well(ctx: &mut Ctx, origin: Pos) -> bool {
+    let st = states();
+    // `blockPos = origin.above()`, then down while the block is empty.
+    let mut p = origin.above(1);
+    while ctx.lv.is_air(p) && p.y > ctx.lv.min_y() + 2 {
+        p = p.below(1);
+    }
+    if blockinfo::block_of(ctx.lv.get(p)) != blockinfo::block_of(st.sand) {
+        return false;
+    }
+    // The well needs two solid layers under its whole footprint.
+    for i in -2..=2 {
+        for j in -2..=2 {
+            if ctx.lv.is_air(p.offset(i, -1, j)) && ctx.lv.is_air(p.offset(i, -2, j)) {
+                return false;
+            }
+        }
+    }
+    for i in -2..=0 {
+        for j in -2..=2 {
+            for k in -2..=2 {
+                ctx.lv.set(p.offset(j, i, k), st.sandstone);
+            }
+        }
+    }
+    ctx.lv.set(p, st.water);
+    for d in Dir::HORIZONTAL {
+        ctx.lv.set(p.rel(d), st.water);
+    }
+    let p2 = p.below(1);
+    ctx.lv.set(p2, st.sand);
+    for d in Dir::HORIZONTAL {
+        ctx.lv.set(p2.rel(d), st.sand);
+    }
+    for j in -2..=2 {
+        for k in -2..=2 {
+            if j == -2 || j == 2 || k == -2 || k == 2 {
+                ctx.lv.set(p.offset(j, 1, k), st.sandstone);
+            }
+        }
+    }
+    ctx.lv.set(p.offset(2, 1, 0), st.sandstone_slab);
+    ctx.lv.set(p.offset(-2, 1, 0), st.sandstone_slab);
+    ctx.lv.set(p.offset(0, 1, 2), st.sandstone_slab);
+    ctx.lv.set(p.offset(0, 1, -2), st.sandstone_slab);
+    for j in -1..=1 {
+        for k in -1..=1 {
+            let s = if j == 0 && k == 0 {
+                st.sandstone
+            } else {
+                st.sandstone_slab
+            };
+            ctx.lv.set(p.offset(j, 4, k), s);
+        }
+    }
+    for j in 1..=3 {
+        ctx.lv.set(p.offset(-1, j, -1), st.sandstone);
+        ctx.lv.set(p.offset(-1, j, 1), st.sandstone);
+        ctx.lv.set(p.offset(1, j, -1), st.sandstone);
+        ctx.lv.set(p.offset(1, j, 1), st.sandstone);
+    }
+    // Two suspicious-sand blocks, each at a random one of the well's five
+    // central columns, one and two layers below it.
+    let list = [
+        p,
+        p.rel(Dir::East),
+        p.rel(Dir::South),
+        p.rel(Dir::West),
+        p.rel(Dir::North),
+    ];
+    let a = list[ctx.r.next_int_bounded(5) as usize].below(1);
+    let b = list[ctx.r.next_int_bounded(5) as usize].below(2);
+    ctx.lv.set(a, st.suspicious_sand);
+    ctx.lv.set(b, st.suspicious_sand);
+    true
+}
+
+/// `MonsterRoomFeature` (dungeons). Loot tables and the spawner's entity are
+/// not generated — the engine has no block entities yet.
+fn monster_room(ctx: &mut Ctx, origin: Pos) -> bool {
+    let s = states();
+    // `Feature.isReplaceable(FEATURES_CANNOT_REPLACE)`: write only into blocks
+    // the pack lets features replace.
+    let cannot = ctx.d.tags.features_cannot_replace.clone();
+    let safe = |ctx: &mut Ctx, p: Pos, v: BlockStateId| {
+        if !cannot.contains(ctx.lv.get(p)) {
+            ctx.lv.set(p, v);
+        }
+    };
+    let j = ctx.r.next_int_bounded(2) + 2;
+    let (k, l) = (-j - 1, j + 1);
+    let o = ctx.r.next_int_bounded(2) + 2;
+    let (p_, q) = (-o - 1, o + 1);
+    let mut r = 0;
+    for sx in k..=l {
+        for ty in -1..=4 {
+            for sz in p_..=q {
+                let at = origin.offset(sx, ty, sz);
+                let solid = legacy_solid(ctx.lv.get(at));
+                if ty == -1 && !solid {
+                    return false;
+                }
+                if ty == 4 && !solid {
+                    return false;
+                }
+                if (sx == k || sx == l || sz == p_ || sz == q)
+                    && ty == 0
+                    && ctx.lv.is_air(at)
+                    && ctx.lv.is_air(at.above(1))
+                {
+                    r += 1;
+                }
+            }
+        }
+    }
+    if !(1..=5).contains(&r) {
+        return false;
+    }
+    for sx in k..=l {
+        for ty in (0..=3).rev().chain([-1]) {
+            for sz in p_..=q {
+                let at = origin.offset(sx, ty, sz);
+                let cur = ctx.lv.get(at);
+                let is_chest = is(cur, "minecraft:chest");
+                if sx == k || ty == -1 || sz == p_ || sx == l || ty == 4 || sz == q {
+                    if at.y >= ctx.lv.min_y() && !legacy_solid(ctx.lv.get(at.below(1))) {
+                        ctx.lv.set(at, states().cave_air);
+                    } else if legacy_solid(cur) && !is_chest {
+                        if ty == -1 && ctx.r.next_int_bounded(4) != 0 {
+                            safe(ctx, at, s.mossy_cobblestone);
+                        } else {
+                            safe(ctx, at, s.cobblestone);
+                        }
+                    }
+                } else if !is_chest && !is(cur, "minecraft:spawner") {
+                    safe(ctx, at, states().cave_air);
+                }
+            }
+        }
+    }
+    'outer: for _ in 0..2 {
+        for _ in 0..3 {
+            let x = origin.x + ctx.r.next_int_bounded(j * 2 + 1) - j;
+            let z = origin.z + ctx.r.next_int_bounded(o * 2 + 1) - o;
+            let at = Pos::new(x, origin.y, z);
+            if ctx.lv.is_air(at) {
+                let mut solid_dirs = 0;
+                for d in Dir::HORIZONTAL {
+                    if legacy_solid(ctx.lv.get(at.rel(d))) {
+                        solid_dirs += 1;
+                    }
+                }
+                if solid_dirs == 1 {
+                    let chest = reorient_chest(ctx.lv, at, s.chest);
+                    safe(ctx, at, chest);
+                    break 'outer;
+                }
+            }
+        }
+    }
+    safe(ctx, origin, s.spawner);
+    // `randomEntityId`: the spawner's mob is drawn here even though the engine
+    // keeps no block entity for it.
+    let _ = ctx.r.next_int_bounded(4);
+    true
+}
+
+/// `StructurePiece.reorient` for a chest.
+fn reorient_chest(lv: &Level, pos: Pos, chest: BlockStateId) -> BlockStateId {
+    let mut facing: Option<Dir> = None;
+    for d in Dir::HORIZONTAL {
+        let other = lv.get(pos.rel(d));
+        if is(other, "minecraft:chest") {
+            return chest;
+        }
+        if solid_render(other) {
+            if facing.is_some() {
+                facing = None;
+                break;
+            }
+            facing = Some(d);
+        }
+    }
+    let f = if let Some(d) = facing {
+        d.opposite()
+    } else {
+        let mut f = Dir::parse(prop(chest, "facing").unwrap_or("north")).unwrap_or(Dir::North);
+        if solid_render(lv.get(pos.rel(f))) {
+            f = f.opposite();
+        }
+        if solid_render(lv.get(pos.rel(f))) {
+            f = f.clockwise();
+        }
+        if solid_render(lv.get(pos.rel(f))) {
+            f = f.opposite();
+        }
+        f
+    };
+    blockinfo::with_prop(chest, "facing", f.name())
+}
+
+/// `GeodeFeature`. `cannot_replace` is consulted before every write, so the
+/// geode never overwrites bedrock, spawners and the like.
+fn geode(ctx: &mut Ctx, cfg: &GeodeConfig, origin: Pos) -> bool {
+    let k = cfg.distribution.sample(ctx.r);
+    let noise = NormalNoise::create_legacy(ctx.lv.core.seed, -4, &[1.0]);
+    let d = k as f64 / cfg.outer_wall.max_value() as f64;
+    let e = 1.0 / cfg.filling_layer.sqrt();
+    let f = 1.0 / (cfg.inner_layer + d).sqrt();
+    let g = 1.0 / (cfg.middle_layer + d).sqrt();
+    let h = 1.0 / (cfg.outer_layer + d).sqrt();
+    let l = 1.0 / (cfg.crack_base + ctx.r.next_double() / 2.0 + if k > 3 { d } else { 0.0 }).sqrt();
+    let crack = ctx.r.next_float() < cfg.crack_chance as f32;
+
+    let mut points: Vec<(Pos, i32)> = Vec::new();
+    let mut m = 0;
+    for _ in 0..k {
+        let o = cfg.outer_wall.sample(ctx.r);
+        let p = cfg.outer_wall.sample(ctx.r);
+        let q = cfg.outer_wall.sample(ctx.r);
+        let at = origin.offset(o, p, q);
+        let state = ctx.lv.get(at);
+        if blockinfo::is_air(state) || cfg.invalid_blocks.contains(state) {
+            m += 1;
+            if m > cfg.invalid_threshold {
+                return false;
+            }
+        }
+        points.push((at, cfg.point_offset.sample(ctx.r)));
+    }
+
+    let mut cracks: Vec<Pos> = Vec::new();
+    if crack {
+        let n = ctx.r.next_int_bounded(4);
+        let o = k * 2 + 1;
+        match n {
+            0 => {
+                cracks.push(origin.offset(o, 7, 0));
+                cracks.push(origin.offset(o, 5, 0));
+                cracks.push(origin.offset(o, 1, 0));
+            }
+            1 => {
+                cracks.push(origin.offset(0, 7, o));
+                cracks.push(origin.offset(0, 5, o));
+                cracks.push(origin.offset(0, 1, o));
+            }
+            2 => {
+                cracks.push(origin.offset(o, 7, o));
+                cracks.push(origin.offset(o, 5, o));
+                cracks.push(origin.offset(o, 1, o));
+            }
+            _ => {
+                cracks.push(origin.offset(0, 7, 0));
+                cracks.push(origin.offset(0, 5, 0));
+                cracks.push(origin.offset(0, 1, 0));
+            }
+        }
+    }
+
+    let mut placements: Vec<Pos> = Vec::new();
+    let (i, j) = (cfg.min_gen_offset, cfg.max_gen_offset);
+    // `betweenClosed`: x fastest, then y, then z.
+    for z in i..=j {
+        for y in i..=j {
+            for x in i..=j {
+                let at = origin.offset(x, y, z);
+                let r =
+                    noise.get_value(at.x as f64, at.y as f64, at.z as f64) * cfg.noise_multiplier;
+                let mut s = 0.0;
+                let mut t = 0.0;
+                for (p, off) in &points {
+                    s += 1.0
+                        / ((at.x - p.x).pow(2) as f64
+                            + (at.y - p.y).pow(2) as f64
+                            + (at.z - p.z).pow(2) as f64
+                            + *off as f64)
+                            .sqrt()
+                        + r;
+                }
+                for p in &cracks {
+                    t += 1.0
+                        / ((at.x - p.x).pow(2) as f64
+                            + (at.y - p.y).pow(2) as f64
+                            + (at.z - p.z).pow(2) as f64
+                            + cfg.crack_offset as f64)
+                            .sqrt()
+                        + r;
+                }
+                if s < h {
+                    continue;
+                }
+                let cannot = &cfg.cannot_replace;
+                let put = |ctx: &mut Ctx, p: Pos, v: BlockStateId| {
+                    if !cannot.contains(ctx.lv.get(p)) {
+                        ctx.lv.set(p, v);
+                    }
+                };
+                if crack && t >= l && s < e {
+                    put(ctx, at, states().cave_air);
+                } else if s >= e {
+                    let v = cfg.filling.get(ctx.r, at);
+                    put(ctx, at, v);
+                } else if s >= f {
+                    let bl2 = ctx.r.next_float() < cfg.use_alternate as f32;
+                    let v = if bl2 {
+                        cfg.alternate_inner.get(ctx.r, at)
+                    } else {
+                        cfg.inner.get(ctx.r, at)
+                    };
+                    put(ctx, at, v);
+                    if (!cfg.require_alternate || bl2)
+                        && ctx.r.next_float() < cfg.use_potential as f32
+                    {
+                        placements.push(at);
+                    }
+                } else if s >= g {
+                    let v = cfg.middle.get(ctx.r, at);
+                    put(ctx, at, v);
+                } else {
+                    let v = cfg.outer.get(ctx.r, at);
+                    put(ctx, at, v);
+                }
+            }
+        }
+    }
+
+    for at in placements {
+        let mut s = cfg.inner_placements
+            [ctx.r.next_int_bounded(cfg.inner_placements.len() as i32) as usize];
+        for d in Dir::ALL {
+            if prop(s, "facing").is_some() {
+                s = blockinfo::with_prop(s, "facing", d.name());
+            }
+            let p = at.rel(d);
+            let other = ctx.lv.get(p);
+            if prop(s, "waterlogged").is_some() {
+                s = blockinfo::with_prop(
+                    s,
+                    "waterlogged",
+                    if is_water_source(other) {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                );
+            }
+            if blockinfo::is_air(other) || (is(other, "minecraft:water") && is_water_source(other))
+            {
+                if !cfg.cannot_replace.contains(ctx.lv.get(p)) {
+                    ctx.lv.set(p, s);
+                }
+                break;
+            }
+        }
+    }
+    true
+}
+
+/// `FossilFeature`. Places one of the pack's fossil templates (spines and
+/// skulls) rotated at a random underground height, then its overlay.
+fn fossil(ctx: &mut Ctx, cfg: &FossilConfig, origin: Pos) -> bool {
+    if cfg.fossil_structures.is_empty() || cfg.overlay_structures.is_empty() {
+        return false;
+    }
+    let rotation = Rotation::random(ctx.r);
+    let i = ctx.r.next_int_bounded(cfg.fossil_structures.len() as i32) as usize;
+    let template = &cfg.fossil_structures[i];
+    let overlay = &cfg.overlay_structures[i];
+    let size = rotation_size(rotation, template.size);
+    let p2 = origin.offset(-size[0] / 2, 0, -size[2] / 2);
+    let mut j = origin.y;
+    for k in 0..size[0] {
+        for l in 0..size[2] {
+            j = j.min(ctx.lv.height(Heightmap::OceanFloorWg, p2.x + k, p2.z + l));
+        }
+    }
+    let k = (j - 15 - ctx.r.next_int_bounded(10)).max(ctx.lv.min_y() + 10);
+    let base = zero_position(Pos::new(p2.x, k, p2.z), rotation, template.size);
+    let (min, max) = bounding_box(base, rotation, template.size);
+    let mut empty = 0;
+    for x in [min.x, max.x] {
+        for y in [min.y, max.y] {
+            for z in [min.z, max.z] {
+                let s = ctx.lv.get(Pos::new(x, y, z));
+                if blockinfo::is_air(s) || is(s, "minecraft:lava") || is(s, "minecraft:water") {
+                    empty += 1;
+                }
+            }
+        }
+    }
+    if empty > cfg.max_empty_corners {
+        return false;
+    }
+    let bbox = Some((min, max));
+    structure::place_in_world(
+        ctx.lv,
+        base,
+        template,
+        rotation,
+        &cfg.fossil_processors,
+        bbox,
+        ctx.r,
+    );
+    structure::place_in_world(
+        ctx.lv,
+        base,
+        overlay,
+        rotation,
+        &cfg.overlay_processors,
+        bbox,
+        ctx.r,
+    );
+    true
+}
+
+/// `StructureTemplate.getSize(rotation)`.
+fn rotation_size(rotation: Rotation, size: [i32; 3]) -> [i32; 3] {
+    match rotation {
+        Rotation::Cw90 | Rotation::Ccw90 => [size[2], size[1], size[0]],
+        _ => size,
+    }
 }
 
 fn huge_mushroom(
@@ -1580,4 +2287,580 @@ fn huge_mushroom(
         put(ctx, pos.above(y), s);
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::testkit::{count_name, pack, parse_configured, place, stone, World};
+    use super::*;
+    use crate::vanilla::rng::WorldgenRandom;
+
+    fn setup() -> Option<(String, crate::vanilla::generator::VanillaGenerator)> {
+        let pack = pack()?;
+        let gen = crate::vanilla::generator::VanillaGenerator::new(&pack, 42).expect("generator");
+        Some((pack, gen))
+    }
+
+    #[test]
+    fn desert_well_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        // A sand plateau at y = 64 with stone beneath; the well sinks into it.
+        let mut w = World::new(&gen, 0, 0);
+        w.fill(-16, 0, -16, 31, 63, 31, stone());
+        w.fill(-16, 64, -16, 31, 70, 31, states().sand);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(r#"{"type":"minecraft:desert_well","config":{}}"#).unwrap(),
+        );
+        let writes = place(&gen, &w, &cfg, Pos::new(8, 64, 8), 1);
+        assert!(
+            count_name(&writes, "minecraft:sandstone") > 0,
+            "no sandstone"
+        );
+        assert!(count_name(&writes, "minecraft:water") > 0, "no water");
+        assert_eq!(
+            count_name(&writes, "minecraft:suspicious_sand"),
+            2,
+            "expected exactly two suspicious sand blocks"
+        );
+    }
+
+    #[test]
+    fn monster_room_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let seed = 1i64;
+        let origin = Pos::new(8, 40, 8);
+        // Replay the two size draws so the solid shell matches the room.
+        let mut rr = WorldgenRandom::xoroshiro(seed);
+        let j = rr.next_int_bounded(2) + 2;
+        let o = rr.next_int_bounded(2) + 2;
+        let (k, l) = (-j - 1, j + 1);
+        let (p, q) = (-o - 1, o + 1);
+        let mut w = World::new(&gen, 0, 0);
+        w.fill(
+            origin.x - 6,
+            origin.y - 1,
+            origin.z - 6,
+            origin.x + 6,
+            origin.y - 1,
+            origin.z + 6,
+            stone(),
+        );
+        w.fill(
+            origin.x - 6,
+            origin.y + 4,
+            origin.z - 6,
+            origin.x + 6,
+            origin.y + 4,
+            origin.z + 6,
+            stone(),
+        );
+        w.fill(
+            origin.x - 6,
+            origin.y,
+            origin.z - 6,
+            origin.x + 6,
+            origin.y,
+            origin.z + 6,
+            stone(),
+        );
+        for sx in k + 1..=l - 1 {
+            for sz in p + 1..=q - 1 {
+                for y in origin.y..=origin.y + 3 {
+                    w.set(origin.x + sx, y, origin.z + sz, BlockStateId::AIR);
+                }
+            }
+        }
+        // One opening on the wall, so the room's entrance count is in range.
+        w.set(origin.x + k, origin.y, origin.z, BlockStateId::AIR);
+        w.set(origin.x + k, origin.y + 1, origin.z, BlockStateId::AIR);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(r#"{"type":"minecraft:monster_room","config":{}}"#).unwrap(),
+        );
+        let writes = place(&gen, &w, &cfg, origin, seed);
+        assert!(count_name(&writes, "minecraft:spawner") >= 1, "no spawner");
+        assert!(
+            count_name(&writes, "minecraft:cobblestone") > 0,
+            "no cobblestone"
+        );
+    }
+
+    #[test]
+    fn geode_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let mut w = World::new(&gen, 0, 0);
+        w.fill(-20, 0, -20, 40, 120, 40, stone());
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(
+                r##"{"type":"minecraft:geode","config":{
+                    "blocks":{
+                        "filling_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:air"}},
+                        "inner_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:amethyst_block"}},
+                        "alternate_inner_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:budding_amethyst"}},
+                        "middle_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:calcite"}},
+                        "outer_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:smooth_basalt"}},
+                        "inner_placements":[{"Name":"minecraft:small_amethyst_bud","Properties":{"facing":"up","waterlogged":"false"}},{"Name":"minecraft:amethyst_cluster","Properties":{"facing":"up","waterlogged":"false"}}],
+                        "cannot_replace":"#minecraft:features_cannot_replace",
+                        "invalid_blocks":"#minecraft:geode_invalid_blocks"
+                    },
+                    "layers":{"filling":1.7,"inner_layer":2.2,"middle_layer":3.2,"outer_layer":4.2},
+                    "crack":{"base_crack_size":2.0,"crack_point_offset":2,"generate_crack_chance":0.95},
+                    "distribution_points":{"type":"minecraft:uniform","min_inclusive":3,"max_inclusive":4},
+                    "point_offset":{"type":"minecraft:uniform","min_inclusive":1,"max_inclusive":2},
+                    "outer_wall_distance":{"type":"minecraft:uniform","min_inclusive":4,"max_inclusive":6},
+                    "invalid_blocks_threshold":1,"max_gen_offset":16,"min_gen_offset":-16,
+                    "noise_multiplier":0.05,"placements_require_layer0_alternate":true,
+                    "use_alternate_layer0_chance":0.083,"use_potential_placements_chance":0.35
+                }}"##,
+            )
+            .unwrap(),
+        );
+        let writes = place(&gen, &w, &cfg, Pos::new(8, 50, 8), 3);
+        assert!(
+            count_name(&writes, "minecraft:amethyst_block") > 0,
+            "no amethyst"
+        );
+        assert!(
+            count_name(&writes, "minecraft:smooth_basalt") > 0,
+            "no smooth basalt"
+        );
+        assert!(count_name(&writes, "minecraft:calcite") > 0, "no calcite");
+    }
+
+    #[test]
+    fn geode_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let mut w = World::new(&gen, 0, 0);
+        w.fill(-20, 0, -20, 40, 120, 40, stone());
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(
+                r##"{"type":"minecraft:geode","config":{
+                    "blocks":{
+                        "filling_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:air"}},
+                        "inner_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:amethyst_block"}},
+                        "alternate_inner_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:budding_amethyst"}},
+                        "middle_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:calcite"}},
+                        "outer_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:smooth_basalt"}},
+                        "inner_placements":[{"Name":"minecraft:amethyst_cluster","Properties":{"facing":"up","waterlogged":"false"}}],
+                        "cannot_replace":"#minecraft:features_cannot_replace",
+                        "invalid_blocks":"#minecraft:geode_invalid_blocks"
+                    },
+                    "layers":{"filling":1.7,"inner_layer":2.2,"middle_layer":3.2,"outer_layer":4.2},
+                    "crack":{"base_crack_size":2.0,"crack_point_offset":2,"generate_crack_chance":0.95},
+                    "distribution_points":{"type":"minecraft:uniform","min_inclusive":3,"max_inclusive":4},
+                    "point_offset":{"type":"minecraft:uniform","min_inclusive":1,"max_inclusive":2},
+                    "outer_wall_distance":{"type":"minecraft:uniform","min_inclusive":4,"max_inclusive":6},
+                    "invalid_blocks_threshold":1,"max_gen_offset":16,"min_gen_offset":-16,
+                    "noise_multiplier":0.05,"placements_require_layer0_alternate":true,
+                    "use_alternate_layer0_chance":0.083,"use_potential_placements_chance":0.35
+                }}"##,
+            )
+            .unwrap(),
+        );
+        let a = place(&gen, &w, &cfg, Pos::new(8, 50, 8), 3);
+        let b = place(&gen, &w, &cfg, Pos::new(8, 50, 8), 3);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn monster_room_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let seed = 1i64;
+        let origin = Pos::new(8, 40, 8);
+        let mut w = World::new(&gen, 0, 0);
+        w.fill(
+            origin.x - 6,
+            origin.y - 1,
+            origin.z - 6,
+            origin.x + 6,
+            origin.y - 1,
+            origin.z + 6,
+            stone(),
+        );
+        w.fill(
+            origin.x - 6,
+            origin.y + 4,
+            origin.z - 6,
+            origin.x + 6,
+            origin.y + 4,
+            origin.z + 6,
+            stone(),
+        );
+        w.fill(
+            origin.x - 6,
+            origin.y,
+            origin.z - 6,
+            origin.x + 6,
+            origin.y,
+            origin.z + 6,
+            stone(),
+        );
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(r#"{"type":"minecraft:monster_room","config":{}}"#).unwrap(),
+        );
+        let a = place(&gen, &w, &cfg, origin, seed);
+        let b = place(&gen, &w, &cfg, origin, seed);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn desert_well_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let mut w = World::new(&gen, 0, 0);
+        w.fill(-16, 0, -16, 31, 63, 31, stone());
+        w.fill(-16, 64, -16, 31, 70, 31, states().sand);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(r#"{"type":"minecraft:desert_well","config":{}}"#).unwrap(),
+        );
+        let a = place(&gen, &w, &cfg, Pos::new(8, 64, 8), 7);
+        let b = place(&gen, &w, &cfg, Pos::new(8, 64, 8), 7);
+        assert_eq!(a, b);
+    }
+
+    /// A solid stone 3×3 region the fossil templates can sink into.
+    fn fossil_world(gen: &crate::vanilla::generator::VanillaGenerator) -> World {
+        let mut w = World::new(gen, 0, 0);
+        w.fill(-16, 0, -16, 31, 48, 31, stone());
+        w
+    }
+
+    #[test]
+    fn fossil_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = fossil_world(&gen);
+        // The pack's own configured feature, with all eight templates and
+        // the real processor lists.
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:fossil_coal\"").unwrap(),
+        );
+        let origin = Pos::new(8, 49, 8);
+        let seed = (0..256)
+            .find(|s| count_name(&place(&gen, &w, &cfg, origin, *s), "minecraft:bone_block") > 0)
+            .expect("no seed in 0..256 placed a fossil");
+        let writes = place(&gen, &w, &cfg, origin, seed);
+        assert!(
+            count_name(&writes, "minecraft:bone_block") > 0,
+            "no bone block from the base template"
+        );
+        assert!(
+            count_name(&writes, "minecraft:coal_ore") > 0,
+            "no coal ore from the coal overlay"
+        );
+    }
+
+    #[test]
+    fn fossil_diamonds_overlay_replaces_coal() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = fossil_world(&gen);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:fossil_diamonds\"").unwrap(),
+        );
+        let origin = Pos::new(8, 49, 8);
+        let seed = (0..256)
+            .find(|s| {
+                count_name(
+                    &place(&gen, &w, &cfg, origin, *s),
+                    "minecraft:deepslate_diamond_ore",
+                ) > 0
+            })
+            .expect("no seed in 0..256 produced a diamond ore");
+        let writes = place(&gen, &w, &cfg, origin, seed);
+        assert!(
+            count_name(&writes, "minecraft:deepslate_diamond_ore") > 0,
+            "the rule processor did not turn surviving coal into diamond ore"
+        );
+        assert_eq!(
+            count_name(&writes, "minecraft:coal_ore"),
+            0,
+            "a surviving coal block was not converted"
+        );
+    }
+
+    #[test]
+    fn fossil_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = fossil_world(&gen);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:fossil_coal\"").unwrap(),
+        );
+        let origin = Pos::new(8, 49, 8);
+        let a = place(&gen, &w, &cfg, origin, 12345);
+        let b = place(&gen, &w, &cfg, origin, 12345);
+        assert_eq!(a, b);
+    }
+
+    fn dripstone() -> BlockStateId {
+        blockinfo::parse_state("minecraft:dripstone_block").unwrap()
+    }
+
+    #[test]
+    fn pointed_dripstone_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let mut w = World::new(&gen, 0, 0);
+        // A base below the origin: the tip grows up from it.
+        w.set(8, 39, 8, dripstone());
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(
+                r#"{"type":"minecraft:pointed_dripstone","config":{
+                    "chance_of_directional_spread":0.7,
+                    "chance_of_spread_radius2":0.5,
+                    "chance_of_spread_radius3":0.5,
+                    "chance_of_taller_dripstone":0.2
+                }}"#,
+            )
+            .unwrap(),
+        );
+        let writes = place(&gen, &w, &cfg, Pos::new(8, 40, 8), 7);
+        assert!(
+            count_name(&writes, "minecraft:pointed_dripstone") > 0,
+            "no pointed dripstone"
+        );
+    }
+
+    #[test]
+    fn pointed_dripstone_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let mut w = World::new(&gen, 0, 0);
+        w.set(8, 39, 8, dripstone());
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(
+                r#"{"type":"minecraft:pointed_dripstone","config":{
+                    "chance_of_directional_spread":0.7,
+                    "chance_of_spread_radius2":0.5,
+                    "chance_of_spread_radius3":0.5,
+                    "chance_of_taller_dripstone":0.2
+                }}"#,
+            )
+            .unwrap(),
+        );
+        let a = place(&gen, &w, &cfg, Pos::new(8, 40, 8), 11);
+        let b = place(&gen, &w, &cfg, Pos::new(8, 40, 8), 11);
+        assert_eq!(a, b);
+    }
+
+    /// A cave: stone floor below, stone ceiling above.
+    fn cave_world(
+        gen: &crate::vanilla::generator::VanillaGenerator,
+        floor: i32,
+        ceiling: i32,
+    ) -> World {
+        let mut w = World::new(gen, 0, 0);
+        w.fill(-16, 0, -16, 31, floor, 31, stone());
+        w.fill(-16, ceiling, -16, 31, 90, 31, stone());
+        w
+    }
+
+    #[test]
+    fn dripstone_cluster_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = cave_world(&gen, 30, 51);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:dripstone_cluster\"").unwrap(),
+        );
+        let origin = Pos::new(8, 40, 8);
+        let seed = (0..256)
+            .find(|s| {
+                let wr = place(&gen, &w, &cfg, origin, *s);
+                count_name(&wr, "minecraft:pointed_dripstone") > 0
+                    || count_name(&wr, "minecraft:dripstone_block") > 0
+            })
+            .expect("no seed in 0..256 placed a dripstone cluster");
+        let writes = place(&gen, &w, &cfg, origin, seed);
+        assert!(
+            count_name(&writes, "minecraft:pointed_dripstone") > 0
+                || count_name(&writes, "minecraft:dripstone_block") > 0,
+            "no dripstone cluster blocks"
+        );
+    }
+
+    #[test]
+    fn large_dripstone_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = cave_world(&gen, 30, 61);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:large_dripstone\"").unwrap(),
+        );
+        let origin = Pos::new(8, 45, 8);
+        let seed = (0..256)
+            .find(|s| {
+                count_name(
+                    &place(&gen, &w, &cfg, origin, *s),
+                    "minecraft:dripstone_block",
+                ) > 0
+            })
+            .expect("no seed in 0..256 placed a large dripstone");
+        let writes = place(&gen, &w, &cfg, origin, seed);
+        assert!(
+            count_name(&writes, "minecraft:dripstone_block") > 0,
+            "no large dripstone blocks"
+        );
+    }
+
+    #[test]
+    fn dripstone_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = cave_world(&gen, 30, 61);
+        let cluster = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:dripstone_cluster\"").unwrap(),
+        );
+        let large = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:large_dripstone\"").unwrap(),
+        );
+        let origin = Pos::new(8, 45, 8);
+        assert_eq!(
+            place(&gen, &w, &cluster, origin, 99),
+            place(&gen, &w, &cluster, origin, 99)
+        );
+        assert_eq!(
+            place(&gen, &w, &large, origin, 99),
+            place(&gen, &w, &large, origin, 99)
+        );
+    }
+
+    /// Stone everywhere but one air cell, so the growth attaches to a stone
+    /// face and the spreader can add a second face to the same cell.
+    fn glow_lichen_world(gen: &crate::vanilla::generator::VanillaGenerator) -> World {
+        let mut w = World::new(gen, 0, 0);
+        w.fill(-16, 0, -16, 31, 70, 31, stone());
+        w.set(8, 40, 8, BlockStateId::AIR);
+        w
+    }
+
+    fn max_faces(writes: &[(i32, i32, i32, BlockStateId)]) -> usize {
+        const FACES: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
+        writes
+            .iter()
+            .filter(|(_, _, _, s)| blockinfo::name(*s) == "minecraft:glow_lichen")
+            .map(|(_, _, _, s)| {
+                FACES
+                    .iter()
+                    .filter(|f| blockinfo::prop(*s, f) == Some("true"))
+                    .count()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn glow_lichen_spreads() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = glow_lichen_world(&gen);
+        // Force the spread draw so the multiface spreader must run.
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(
+                r#"{"type":"minecraft:multiface_growth","config":{
+                    "block":"minecraft:glow_lichen",
+                    "can_be_placed_on":["minecraft:stone"],
+                    "can_place_on_ceiling":true,
+                    "can_place_on_floor":false,
+                    "can_place_on_wall":true,
+                    "chance_of_spreading":1.0,
+                    "search_range":20
+                }}"#,
+            )
+            .unwrap(),
+        );
+        let writes = place(&gen, &w, &cfg, Pos::new(8, 40, 8), 5);
+        assert!(
+            count_name(&writes, "minecraft:glow_lichen") > 0,
+            "no glow lichen placed"
+        );
+        assert!(
+            max_faces(&writes) >= 2,
+            "the spreader did not add a second face"
+        );
+    }
+
+    #[test]
+    fn glow_lichen_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = glow_lichen_world(&gen);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:glow_lichen\"").unwrap(),
+        );
+        let a = place(&gen, &w, &cfg, Pos::new(8, 40, 8), 3);
+        let b = place(&gen, &w, &cfg, Pos::new(8, 40, 8), 3);
+        assert_eq!(a, b);
+    }
 }

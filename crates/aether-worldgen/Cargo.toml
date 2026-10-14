@@ -11,13 +11,12 @@ authors.workspace = true
 [dependencies]
 # worldgen only needs the world model types, not the storage backend.
 aether-world = { workspace = true, default-features = false }
+# Fossil structure templates are gzipped NBT in the pack, read at run time.
+miniz_oxide = { workspace = true }
 
 [dev-dependencies]
-# The parity oracle reads vanilla's own region files: NBT from the converter,
-# zlib from the same codec the converter uses. Dev-only — the generator itself
-# stays dependency-free.
+# The parity oracle reads vanilla's own region files, via the converter's NBT.
 aether-convert = { path = "../aether-convert", version = "0.1.0", default-features = false }
-miniz_oxide = { workspace = true }
 
 [lints]
 workspace = true

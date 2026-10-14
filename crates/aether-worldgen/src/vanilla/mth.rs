@@ -3,6 +3,8 @@
 
 use std::sync::OnceLock;
 
+use super::rng::Rng;
+
 fn table() -> &'static [f32] {
     static T: OnceLock<Vec<f32>> = OnceLock::new();
     T.get_or_init(|| {
@@ -36,6 +38,19 @@ pub fn lerp(t: f64, a: f64, b: f64) -> f64 {
     a + t * (b - a)
 }
 
+/// `Mth.getSeed(x, y, z)` — one of the few integer hashes the game uses both
+/// to seed a positional random and to key structure placement.
+#[inline]
+pub fn get_seed(x: i32, y: i32, z: i32) -> i64 {
+    let mut l =
+        (x as i64).wrapping_mul(3_129_871) ^ (z as i64).wrapping_mul(116_129_781) ^ y as i64;
+    l = l
+        .wrapping_mul(l)
+        .wrapping_mul(42_317_861)
+        .wrapping_add(l.wrapping_mul(11));
+    l >> 16
+}
+
 /// `Mth.clampedMap`.
 pub fn clamped_map(v: f64, from_a: f64, from_b: f64, to_a: f64, to_b: f64) -> f64 {
     let t = (v - from_a) / (from_b - from_a);
@@ -46,4 +61,22 @@ pub fn clamped_map(v: f64, from_a: f64, from_b: f64, to_a: f64, to_b: f64) -> f6
     } else {
         lerp(t, to_a, to_b)
     }
+}
+
+/// `Mth.clampedMap` over `float`s (the game has both overloads and they
+/// round differently).
+pub fn clamped_map_f32(v: f32, from_a: f32, from_b: f32, to_a: f32, to_b: f32) -> f32 {
+    let t = (v - from_a) / (from_b - from_a);
+    if t < 0.0 {
+        to_a
+    } else if t > 1.0 {
+        to_b
+    } else {
+        to_a + t * (to_b - to_a)
+    }
+}
+
+/// `Mth.randomBetween(random, min, max)`.
+pub fn random_between_f32(r: &mut impl Rng, min: f32, max: f32) -> f32 {
+    r.next_float() * (max - min) + min
 }

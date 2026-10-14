@@ -24,9 +24,12 @@
 //! are not generated.
 
 pub mod blocks;
+pub mod dripstone;
 pub mod extra;
 pub mod features;
 pub mod level;
+#[cfg(test)]
+pub(crate) mod testkit;
 pub mod tree;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
