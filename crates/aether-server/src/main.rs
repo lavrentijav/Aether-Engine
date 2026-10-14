@@ -424,6 +424,13 @@ pub fn visibility_config() -> config::VisibilityConfig {
         .unwrap_or_default()
 }
 
+/// Whether visibility culling is on. A single load and branch, for the block
+/// write path, which must cost nothing on the default (off) configuration.
+#[inline]
+pub fn visibility_enabled() -> bool {
+    CONFIG.get().is_some_and(|c| c.visibility.enabled)
+}
+
 /// The chunk radius kept loaded around a player, from the config.
 ///
 /// Clamped the same way the streamer clamps it, so the visibility search and

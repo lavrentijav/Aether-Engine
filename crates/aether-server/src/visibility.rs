@@ -127,17 +127,21 @@ impl State {
         self.reveal_pending = false;
     }
 
-    /// Mark this player's reachable set stale when `key` falls inside the
-    /// view box rooted at their current section.
+    /// Mark this player's reachable set stale if any of `sections` falls
+    /// inside the view box rooted at their current section.
     ///
     /// A change outside that box cannot alter the answer: the breadth-first
     /// search never looks outside it. The vertical axis is always in range,
     /// because the search walks the whole column.
-    pub fn mark_dirty_if_in_view(&mut self, view_radius: i32, key: (i32, i32, i32)) {
-        if let Some(c) = self.center {
-            if (key.0 - c.0).abs() <= view_radius && (key.2 - c.2).abs() <= view_radius {
-                self.dirty = true;
-            }
+    pub fn mark_dirty_for(&mut self, view_radius: i32, sections: &[(i32, i32, i32)]) {
+        let Some(c) = self.center else {
+            return;
+        };
+        if sections
+            .iter()
+            .any(|s| (s.0 - c.0).abs() <= view_radius && (s.2 - c.2).abs() <= view_radius)
+        {
+            self.dirty = true;
         }
     }
 
@@ -212,31 +216,45 @@ fn cache() -> &'static Mutex<GraphCache> {
     CACHE.get_or_init(|| Mutex::new(GraphCache::default()))
 }
 
-/// Forget a section's cached graph after a block in it changed, and mark the
-/// players whose view covers it so their next search recomputes.
+/// Sections written since the last tick, for the tick thread to hand to the
+/// players in range. Bounded: drained once a tick.
+static DIRTY_SECTIONS: OnceLock<Mutex<HashSet<(i32, i32, i32)>>> = OnceLock::new();
+
+fn dirty_sections() -> &'static Mutex<HashSet<(i32, i32, i32)>> {
+    DIRTY_SECTIONS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Forget a section's cached graph after a block in it changed.
 ///
 /// Called from every path that writes a block, so a broken wall reopens the
-/// sight line to whatever was behind it. Only players whose view actually
-/// contains the section are marked: a break on the far side of the map does
-/// not force anyone else's search to rerun.
+/// sight line to whatever was behind it. It is deliberately the cheapest thing
+/// that can work: with culling off it returns before touching any lock or
+/// allocating, so a deployment on the default configuration pays nothing
+/// (N1). When on, it takes the cache lock once and records the section; the
+/// tick thread decides which players that actually affects. There is no
+/// snapshot of the player list here.
+#[inline]
 pub fn invalidate_block(x: i32, y: i32, z: i32) {
-    let key = (x >> 4, y >> 4, z >> 4);
-    invalidate_section(&mut cache().lock().unwrap(), key);
-    if let Some(reg) = crate::game::registry() {
-        let r = crate::server_view_radius();
-        for player in reg.snapshot() {
-            let mut st = player.visibility();
-            if !st.bypass {
-                st.mark_dirty_if_in_view(r, key);
-            }
-        }
+    if !crate::visibility_enabled() {
+        return;
     }
+    record_invalidation((x >> 4, y >> 4, z >> 4));
+}
+
+/// The cache/epoch/dirty work for one changed section.
+fn record_invalidation(key: (i32, i32, i32)) {
+    invalidate_section(&mut cache().lock().unwrap(), key);
+    dirty_sections().lock().unwrap().insert(key);
 }
 
 /// Drop every cached graph. Used by tests to start from a clean cache.
 #[cfg(test)]
 pub fn invalidate_all() {
-    cache().lock().unwrap().graphs.clear();
+    let mut c = cache().lock().unwrap();
+    c.graphs.clear();
+    c.epochs.clear();
+    drop(c);
+    dirty_sections().lock().unwrap().clear();
 }
 
 /// The section graph for `c`, computed and cached on first ask.
@@ -396,6 +414,20 @@ pub fn tick(players: &[Arc<PlayerHandle>], world: &dyn BlockSource) {
     let cfg = crate::visibility_config();
     if !cfg.enabled {
         return;
+    }
+    // Hand the sections written since the last tick to the players whose view
+    // covers one, so each one's own search is invalidated — without the writer
+    // thread ever walking the player list (N1). Drained here, so the set stays
+    // bounded; a write that lands during this tick waits for the next one.
+    let dirty: Vec<(i32, i32, i32)> = dirty_sections().lock().unwrap().drain().collect();
+    if !dirty.is_empty() {
+        let r = crate::server_view_radius();
+        for player in players {
+            let mut st = player.visibility();
+            if !st.bypass {
+                st.mark_dirty_for(r, &dirty);
+            }
+        }
     }
     for player in players {
         if player.visibility().bypass {
@@ -638,7 +670,7 @@ mod tests {
             center: Some((0, 0, 0)),
             ..Default::default()
         };
-        near.mark_dirty_if_in_view(8, (3, 100, 3));
+        near.mark_dirty_for(8, &[(3, 100, 3)]);
         assert!(near.dirty, "a change in the view box must mark the player");
         assert!(!near.is_fresh((0, 0, 0)));
 
@@ -646,7 +678,7 @@ mod tests {
             center: Some((0, 0, 0)),
             ..Default::default()
         };
-        far.mark_dirty_if_in_view(8, (20, 0, 0));
+        far.mark_dirty_for(8, &[(20, 0, 0)]);
         assert!(!far.dirty, "a change beyond the view box must not");
     }
 
@@ -673,22 +705,50 @@ mod tests {
         assert!(!cache.graphs.contains_key(&key));
     }
 
+    /// Serialises the tests that touch the process-wide cache, epoch and
+    /// dirty set, which are shared across the whole test binary.
+    fn global_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
-    fn invalidating_a_section_drops_its_cached_graph() {
-        // What `/rollback` now does for every restored block (finding 3): the
-        // graph cache must forget the section so the reopened or resealed cave
-        // is re-evaluated, not served from the old wall.
+    fn write_invalidation_is_free_when_off_and_records_when_on() {
+        // N1: with culling off (the default, and what every test here runs
+        // under) a block write must not touch the cache or record a section.
+        // Once on, it records the section and evicts the graph.
+        let _guard = global_test_lock();
         invalidate_all();
-        let world = FlatWorld;
-        let key = (0, 2, 0);
-        assert_eq!(
-            graph(&world, key).unwrap().open_faces(),
-            aether_world::visibility::ALL_FACES
-        );
-        assert!(cache().lock().unwrap().graphs.contains_key(&key));
-        // invalidate_block takes block coordinates: (0, 32, 0) is section (0,2,0).
+        graph(&FlatWorld, (0, 2, 0));
         invalidate_block(0, 32, 0);
-        assert!(!cache().lock().unwrap().graphs.contains_key(&key));
+        assert!(
+            dirty_sections().lock().unwrap().is_empty(),
+            "a disabled write must not record a section"
+        );
+        assert!(
+            cache().lock().unwrap().graphs.contains_key(&(0, 2, 0)),
+            "a disabled write must not evict a cached graph"
+        );
+
+        // The enabled path (what `invalidate_block` runs once the flag is on).
+        record_invalidation((0, 2, 0));
+        assert!(!cache().lock().unwrap().graphs.contains_key(&(0, 2, 0)));
+        assert!(dirty_sections().lock().unwrap().contains(&(0, 2, 0)));
+        dirty_sections().lock().unwrap().clear();
+    }
+
+    #[test]
+    fn the_tick_hands_only_in_range_sections_to_a_player() {
+        // A drained section within the player's view dirties them; one beyond
+        // it does not, and the drain is what bounds the set.
+        let mut st = State {
+            center: Some((0, 0, 0)),
+            ..Default::default()
+        };
+        st.mark_dirty_for(2, &[(5, 0, 0)]);
+        assert!(!st.dirty, "5 sections away is outside a radius-2 view");
+        st.mark_dirty_for(2, &[(1, 0, 1)]);
+        assert!(st.dirty, "1 section away is inside");
     }
 
     #[test]
@@ -709,6 +769,7 @@ mod tests {
 
     #[test]
     fn a_flat_world_below_the_surface_caches_a_sealed_graph() {
+        let _guard = global_test_lock();
         invalidate_all();
         let world = FlatWorld;
         let g = graph(&world, (0, -2, 0)).unwrap();
@@ -719,6 +780,7 @@ mod tests {
 
     #[test]
     fn visible_from_hides_a_sealed_underground_column() {
+        let _guard = global_test_lock();
         invalidate_all();
         // The player is on the surface of the flat world: the solid sections
         // far below must not be in the reachable set.
@@ -735,6 +797,7 @@ mod tests {
         // The join path masks its first columns through exactly these calls
         // (finding 2). A buried ore a section below the surface must not reach
         // the client as itself.
+        let _guard = global_test_lock();
         invalidate_all();
         struct BuriedOre;
         impl BlockSource for BuriedOre {
