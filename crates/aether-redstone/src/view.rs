@@ -188,6 +188,16 @@ pub trait RedstoneView {
         0
     }
 
+    /// The chain limit for one neighbour-update cascade — vanilla's gamerule
+    /// `maxChainedNeighborUpdates` (default **1,000,000**). Past it the rest of a
+    /// single cascade is dropped, which bounds a runaway circuit.
+    ///
+    /// This is per level in vanilla, so it belongs on the world, not the
+    /// stateless engine. `usize::MAX` disables the limit.
+    fn max_chained_neighbor_updates(&self) -> usize {
+        1_000_000
+    }
+
     /// Record that the redstone torch at `pos` toggled at game time `when`.
     ///
     /// This is vanilla's `RECENT_TOGGLES`. It lives on the **world**, not the
@@ -219,12 +229,21 @@ pub struct MemWorld {
     game_time: u64,
     /// Per-position torch toggle times, pruned to the 60-tick burnout window.
     toggles: HashMap<BlockPos, std::collections::VecDeque<u64>>,
+    /// The configured chain limit; `None` means vanilla's 1,000,000.
+    max_chained: Option<usize>,
 }
 
 impl MemWorld {
     /// A fresh, empty world at game time 0.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the neighbour-update chain limit (vanilla's
+    /// `maxChainedNeighborUpdates`). For tests that need to observe truncation.
+    pub fn with_max_chained(mut self, limit: usize) -> Self {
+        self.max_chained = Some(limit);
+        self
     }
 
     /// Put the block whose state name is `name` at `pos`.
@@ -321,6 +340,10 @@ impl RedstoneView for MemWorld {
         self.game_time
     }
 
+    fn max_chained_neighbor_updates(&self) -> usize {
+        self.max_chained.unwrap_or(1_000_000)
+    }
+
     fn record_toggle(&mut self, pos: BlockPos, when: u64) {
         let log = self.toggles.entry(pos).or_default();
         // Prune entries outside the 60-tick burnout window, so a clock torch
@@ -404,6 +427,10 @@ impl RedstoneView for TraceWorld {
 
     fn game_time(&self) -> u64 {
         self.inner.game_time()
+    }
+
+    fn max_chained_neighbor_updates(&self) -> usize {
+        self.inner.max_chained_neighbor_updates()
     }
 
     fn record_toggle(&mut self, pos: BlockPos, when: u64) {

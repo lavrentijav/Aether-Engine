@@ -796,3 +796,79 @@ fn skip_shape_update_on_wire_suppresses_the_wire_shape_update() {
         "without the flag the wire must update"
     );
 }
+
+#[test]
+fn a_twenty_by_twenty_wire_patch_resolves_to_vanilla_levels() {
+    // D1: a single cascade larger than the old 512-entry cap must resolve fully.
+    // A redstone block in the middle of a flat wire patch powers every wire,
+    // with power = 16 - Manhattan distance (15 adjacent, one less per block,
+    // zero past 15). This is ~400 wire cells in one cascade.
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    const N: i32 = 20;
+    let center = (N / 2, N / 2);
+    for x in 0..N {
+        for z in 0..N {
+            w.put(p(x, 0, z), "minecraft:redstone_wire");
+        }
+    }
+    let block = p(center.0, 0, center.1);
+    w.put(block, "minecraft:redstone_block");
+    engine.on_placed(&mut w, block);
+
+    for x in 0..N {
+        for z in 0..N {
+            if (x, z) == center {
+                continue;
+            }
+            let dist = (x - center.0).abs() + (z - center.1).abs();
+            let expected = if (1..=15).contains(&dist) {
+                (16 - dist) as u8
+            } else {
+                0
+            };
+            assert_eq!(
+                power(&w, p(x, 0, z)),
+                expected,
+                "wire at ({x},{z}), Manhattan {dist}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_neighbor_update_chain_limit_is_configurable() {
+    // D1: the cap is the world's `maxChainedNeighborUpdates`, not a hard 512.
+    // The same patch under a deliberately tiny limit leaves cells uncharged.
+    fn charged(limit: Option<usize>) -> u32 {
+        let engine = Redstone::new();
+        let mut w = match limit {
+            Some(n) => MemWorld::new().with_max_chained(n),
+            None => MemWorld::new(),
+        };
+        const N: i32 = 20;
+        for x in 0..N {
+            for z in 0..N {
+                w.put(p(x, 0, z), "minecraft:redstone_wire");
+            }
+        }
+        let block = p(N / 2, 0, N / 2);
+        w.put(block, "minecraft:redstone_block");
+        engine.on_placed(&mut w, block);
+        let mut sum = 0u32;
+        for x in 0..N {
+            for z in 0..N {
+                sum += u32::from(power(&w, p(x, 0, z)));
+            }
+        }
+        sum
+    }
+
+    let full = charged(None);
+    let truncated = charged(Some(16));
+    assert!(full > 0);
+    assert!(
+        truncated < full,
+        "a tiny limit must truncate the cascade ({truncated} vs {full})"
+    );
+}

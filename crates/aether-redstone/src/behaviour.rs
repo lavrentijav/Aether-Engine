@@ -47,10 +47,6 @@ impl NeighborSource {
     }
 }
 
-/// The chain limit for the neighbour-update cascade — vanilla's
-/// `maxChainedNeighborUpdates`. Beyond it the rest is dropped with an error.
-const MAX_CHAINED: usize = 512;
-
 /// The initial recursion limit for shape updates — vanilla's default `j` of
 /// `512` in `Block.updateOrDestroy` / `Level.setBlock`. Each nested shape
 /// update decrements it, so a malformed shape loop terminates.
@@ -192,14 +188,16 @@ pub struct Context<'a> {
 }
 
 impl<'a> Context<'a> {
-    /// Wrap a world for the duration of one engine call.
+    /// Wrap a world for the duration of one engine call. The chain limit is
+    /// the world's (vanilla's `maxChainedNeighborUpdates`, default 1,000,000).
     pub fn new(view: &'a mut dyn RedstoneView) -> Self {
+        let max_chained = view.max_chained_neighbor_updates();
         Self {
             view,
             stack: Vec::new(),
             added: Vec::new(),
             count: 0,
-            max_chained: MAX_CHAINED,
+            max_chained,
         }
     }
 
