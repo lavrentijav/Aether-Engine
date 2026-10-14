@@ -26,11 +26,18 @@ use crate::session::DemoWorld;
 // named.
 pub const SPEED: u8 = 0;
 pub const SLOWNESS: u8 = 1;
+pub const STRENGTH: u8 = 4;
+/// Instant health and instant damage are applied the moment they arrive and
+/// are never stored on the entity — see [`is_instant`].
+pub const INSTANT_HEALTH: u8 = 5;
+pub const INSTANT_DAMAGE: u8 = 6;
 pub const JUMP_BOOST: u8 = 7;
 pub const NAUSEA: u8 = 8;
 pub const REGENERATION: u8 = 9;
 pub const RESISTANCE: u8 = 10;
 pub const FIRE_RESISTANCE: u8 = 11;
+pub const WATER_BREATHING: u8 = 12;
+pub const INVISIBILITY: u8 = 13;
 pub const BLINDNESS: u8 = 14;
 pub const NIGHT_VISION: u8 = 15;
 pub const HUNGER: u8 = 16;
@@ -39,6 +46,32 @@ pub const POISON: u8 = 18;
 pub const WITHER: u8 = 19;
 pub const ABSORPTION: u8 = 21;
 pub const SATURATION: u8 = 22;
+pub const LUCK: u8 = 25;
+pub const SLOW_FALLING: u8 = 27;
+pub const WIND_CHARGED: u8 = 35;
+pub const WEAVING: u8 = 36;
+pub const OOZING: u8 = 37;
+pub const INFESTED: u8 = 38;
+
+/// Whether an effect takes hold immediately rather than over time. Vanilla's
+/// `InstantenousMobEffect`: instant health heals and instant damage hurts, and
+/// the effect itself is never added to the entity.
+pub fn is_instant(id: u8) -> bool {
+    matches!(id, INSTANT_HEALTH | INSTANT_DAMAGE)
+}
+
+/// The immediate heal of an instant-health effect at `amplifier`, scaled by a
+/// splash's distance factor — vanilla's `HealOrHarmMobEffect`, `(int)(d * (4
+/// << amplifier) + 0.5)`.
+pub fn instant_heal(amplifier: u8, factor: f64) -> f32 {
+    (factor * (4i64 << amplifier.min(30)) as f64 + 0.5) as i64 as f32
+}
+
+/// The immediate damage of an instant-damage effect, vanilla's
+/// `(int)(d * (6 << amplifier) + 0.5)`.
+pub fn instant_damage(amplifier: u8, factor: f64) -> f32 {
+    (factor * (6i64 << amplifier.min(30)) as f64 + 0.5) as i64 as f32
+}
 
 /// The `minecraft:attribute` registry id of `movement_speed`. The registry
 /// is alphabetical in the data dump but registered in vanilla's own order on

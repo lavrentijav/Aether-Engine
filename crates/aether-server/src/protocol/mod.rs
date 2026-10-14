@@ -515,6 +515,8 @@ pub enum Menu {
     Hopper,
     /// A dispenser or dropper, 9 slots.
     Dispenser,
+    /// A brewing stand, 5 slots.
+    BrewingStand,
 }
 
 /// Flag on an [`ServerEvent::EntityMeta`] index: the field belongs to a

@@ -265,8 +265,11 @@ pub struct Version {
     pub menu_furnace: i32,
     pub menu_hopper: i32,
     pub menu_dispenser: i32,
+    pub menu_brewing_stand: i32,
     pub component_damage: i32,
     pub component_custom_name: i32,
+    /// This version's id of the `minecraft:potion_contents` data component.
+    pub component_potion_contents: i32,
     /// This version's id of the `minecraft:lore` data component. A disguised
     /// stack carries one line naming the real item, so a player can tell a
     /// stand-in from the genuine article.
@@ -538,8 +541,10 @@ macro_rules! version {
             menu_furnace: super::gen::$m::MENU_FURNACE,
             menu_hopper: super::gen::$m::MENU_HOPPER,
             menu_dispenser: super::gen::$m::MENU_GENERIC_3X3,
+            menu_brewing_stand: super::gen::$m::MENU_BREWING_STAND,
             component_damage: super::gen::$m::COMPONENT_DAMAGE,
             component_custom_name: super::gen::$m::COMPONENT_CUSTOM_NAME,
+            component_potion_contents: super::gen::$m::COMPONENT_POTION_CONTENTS,
             component_lore: super::gen::$m::COMPONENT_LORE,
             particle_explosion: super::gen::$m::PARTICLE_EXPLOSION,
             particle_explosion_emitter: super::gen::$m::PARTICLE_EXPLOSION_EMITTER,
@@ -599,9 +604,11 @@ macro_rules! legacy_version {
             menu_furnace: super::legacy_gen::$m::MENU_FURNACE,
             menu_hopper: super::legacy_gen::$m::MENU_HOPPER,
             menu_dispenser: super::legacy_gen::$m::MENU_GENERIC_3X3,
+            menu_brewing_stand: super::legacy_gen::$m::MENU_BREWING_STAND,
             component_damage: super::legacy_gen::$m::COMPONENT_DAMAGE,
             component_custom_name: super::legacy_gen::$m::COMPONENT_CUSTOM_NAME,
             component_lore: super::legacy_gen::$m::COMPONENT_LORE,
+            component_potion_contents: super::legacy_gen::$m::COMPONENT_POTION_CONTENTS,
             particle_explosion: super::legacy_gen::$m::PARTICLE_EXPLOSION,
             particle_explosion_emitter: super::legacy_gen::$m::PARTICLE_EXPLOSION_EMITTER,
             registries: Registries::None,
@@ -645,6 +652,60 @@ mod tests {
             assert_eq!(v.state(BlockStateId(0)), 0, "air stays air");
         }
         assert_eq!(V26_3.direct_bits(), 16, "26.3 has more than 32768 states");
+    }
+
+    #[test]
+    fn potion_component_ids_match_each_releases_own_registry() {
+        // The `minecraft:data_component_type` registry assigns ids in
+        // registration order. For the modern codecs these are dumped from each
+        // release's own DataComponents `<clinit>`: 1.21.11 registers
+        // `potion_contents` 49th, 26.1.2/26.2 add `charged_projectiles` and
+        // `bundle_contents` before it (51), and 26.3 adds two more (53). For
+        // protocols 766-773 the value comes from PrismarineJS `minecraft-data`'s
+        // `SlotComponentType`, which matches the committed `legacy_gen` tables
+        // for every other component and is what `gen_legacy_play.js` reads. A
+        // wrong id makes the client decode the payload as another component and
+        // reject the stack, so every supported codec is pinned.
+        assert_eq!(V1_21_11.component_potion_contents, 49);
+        assert_eq!(V26_1.component_potion_contents, 51);
+        assert_eq!(V26_2.component_potion_contents, 51);
+        assert_eq!(V26_3.component_potion_contents, 53);
+        // 1.20.5/1.21.1: 31; 1.21.3/1.21.4: 41; 1.21.5 through 1.21.10: 42.
+        assert_eq!(V1_20_5.component_potion_contents, 31);
+        assert_eq!(V1_21_1.component_potion_contents, 31);
+        assert_eq!(V1_21_3.component_potion_contents, 41);
+        assert_eq!(V1_21_4.component_potion_contents, 41);
+        assert_eq!(V1_21_5.component_potion_contents, 42);
+        assert_eq!(V1_21_6.component_potion_contents, 42);
+        assert_eq!(V1_21_8.component_potion_contents, 42);
+        assert_eq!(V1_21_9.component_potion_contents, 42);
+        // 1.20.2-1.20.4 predate the data-component slot entirely: their potion
+        // is the NBT `Potion` tag, so the component id is unused (0).
+        assert_eq!(V1_20_2.component_potion_contents, 0);
+        assert_eq!(V1_20_4.component_potion_contents, 0);
+    }
+
+    #[test]
+    fn brewing_stand_menu_ids_match_each_releases_own_registry() {
+        // `minecraft:menu` in `MenuType` registration order: `brewing_stand`
+        // follows `blast_furnace`. 1.21.11 puts it at 11; the crafter menu
+        // added in 1.21 shifts the pre-1.21 entries one lower (10), and every
+        // release from 1.21.1 keeps 11. The registry is built-in and unchanged
+        // from 1.20.2 through 1.20.6, so 1.20.2/1.20.4 match 1.20.5.
+        assert_eq!(V1_21_11.menu_brewing_stand, 11);
+        assert_eq!(V26_1.menu_brewing_stand, 11);
+        assert_eq!(V26_2.menu_brewing_stand, 11);
+        assert_eq!(V26_3.menu_brewing_stand, 11);
+        assert_eq!(V1_20_2.menu_brewing_stand, 10);
+        assert_eq!(V1_20_4.menu_brewing_stand, 10);
+        assert_eq!(V1_20_5.menu_brewing_stand, 10);
+        assert_eq!(V1_21_1.menu_brewing_stand, 11);
+        assert_eq!(V1_21_3.menu_brewing_stand, 11);
+        assert_eq!(V1_21_4.menu_brewing_stand, 11);
+        assert_eq!(V1_21_5.menu_brewing_stand, 11);
+        assert_eq!(V1_21_6.menu_brewing_stand, 11);
+        assert_eq!(V1_21_8.menu_brewing_stand, 11);
+        assert_eq!(V1_21_9.menu_brewing_stand, 11);
     }
 
     #[test]

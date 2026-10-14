@@ -228,6 +228,7 @@ pub mod v1_20_2 {
     pub const COMPONENT_DAMAGE: i32 = 0;
     pub const COMPONENT_CUSTOM_NAME: i32 = 0;
     pub const COMPONENT_LORE: i32 = 0;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 0;
 
     /// Engine attribute id (1.21.11 order) -> the identifier this
     /// release names it by (attributes were named, not indexed, before
@@ -239,6 +240,7 @@ pub mod v1_20_2 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 10;
     pub const MENU_CRAFTING: i32 = 11;
     pub const MENU_FURNACE: i32 = 13;
     pub const MENU_HOPPER: i32 = 15;
@@ -469,6 +471,7 @@ pub mod v1_20_4 {
     pub const COMPONENT_DAMAGE: i32 = 0;
     pub const COMPONENT_CUSTOM_NAME: i32 = 0;
     pub const COMPONENT_LORE: i32 = 0;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 0;
 
     /// Engine attribute id (1.21.11 order) -> the identifier this
     /// release names it by (attributes were named, not indexed, before
@@ -480,6 +483,7 @@ pub mod v1_20_4 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 10;
     pub const MENU_CRAFTING: i32 = 11;
     pub const MENU_FURNACE: i32 = 13;
     pub const MENU_HOPPER: i32 = 15;
@@ -713,6 +717,7 @@ pub mod v1_20_5 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 7;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 31;
 
     /// 1.20.5 names attributes by registry index instead.
     pub static ATTRIBUTE_NAMES: &[&str] = &[];
@@ -722,6 +727,7 @@ pub mod v1_20_5 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 10;
     pub const MENU_CRAFTING: i32 = 11;
     pub const MENU_FURNACE: i32 = 13;
     pub const MENU_HOPPER: i32 = 15;
@@ -955,6 +961,7 @@ pub mod v1_21_1 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 7;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 31;
 
     /// 1.20.5 names attributes by registry index instead.
     pub static ATTRIBUTE_NAMES: &[&str] = &[];
@@ -964,6 +971,7 @@ pub mod v1_21_1 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;
@@ -1217,6 +1225,7 @@ pub mod v1_21_3 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 8;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 41;
 
     /// 1.20.5 names attributes by registry index instead.
     pub static ATTRIBUTE_NAMES: &[&str] = &[];
@@ -1226,6 +1235,7 @@ pub mod v1_21_3 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;
@@ -1478,6 +1488,7 @@ pub mod v1_21_4 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 8;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 41;
 
     /// 1.20.5 names attributes by registry index instead.
     pub static ATTRIBUTE_NAMES: &[&str] = &[];
@@ -1487,6 +1498,7 @@ pub mod v1_21_4 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;
@@ -1740,6 +1752,7 @@ pub mod v1_21_5 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 8;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 42;
 
     /// 1.20.5 names attributes by registry index instead.
     pub static ATTRIBUTE_NAMES: &[&str] = &[];
@@ -1749,6 +1762,7 @@ pub mod v1_21_5 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;
@@ -2003,6 +2017,7 @@ pub mod v1_21_6 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 8;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 42;
 
     /// 1.20.5 names attributes by registry index instead.
     pub static ATTRIBUTE_NAMES: &[&str] = &[];
@@ -2012,6 +2027,7 @@ pub mod v1_21_6 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;
@@ -2266,6 +2282,7 @@ pub mod v1_21_8 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 8;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 42;
 
     /// 1.20.5 names attributes by registry index instead.
     pub static ATTRIBUTE_NAMES: &[&str] = &[];
@@ -2275,6 +2292,7 @@ pub mod v1_21_8 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;
@@ -2531,6 +2549,7 @@ pub mod v1_21_9 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 8;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 42;
 
     /// 1.20.5 names attributes by registry index instead.
     pub static ATTRIBUTE_NAMES: &[&str] = &[];
@@ -2540,6 +2559,7 @@ pub mod v1_21_9 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;

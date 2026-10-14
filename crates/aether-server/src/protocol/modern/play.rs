@@ -19,6 +19,7 @@ fn menu_id(v: &Version, m: Menu) -> i32 {
         Menu::Furnace => v.menu_furnace,
         Menu::Hopper => v.menu_hopper,
         Menu::Dispenser => v.menu_dispenser,
+        Menu::BrewingStand => v.menu_brewing_stand,
     }
 }
 
@@ -37,14 +38,20 @@ pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
     };
     match v.wire_stack_item(s.item) {
         Some(w) if !w.disguised => {
-            p.var_int(s.count as i32).var_int(w.id);
+            // A potion, splash potion or lingering potion carries its contents
+            // in the `minecraft:potion_contents` component; a worn tool
+            // carries its damage. Both are components added to the default set.
+            let potion = potion_contents(s);
+            let added = (s.damage > 0) as i32 + potion.is_some() as i32;
+            p.var_int(s.count as i32)
+                .var_int(w.id)
+                .var_int(added)
+                .var_int(0);
             if s.damage > 0 {
-                p.var_int(1)
-                    .var_int(0)
-                    .var_int(v.component_damage)
-                    .var_int(s.damage as i32);
-            } else {
-                p.var_int(0).var_int(0);
+                p.var_int(v.component_damage).var_int(s.damage as i32);
+            }
+            if let Some(potion) = potion {
+                write_potion_contents(v, p, potion);
             }
         }
         // A stand-in for a *different* item (the compat layer's substitution,
@@ -57,6 +64,32 @@ pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
         // instead. The server keeps the real stack; only the picture changes.
         None => write_disguised_stack(v, p, s, stand_in_id(v)),
     }
+}
+
+/// The `minecraft:potion` registry index of a potion stack, or `None` for
+/// anything else. A potion item with no contents is water, which is what the
+/// item's own default component holds (`PotionItem.getDefaultInstance`).
+fn potion_contents(s: &Stack) -> Option<u16> {
+    let name = s.item.vanilla_name()?;
+    if !crate::game::brewing::is_potion_item(name) {
+        return None;
+    }
+    Some(s.potion.unwrap_or(crate::game::brewing::WATER))
+}
+
+/// Append `minecraft:potion_contents`, the component that names the potion.
+///
+/// Its stream codec is `PotionContents.STREAM_CODEC`: an optional potion (a
+/// boolean then the registry VarInt), an optional custom colour, a list of
+/// custom effects and an optional custom name — the client derives the
+/// effects, name and colour from the potion, so the last three are empty.
+fn write_potion_contents(v: &Version, p: &mut PacketOut, potion: u16) {
+    p.var_int(v.component_potion_contents)
+        .bool(true)
+        .var_int(potion as i32)
+        .bool(false) // no custom colour: the client computes it
+        .var_int(0) // no custom effects
+        .bool(false); // no custom name
 }
 
 /// A stand-in item id the version always has, for an item it cannot name.
@@ -122,6 +155,18 @@ fn write_legacy_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
     let mut fields: Vec<(String, Nbt)> = Vec::new();
     if s.damage > 0 {
         fields.push(("Damage".to_owned(), Nbt::Int(s.damage as i32)));
+    }
+    // A potion names itself in the NBT `Potion` tag before 1.20.5, where
+    // 1.20.5+ uses the `minecraft:potion_contents` component. The value is the
+    // `minecraft:potion` registry *name* — which is why the older form needs
+    // no component id and why the registry ordering cannot drift here.
+    if let Some(id) = potion_contents(s) {
+        if let Some(def) = crate::game::brewing::def_of(id) {
+            fields.push((
+                "Potion".to_owned(),
+                Nbt::Str(format!("minecraft:{}", def.name)),
+            ));
+        }
     }
     if disguised {
         let (name, marker) = disguise_labels(s);
@@ -976,6 +1021,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_potion_stack_carries_potion_contents() {
+        let v = &crate::protocol::modern::version::V1_21_11;
+        let potion = crate::game::brewing::potion_id("minecraft:long_swiftness").unwrap();
+        let stack = Stack::potion("minecraft:potion", potion, 1);
+        let mut p = PacketOut::new(0);
+        write_stack(v, &mut p, Some(&stack));
+        let body = p.body()[1..].to_vec(); // past the packet id
+        let mut pin = crate::proto::PacketIn::new(&body);
+        assert_eq!(pin.var_int().unwrap(), 1, "count");
+        assert_eq!(
+            pin.var_int().unwrap(),
+            v.item_id("minecraft:potion").unwrap(),
+            "the potion item"
+        );
+        assert_eq!(pin.var_int().unwrap(), 1, "potion_contents added");
+        assert_eq!(pin.var_int().unwrap(), 0, "none removed");
+        assert_eq!(pin.var_int().unwrap(), v.component_potion_contents);
+        assert!(pin.bool().unwrap(), "the potion field is present");
+        assert_eq!(pin.var_int().unwrap(), potion as i32);
+        assert!(!pin.bool().unwrap(), "no custom colour");
+        assert_eq!(pin.var_int().unwrap(), 0, "no custom effects");
+        assert!(!pin.bool().unwrap(), "no custom name");
+    }
+
+    #[test]
+    fn a_potion_stack_uses_each_versions_own_component_id() {
+        // The component id is not shared: every codec must write its own
+        // release's. A test that pinned only 1.21.11 would miss a 26.x registry
+        // that grew a component before `potion_contents`, or a 1.20.5-1.21.10
+        // release whose compat table is one of many.
+        use crate::protocol::modern::version::{
+            V1_20_5, V1_21_1, V1_21_11, V1_21_3, V1_21_4, V1_21_5, V1_21_6, V1_21_8, V1_21_9,
+            V26_1, V26_2, V26_3,
+        };
+        let potion = crate::game::brewing::potion_id("minecraft:swiftness").unwrap();
+        let stack = Stack::potion("minecraft:potion", potion, 1);
+        for v in [
+            &V1_21_11, &V26_1, &V26_2, &V26_3, &V1_20_5, &V1_21_1, &V1_21_3, &V1_21_4, &V1_21_5,
+            &V1_21_6, &V1_21_8, &V1_21_9,
+        ] {
+            let mut p = PacketOut::new(0);
+            write_stack(v, &mut p, Some(&stack));
+            let body = p.body()[1..].to_vec();
+            let mut pin = crate::proto::PacketIn::new(&body);
+            assert_eq!(pin.var_int().unwrap(), 1, "{}: count", v.name);
+            assert_eq!(
+                pin.var_int().unwrap(),
+                v.item_id("minecraft:potion").unwrap(),
+                "{}: the potion item",
+                v.name
+            );
+            assert_eq!(pin.var_int().unwrap(), 1, "{}: component added", v.name);
+            assert_eq!(pin.var_int().unwrap(), 0, "{}: none removed", v.name);
+            assert_eq!(
+                pin.var_int().unwrap(),
+                v.component_potion_contents,
+                "{}: its own potion_contents id",
+                v.name
+            );
+        }
+    }
+
     /// Whether `hay` contains `needle` as a contiguous run.
     fn contains(hay: &[u8], needle: &[u8]) -> bool {
         hay.windows(needle.len()).any(|w| w == needle)
@@ -1209,6 +1317,50 @@ mod tests {
     }
 
     #[test]
+    fn a_potion_carries_its_name_in_the_old_nbt_slot() {
+        // Before 1.20.5 a potion names itself through the NBT `Potion` tag —
+        // the registry *name*, not an index — rather than the
+        // `minecraft:potion_contents` component. This is why 764/765 need no
+        // component id.
+        for v in [
+            &crate::protocol::modern::version::V1_20_2,
+            &crate::protocol::modern::version::V1_20_4,
+        ] {
+            let potion = crate::game::brewing::potion_id("minecraft:long_swiftness").unwrap();
+            let s = Stack::potion("minecraft:potion", potion, 1);
+            let mut p = PacketOut::new(0);
+            write_stack(v, &mut p, Some(&s));
+            let body = p.body()[1..].to_vec();
+            let mut pin = crate::proto::PacketIn::new(&body);
+            assert!(pin.bool().unwrap(), "{}: present", v.name);
+            assert_eq!(
+                pin.var_int().unwrap(),
+                v.item_id("minecraft:potion").unwrap(),
+                "{}: the potion item",
+                v.name
+            );
+            assert_eq!(pin.u8().unwrap(), 1, "{}: i8 count", v.name);
+            assert_eq!(pin.u8().unwrap(), 0x0A, "{}: TAG_Compound", v.name);
+            // The compound holds the `Potion` string with the registry name.
+            assert!(
+                contains(&body, b"Potion"),
+                "{}: the Potion tag is present",
+                v.name
+            );
+            assert!(
+                contains(&body, b"minecraft:long_swiftness"),
+                "{}: and carries the registry name",
+                v.name
+            );
+        }
+        // A non-potion stack carries no `Potion` tag.
+        let v = &crate::protocol::modern::version::V1_20_4;
+        let mut p = PacketOut::new(0);
+        write_stack(v, &mut p, Some(&Stack::new(id("minecraft:diamond"), 1)));
+        assert!(!contains(&p.body()[1..], b"Potion"));
+    }
+
+    #[test]
     fn the_pose_serializer_is_20_before_1_20_5() {
         // 1.20.5 grew a `particles` serializer ahead of `pose`, shifting it
         // from 20 to 21; 1.21.9 moved it back. Older codecs must keep 20.
@@ -1336,6 +1488,29 @@ mod tests {
         // 1.20.3 sends the NBT component form: tag byte then payload.
         let pkts = encode(&crate::protocol::modern::version::V1_20_4, &open).unwrap();
         assert_eq!(pkts[0].body()[3], 0x08, "TAG_String NBT component");
+
+        // The same open-screen path carries the brewing-stand menu id, which
+        // is one below 1.21's on 764/765.
+        for v in [
+            &crate::protocol::modern::version::V1_20_2,
+            &crate::protocol::modern::version::V1_20_4,
+        ] {
+            let ev = ServerEvent::OpenWindow {
+                window_id: 1,
+                menu: Menu::BrewingStand,
+                title: "Brewing Stand".to_owned(),
+            };
+            let pkts = encode(v, &ev).unwrap();
+            let mut pin = crate::proto::PacketIn::new(&pkts[0].body()[1..]);
+            assert_eq!(pin.var_int().unwrap(), 1);
+            assert_eq!(
+                pin.var_int().unwrap(),
+                v.menu_brewing_stand,
+                "{}: brewing-stand menu id",
+                v.name
+            );
+            assert_eq!(v.menu_brewing_stand, 10, "{}", v.name);
+        }
 
         let death = ServerEvent::DeathMessage {
             entity_id: 3,
