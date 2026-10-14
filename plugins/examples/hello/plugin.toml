@@ -1,0 +1,22 @@
+# Manifest for the reference plugin. See crates/aether-plugin/src/manifest.rs.
+id = "hello"
+name = "Hello Plugin"
+version = "0.1.0"
+api = "0.1"
+entry = "hello.wasm"
+priority = 10
+
+# What the plugin asks the operator to grant; a call for an ungranted
+# capability is refused and logged rather than trapping.
+capabilities = ["log", "config", "supports"]
+
+# Only these events are ever called; everything else costs nothing.
+subscribe = [
+    "on-tick",
+    "before-block-break",
+    "after-player-join",
+    "after-player-leave",
+    "on-command",
+]
+commands = ["hello"]
+tick_period = 20
