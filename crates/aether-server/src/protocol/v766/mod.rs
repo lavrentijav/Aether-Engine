@@ -64,8 +64,6 @@ const PLAY_BLOCK_CHANGED_ACK: i32 = 0x05;
 const PLAY_PLAYER_INFO: i32 = 0x3E;
 /// Play: tab list entry removed.
 const PLAY_PLAYER_REMOVE: i32 = 0x3D;
-/// Play: spawn an entity.
-const PLAY_SPAWN_ENTITY: i32 = 0x01;
 /// Play: remove entities.
 const PLAY_DESTROY_ENTITIES: i32 = 0x42;
 /// Play: keep-alive (a long, unlike 1.8's varint).
@@ -99,10 +97,6 @@ const SB_FLYING: i32 = 0x1D;
 const SB_BLOCK_DIG: i32 = 0x24;
 /// Serverbound: block placement.
 const SB_BLOCK_PLACE: i32 = 0x38;
-
-/// Entity type id for `minecraft:player` — a registry index, which moves
-/// whenever an entity type is added ahead of `player`.
-const PLAYER_ENTITY_TYPE: i32 = 128;
 
 /// Stable id for the pack this server offers.
 const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_0000_0000_0002;
@@ -272,24 +266,6 @@ impl ProtocolCodec for Codec {
             ServerEvent::TabListRemove(uuid) => {
                 let mut p = PacketOut::new(PLAY_PLAYER_REMOVE);
                 p.var_int(1).uuid(*uuid);
-                vec![p]
-            }
-            ServerEvent::SpawnPlayer(h) => {
-                let pos = h.pos();
-                let mut p = PacketOut::new(PLAY_SPAWN_ENTITY);
-                p.var_int(h.entity_id)
-                    .uuid(h.uuid)
-                    .var_int(PLAYER_ENTITY_TYPE)
-                    .f64(pos.x)
-                    .f64(pos.y)
-                    .f64(pos.z)
-                    .u8(angle(pos.pitch))
-                    .u8(angle(pos.yaw))
-                    .u8(angle(pos.yaw)) // head yaw
-                    .var_int(0) // no object data
-                    .u16(0)
-                    .u16(0)
-                    .u16(0); // velocity
                 vec![p]
             }
             ServerEvent::DespawnEntity(eid) => {
@@ -484,11 +460,6 @@ fn wait_for(s: &mut Conn, id: i32) -> io::Result<()> {
         io::ErrorKind::InvalidData,
         "client never sent the expected handshake packet",
     ))
-}
-
-/// Degrees -> the protocol's angle byte (256ths of a full turn).
-fn angle(deg: f32) -> u8 {
-    (deg.rem_euclid(360.0) / 360.0 * 256.0).round() as u8
 }
 
 /// Encode a block position: `X (26) | Z (26) | Y (12)`, Y in the low bits.

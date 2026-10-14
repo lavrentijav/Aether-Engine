@@ -64,8 +64,6 @@ const PLAY_BLOCK_CHANGED_ACK: i32 = 0x05;
 const PLAY_PLAYER_INFO: i32 = 0x40;
 /// Play: tab list entry removed.
 const PLAY_PLAYER_REMOVE: i32 = 0x3F;
-/// Play: spawn an entity.
-const PLAY_SPAWN_ENTITY: i32 = 0x01;
 /// Play: remove entities.
 const PLAY_DESTROY_ENTITIES: i32 = 0x47;
 /// Play: keep-alive (a long, unlike 1.8's varint).
@@ -99,10 +97,6 @@ const SB_FLYING: i32 = 0x1F;
 const SB_BLOCK_DIG: i32 = 0x26;
 /// Serverbound: block placement.
 const SB_BLOCK_PLACE: i32 = 0x3A;
-
-/// Entity type id for `minecraft:player` — a registry index, which moves
-/// whenever an entity type is added ahead of `player`.
-const PLAYER_ENTITY_TYPE: i32 = 147;
 
 /// Stable id for the pack this server offers.
 const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_0000_0000_0002;
@@ -276,24 +270,6 @@ impl ProtocolCodec for Codec {
             ServerEvent::TabListRemove(uuid) => {
                 let mut p = PacketOut::new(PLAY_PLAYER_REMOVE);
                 p.var_int(1).uuid(*uuid);
-                vec![p]
-            }
-            ServerEvent::SpawnPlayer(h) => {
-                let pos = h.pos();
-                let mut p = PacketOut::new(PLAY_SPAWN_ENTITY);
-                p.var_int(h.entity_id)
-                    .uuid(h.uuid)
-                    .var_int(PLAYER_ENTITY_TYPE)
-                    .f64(pos.x)
-                    .f64(pos.y)
-                    .f64(pos.z)
-                    .u8(angle(pos.pitch))
-                    .u8(angle(pos.yaw))
-                    .u8(angle(pos.yaw)) // head yaw
-                    .var_int(0) // no object data
-                    .u16(0)
-                    .u16(0)
-                    .u16(0); // velocity
                 vec![p]
             }
             ServerEvent::DespawnEntity(eid) => {
@@ -490,11 +466,6 @@ fn wait_for(s: &mut Conn, id: i32) -> io::Result<()> {
     ))
 }
 
-/// Degrees -> the protocol's angle byte (256ths of a full turn).
-fn angle(deg: f32) -> u8 {
-    (deg.rem_euclid(360.0) / 360.0 * 256.0).round() as u8
-}
-
 /// Encode a block position: `X (26) | Z (26) | Y (12)`, Y in the low bits.
 fn encode_position(x: i64, y: i64, z: i64) -> i64 {
     ((x & 0x3FF_FFFF) << 38) | ((z & 0x3FF_FFFF) << 12) | (y & 0xFFF)
@@ -627,5 +598,12 @@ mod tests {
         pkts[0].write_to(&mut wire, None).unwrap();
         // length, id, then 300 as a VarInt: 0b10101100, 0b00000010.
         assert_eq!(wire, vec![3, PLAY_BLOCK_CHANGED_ACK as u8, 0xAC, 0x02]);
+    }
+    #[test]
+    fn the_player_entity_type_is_this_releases_own() {
+        // 1.21.2/1.21.3's `minecraft:player` is 148; the codec used to carry
+        // a hand-rolled 147 (1.21.4's value), which spawned other players as
+        // the wrong entity. The shared spawn path reads the generated table.
+        assert_eq!(version().entity_type("minecraft:player"), Some(148));
     }
 }

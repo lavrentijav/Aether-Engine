@@ -64,25 +64,6 @@ const PLAY_BLOCK_CHANGED_ACK: i32 = 0x04;
 const PLAY_PLAYER_INFO: i32 = 0x44;
 /// Play: tab list entry removed.
 const PLAY_PLAYER_REMOVE: i32 = 0x43;
-/// Play: spawn an entity.
-/// A spawn packet's velocity, at rest.
-///
-/// 1.21.9 changed this field twice over: it moved from the end of the packet
-/// to just after the position, and the three `i16` components became a
-/// variable-length quantized vector whose **zero is a single `0x00` byte**,
-/// not six. A real 1.21.11 client refused the packet outright:
-///
-/// ```text
-/// Packet play/clientbound/minecraft:add_entity was larger than I expected,
-/// found 5 bytes extra whilst reading packet clientbound/minecraft:add_entity
-/// ```
-///
-/// Nothing this server spawns moves under its own velocity — dropped items
-/// are moved with position updates from [`crate::ground`] — so the zero form
-/// is the only one needed, and the quantized encoding is not implemented.
-const ZERO_VELOCITY: [u8; 1] = [0x00];
-
-const PLAY_SPAWN_ENTITY: i32 = 0x01;
 /// Play: remove entities.
 const PLAY_DESTROY_ENTITIES: i32 = 0x4B;
 /// Play: keep-alive (a long, unlike 1.8's varint).
@@ -116,10 +97,6 @@ const SB_FLYING: i32 = 0x20;
 const SB_BLOCK_DIG: i32 = 0x28;
 /// Serverbound: block placement.
 const SB_BLOCK_PLACE: i32 = 0x3F;
-
-/// Entity type id for `minecraft:player` — a registry index, which moves
-/// whenever an entity type is added ahead of `player`.
-const PLAYER_ENTITY_TYPE: i32 = 155;
 
 /// Stable id for the pack this server offers.
 const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_0000_0000_0002;
@@ -293,23 +270,6 @@ impl ProtocolCodec for Codec {
             ServerEvent::TabListRemove(uuid) => {
                 let mut p = PacketOut::new(PLAY_PLAYER_REMOVE);
                 p.var_int(1).uuid(*uuid);
-                vec![p]
-            }
-            ServerEvent::SpawnPlayer(h) => {
-                let pos = h.pos();
-                let mut p = PacketOut::new(PLAY_SPAWN_ENTITY);
-                p.var_int(h.entity_id)
-                    .uuid(h.uuid)
-                    .var_int(PLAYER_ENTITY_TYPE)
-                    .f64(pos.x)
-                    .f64(pos.y)
-                    .f64(pos.z)
-                    // Velocity moved ahead of the angles in 1.21.9.
-                    .bytes(&ZERO_VELOCITY)
-                    .u8(angle(pos.pitch))
-                    .u8(angle(pos.yaw))
-                    .u8(angle(pos.yaw)) // head yaw
-                    .var_int(0); // no object data
                 vec![p]
             }
             ServerEvent::DespawnEntity(eid) => {
@@ -506,11 +466,6 @@ fn wait_for(s: &mut Conn, id: i32) -> io::Result<()> {
     ))
 }
 
-/// Degrees -> the protocol's angle byte (256ths of a full turn).
-fn angle(deg: f32) -> u8 {
-    (deg.rem_euclid(360.0) / 360.0 * 256.0).round() as u8
-}
-
 /// Encode a block position: `X (26) | Z (26) | Y (12)`, Y in the low bits.
 fn encode_position(x: i64, y: i64, z: i64) -> i64 {
     ((x & 0x3FF_FFFF) << 38) | ((z & 0x3FF_FFFF) << 12) | (y & 0xFFF)
@@ -643,5 +598,12 @@ mod tests {
         pkts[0].write_to(&mut wire, None).unwrap();
         // length, id, then 300 as a VarInt: 0b10101100, 0b00000010.
         assert_eq!(wire, vec![3, PLAY_BLOCK_CHANGED_ACK as u8, 0xAC, 0x02]);
+    }
+    #[test]
+    fn the_player_entity_type_is_this_releases_own() {
+        // 1.21.9/1.21.10's `minecraft:player` is 151; the hand-rolled 155 was
+        // 1.21.11's value and the client dropped an unknown entity type. The
+        // shared spawn path reads the generated table now.
+        assert_eq!(version().entity_type("minecraft:player"), Some(151));
     }
 }
