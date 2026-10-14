@@ -392,6 +392,28 @@ pub enum ServerEvent<'a> {
         entity_id: i32,
         slots: Vec<(u8, Option<crate::inventory::Stack>)>,
     },
+    /// A status effect was applied or changed on an entity: the client shows
+    /// its icon and, if visible, its particles.
+    UpdateMobEffect {
+        entity_id: i32,
+        /// `minecraft:mob_effect` registry id.
+        effect: u8,
+        amplifier: u8,
+        /// Ticks remaining, `-1` for infinite.
+        duration: i32,
+        ambient: bool,
+        visible: bool,
+        show_icon: bool,
+    },
+    /// A status effect ran out or was removed.
+    RemoveMobEffect { entity_id: i32, effect: u8 },
+    /// An entity's attributes changed — the movement-speed modifier a
+    /// speed or slowness effect puts on.
+    UpdateAttributes {
+        entity_id: i32,
+        /// `(attribute registry id, base value, [(modifier id, amount, operation)])`.
+        properties: Vec<(i32, f64, Vec<(String, f64, i8)>)>,
+    },
     /// The player's own health and hunger.
     Health {
         health: f32,

@@ -298,6 +298,49 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             }
             vec![p]
         }
+        ServerEvent::UpdateMobEffect {
+            entity_id,
+            effect,
+            amplifier,
+            duration,
+            ambient,
+            visible,
+            show_icon,
+        } => {
+            let mut p = PacketOut::new(ids.cb_update_mob_effect);
+            let flags = (*ambient as u8) | ((*visible as u8) << 1) | ((*show_icon as u8) << 2);
+            p.var_int(*entity_id)
+                .var_int(*effect as i32)
+                .var_int(*amplifier as i32)
+                .var_int(*duration)
+                .u8(flags);
+            vec![p]
+        }
+        ServerEvent::RemoveMobEffect { entity_id, effect } => {
+            let mut p = PacketOut::new(ids.cb_remove_mob_effect);
+            p.var_int(*entity_id).var_int(*effect as i32);
+            vec![p]
+        }
+        ServerEvent::UpdateAttributes {
+            entity_id,
+            properties,
+        } => {
+            // A client given an attribute it does not know drops the whole
+            // packet, so a version without this packet is left alone rather
+            // than sent a malformed one.
+            if ids.cb_update_attributes < 0 {
+                return Some(Vec::new());
+            }
+            let mut p = PacketOut::new(ids.cb_update_attributes);
+            p.var_int(*entity_id).var_int(properties.len() as i32);
+            for (key, value, modifiers) in properties {
+                p.var_int(*key).f64(*value).var_int(modifiers.len() as i32);
+                for (id, amount, operation) in modifiers {
+                    p.string(id).f64(*amount).u8(*operation as u8);
+                }
+            }
+            vec![p]
+        }
         ServerEvent::Health {
             health,
             food,

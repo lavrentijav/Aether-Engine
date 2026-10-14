@@ -33,11 +33,14 @@ cb_set_held_slot
 cb_set_time
 cb_sound
 cb_take_item_entity
+cb_update_attributes
+cb_update_mob_effect
 cb_keep_alive
 cb_login
 cb_player_info_update
 cb_player_info_remove
 cb_remove_entities
+cb_remove_mob_effect
 cb_system_chat
 cb_commands
 sb_accept_teleportation
