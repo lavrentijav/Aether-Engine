@@ -143,8 +143,6 @@ impl ItemTable {
 pub enum Resolution {
     /// Write this item (or an empty slot) into the reported slot.
     Apply(Option<ItemTypeId>),
-    /// The report was a stand-in with no authoritative source: refuse it.
-    Refuse,
 }
 
 impl ItemTable {
@@ -187,7 +185,13 @@ impl ItemTable {
                     let carried = if carried == Some(real) { None } else { carried };
                     (Resolution::Apply(Some(real)), carried)
                 }
-                None => (Resolution::Refuse, carried),
+                // No source in the window: a *creation*. A creative client can
+                // conjure any item its version has, so the report stands as the
+                // genuine item the wire id names. Refusing it (the old
+                // behaviour) made ordinary creative picks vanish: on 1.20.5–1.21.8
+                // `oak_planks` is also `pale_oak_planks`'s stand-in, so every
+                // Oak Planks pick was a stand-in with no source.
+                None => (Resolution::Apply(Some(r)), carried),
             },
         }
     }
@@ -449,12 +453,41 @@ mod tests {
         let (res, _next) = t.resolve_change(Some(shown), None, carried, &others(&slots, 11));
         assert_eq!(res, Resolution::Apply(Some(spear)));
 
-        // 4. A trident conjured from nothing is refused, not accepted.
+        // 4. A trident with no source is a *creation*: a creative client can
+        //    conjure one, so it is accepted as the genuine trident (F1), not
+        //    refused.
         let (res, _) = t.resolve_change(Some(shown), None, None, &[]);
-        assert_eq!(res, Resolution::Refuse);
-        // ...but a genuine item is always believed.
+        assert_eq!(res, Resolution::Apply(Some(id("minecraft:trident"))));
+        // ...and a genuine item is always believed.
         let (res, _) = t.resolve_change(Some(id("minecraft:diamond")), None, None, &[]);
         assert_eq!(res, Resolution::Apply(Some(id("minecraft:diamond"))));
+    }
+
+    #[test]
+    fn a_creative_pick_of_a_stand_in_target_item_is_not_refused() {
+        // F1: many ordinary items share their wire id with some engine item's
+        // stand-in — `oak_planks` is `pale_oak_planks`'s, `torch` is
+        // `copper_torch`'s — so a plain creative pick from the menu is a
+        // stand-in with no source. It must be written as the genuine item, not
+        // refused (which made Ordinary Oak Planks unobtainable on 1.20.5–1.21.8).
+        let t = &V1_21_1;
+        for name in [
+            "minecraft:oak_planks",
+            "minecraft:torch",
+            "minecraft:bookshelf",
+            "minecraft:iron_bars",
+            "minecraft:trident",
+        ] {
+            let picked = id(name);
+            let w = t.wire(picked).expect("a version item");
+            assert!(
+                t.stand_in_wire(w.id),
+                "{name} must be a stand-in wire id for this test to bite"
+            );
+            let (res, carry) = t.resolve_change(Some(picked), None, None, &[]);
+            assert_eq!(res, Resolution::Apply(Some(picked)), "{name} vanished");
+            assert_eq!(carry, None);
+        }
     }
 
     #[test]
