@@ -14,10 +14,13 @@
 //!   vanilla would fall through to the next entry when the biome at the
 //!   generation position does not match, which needs the terrain. That check
 //!   belongs to generation and is not modelled yet.
-//! * Only template structures with code-defined layouts are placed; jigsaw
-//!   structures (villages, …) are not — see `docs/tasks/QF-notes.md`.
+//! * Only the igloo is placed, from the pack's `.nbt` templates
+//!   ([`igloo`]). Jigsaw structures (villages, …) are not — see
+//!   `docs/tasks/QF-notes.md`.
 
+pub mod igloo;
 pub mod placement;
+pub mod template;
 
 use std::collections::{HashMap, HashSet};
 
@@ -267,6 +270,21 @@ fn structure_biome_names(pack: &DataPack, structure_id: &str) -> Vec<String> {
     let mut out = Vec::new();
     collect_biome_names(pack, j.get("biomes"), &mut out, 0);
     out
+}
+
+/// The biome ids a structure can appear in — `Structure.biomes()`, resolved.
+pub fn structure_biomes(
+    pack: &DataPack,
+    biomes: &BiomeRegistry,
+    structure_id: &str,
+) -> Vec<BiomeId> {
+    let mut ids: Vec<BiomeId> = structure_biome_names(pack, structure_id)
+        .iter()
+        .filter_map(|n| biomes.id(n))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 /// A `HolderSet<Biome>` from JSON: `"#tag"`, `"minecraft:biome"` or a list.
