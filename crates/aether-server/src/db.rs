@@ -113,6 +113,74 @@ const COLUMNS: [(&str, &str); 18] = [
 /// How many of them.
 const NCOLS: usize = COLUMNS.len();
 
+/// The `information_schema.columns.udt_name` Postgres reports for one of the
+/// [`COLUMNS`] types.
+///
+/// `data_type` is useless for comparing: it is `ARRAY` for every array type,
+/// so `bigint[]` and a hypothetical `integer[]` would look alike. `udt_name`
+/// is the underlying type — `int8`, `_int8`, `uuid`, `text` — which is exact.
+fn udt_name(ty: &str) -> &'static str {
+    match ty {
+        "bigint" => "int8",
+        "integer" => "int4",
+        "text" => "text",
+        "uuid" => "uuid",
+        "bigint[]" => "_int8",
+        other => unreachable!("COLUMNS carries no type `{other}`"),
+    }
+}
+
+/// What an existing column needs to match [`COLUMNS`], or `None` if it already
+/// does (or is not one of the mirror's columns, like the generated `at`).
+///
+/// A mismatch is migrated with `USING NULL`, not a cast: every difference this
+/// is built to repair is a column whose old type has no lossless conversion —
+/// `item_uid` was a `uuid`, `derived_from` a `uuid[]`, from before item uids
+/// became a 64-bit counter. Guessing a numeric value for a UUID would invent
+/// item identity, which is worse than dropping it. The boolean is whether the
+/// column is `item_uid`, whose lost values are counted and reported.
+fn migration_for_column(name: &str, udt: &str) -> Option<(String, bool)> {
+    let (_, want) = COLUMNS.iter().find(|(n, _)| *n == name)?;
+    if udt == udt_name(want) {
+        return None;
+    }
+    Some((
+        format!("ALTER TABLE aether_events ALTER COLUMN {name} TYPE {want} USING NULL"),
+        name == "item_uid",
+    ))
+}
+
+/// The `ALTER TABLE` statements that bring an existing `aether_events` onto
+/// [`COLUMNS`], and whether any migration drops item ids that must be counted.
+///
+/// `existing` is `(column_name, udt_name)` as `information_schema.columns`
+/// reports it; the order does not matter. Columns the table lacks are left to
+/// the schema's own `ADD COLUMN IF NOT EXISTS`.
+pub struct MigrationPlan {
+    /// One `ALTER TABLE ... ALTER COLUMN ... TYPE ... USING NULL` per column
+    /// whose type differs from [`COLUMNS`].
+    pub statements: Vec<String>,
+    /// True when `item_uid` is among them, so the caller counts the non-null
+    /// values and reports how many ids were lost.
+    pub item_uids_lost: bool,
+}
+
+/// Plan the migration of `existing` columns onto [`COLUMNS`].
+pub fn migration_plan(existing: &[(String, String)]) -> MigrationPlan {
+    let mut statements = Vec::new();
+    let mut item_uids_lost = false;
+    for (name, udt) in existing {
+        if let Some((sql, loses)) = migration_for_column(name, udt) {
+            statements.push(sql);
+            item_uids_lost |= loses;
+        }
+    }
+    MigrationPlan {
+        statements,
+        item_uids_lost,
+    }
+}
+
 /// Render a `u128` as a UUID string. Actors are UUIDs; this is the one
 /// spelling of an actor the mirror and the economy agree on.
 pub fn uuid_text(v: u128) -> String {
@@ -132,7 +200,9 @@ pub fn uuid_text(v: u128) -> String {
 ///
 /// Item uids are a 64-bit allocated counter now, not UUIDs: the column is a
 /// `bigint`, and there is exactly one spelling — decimal — so the mirror, the
-/// economy and `/audit` all compare and sort the same way.
+/// economy, `/audit` and `/inventory` all compare, print and sort the same way.
+/// They did not always: the commands printed `{:016x}` hex while this column
+/// held decimal, so an operator could not copy an id from one to the other.
 pub fn uid_text(u: u64) -> String {
     u.to_string()
 }
@@ -291,9 +361,56 @@ mod live {
         fn reconnect(&mut self) -> Result<(), String> {
             let mut c = Client::connect(&self.url, NoTls).map_err(|e| e.to_string())?;
             c.batch_execute(SCHEMA).map_err(|e| e.to_string())?;
+            migrate(&mut c)?;
             self.client = Some(c);
             Ok(())
         }
+    }
+
+    /// Bring an existing table onto [`COLUMNS`], creating nothing.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` and `ADD COLUMN IF NOT EXISTS` (in
+    /// [`SCHEMA`]) do nothing to a column that already exists with the wrong
+    /// type, so a mirror written before item uids became a counter keeps its
+    /// `uuid` `item_uid` and every insert fails. Reading
+    /// `information_schema.columns` and altering the mismatched columns is the
+    /// only way a running deployment heals.
+    fn migrate(c: &mut Client) -> Result<(), String> {
+        let rows = c
+            .query(
+                "SELECT column_name, udt_name FROM information_schema.columns \
+                 WHERE table_name = 'aether_events'",
+                &[],
+            )
+            .map_err(|e| e.to_string())?;
+        let existing: Vec<(String, String)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+        let plan = migration_plan(&existing);
+        if plan.statements.is_empty() {
+            return Ok(());
+        }
+        // Count before altering: `USING NULL` is about to erase the ids.
+        let lost = if plan.item_uids_lost {
+            Some(
+                c.query_one(
+                    "SELECT count(*) FROM aether_events WHERE item_uid IS NOT NULL",
+                    &[],
+                )
+                .map_err(|e| e.to_string())?
+                .get::<_, i64>(0),
+            )
+        } else {
+            None
+        };
+        for sql in &plan.statements {
+            c.batch_execute(sql).map_err(|e| e.to_string())?;
+        }
+        if let Some(n) = lost {
+            crate::log::warn(&format!(
+                "postgres mirror migrated `item_uid` from uuid to bigint; \
+                 {n} row(s) lost their item id, which has no bigint equivalent"
+            ));
+        }
+        Ok(())
     }
 
     impl EventSink for PostgresSink {
@@ -623,5 +740,77 @@ mod tests {
         let sql = insert_statement(1);
         assert!(sql.contains("VALUES ($1::text::bigint,"));
         assert!(!sql.contains(",("), "no stray empty tuple");
+    }
+
+    /// `COLUMNS` as `information_schema.columns` would report a table already
+    /// on the current schema.
+    fn current_schema() -> Vec<(String, String)> {
+        COLUMNS
+            .iter()
+            .map(|(n, ty)| ((*n).to_string(), udt_name(ty).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_schema_already_on_the_current_types_needs_no_migration() {
+        // The generated `at` column is not in COLUMNS and must be ignored, not
+        // reported as an unknown type.
+        let existing = current_schema()
+            .into_iter()
+            .chain([("at".to_string(), "timestamptz".to_string())])
+            .collect::<Vec<_>>();
+        let plan = migration_plan(&existing);
+        assert!(plan.statements.is_empty(), "{:?}", plan.statements);
+        assert!(!plan.item_uids_lost);
+    }
+
+    #[test]
+    fn a_pre_t03_uuid_item_uid_is_migrated_and_its_ids_are_counted() {
+        // The schema this repair exists for: `item_uid uuid` and
+        // `derived_from uuid[]`. `CREATE TABLE IF NOT EXISTS` cannot fix
+        // either, so without this every insert fails forever.
+        let mut existing = current_schema();
+        for (name, udt) in &mut existing {
+            match name.as_str() {
+                "item_uid" => *udt = "uuid".to_string(),
+                "derived_from" => *udt = "_uuid".to_string(),
+                _ => {}
+            }
+        }
+        let plan = migration_plan(&existing);
+        assert!(plan.item_uids_lost, "the item ids are about to be erased");
+        assert_eq!(plan.statements.len(), 2, "{:?}", plan.statements);
+        assert!(
+            plan.statements
+                .iter()
+                .any(|s| s
+                    == "ALTER TABLE aether_events ALTER COLUMN item_uid TYPE bigint USING NULL")
+        );
+        assert!(plan
+            .statements
+            .iter()
+            .any(|s| s
+                == "ALTER TABLE aether_events ALTER COLUMN derived_from TYPE bigint[] USING NULL"));
+    }
+
+    #[test]
+    fn any_type_mismatch_migrates_but_only_item_uid_counts_as_a_lost_id() {
+        let plan = migration_plan(&[("block_from".to_string(), "int4".to_string())]);
+        assert_eq!(
+            plan.statements,
+            ["ALTER TABLE aether_events ALTER COLUMN block_from TYPE bigint USING NULL"]
+        );
+        assert!(!plan.item_uids_lost);
+    }
+
+    #[test]
+    fn columns_the_table_lacks_are_left_to_add_column() {
+        // A pre-`cause` table reports neither `cause` nor `derived_from`;
+        // those are the schema's job, not a type migration's.
+        let plan = migration_plan(&[
+            ("seq".to_string(), "int8".to_string()),
+            ("at".to_string(), "timestamptz".to_string()),
+        ]);
+        assert!(plan.statements.is_empty());
     }
 }

@@ -278,7 +278,21 @@ impl Reservation {
         if v < self.bound.load(Ordering::Acquire) {
             return Ok(());
         }
-        let new = (v / self.block + 1) * self.block;
+        // Checked, not wrapping: a corrupted bound (or an id near `u64::MAX`)
+        // would otherwise wrap the next bound to 0, and 0 is exactly the
+        // "no id" value this reservation exists to keep out of circulation.
+        // There is no safe value to clamp to, so fail loudly instead.
+        let new = (v / self.block)
+            .checked_add(1)
+            .and_then(|blocks| blocks.checked_mul(self.block))
+            .ok_or_else(|| {
+                StorageError::Codec(format!(
+                    "reservation bound {} cannot cover id {v} in blocks of {}: \
+                     the next bound would overflow u64",
+                    String::from_utf8_lossy(self.key),
+                    self.block,
+                ))
+            })?;
         backend.put(self.key, &new.to_be_bytes())?;
         self.bound.store(new, Ordering::Release);
         Ok(())

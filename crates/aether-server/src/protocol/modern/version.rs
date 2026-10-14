@@ -230,13 +230,32 @@ impl Version {
                 .map(|name| self.item_id(name).unwrap_or(-1))
                 .collect();
             // Wire ids are dense from 0 within a version: index the reverse
-            // tables by the id the version itself declares.
+            // tables by the id the version itself declares. `debug_assert`
+            // holds the generated data to that, but the indexing stays safe in
+            // a release build: a wire id past the end leaves the slot as air
+            // rather than panicking on a malformed table.
             let mut from_wire = vec![ItemTypeId::AIR; self.items.len()];
             let mut names_by_wire = vec![None; self.items.len()];
             for (name, wire) in self.items {
-                from_wire[*wire as usize] = ItemTypeId::vanilla(name).unwrap_or(ItemTypeId::AIR);
-                names_by_wire[*wire as usize] = Some(*name);
+                let wire = *wire as usize;
+                debug_assert!(
+                    wire < self.items.len(),
+                    "{}: wire id {wire} is past the item table's {} entries",
+                    self.name,
+                    self.items.len()
+                );
+                if let Some(slot) = from_wire.get_mut(wire) {
+                    *slot = ItemTypeId::vanilla(name).unwrap_or(ItemTypeId::AIR);
+                }
+                if let Some(slot) = names_by_wire.get_mut(wire) {
+                    *slot = Some(*name);
+                }
             }
+            debug_assert!(
+                names_by_wire.iter().all(Option::is_some),
+                "{}: item wire ids are not dense from 0",
+                self.name
+            );
             ItemTables {
                 to_wire,
                 from_wire,
@@ -463,6 +482,33 @@ mod tests {
             assert_eq!(
                 v.biome("minecraft:plains"),
                 v.biome("minecraft:no_such_biome")
+            );
+        }
+    }
+
+    #[test]
+    fn every_versions_item_wire_ids_are_dense_from_zero() {
+        // The reverse tables are indexed by wire id, so a gap or a duplicate
+        // in the generated data would leave a slot as air — a real item
+        // silently reading as nothing — and an id past the end would once
+        // have panicked. Pin both: a dense permutation of `0..len`.
+        for v in [&V1_21_11, &V26_1, &V26_2, &V26_3] {
+            assert!(
+                v.items.windows(2).all(|w| w[0].0 < w[1].0),
+                "{}: items must be sorted by name for item_id's binary search",
+                v.name
+            );
+            let mut wires: Vec<u16> = v.items.iter().map(|(_, w)| *w).collect();
+            wires.sort_unstable();
+            let dense: Vec<u16> = (0..v.items.len() as u16).collect();
+            assert_eq!(wires, dense, "{}: wire ids must be 0..len", v.name);
+
+            let tables = v.item_tables();
+            assert_eq!(tables.from_wire.len(), v.items.len(), "{}", v.name);
+            assert!(
+                tables.names_by_wire.iter().all(Option::is_some),
+                "{}: a dense table has no empty slot",
+                v.name
             );
         }
     }
