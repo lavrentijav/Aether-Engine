@@ -34,6 +34,7 @@ use std::io;
 use aether_world::BlockStateId;
 
 use super::{BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
+use crate::inventory::Stack;
 use crate::players::PosLook;
 use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 use version::{Gen, Registries};
@@ -371,10 +372,12 @@ impl ProtocolCodec for Codec {
                 meta.var_int(*entity_id)
                     .u8(ITEM_DATA_INDEX)
                     .var_int(META_ITEM_STACK);
-                match self.0.wire_item(*item) {
-                    Some(id) => inventory::write_item(&mut meta, id, *count as i32),
-                    None => inventory::write_empty(&mut meta),
-                }
+                // Through the compat-aware writer, not a raw wire id: a dropped
+                // item must show the same stand-in (and carry the real name)
+                // as the slot it came from, or dropping a spear on 1.21.1 would
+                // spawn a genuine trident.
+                let stack = Stack::new(*item, (*count).min(u8::MAX as u64) as u8);
+                play::write_stack(self.0, &mut meta, Some(&stack));
                 meta.u8(META_END);
                 vec![spawn, meta]
             }
@@ -1570,6 +1573,55 @@ mod tests {
         assert_eq!(
             version::V26_1.packets.cb_update_mob_effect,
             version::V26_2.packets.cb_update_mob_effect
+        );
+    }
+
+    #[test]
+    fn a_dropped_spear_keeps_its_disguise_on_1_21_1() {
+        // The drop path must go through the compat-aware writer, or dropping
+        // a spear on 1.21.1 spawns a genuine trident with no marker — the
+        // disguise the item layer exists to preserve.
+        struct Empty;
+        impl BlockSource for Empty {
+            fn block_at(&self, _x: i32, _y: i32, _z: i32) -> BlockStateId {
+                BlockStateId::AIR
+            }
+        }
+        let v = &version::V1_21_1;
+        let spear = crate::inventory::item("minecraft:iron_spear");
+        let pkts = Codec(v).encode(
+            &ServerEvent::DropItem {
+                entity_id: 7,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                item: spear,
+                count: 1,
+            },
+            &Empty,
+        );
+        assert_eq!(pkts.len(), 2, "spawn + metadata");
+        let body = pkts[1].body();
+        assert_eq!(body[0] as i32, v.packets.cb_set_entity_data);
+        let mut pin = PacketIn::new(&body[1..]);
+        pin.var_int().unwrap(); // entity id
+        pin.u8().unwrap(); // metadata index
+        assert_eq!(pin.var_int().unwrap(), META_ITEM_STACK);
+        assert_eq!(pin.var_int().unwrap(), 1, "count");
+        let shown = pin.var_int().unwrap();
+        assert_eq!(shown, v.wire_stack_item(spear).unwrap().id);
+        assert_eq!(
+            v.engine_item(shown),
+            Some(crate::inventory::item("minecraft:trident"))
+        );
+        assert_eq!(pin.var_int().unwrap(), 2, "custom_name and lore added");
+        assert_eq!(pin.var_int().unwrap(), 0, "none removed");
+        assert_eq!(pin.var_int().unwrap(), v.component_custom_name);
+        let contains = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+        assert!(contains(body, b"Iron Spear"), "the real name rides along");
+        assert!(
+            contains(body, b"Aether: minecraft:iron_spear"),
+            "and the marker names the real item"
         );
     }
 }
