@@ -16,6 +16,7 @@ mod pressure_plate;
 mod redstone_block;
 mod repeater;
 mod torch;
+mod tripwire;
 mod wire;
 
 #[cfg(test)]
@@ -38,6 +39,7 @@ pub use repeater::Repeater;
 #[cfg(test)]
 pub use test_observer::TestObserver;
 pub use torch::{Torch, WallTorch};
+pub use tripwire::{TripWire, TripWireHook};
 pub use wire::Wire;
 
 use aether_world::BlockStateId;

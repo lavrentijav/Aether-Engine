@@ -821,6 +821,12 @@ impl Registry {
             "minecraft:heavy_weighted_pressure_plate",
             &blocks::HeavyWeighted,
         );
+        put(&mut by_state, "minecraft:tripwire", &blocks::TripWire);
+        put(
+            &mut by_state,
+            "minecraft:tripwire_hook",
+            &blocks::TripWireHook,
+        );
 
         // A test-only block registered over the piston's states, proving that a
         // new component decides its own wire connection without a core edit.
