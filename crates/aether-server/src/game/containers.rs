@@ -393,10 +393,20 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
                 continue;
             };
             // Fuel burnt, input smelted, output made: journalled as the
-            // difference, by the server.
+            // difference, by the server. Which cooking method applies is the
+            // block's own (furnace, smoker or blast furnace); the recipe
+            // carries its cooking time and experience.
             let before = c.slots.clone();
+            let method = crate::game::block_name(world, world.get_block(pos.0, pos.1, pos.2))
+                .map(|n| {
+                    super::recipes::method_for_block(
+                        n.strip_prefix("minecraft:").unwrap_or(n.as_str()),
+                    )
+                })
+                .unwrap_or(super::recipes::Cook::Smelting);
             let input = c.slots[0].as_ref().map(|s| s.item);
-            let result = input.and_then(super::tables::smelt_id);
+            let recipe = input.and_then(|i| super::recipes::cook(method, i));
+            let result = recipe.map(|r| r.result);
             let output_ok = result.is_some_and(|r| match &c.slots[2] {
                 None => true,
                 Some(o) => o.item == r && o.count < o.max_stack(),
@@ -423,11 +433,13 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
                 }
             }
             if c.burn > 0 && output_ok {
+                let done = recipe.map_or(200, |r| r.ticks);
                 c.cook += 1;
                 dirty = true;
-                if c.cook >= 200 {
+                if c.cook >= done {
                     c.cook = 0;
                     let r = result.expect("output_ok implies a result");
+                    let count = recipe.map_or(1, |r| r.count);
                     if let Some(input) = &mut c.slots[0] {
                         input.count -= 1;
                         if input.count == 0 {
@@ -435,14 +447,12 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
                         }
                     }
                     match &mut c.slots[2] {
-                        Some(o) => o.count += 1,
-                        None => c.slots[2] = Some(Stack::new(r, 1)),
+                        Some(o) => o.count = o.count.saturating_add(count),
+                        None => c.slots[2] = Some(Stack::new(r, count)),
                     }
                     // The smelted item's experience waits in the furnace
                     // until a player takes the output.
-                    if let Some(item) = input {
-                        c.xp += item.vanilla_name().map_or(0.0, super::tables::smelt_xp);
-                    }
+                    c.xp += recipe.map_or(0.0, |r| r.xp);
                 }
             } else if c.cook > 0 {
                 c.cook = c.cook.saturating_sub(2);

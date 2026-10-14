@@ -18,6 +18,7 @@ pub mod interact;
 pub mod mobs;
 pub mod player;
 pub mod provenance;
+pub mod recipes;
 pub mod scheduler;
 pub mod tables;
 pub mod tick;

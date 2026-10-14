@@ -116,6 +116,36 @@ fn main() -> std::process::ExitCode {
             ))
         }
     };
+    // The recipe book, read from the same pack the terrain is: crafting,
+    // smelting, smithing and the rest therefore match the version the world
+    // speaks. A packless server keeps the compiled-in tables. A pack set but
+    // unreadable is a warning, not a refusal: recipes are gameplay, and the
+    // world is already being generated.
+    if !cfg.server.worldgen_data.is_empty() {
+        match game::recipes::load(std::path::Path::new(&cfg.server.worldgen_data)) {
+            Ok(book) => {
+                let c = book.counts();
+                log::info(&format!(
+                    "recipes    : {} loaded from the pack ({} shaped, {} shapeless, {} cooking, \
+                     {} stonecutting, {} smithing, {} transmute; {} special, {} unsupported)",
+                    c.total,
+                    c.shaped,
+                    c.shapeless,
+                    c.cooking,
+                    c.stonecutting,
+                    c.smithing,
+                    c.transmute,
+                    c.special,
+                    c.unsupported.len(),
+                ));
+                game::recipes::install(book);
+            }
+            Err(e) => log::warn(&format!(
+                "recipes    : cannot load from `{}`: {e}; using the compiled-in table",
+                cfg.server.worldgen_data
+            )),
+        }
+    }
     let described = generator.describe(cfg.server.seed);
     let revision = generator.revision();
     // The generator is deterministic, so its output is a cache and never a

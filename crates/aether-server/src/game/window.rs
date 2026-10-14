@@ -17,6 +17,7 @@
 
 use super::containers::{self, ContainerKind};
 use super::player::{Drag, OpenWindow, PlayerState, WindowKind};
+use super::recipes;
 use super::tables;
 use crate::inventory::{Inventory, Stack};
 use crate::players::PlayerHandle;
@@ -137,13 +138,10 @@ impl<'a> Ctx<'a> {
         if w == 0 {
             return None;
         }
-        // Recipes are keyed by name; a modded id has no name here and cannot
-        // match one. `craft` answers a name, back to an id.
-        let refs: Vec<Option<&str>> = cells
-            .iter()
-            .map(|c| c.and_then(aether_world::ItemTypeId::vanilla_name))
-            .collect();
-        tables::craft(&refs, w).map(|(item, n)| Stack::named(item, n))
+        // The recipe book (pack-loaded, with the compiled-in table as the
+        // no-pack fallback) matches on item ids, so a modded stack can match
+        // a recipe keyed by its own interned id.
+        recipes::craft(&cells, w).map(|(item, n)| Stack::new(item, n))
     }
 
     /// Use up one of every ingredient.
@@ -155,13 +153,10 @@ impl<'a> Ctx<'a> {
         };
         for r in cells {
             if let Some(mut s) = self.get(r) {
-                let bucket = s
-                    .item
-                    .vanilla_name()
-                    .is_some_and(|n| n.ends_with("_bucket"));
+                let remainder = recipes::remainder(s.item);
                 s.count -= 1;
                 if s.count == 0 {
-                    self.put(r, bucket.then(|| Stack::named("minecraft:bucket", 1)));
+                    self.put(r, remainder.map(|i| Stack::new(i, 1)));
                 } else {
                     self.put(r, Some(s));
                 }
@@ -298,7 +293,7 @@ impl<'a> Ctx<'a> {
             Layout::Furnace => {
                 if slot < main {
                     rev(main, end)
-                } else if tables::smelt_id(stack.item).is_some() {
+                } else if recipes::cooks(stack.item) {
                     vec![0]
                 } else if tables::fuel_ticks_id(stack.item) > 0 {
                     vec![1]
@@ -876,11 +871,9 @@ fn open_window_slots(st: &PlayerState, inv: &Inventory, world: &DemoWorld) -> Op
     let mut player_part: Vec<Option<Stack>> = (9..45).map(|i| inv.slot(i).cloned()).collect();
     Some(match &w.kind {
         WindowKind::Crafting { grid } => {
-            let cells: Vec<Option<&str>> = grid
-                .iter()
-                .map(|s| s.as_ref().and_then(|s| s.item.vanilla_name()))
-                .collect();
-            let res = tables::craft(&cells, 3).map(|(i, n)| Stack::named(i, n));
+            let cells: Vec<Option<aether_world::ItemTypeId>> =
+                grid.iter().map(|s| s.as_ref().map(|s| s.item)).collect();
+            let res = recipes::craft(&cells, 3).map(|(i, n)| Stack::new(i, n));
             let mut v = vec![res];
             v.extend(grid.iter().cloned());
             v.append(&mut player_part);
@@ -901,7 +894,21 @@ fn open_window_slots(st: &PlayerState, inv: &Inventory, world: &DemoWorld) -> Op
         }
         WindowKind::Furnace { pos } => {
             let c = containers::snapshot(world, *pos, ContainerKind::Furnace);
-            let props = (c.burn as i16, c.burn_max as i16, c.cook as i16, 200);
+            // The progress bar's denominator is the recipe's own cooking time
+            // (200 for a furnace, 100 for a smoker or blast furnace).
+            let method = crate::game::block_name(world, world.get_block(pos.0, pos.1, pos.2))
+                .map(|n| {
+                    recipes::method_for_block(n.strip_prefix("minecraft:").unwrap_or(n.as_str()))
+                })
+                .unwrap_or(recipes::Cook::Smelting);
+            let total = c
+                .slots
+                .first()
+                .and_then(|s| s.as_ref())
+                .and_then(|s| recipes::cook(method, s.item))
+                .map(|c| c.ticks as i16)
+                .unwrap_or(200);
+            let props = (c.burn as i16, c.burn_max as i16, c.cook as i16, total);
             let mut v = c.slots;
             v.append(&mut player_part);
             (w.id, v, Some(props))
@@ -920,10 +927,9 @@ fn open_window_slots(st: &PlayerState, inv: &Inventory, world: &DemoWorld) -> Op
 }
 
 fn player_window_slots(inv: &Inventory) -> Vec<Option<Stack>> {
-    let cells: Vec<Option<&str>> = (1..=4)
-        .map(|i| inv.slot(i).and_then(|s| s.item.vanilla_name()))
-        .collect();
-    let res = tables::craft(&cells, 2).map(|(i, n)| Stack::named(i, n));
+    let cells: Vec<Option<aether_world::ItemTypeId>> =
+        (1..=4).map(|i| inv.slot(i).map(|s| s.item)).collect();
+    let res = recipes::craft(&cells, 2).map(|(i, n)| Stack::new(i, n));
     let mut v = vec![res];
     v.extend((1..46).map(|i| inv.slot(i).cloned()));
     v
@@ -1117,6 +1123,20 @@ mod tests {
             c.inv
                 .count_of(crate::inventory::item("minecraft:oak_planks")),
             4
+        );
+    }
+
+    #[test]
+    fn consuming_a_bucket_leaves_an_empty_bucket() {
+        let mut inv = Inventory::new();
+        inv.put_slot(1, Some(Stack::named("minecraft:milk_bucket", 1)));
+        let mut cur = None;
+        let mut c = ctx(&mut inv, &mut cur);
+        c.consume_grid();
+        assert_eq!(
+            c.inv.slot(1).map(|s| s.item),
+            Some(crate::inventory::item("minecraft:bucket")),
+            "a consumed milk bucket leaves a bucket"
         );
     }
 
