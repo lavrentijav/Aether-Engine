@@ -112,6 +112,46 @@ flat!(V1_21_6, v1_21_6);
 flat!(V1_21_8, v1_21_8);
 flat!(V1_21_9, v1_21_9);
 
+/// A pre-flattening version's table: engine state → its `(id << 4)` value.
+#[derive(Clone, Copy)]
+pub struct LegacyTable {
+    /// `(first engine state, run length, legacy block id)`.
+    pub runs: &'static [(u32, u32, u16)],
+    /// `(legacy block id, engine default state)`, sorted by id.
+    pub reverse: &'static [(u16, u32)],
+    /// The version's stone id.
+    pub stone: u16,
+}
+
+impl LegacyTable {
+    /// The legacy numeric block id for an engine state.
+    #[inline]
+    pub fn vanilla(&self, id: BlockStateId) -> u16 {
+        let raw = id.raw();
+        let i = self.runs.partition_point(|r| r.0 <= raw);
+        match i.checked_sub(1).and_then(|i| self.runs.get(i)) {
+            Some(&(start, len, to)) if raw < start + len => to,
+            _ => self.stone,
+        }
+    }
+
+    /// The engine state a legacy block id names, if the engine has that block.
+    #[inline]
+    pub fn engine(&self, vanilla: u16) -> Option<BlockStateId> {
+        self.reverse
+            .binary_search_by_key(&vanilla, |r| r.0)
+            .ok()
+            .map(|i| BlockStateId(self.reverse[i].1))
+    }
+}
+
+/// The block table for 1.8.9 (protocol 47), which predates flattened states.
+pub static V1_8: LegacyTable = LegacyTable {
+    runs: gen::v1_8::LEGACY_RUNS,
+    reverse: gen::v1_8::LEGACY_TO_ENGINE,
+    stone: gen::v1_8::STONE,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +201,39 @@ mod tests {
             aether_world::BlockStateId(aether_world::registry::blocks::STATE_COUNT as u32 + 7);
         assert_eq!(V1_17.state(beyond), V1_17.stone);
         assert_eq!(V1_21_1.state(beyond), V1_21_1.stone);
+    }
+
+    #[test]
+    fn no_rule_covered_block_falls_back_to_stone() {
+        // Substitution is the whole point of J2: every release from 1.17 on
+        // has a stand-in for every engine block. This prints the remaining
+        // fallbacks for 1.8, which has fewer than a fifth of the modern blocks
+        // and no metadata table to derive variants from, so a large list there
+        // is expected; see docs/KNOWN_ISSUES.md.
+        for (name, fallbacks) in [
+            ("1.17", gen::v1_17::STONE_FALLBACKS),
+            ("1.19", gen::v1_19::STONE_FALLBACKS),
+            ("1.20.1", gen::v1_20_1::STONE_FALLBACKS),
+            ("1.21.1", gen::v1_21_1::STONE_FALLBACKS),
+            ("1.21.4", gen::v1_21_4::STONE_FALLBACKS),
+        ] {
+            assert!(
+                fallbacks.is_empty(),
+                "{name} still falls back to stone: {fallbacks:?}"
+            );
+        }
+        println!("1.8 stone fallbacks: {}", gen::v1_8::STONE_FALLBACKS.len());
+    }
+
+    #[test]
+    fn the_legacy_table_round_trips_the_common_blocks() {
+        use aether_api::block_ids as b;
+        assert_eq!(V1_8.vanilla(b::AIR), 0);
+        assert_eq!(V1_8.vanilla(b::STONE), 1);
+        assert_eq!(V1_8.vanilla(b::GRASS_BLOCK), 2);
+        // And the reverse names a real engine state for every id we emit.
+        for (id, engine) in gen::v1_8::LEGACY_TO_ENGINE {
+            assert_eq!(V1_8.engine(*id), Some(aether_world::BlockStateId(*engine)));
+        }
     }
 }
