@@ -124,6 +124,7 @@ pub mod providers;
 pub mod random;
 pub mod rng;
 pub mod simplex;
+pub mod structure;
 pub mod surface;
 pub mod tags;
 pub mod terrain;
