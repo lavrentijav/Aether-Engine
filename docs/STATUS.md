@@ -119,6 +119,10 @@ modern versions run a server-side survival game).
 | Chunks stream on a per-player thread — input is read while the horizon generates | ✅ |
 | Gameplay events on the 18 codecs before 1.21.11 (they keep the older subset) | ❌ |
 | Water and lava flow: vanilla delays and levels, falls, slope-seeking, infinite water, lava/water → obsidian/cobblestone/stone | ✅ |
+| Falling blocks: sand, red sand, gravel and the sixteen concrete powders move to where they would land on their scheduled tick (no falling entity); concrete powder sets on contact with water | ✅ |
+| Crop growth: wheat, carrots, potatoes, beetroot, sugar cane and cactus grow on vanilla-rate random ticks (3 per 16³ section per tick) with vanilla farmland/crowding rules; sugar cane and cactus break when their support is gone | ✅ |
+| Leaf decay: a leaf recomputes `distance` to the nearest log one tick after a neighbour changes, and a non-persistent leaf at distance 7 drops its loot and disappears on a random tick | ✅ |
+| Crop light is assumed full-bright (the engine does not simulate it), so crops grow in the dark; bone meal is not implemented | 🚧 Preview |
 | Vanilla tags sent in configuration (block, item, fluid, entity type, game event — generated per release by `tools/gen/versions.py`): without the `minecraft:water` fluid tag a 1.21.11 client treats water as air (no swimming, no underwater view); `climbable` and `mineable/*` drive ladders and tool speed | ✅ |
 | Journal checkpoints: a flush records, per column, which events its snapshots already hold, so loading a column replays only the events after that — not its whole history (1000 saved edits + 3 unsaved: 3 events read, was 1003) | ✅ |
 | Snapshots stamped with the generator revision; one saved under an older generator is rebuilt as it loads (fresh terrain, the blocks players placed, then the journal) instead of bringing the old terrain back as a seam | ✅ |
