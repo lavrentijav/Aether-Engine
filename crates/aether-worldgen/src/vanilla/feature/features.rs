@@ -14,9 +14,10 @@ use super::super::rng::Rng;
 use super::super::surface::parse_block_state;
 use super::super::tags::BlockSet;
 use super::blocks::{
-    can_survive, is_water_source, legacy_solid, sturdy, BlockPredicate, RuleTest, StateProvider,
+    can_survive, is_water_source, legacy_solid, solid_render, sturdy, BlockPredicate, RuleTest,
+    StateProvider,
 };
-use super::level::{Dir, Heightmap, Pos};
+use super::level::{Dir, Heightmap, Level, Pos};
 use super::tree::{self, FallenTree, TreeConfig};
 use super::{place_placed, Ctx, Loader, Placed};
 
@@ -144,6 +145,8 @@ pub enum Configured {
     Iceberg(BlockStateId),
     /// `desert_well`.
     DesertWell,
+    /// `monster_room` (dungeons).
+    MonsterRoom,
     /// A type this port does not place.
     Unsupported(String),
 }
@@ -361,6 +364,7 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
         }
         "iceberg" => Configured::Iceberg(state_of(c, "state")?),
         "desert_well" => Configured::DesertWell,
+        "monster_room" => Configured::MonsterRoom,
         other => {
             l.unsupported.insert(format!("feature:{other}"));
             Configured::Unsupported(other.to_string())
@@ -393,6 +397,10 @@ pub(crate) struct States {
     pub sandstone: BlockStateId,
     pub sandstone_slab: BlockStateId,
     pub suspicious_sand: BlockStateId,
+    pub cobblestone: BlockStateId,
+    pub mossy_cobblestone: BlockStateId,
+    pub spawner: BlockStateId,
+    pub chest: BlockStateId,
 }
 
 pub(crate) fn states() -> &'static States {
@@ -423,6 +431,10 @@ pub(crate) fn states() -> &'static States {
             sandstone: s("minecraft:sandstone"),
             sandstone_slab: s("minecraft:sandstone_slab"),
             suspicious_sand: s("minecraft:suspicious_sand"),
+            cobblestone: s("minecraft:cobblestone"),
+            mossy_cobblestone: s("minecraft:mossy_cobblestone"),
+            spawner: s("minecraft:spawner"),
+            chest: s("minecraft:chest"),
         }
     })
 }
@@ -626,6 +638,7 @@ pub(crate) fn place_configured(ctx: &mut Ctx, f: &Configured, pos: Pos) -> bool 
         Configured::Coral(kind, blocks) => super::extra::coral(ctx, *kind, blocks, pos),
         Configured::Iceberg(state) => super::extra::iceberg(ctx, *state, pos),
         Configured::DesertWell => desert_well(ctx, pos),
+        Configured::MonsterRoom => monster_room(ctx, pos),
         Configured::Unsupported(name) => {
             ctx.d.note_unsupported(&format!("feature:{name}"));
             false
@@ -1570,6 +1583,130 @@ fn desert_well(ctx: &mut Ctx, origin: Pos) -> bool {
     true
 }
 
+/// `MonsterRoomFeature` (dungeons). Loot tables and the spawner's entity are
+/// not generated — the engine has no block entities yet.
+fn monster_room(ctx: &mut Ctx, origin: Pos) -> bool {
+    let s = states();
+    // `Feature.isReplaceable(FEATURES_CANNOT_REPLACE)`: write only into blocks
+    // the pack lets features replace.
+    let cannot = ctx.d.tags.features_cannot_replace.clone();
+    let safe = |ctx: &mut Ctx, p: Pos, v: BlockStateId| {
+        if !cannot.contains(ctx.lv.get(p)) {
+            ctx.lv.set(p, v);
+        }
+    };
+    let j = ctx.r.next_int_bounded(2) + 2;
+    let (k, l) = (-j - 1, j + 1);
+    let o = ctx.r.next_int_bounded(2) + 2;
+    let (p_, q) = (-o - 1, o + 1);
+    let mut r = 0;
+    for sx in k..=l {
+        for ty in -1..=4 {
+            for sz in p_..=q {
+                let at = origin.offset(sx, ty, sz);
+                let solid = legacy_solid(ctx.lv.get(at));
+                if ty == -1 && !solid {
+                    return false;
+                }
+                if ty == 4 && !solid {
+                    return false;
+                }
+                if (sx == k || sx == l || sz == p_ || sz == q)
+                    && ty == 0
+                    && ctx.lv.is_air(at)
+                    && ctx.lv.is_air(at.above(1))
+                {
+                    r += 1;
+                }
+            }
+        }
+    }
+    if !(1..=5).contains(&r) {
+        return false;
+    }
+    for sx in k..=l {
+        for ty in (0..=3).rev().chain([-1]) {
+            for sz in p_..=q {
+                let at = origin.offset(sx, ty, sz);
+                let cur = ctx.lv.get(at);
+                let is_chest = is(cur, "minecraft:chest");
+                if sx == k || ty == -1 || sz == p_ || sx == l || ty == 4 || sz == q {
+                    if at.y >= ctx.lv.min_y() && !legacy_solid(ctx.lv.get(at.below(1))) {
+                        ctx.lv.set(at, states().cave_air);
+                    } else if legacy_solid(cur) && !is_chest {
+                        if ty == -1 && ctx.r.next_int_bounded(4) != 0 {
+                            safe(ctx, at, s.mossy_cobblestone);
+                        } else {
+                            safe(ctx, at, s.cobblestone);
+                        }
+                    }
+                } else if !is_chest && !is(cur, "minecraft:spawner") {
+                    safe(ctx, at, states().cave_air);
+                }
+            }
+        }
+    }
+    'outer: for _ in 0..2 {
+        for _ in 0..3 {
+            let x = origin.x + ctx.r.next_int_bounded(j * 2 + 1) - j;
+            let z = origin.z + ctx.r.next_int_bounded(o * 2 + 1) - o;
+            let at = Pos::new(x, origin.y, z);
+            if ctx.lv.is_air(at) {
+                let mut solid_dirs = 0;
+                for d in Dir::HORIZONTAL {
+                    if legacy_solid(ctx.lv.get(at.rel(d))) {
+                        solid_dirs += 1;
+                    }
+                }
+                if solid_dirs == 1 {
+                    let chest = reorient_chest(ctx.lv, at, s.chest);
+                    safe(ctx, at, chest);
+                    break 'outer;
+                }
+            }
+        }
+    }
+    safe(ctx, origin, s.spawner);
+    // `randomEntityId`: the spawner's mob is drawn here even though the engine
+    // keeps no block entity for it.
+    let _ = ctx.r.next_int_bounded(4);
+    true
+}
+
+/// `StructurePiece.reorient` for a chest.
+fn reorient_chest(lv: &Level, pos: Pos, chest: BlockStateId) -> BlockStateId {
+    let mut facing: Option<Dir> = None;
+    for d in Dir::HORIZONTAL {
+        let other = lv.get(pos.rel(d));
+        if is(other, "minecraft:chest") {
+            return chest;
+        }
+        if solid_render(other) {
+            if facing.is_some() {
+                facing = None;
+                break;
+            }
+            facing = Some(d);
+        }
+    }
+    let f = if let Some(d) = facing {
+        d.opposite()
+    } else {
+        let mut f = Dir::parse(prop(chest, "facing").unwrap_or("north")).unwrap_or(Dir::North);
+        if solid_render(lv.get(pos.rel(f))) {
+            f = f.opposite();
+        }
+        if solid_render(lv.get(pos.rel(f))) {
+            f = f.clockwise();
+        }
+        if solid_render(lv.get(pos.rel(f))) {
+            f = f.opposite();
+        }
+        f
+    };
+    blockinfo::with_prop(chest, "facing", f.name())
+}
+
 fn huge_mushroom(
     ctx: &mut Ctx,
     red: bool,
@@ -1676,6 +1813,7 @@ fn huge_mushroom(
 mod tests {
     use super::super::testkit::{count_name, pack, parse_configured, place, stone, World};
     use super::*;
+    use crate::vanilla::rng::WorldgenRandom;
 
     fn setup() -> Option<(String, crate::vanilla::generator::VanillaGenerator)> {
         let pack = pack()?;
@@ -1709,6 +1847,117 @@ mod tests {
             2,
             "expected exactly two suspicious sand blocks"
         );
+    }
+
+    #[test]
+    fn monster_room_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let seed = 1i64;
+        let origin = Pos::new(8, 40, 8);
+        // Replay the two size draws so the solid shell matches the room.
+        let mut rr = WorldgenRandom::xoroshiro(seed);
+        let j = rr.next_int_bounded(2) + 2;
+        let o = rr.next_int_bounded(2) + 2;
+        let (k, l) = (-j - 1, j + 1);
+        let (p, q) = (-o - 1, o + 1);
+        let mut w = World::new(&gen, 0, 0);
+        w.fill(
+            origin.x - 6,
+            origin.y - 1,
+            origin.z - 6,
+            origin.x + 6,
+            origin.y - 1,
+            origin.z + 6,
+            stone(),
+        );
+        w.fill(
+            origin.x - 6,
+            origin.y + 4,
+            origin.z - 6,
+            origin.x + 6,
+            origin.y + 4,
+            origin.z + 6,
+            stone(),
+        );
+        w.fill(
+            origin.x - 6,
+            origin.y,
+            origin.z - 6,
+            origin.x + 6,
+            origin.y,
+            origin.z + 6,
+            stone(),
+        );
+        for sx in k + 1..=l - 1 {
+            for sz in p + 1..=q - 1 {
+                for y in origin.y..=origin.y + 3 {
+                    w.set(origin.x + sx, y, origin.z + sz, BlockStateId::AIR);
+                }
+            }
+        }
+        // One opening on the wall, so the room's entrance count is in range.
+        w.set(origin.x + k, origin.y, origin.z, BlockStateId::AIR);
+        w.set(origin.x + k, origin.y + 1, origin.z, BlockStateId::AIR);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(r#"{"type":"minecraft:monster_room","config":{}}"#).unwrap(),
+        );
+        let writes = place(&gen, &w, &cfg, origin, seed);
+        assert!(count_name(&writes, "minecraft:spawner") >= 1, "no spawner");
+        assert!(
+            count_name(&writes, "minecraft:cobblestone") > 0,
+            "no cobblestone"
+        );
+    }
+
+    #[test]
+    fn monster_room_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let seed = 1i64;
+        let origin = Pos::new(8, 40, 8);
+        let mut w = World::new(&gen, 0, 0);
+        w.fill(
+            origin.x - 6,
+            origin.y - 1,
+            origin.z - 6,
+            origin.x + 6,
+            origin.y - 1,
+            origin.z + 6,
+            stone(),
+        );
+        w.fill(
+            origin.x - 6,
+            origin.y + 4,
+            origin.z - 6,
+            origin.x + 6,
+            origin.y + 4,
+            origin.z + 6,
+            stone(),
+        );
+        w.fill(
+            origin.x - 6,
+            origin.y,
+            origin.z - 6,
+            origin.x + 6,
+            origin.y,
+            origin.z + 6,
+            stone(),
+        );
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(r#"{"type":"minecraft:monster_room","config":{}}"#).unwrap(),
+        );
+        let a = place(&gen, &w, &cfg, origin, seed);
+        let b = place(&gen, &w, &cfg, origin, seed);
+        assert_eq!(a, b);
     }
 
     #[test]
