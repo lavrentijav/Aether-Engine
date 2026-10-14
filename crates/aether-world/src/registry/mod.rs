@@ -494,7 +494,10 @@ mod tests {
         assert_eq!(top.len(), 1);
         assert_eq!((top[0][1], top[0][4]), (0.5, 1.0));
         let fence = shapes::collision_boxes(
-            BlockRegistry::new().get("minecraft:oak_fence").unwrap().raw(),
+            BlockRegistry::new()
+                .get("minecraft:oak_fence")
+                .unwrap()
+                .raw(),
         );
         assert!(!fence.is_empty());
         assert!(fence.iter().all(|b| b[4] == 1.5));

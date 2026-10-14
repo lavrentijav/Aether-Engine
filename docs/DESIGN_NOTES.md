@@ -501,13 +501,22 @@ generator code keeps compiling and gets more correct rather than less.
 3. Older codecs' `state -> state` tables.
 4. Block-update pass for (c).
 
-**Not addressed:** per-state *properties* that differ from their block's. An
-open door does not collide, a lit redstone lamp emits 15, a double slab is a
-full opaque cube — `minecraft-data` publishes light and bounding box per block,
-not per state, so the generated `STATE_PROPS` starts out uniform within a block.
-That is exactly as correct as today and no more. Closing it means asking the
-game itself: the unobfuscated server jar plus a small Java harness, which is the
-technique the worldgen work already uses successfully.
+**Not addressed:** per-state *properties* that differ from their block's. A lit
+redstone lamp emits 15, a double slab is a full opaque cube — `minecraft-data`
+publishes light and occlusion per block, not per state, so the generated
+`STATE_PROPS` starts out uniform within a block. That is exactly as correct as
+today and no more. Closing it means asking the game itself: the unobfuscated
+server jar plus a small Java harness, which is the technique the worldgen work
+already uses successfully.
+
+**The one exception: collision.** `minecraft-data` *does* publish bounding boxes
+per state in `blockCollisionShapes.json`, so a slab's half cell, a stair's step,
+a fence's 1.5-tall rails and an open door's empty shape are all available.
+`tools/gen/collisions.js` turns that into `registry/shapes.rs` — a shape table
+plus a `STATE_SHAPE` map from every flattened state id — exactly as
+`registry/blocks.rs` is generated from the same version and block order. Only
+the physics layer reads it; `STATE_PROPS`' `collision` bit stays the coarse
+per-block answer that the SoA mask and the AI heuristics use.
 
 ## 10. History at scale, and the History Graph
 

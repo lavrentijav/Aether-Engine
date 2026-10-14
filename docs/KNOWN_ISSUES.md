@@ -40,7 +40,7 @@
    Three smaller gaps inside the part that does work:
    - **Attachment-based facing is not distinguished from look-based facing.** A ladder or a wall torch takes its direction from the surface it is on; nothing in the block's own data says so, and they get the look-based answer.
    - **Anvils are 90 degrees out.** `AnvilBlock` uses `getClockWise()`, a third rule that is not implemented.
-   - **Properties do not vary within a block.** An open door still collides, an unlit redstone lamp still emits nothing, a double slab is not a full opaque cube. `minecraft-data` publishes light and bounding box per *block*; closing this means asking the game itself, which is the technique the worldgen work uses.
+   - **Properties do not vary within a block, except collision.** An unlit redstone lamp still emits nothing, a double slab is not a full opaque cube, an open trapdoor still occludes light as its closed form. `minecraft-data` publishes light and occlusion per *block*, not per state, so `STATE_PROPS` stays uniform within a block; closing the light half means asking the game itself, which is the technique the worldgen work uses. **Collision is now the exception**: the boxes come per state from `blockCollisionShapes` (see the next item), so an open door or gate no longer collides, a top slab sits in the upper half and a fence is 1.5 tall.
 
 7. ~~**The 1.17 / 1.17.1 chunk encoding is rejected by a real client.**~~ **Fixed:** the section encoder wrote 1.18's *single-valued* palette (`bits per entry = 0`) whenever a section held one repeated block, which the old code also used for every empty section. 1.17 predates that form (it first appears in `PaletteType1_18`), so a client read the palette value as a length, consumed the wrong number of bytes and ran off the buffer — surfacing as `Attempted to read beyond the bounds of the managed data` while reading the next section's block count. Sections are now encoded exactly as 1.17 requires: a big-endian non-air count followed by a **4-bit indirect** palette, and an all-air section is **omitted from the section bitmask** entirely, which is also what the vanilla server does — it never sends an empty section. Byte-level tests pin one section and an empty column; both 1.17 and 1.17.1 are covered.
 
@@ -58,7 +58,7 @@
     - **No enchanting, brewing, anvils, smithing, villager trading, beds only set the spawn point and skip the night.** Status effects (golden apples, poison) are not applied; foods restore hunger only.
     - **No XP orbs.** Experience is credited to the killer directly; ores give none.
     - **Chests do not double**, and hoppers/droppers/dispensers have no inventory.
-    - **Block collision is per cube**: slabs, stairs and fences collide as full blocks for mobs and item entities (as for the burial check in item 6).
+    - ~~**Block collision is per cube**~~ **Fixed:** collision boxes come per block **state**, generated from `minecraft-data`'s `blockCollisionShapes` (`registry::shapes`, generator `tools/gen/collisions.js`). Slabs collide as half cells, stairs as their step shape, fences as their 1.5-tall rails, and an open door or fence gate as nothing at all; grounded entities walk (step) up a slab but not a full block. `aether-physics` resolves an AABB against the box list and a state-aware `BlockView` supplies it.
     - **Anti-cheat is minimal**: mining time is checked at half the expected duration, reach at 6 blocks; movement is trusted.
     - **Light is not consulted for spawning**: monsters spawn at night under open sky, or at any time under cover.
 
