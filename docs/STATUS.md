@@ -41,6 +41,7 @@ modern versions run a server-side survival game).
 | `aether-convert`: Anvil `.mca` → KV migration (parallel, audited) | ✅ |
 | `aether-baseproxy`: live vanilla → core translation (network chunk sections, block states) | ✅ |
 | Basic physics: voxel AABB collision, movement + gravity (`aether-physics`) | ✅ |
+| Redstone core crate (`aether-redstone`): standalone weak/strong power, wire, repeaters, torches, lamps — tested, not wired to the server | ✅ (not wired) |
 | Chunk generation: flat + value-noise terrain (`aether-worldgen`) | ✅ |
 | Core API: `World` facade over storage/generation/physics (`aether-api`) | ✅ |
 | Runnable demo: `aether` binary (worldgen + physics + storage + telemetry) with TOML config | ✅ |
