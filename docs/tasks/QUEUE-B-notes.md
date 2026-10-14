@@ -20,3 +20,13 @@ What was run instead, per task, all passing:
 The crates touched by this queue (`aether-worldgen`, and its dependency
 `aether-world`) are clean. `cargo check -p aether-server` on `main` passes, so
 the failure is purely the branch's age, not the worldgen changes.
+
+## Parity example
+
+`examples/vanilla_world_compare.rs` needs a vanilla-generated region plus its
+seed (`<pack-root> <seed> <region-dir>`), same as `tests/vanilla_parity.rs`.
+No such reference world is present on this machine (no `AETHER_VANILLA_REGION`
+/ `AETHER_VANILLA_SEED`, no `.mca` under the build tree), so it was not run
+and no before/after numbers are reported. It reads only the pack and the
+region files—not the game jar—so it can be run once a reference world is
+supplied.

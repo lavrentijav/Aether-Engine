@@ -161,7 +161,7 @@ pub enum Configured {
         radius: i32,
         probability: f32,
     },
-    /// `multiface_growth` (no spreading).
+    /// `multiface_growth` (glow lichen), including the `MultifaceSpreader`.
     MultifaceGrowth {
         block: BlockStateId,
         search_range: i32,
@@ -1582,25 +1582,27 @@ fn multiface(
     if wall {
         dirs.extend(Dir::HORIZONTAL);
     }
-    let shuffled = shuffle(ctx, &dirs);
-    if try_multiface(ctx, block, spread, on, pos, &shuffled) {
+    let list = shuffle(ctx, &dirs);
+    if place_growth_if_possible(ctx, block, spread, on, pos, &list) {
         return true;
     }
-    for d in shuffled.clone() {
-        let others: Vec<Dir> = dirs
+    for d in list {
+        let except: Vec<Dir> = dirs
             .iter()
             .copied()
             .filter(|x| *x != d.opposite())
             .collect();
-        let others = shuffle(ctx, &others);
-        let mut p = pos;
+        let list2 = shuffle(ctx, &except);
         for _ in 0..search {
-            p = p.rel(d);
+            // 1.21.11's `MultifaceGrowthFeature` re-sets to `origin + dir` on
+            // every step (`MutableBlockPos.setWithOffset(origin, dir)`), so
+            // this walk does not accumulate; the loop is the game's own.
+            let p = pos.rel(d);
             let s = ctx.lv.get(p);
             if !air_or_water(s) && blockinfo::block_of(s) != blockinfo::block_of(block) {
                 break;
             }
-            if try_multiface(ctx, block, spread, on, p, &others) {
+            if place_growth_if_possible(ctx, block, spread, on, p, &list2) {
                 return true;
             }
         }
@@ -1608,32 +1610,145 @@ fn multiface(
     false
 }
 
-fn try_multiface(
+/// `MultifaceGrowthFeature.placeGrowthIfPossible`.
+fn place_growth_if_possible(
     ctx: &mut Ctx,
     block: BlockStateId,
     spread: f32,
     on: &BlockSet,
-    p: Pos,
+    pos: Pos,
     dirs: &[Dir],
 ) -> bool {
     for d in dirs {
-        if on.contains(ctx.lv.get(p.rel(*d))) {
-            let here = ctx.lv.get(p);
-            let mut s = if blockinfo::block_of(here) == blockinfo::block_of(block) {
-                here
-            } else {
-                block
+        if on.contains(ctx.lv.get(pos.rel(*d))) {
+            let here = ctx.lv.get(pos);
+            let Some(s) = multiface_state_for_placement(block, here, ctx.lv.get(pos.rel(*d)), *d)
+            else {
+                return false;
             };
-            s = blockinfo::with_prop(s, d.name(), "true");
-            let wet = is(here, "minecraft:water");
-            s = blockinfo::with_prop(s, "waterlogged", if wet { "true" } else { "false" });
-            ctx.lv.set(p, s);
-            // Spreading to neighbouring faces is not ported; the draw is.
-            let _ = ctx.r.next_float() < spread;
+            ctx.lv.set(pos, s);
+            if ctx.r.next_float() < spread {
+                spread_from_face_toward_random_direction(ctx, block, s, pos, *d);
+            }
             return true;
         }
     }
     false
+}
+
+/// `MultifaceBlock.getStateForPlacement(state, getter, pos, direction)`.
+fn multiface_state_for_placement(
+    block: BlockStateId,
+    state: BlockStateId,
+    attach: BlockStateId,
+    direction: Dir,
+) -> Option<BlockStateId> {
+    if !multi_valid_for_placement(block, state, attach, direction) {
+        return None;
+    }
+    let base = if blockinfo::block_of(state) == blockinfo::block_of(block) {
+        state
+    } else if is_water_source(state) {
+        blockinfo::with_prop(block, "waterlogged", "true")
+    } else {
+        block
+    };
+    Some(blockinfo::with_prop(base, direction.name(), "true"))
+}
+
+/// `MultifaceBlock.isValidStateForPlacement`, with `canAttachTo`'s face test
+/// reduced to a full-collision test (no per-face shapes here).
+fn multi_valid_for_placement(
+    block: BlockStateId,
+    state: BlockStateId,
+    attach: BlockStateId,
+    direction: Dir,
+) -> bool {
+    if blockinfo::block_of(state) == blockinfo::block_of(block) && has_face(state, direction) {
+        return false;
+    }
+    sturdy(attach)
+}
+
+/// `MultifaceBlock.hasFace`.
+fn has_face(state: BlockStateId, direction: Dir) -> bool {
+    prop(state, direction.name()) == Some("true")
+}
+
+/// `MultifaceSpreader.spreadFromFaceTowardRandomDirection`.
+fn spread_from_face_toward_random_direction(
+    ctx: &mut Ctx,
+    block: BlockStateId,
+    state: BlockStateId,
+    pos: Pos,
+    direction: Dir,
+) {
+    for d2 in shuffle(ctx, &Dir::ALL) {
+        if spread_from_face_toward_direction(ctx, block, state, pos, direction, d2) {
+            return;
+        }
+    }
+}
+
+/// `MultifaceSpreader.spreadFromFaceTowardDirection`.
+fn spread_from_face_toward_direction(
+    ctx: &mut Ctx,
+    block: BlockStateId,
+    state: BlockStateId,
+    pos: Pos,
+    direction: Dir,
+    d2: Dir,
+) -> bool {
+    let Some((sp, face)) = spread_from_face(ctx, block, state, pos, direction, d2) else {
+        return false;
+    };
+    let here = ctx.lv.get(sp);
+    let Some(new_state) =
+        multiface_state_for_placement(block, here, ctx.lv.get(sp.rel(face)), face)
+    else {
+        return false;
+    };
+    ctx.lv.set(sp, new_state)
+}
+
+/// `getSpreadFromFaceTowardDirection` + `canSpreadInto`; returns the position
+/// and face of the first spread type that can be placed.
+fn spread_from_face(
+    ctx: &Ctx,
+    block: BlockStateId,
+    state: BlockStateId,
+    pos: Pos,
+    direction: Dir,
+    d2: Dir,
+) -> Option<(Pos, Dir)> {
+    if d2.axis() == direction.axis() {
+        return None;
+    }
+    if !(has_face(state, direction) && !has_face(state, d2)) {
+        return None;
+    }
+    // SAME_POSITION, SAME_PLANE, WRAP_AROUND.
+    let candidates = [
+        (pos, d2),
+        (pos.rel(d2), direction),
+        (pos.rel(d2).rel(direction), d2.opposite()),
+    ];
+    for (sp, face) in candidates {
+        if can_spread_into(ctx, block, sp, face) {
+            return Some((sp, face));
+        }
+    }
+    None
+}
+
+/// `DefaultSpreaderConfig.canSpreadInto`: the cell may be replaced and the
+/// face attaches.
+fn can_spread_into(ctx: &Ctx, block: BlockStateId, sp: Pos, face: Dir) -> bool {
+    let s = ctx.lv.get(sp);
+    let replaceable = blockinfo::is_air(s)
+        || blockinfo::block_of(s) == blockinfo::block_of(block)
+        || (is(s, "minecraft:water") && is_water_source(s));
+    replaceable && multi_valid_for_placement(block, s, ctx.lv.get(sp.rel(face)), face)
 }
 
 /// `Util.shuffledCopy`.
@@ -2671,5 +2786,81 @@ mod tests {
             place(&gen, &w, &large, origin, 99),
             place(&gen, &w, &large, origin, 99)
         );
+    }
+
+    /// Stone everywhere but one air cell, so the growth attaches to a stone
+    /// face and the spreader can add a second face to the same cell.
+    fn glow_lichen_world(gen: &crate::vanilla::generator::VanillaGenerator) -> World {
+        let mut w = World::new(gen, 0, 0);
+        w.fill(-16, 0, -16, 31, 70, 31, stone());
+        w.set(8, 40, 8, BlockStateId::AIR);
+        w
+    }
+
+    fn max_faces(writes: &[(i32, i32, i32, BlockStateId)]) -> usize {
+        const FACES: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
+        writes
+            .iter()
+            .filter(|(_, _, _, s)| blockinfo::name(*s) == "minecraft:glow_lichen")
+            .map(|(_, _, _, s)| {
+                FACES
+                    .iter()
+                    .filter(|f| blockinfo::prop(*s, f) == Some("true"))
+                    .count()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn glow_lichen_spreads() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = glow_lichen_world(&gen);
+        // Force the spread draw so the multiface spreader must run.
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(
+                r#"{"type":"minecraft:multiface_growth","config":{
+                    "block":"minecraft:glow_lichen",
+                    "can_be_placed_on":["minecraft:stone"],
+                    "can_place_on_ceiling":true,
+                    "can_place_on_floor":false,
+                    "can_place_on_wall":true,
+                    "chance_of_spreading":1.0,
+                    "search_range":20
+                }}"#,
+            )
+            .unwrap(),
+        );
+        let writes = place(&gen, &w, &cfg, Pos::new(8, 40, 8), 5);
+        assert!(
+            count_name(&writes, "minecraft:glow_lichen") > 0,
+            "no glow lichen placed"
+        );
+        assert!(
+            max_faces(&writes) >= 2,
+            "the spreader did not add a second face"
+        );
+    }
+
+    #[test]
+    fn glow_lichen_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let w = glow_lichen_world(&gen);
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse("\"minecraft:glow_lichen\"").unwrap(),
+        );
+        let a = place(&gen, &w, &cfg, Pos::new(8, 40, 8), 3);
+        let b = place(&gen, &w, &cfg, Pos::new(8, 40, 8), 3);
+        assert_eq!(a, b);
     }
 }
