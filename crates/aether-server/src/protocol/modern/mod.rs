@@ -22,6 +22,9 @@ pub mod chunk;
 pub mod gen;
 pub mod inventory;
 pub mod items;
+#[allow(clippy::all)]
+#[rustfmt::skip]
+pub mod legacy_gen;
 pub mod play;
 pub mod registry;
 pub mod version;
@@ -156,6 +159,16 @@ impl ProtocolCodec for Codec {
                 overworld,
                 data,
             } => send_known_registries(s, v, core, synced, *overworld, data)?,
+            // The older codecs never drive the modern login path; they carry
+            // their own registry dump. Reaching here would mean a `Version`
+            // wired to the wrong codec, so fail loudly rather than send a
+            // client a world with no registries.
+            Registries::None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "this version sends its own registries; the modern login path cannot serve it",
+                ))
+            }
         }
 
         // Add Resource Pack, offered while still in configuration so the
@@ -309,13 +322,19 @@ impl ProtocolCodec for Codec {
                     .var_int(self.0.entity_type("minecraft:player").unwrap_or(0))
                     .f64(pos.x)
                     .f64(pos.y)
-                    .f64(pos.z)
-                    // Velocity precedes the angles in this version.
-                    .bytes(&ZERO_VELOCITY)
-                    .u8(angle(pos.pitch))
+                    .f64(pos.z);
+                // Velocity precedes the angles from 1.21.9; before that it
+                // trails the object data as three shorts.
+                if self.0.gen >= Gen::V1_21_9 {
+                    p.bytes(&ZERO_VELOCITY);
+                }
+                p.u8(angle(pos.pitch))
                     .u8(angle(pos.yaw))
                     .u8(angle(pos.yaw)) // head yaw
                     .var_int(0); // no object data
+                if self.0.gen < Gen::V1_21_9 {
+                    play::write_velocity(self.0, &mut p, (0.0, 0.0, 0.0));
+                }
                 vec![p]
             }
             ServerEvent::DropItem {
@@ -339,12 +358,14 @@ impl ProtocolCodec for Codec {
                     .var_int(self.0.entity_type("minecraft:item").unwrap_or(0))
                     .f64(*x)
                     .f64(*y)
-                    .f64(*z)
-                    .bytes(&ZERO_VELOCITY)
-                    .u8(0)
-                    .u8(0)
-                    .u8(0)
-                    .var_int(0);
+                    .f64(*z);
+                if self.0.gen >= Gen::V1_21_9 {
+                    spawn.bytes(&ZERO_VELOCITY);
+                }
+                spawn.u8(0).u8(0).u8(0).var_int(0);
+                if self.0.gen < Gen::V1_21_9 {
+                    play::write_velocity(self.0, &mut spawn, (0.0, 0.0, 0.0));
+                }
 
                 let mut meta = PacketOut::new(self.0.packets.cb_set_entity_data);
                 meta.var_int(*entity_id)
@@ -456,20 +477,7 @@ impl ProtocolCodec for Codec {
     }
 
     fn block_for_item(&self, item: &str) -> Option<BlockStateId> {
-        // Almost every placeable item shares its name with the block it places,
-        // so the registry answers this directly. This used to be a lookup in a
-        // seven-entry hotbar table, which meant every other block a player
-        // selected was placed as **stone** — the fallback at the end of the
-        // chain. A headless client found it in one run.
-        use aether_world::registry::blocks::default_state;
-        // The block's *default* state. Choosing a better one — a stair facing
-        // the player, a slab in the half they clicked — is the placement's job
-        // and needs context this method is not given; see DESIGN_NOTES §9.4.
-        if let Some(id) = default_state(item) {
-            return Some(id);
-        }
-        // The handful whose item and block names differ.
-        items::block_name_for_item(item).and_then(default_state)
+        block_for_item(item)
     }
 
     fn supports_containers(&self) -> bool {
@@ -733,6 +741,23 @@ impl ProtocolCodec for Codec {
             _ => ClientEvent::Ignored,
         }
     }
+}
+
+/// The block an item name places, if it places one.
+///
+/// Item names are version-independent (`minecraft:oak_stairs` is that name in
+/// every release), so the older codecs share this with the modern one. Almost
+/// every placeable item shares its name with the block it places.
+pub fn block_for_item(item: &str) -> Option<BlockStateId> {
+    use aether_world::registry::blocks::default_state;
+    // The block's *default* state. Choosing a better one — a stair facing the
+    // player, a slab in the half they clicked — is the placement's job and
+    // needs context this method is not given; see DESIGN_NOTES §9.4.
+    if let Some(id) = default_state(item) {
+        return Some(id);
+    }
+    // The handful whose item and block names differ.
+    items::block_name_for_item(item).and_then(default_state)
 }
 
 /// Write one container slot in this version's item format.

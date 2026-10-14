@@ -16,8 +16,16 @@ pub mod registry;
 
 use std::io;
 
-use aether_world::BlockStateId;
+use aether_world::{BlockStateId, ItemTypeId};
 
+/// The shared [`super::modern`] version for this protocol: its packet ids,
+/// entity types, menus and compat-backed block and item tables drive the
+/// gameplay path this codec delegates to.
+fn version() -> &'static super::modern::version::Version {
+    &super::modern::version::V1_21_6
+}
+
+use super::modern;
 use super::{BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::players::PosLook;
 use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
@@ -120,6 +128,25 @@ impl ProtocolCodec for Codec {
         771
     }
 
+    fn supports_containers(&self) -> bool {
+        true
+    }
+
+    fn full_gameplay(&self) -> bool {
+        true
+    }
+
+    fn block_for_item(&self, item: &str) -> Option<BlockStateId> {
+        super::modern::block_for_item(item)
+    }
+
+    fn resolve_reported_item(&self, server: ItemTypeId, reported: ItemTypeId) -> ItemTypeId {
+        // A spear shown as a trident comes back as a trident; the slot's real
+        // item wins, so a creative client cannot launder one into a real
+        // trident by moving it around.
+        version().resolve_reported(server, reported)
+    }
+
     fn read_login_start(&self, s: &mut Conn) -> io::Result<Option<String>> {
         let Some(p) = read_packet(s)? else {
             return Ok(None);
@@ -207,10 +234,24 @@ impl ProtocolCodec for Codec {
             .f32(p.yaw)
             .f32(p.pitch)
             .i32(0); // all absolute
-        pkt.send(s)
-        // No hotbar: Set Slot carries a full item-component structure this
-        // server has no inventory model for. Creative players take blocks from
-        // the creative menu instead.
+        pkt.send(s)?;
+        // This codec runs the full game, so the client needs the same
+        // bootstrap the 1.21.11 codec sends: abilities, the selected hotbar
+        // slot, and full health and food.
+        let v = version();
+        let flags = match p.game_mode {
+            super::GameMode::Creative => 0x01 | 0x04 | 0x08,
+            super::GameMode::Survival => 0,
+        };
+        let mut abilities = PacketOut::new(v.packets.cb_player_abilities);
+        abilities.u8(flags).f32(0.05).f32(0.10);
+        abilities.send(s)?;
+        PacketOut::new(v.packets.cb_set_held_slot)
+            .var_int(0)
+            .send(s)?;
+        let mut health = PacketOut::new(v.packets.cb_set_health);
+        health.f32(20.0).var_int(20).f32(5.0);
+        health.send(s)
     }
 
     fn encode(&self, ev: &ServerEvent, world: &dyn BlockSource) -> Vec<PacketOut> {
@@ -289,14 +330,9 @@ impl ProtocolCodec for Codec {
                 p.var_int(*seq);
                 vec![p]
             }
-            // This version has no server-driven container support here; the
-            // caller falls back to a chat listing. See
-            // `ProtocolCodec::supports_containers`.
-            // No item entity on this version yet; the caller keeps the stack
-            // rather than dropping it, so nothing is lost.
-            ServerEvent::MoveEntity { .. } => Vec::new(),
-            ServerEvent::DropItem { .. } => Vec::new(),
-            ServerEvent::OpenContainer { .. } => Vec::new(),
+            ServerEvent::MoveEntity { .. }
+            | ServerEvent::DropItem { .. }
+            | ServerEvent::OpenContainer { .. } => modern::Codec(version()).encode(ev, world),
             ServerEvent::SetCenterChunk { cx, cz } => {
                 let mut p = PacketOut::new(PLAY_SET_CENTER_CHUNK);
                 p.var_int(*cx).var_int(*cz);
@@ -315,8 +351,10 @@ impl ProtocolCodec for Codec {
                 p.bytes(&super::nbt::string(text).to_network()).bool(false);
                 vec![p]
             }
-            // Gameplay events this version does not render.
-            _ => Vec::new(),
+            // Everything the codec above does not handle itself — entities,
+            // combat, health, hunger, windows, effects — is the shared
+            // gameplay path, driven by this version's ids and layouts.
+            _ => modern::Codec(version()).encode(ev, world),
         }
     }
 
@@ -383,14 +421,31 @@ impl ProtocolCodec for Codec {
                 let Ok(status) = pin.var_int() else {
                     return ClientEvent::Ignored;
                 };
-                if status != 0 && status != 2 {
-                    return ClientEvent::Ignored;
+                // The same packet carries digging and the non-dig actions,
+                // distinguished only by the status; a held right click sends
+                // the release-use status a spear's charge is read from.
+                match status {
+                    0 => {
+                        let Ok(packed) = pin.i64() else {
+                            return ClientEvent::Ignored;
+                        };
+                        let (x, y, z) = decode_position(packed);
+                        ClientEvent::StartDig { x, y, z, seq }
+                    }
+                    1 => ClientEvent::CancelDig { seq },
+                    2 => {
+                        let Ok(packed) = pin.i64() else {
+                            return ClientEvent::Ignored;
+                        };
+                        let (x, y, z) = decode_position(packed);
+                        ClientEvent::Dig { x, y, z, seq }
+                    }
+                    3 => ClientEvent::DropHeld { all: true },
+                    4 => ClientEvent::DropHeld { all: false },
+                    5 => ClientEvent::ReleaseUse,
+                    6 => ClientEvent::SwapHands,
+                    _ => ClientEvent::Ignored,
                 }
-                let Ok(packed) = pin.i64() else {
-                    return ClientEvent::Ignored;
-                };
-                let (x, y, z) = decode_position(packed);
-                ClientEvent::Dig { x, y, z, seq }
             }
             SB_BLOCK_PLACE => {
                 let Ok(_hand) = pin.var_int() else {
@@ -429,7 +484,9 @@ impl ProtocolCodec for Codec {
                 Ok(text) => ClientEvent::Chat(text),
                 Err(_) => ClientEvent::Ignored,
             },
-            _ => ClientEvent::Ignored,
+            // Window clicks, creative slots, sprint, sneak, swing and
+            // entity interaction: the shared gameplay decoder.
+            _ => modern::Codec(version()).decode(pkt, prev),
         }
     }
 }

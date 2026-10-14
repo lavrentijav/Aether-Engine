@@ -27,23 +27,27 @@ pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
         inventory::write_empty(p);
         return;
     };
-    let Some(id) = v.wire_item(s.item) else {
-        // The version has no item by that name — a modded item, or one from a
-        // release this client does not have. An empty slot makes it look as
-        // though the item vanished; show a stand-in carrying the real item's
-        // name instead, so the player can still see and handle it. The server
-        // keeps the real stack; only the picture changes.
-        write_disguised_stack(v, p, s);
-        return;
-    };
-    p.var_int(s.count as i32).var_int(id);
-    if s.damage > 0 {
-        p.var_int(1)
-            .var_int(0)
-            .var_int(v.component_damage)
-            .var_int(s.damage as i32);
-    } else {
-        p.var_int(0).var_int(0);
+    match v.wire_stack_item(s.item) {
+        Some(w) if !w.disguised => {
+            p.var_int(s.count as i32).var_int(w.id);
+            if s.damage > 0 {
+                p.var_int(1)
+                    .var_int(0)
+                    .var_int(v.component_damage)
+                    .var_int(s.damage as i32);
+            } else {
+                p.var_int(0).var_int(0);
+            }
+        }
+        // A stand-in for a *different* item (the compat layer's substitution,
+        // e.g. a spear shown as a trident): the icon is the stand-in but the
+        // real name and marker ride along.
+        Some(w) => write_disguised_stack(v, p, s, w.id),
+        // The version has no item by that name at all — a modded item, or one
+        // this build does not know. An empty slot makes it look as though the
+        // item vanished; show a generic stand-in carrying the real item's name
+        // instead. The server keeps the real stack; only the picture changes.
+        None => write_disguised_stack(v, p, s, stand_in_id(v)),
     }
 }
 
@@ -54,15 +58,14 @@ fn stand_in_id(v: &Version) -> i32 {
         .unwrap_or(0)
 }
 
-/// Write a stack whose item this version lacks, disguised under its real name.
+/// Write a stack under `id`, disguised under the real item's name.
 ///
 /// Two data components ride along: `custom_name` shows the real item's
 /// English name where the icon cannot, and `lore` carries one
 /// `Aether: minecraft:<id>` line so a disguised spear can be told from a
-/// genuine trident. The component ids are per-version (`minecraft:lore` is
-/// 11 in every release this codec speaks); a wrong id makes the client reject
-/// the whole stack, so they are generated, never guessed.
-fn write_disguised_stack(v: &Version, p: &mut PacketOut, s: &Stack) {
+/// genuine trident. The component ids are per-version; a wrong id makes the
+/// client reject the whole stack, so they are generated, never guessed.
+fn write_disguised_stack(v: &Version, p: &mut PacketOut, s: &Stack, id: i32) {
     let name = crate::protocol::compat::items::english(s.item)
         .map(str::to_owned)
         .unwrap_or_else(|| aether_world::registry::items::display_name(s.item));
@@ -71,7 +74,7 @@ fn write_disguised_stack(v: &Version, p: &mut PacketOut, s: &Stack) {
         None => "Aether: unknown item".to_owned(),
     };
     p.var_int(s.count as i32)
-        .var_int(stand_in_id(v))
+        .var_int(id)
         .var_int(2) // custom_name and lore added...
         .var_int(0) // ...and none removed
         .var_int(v.component_custom_name)
@@ -92,6 +95,20 @@ pub fn position_sync(
     pitch: f32,
     on_ground: bool,
 ) -> PacketOut {
+    // Before 1.21.2 the absolute position was `entity_teleport`, with the
+    // entity id first and no velocity deltas; 1.21.2 replaced it with
+    // `entity_position_sync`, whose extra three doubles are the delta.
+    if v.gen < Gen::V1_21_3 {
+        let mut p = PacketOut::new(v.packets.cb_entity_teleport);
+        p.var_int(entity_id)
+            .f64(x)
+            .f64(y)
+            .f64(z)
+            .u8(angle(yaw))
+            .u8(angle(pitch))
+            .bool(on_ground);
+        return p;
+    }
     let mut p = PacketOut::new(v.packets.cb_entity_position_sync);
     p.var_int(entity_id);
     if v.gen >= Gen::V26_3 {
@@ -157,6 +174,35 @@ pub fn write_lp_vec3(p: &mut PacketOut, v: (f64, f64, f64)) {
     }
 }
 
+/// An entity velocity, in the release's own form.
+///
+/// 1.21.9 replaced the three `i16` components (1/8000 of a block per tick)
+/// with the quantized [`write_lp_vec3`]. The older codecs still use the
+/// shorts, and they sit in the same place in the packet either way.
+pub fn write_velocity(v: &Version, p: &mut PacketOut, velocity: (f64, f64, f64)) {
+    if v.gen >= Gen::V1_21_9 {
+        write_lp_vec3(p, velocity);
+    } else {
+        for c in [velocity.0, velocity.1, velocity.2] {
+            p.u16((c.clamp(-3.9, 3.9) * 8000.0).round() as i16 as u16);
+        }
+    }
+}
+
+/// A stable UUID for an attribute modifier named by identifier.
+///
+/// 1.20.5 and older name a modifier by UUID on the wire. The value is only an
+/// identity, so one is derived from the identifier — the same modifier keeps
+/// the same id across a session.
+fn modifier_uuid(name: &str) -> u128 {
+    let mut h: u128 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h ^= b as u128;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// An inline sound event: holder id 0, then the identifier and no range.
 fn write_sound(p: &mut PacketOut, name: &str) {
     p.var_int(0).string(name).bool(false);
@@ -198,11 +244,18 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
                 .f64(*x)
                 .f64(*y)
                 .f64(*z);
-            write_lp_vec3(&mut p, *velocity);
+            // 1.21.9 moved the velocity from the end of the packet to just
+            // after the position, and quantized it.
+            if v.gen >= Gen::V1_21_9 {
+                write_velocity(v, &mut p, *velocity);
+            }
             p.u8(angle(*pitch))
                 .u8(angle(*yaw))
                 .u8(angle(*yaw))
                 .var_int(*data);
+            if v.gen < Gen::V1_21_9 {
+                write_velocity(v, &mut p, *velocity);
+            }
             let mut head = PacketOut::new(ids.cb_rotate_head);
             head.var_int(*entity_id).u8(angle(*yaw));
             vec![p, head]
@@ -226,8 +279,10 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
                         p.var_int(7);
                         write_stack(v, &mut p, s.as_ref());
                     }
-                    MetaValue::Pose(v) => {
-                        p.var_int(20).var_int(*v);
+                    MetaValue::Pose(pose) => {
+                        // The pose serializer is 21 before 1.21.9 and 20 after.
+                        let id = if v.gen >= Gen::V1_21_9 { 20 } else { 21 };
+                        p.var_int(id).var_int(*pose);
                     }
                 }
             }
@@ -263,7 +318,7 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
         } => {
             let mut p = PacketOut::new(ids.cb_set_entity_motion);
             p.var_int(*entity_id);
-            write_lp_vec3(&mut p, *velocity);
+            write_velocity(v, &mut p, *velocity);
             vec![p]
         }
         ServerEvent::EntityAnimation {
@@ -373,12 +428,36 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             if ids.cb_update_attributes < 0 {
                 return Some(Vec::new());
             }
+            // The attribute registry was reordered between releases, and
+            // 1.20.5 still names a modifier by UUID where 1.21 uses an
+            // identifier. Translate each key through the version's map and
+            // drop a property the release does not have.
+            let mapped: Vec<(i32, f64, &Vec<(String, f64, i8)>)> = properties
+                .iter()
+                .filter_map(|(key, value, modifiers)| {
+                    let key = match v.attribute_map.is_empty() {
+                        true => *key,
+                        false => match v.attribute_map.get(*key as usize) {
+                            Some(&k) if k >= 0 => k,
+                            _ => return None,
+                        },
+                    };
+                    Some((key, *value, modifiers))
+                })
+                .collect();
             let mut p = PacketOut::new(ids.cb_update_attributes);
-            p.var_int(*entity_id).var_int(properties.len() as i32);
-            for (key, value, modifiers) in properties {
-                p.var_int(*key).f64(*value).var_int(modifiers.len() as i32);
+            p.var_int(*entity_id).var_int(mapped.len() as i32);
+            for (key, value, modifiers) in mapped {
+                p.var_int(key).f64(value).var_int(modifiers.len() as i32);
                 for (id, amount, operation) in modifiers {
-                    p.string(id).f64(*amount).u8(*operation as u8);
+                    if v.gen <= Gen::V1_20_5 {
+                        // 1.20.5 wants a UUID; derive a stable one from the
+                        // identifier so the same modifier keeps its id.
+                        p.uuid(modifier_uuid(id));
+                    } else {
+                        p.string(id);
+                    }
+                    p.f64(*amount).u8(*operation as u8);
                 }
             }
             vec![p]
@@ -510,12 +589,16 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             p.bool(false)
                 .bool(false)
                 .bool(false) // no death location
-                .var_int(0)
-                .var_int(63)
-                .u8(0); // keep nothing
-                        // Then "start waiting for level chunks", as at login. Without it a
-                        // 1.20.3+ client holds the loading screen after a respawn until
-                        // it gives up — the world never appears.
+                .var_int(0); // portal cooldown
+                             // 1.21.2 added the sea level to the SpawnInfo; 1.20.5-1.21.1 do not
+                             // have it, and writing it would shift the next byte.
+            if v.gen >= Gen::V1_21_3 {
+                p.var_int(63);
+            }
+            p.u8(0); // keep nothing
+                     // Then "start waiting for level chunks", as at login. Without it a
+                     // 1.20.3+ client holds the loading screen after a respawn until
+                     // it gives up — the world never appears.
             let mut wait = PacketOut::new(ids.cb_game_event);
             wait.u8(13).f32(0.0);
             vec![p, abilities(v, *game_mode), wait]
@@ -539,16 +622,28 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             pitch,
         } => {
             let mut p = PacketOut::new(ids.cb_player_position);
-            p.var_int(2)
-                .f64(*x)
-                .f64(*y)
-                .f64(*z)
-                .f64(0.0)
-                .f64(0.0)
-                .f64(0.0)
-                .f32(*yaw)
-                .f32(*pitch)
-                .i32(0);
+            if v.gen >= Gen::V1_21_3 {
+                // 1.21.2 put the teleport id first and added explicit deltas.
+                p.var_int(2)
+                    .f64(*x)
+                    .f64(*y)
+                    .f64(*z)
+                    .f64(0.0)
+                    .f64(0.0)
+                    .f64(0.0)
+                    .f32(*yaw)
+                    .f32(*pitch)
+                    .i32(0);
+            } else {
+                // 1.20.5-1.21.1: position, look, relative flags, then the id.
+                p.f64(*x)
+                    .f64(*y)
+                    .f64(*z)
+                    .f32(*yaw)
+                    .f32(*pitch)
+                    .u8(0) // all absolute
+                    .var_int(2);
+            }
             vec![p]
         }
         ServerEvent::DeathMessage { entity_id, text } => {
@@ -564,6 +659,15 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             radius,
             knockback,
         } => {
+            // The explosion packet was rebuilt in 1.21.9 (block-offset array,
+            // player motion, two particle ids, an inline sound holder); the
+            // older layout also names particles by registry id, which this
+            // build has no table for. The event is cosmetic — damage and
+            // knockback are applied by the game layer — so it is left
+            // unsent on the older codecs rather than sent malformed.
+            if v.gen < Gen::V1_21_11 {
+                return Some(Vec::new());
+            }
             let mut p = PacketOut::new(ids.cb_explode);
             p.f64(*x).f64(*y).f64(*z).f32(*radius).i32(0);
             match knockback {
@@ -712,7 +816,7 @@ mod tests {
         // V1_21_11 has the spear, so drive the disguise helper directly, as a
         // version that lacked it would.
         let mut p = PacketOut::new(0);
-        write_disguised_stack(v, &mut p, &Stack::new(spear, 1));
+        write_disguised_stack(v, &mut p, &Stack::new(spear, 1), stand_in_id(v));
         let body = p.body()[1..].to_vec();
         assert!(
             contains(&body, b"Aether: minecraft:iron_spear"),
@@ -727,5 +831,117 @@ mod tests {
     /// Whether `hay` contains `needle` as a contiguous run.
     fn contains(hay: &[u8], needle: &[u8]) -> bool {
         hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    fn id(name: &str) -> aether_world::ItemTypeId {
+        crate::inventory::item(name)
+    }
+
+    #[test]
+    fn an_old_add_entity_puts_the_short_velocity_after_the_object_data() {
+        // 1.21.9 moved the velocity from the tail to just after the position
+        // and quantized it. A 1.21.1 client still wants three shorts at the
+        // end, and getting the place wrong shifts the angles it reads.
+        let ev = ServerEvent::SpawnEntity {
+            entity_id: 9,
+            uuid: 0x1234,
+            kind: "minecraft:zombie",
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            velocity: (0.0, 0.0, 0.0),
+            data: 0,
+        };
+        let v = &crate::protocol::modern::version::V1_21_1;
+        let pkts = encode(v, &ev).unwrap();
+        let body = pkts[0].body();
+        assert_eq!(body[0] as i32, v.packets.cb_add_entity);
+        let mut pin = crate::proto::PacketIn::new(&body[1..]);
+        pin.var_int().unwrap(); // entity id
+        for _ in 0..16 {
+            pin.u8().unwrap(); // uuid
+        }
+        pin.var_int().unwrap(); // type
+        for _ in 0..3 {
+            pin.f64().unwrap();
+        }
+        pin.u8().unwrap(); // pitch
+        pin.u8().unwrap(); // yaw
+        pin.u8().unwrap(); // head yaw
+        pin.var_int().unwrap(); // object data
+                                // The remaining payload is exactly the three shorts of the velocity.
+        assert_eq!(pin.u16().unwrap(), 0);
+        assert_eq!(pin.u16().unwrap(), 0);
+        assert_eq!(pin.u16().unwrap(), 0);
+        // Nothing may follow the velocity.
+        assert!(pin.u8().is_err(), "nothing may follow the velocity");
+    }
+
+    #[test]
+    fn older_versions_teleport_with_the_1_20_packet() {
+        let old = position_sync(
+            &crate::protocol::modern::version::V1_21_1,
+            7,
+            (1.0, 2.0, 3.0),
+            0.0,
+            0.0,
+            true,
+        );
+        assert_eq!(
+            old.body()[0] as i32,
+            crate::protocol::modern::version::V1_21_1
+                .packets
+                .cb_entity_teleport
+        );
+        let new = position_sync(
+            &crate::protocol::modern::version::V1_21_3,
+            7,
+            (1.0, 2.0, 3.0),
+            0.0,
+            0.0,
+            true,
+        );
+        assert_eq!(
+            new.body()[0] as i32,
+            crate::protocol::modern::version::V1_21_3
+                .packets
+                .cb_entity_position_sync
+        );
+    }
+
+    #[test]
+    fn the_pose_serializer_id_moved_in_1_21_9() {
+        let ev = ServerEvent::EntityMeta {
+            entity_id: 1,
+            entries: vec![(0, MetaValue::Pose(0))],
+        };
+        let check = |v: &Version, want: i32| {
+            let pkts = encode(v, &ev).unwrap();
+            let body = pkts[0].body();
+            let mut pin = crate::proto::PacketIn::new(&body[1..]);
+            pin.var_int().unwrap(); // entity id
+            pin.u8().unwrap(); // index
+            assert_eq!(pin.var_int().unwrap(), want, "{}: pose serializer", v.name);
+        };
+        check(&crate::protocol::modern::version::V1_21_1, 21);
+        check(&crate::protocol::modern::version::V1_21_11, 20);
+    }
+
+    #[test]
+    fn a_spear_is_shown_as_a_trident_on_1_21_1_and_cannot_be_laundered() {
+        let v = &crate::protocol::modern::version::V1_21_1;
+        let spear = id("minecraft:iron_spear");
+        let w = v.wire_stack_item(spear).expect("a stand-in exists");
+        assert!(w.disguised, "the spear is a stand-in on this release");
+        assert_eq!(v.engine_item(w.id), Some(id("minecraft:trident")));
+        // The client echoes the trident; the slot's real spear wins.
+        assert_eq!(v.resolve_reported(spear, id("minecraft:trident")), spear);
+        // A genuinely different report still stands.
+        assert_eq!(
+            v.resolve_reported(spear, id("minecraft:diamond")),
+            id("minecraft:diamond")
+        );
     }
 }
