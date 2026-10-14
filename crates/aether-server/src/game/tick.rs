@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use aether_api::Vector3;
 
+use super::effects::{self, Effect, TickEvent};
 use super::entities::{self, Action, PlayerView};
 use super::{combat, containers, mobs, tables, window};
 use crate::inventory::Stack;
@@ -254,8 +255,13 @@ fn apply(a: Action, registry: &SharedRegistry, world: &DemoWorld) {
 /// One player's tick: eating, hunger, regeneration, the void.
 fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now: u64) {
     let pos = p.pos();
-    let mut hurt: Option<(f32, &'static str)> = None;
+    let mut hurts: Vec<(f32, &'static str)> = Vec::new();
     let mut ate = false;
+    // Effects to apply and to take away, and a milk bucket that clears them
+    // all; all three are sent after the game lock is dropped.
+    let mut applied: Vec<Effect> = Vec::new();
+    let mut removed: Vec<u8> = Vec::new();
+    let mut milk = false;
     let health_msg;
     {
         let mut st = p.game();
@@ -277,11 +283,16 @@ fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now:
                         st.food = (st.food + f.nutrition as i32).min(20);
                         st.saturation = (st.saturation + f.saturation).min(st.food as f32);
                         consume_one(&mut inv, slot, food.item, st.survival());
+                        applied = food.item.vanilla_name().map_or_else(Vec::new, |n| {
+                            entities::with_rng(|r| effects::food_effects(n, r))
+                        });
                         ate = true;
                     } else if food.item == crate::inventory::item("minecraft:milk_bucket") {
+                        // Milk cures every effect, as vanilla's does.
                         if st.survival() {
                             inv.put_slot(slot, Some(Stack::named("minecraft:bucket", 1)));
                         }
+                        milk = true;
                         ate = true;
                     }
                 }
@@ -306,7 +317,7 @@ fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now:
                 if st.food_timer >= 80 {
                     st.food_timer = 0;
                     if st.health > 1.0 {
-                        hurt = Some((1.0, "minecraft:starve"));
+                        hurts.push((1.0, "minecraft:starve"));
                     }
                 }
             } else {
@@ -317,7 +328,7 @@ fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now:
             if st.env_timer >= 10 {
                 st.env_timer = 0;
                 if pos.y < -128.0 {
-                    hurt = Some((4.0, "minecraft:out_of_world"));
+                    hurts.push((4.0, "minecraft:out_of_world"));
                 } else {
                     let feet = world.get_block(
                         pos.x.floor() as i32,
@@ -325,8 +336,45 @@ fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now:
                         pos.z.floor() as i32,
                     );
                     if crate::game::block_name(world, feet).is_some_and(|n| n == "minecraft:lava") {
-                        hurt = Some((4.0, "minecraft:lava"));
+                        hurts.push((4.0, "minecraft:lava"));
                     }
+                }
+            }
+        }
+        // Status effects advance for every player, so they still run out in
+        // creative; only a survival player feels them.
+        for ev in st.effects.tick() {
+            match ev {
+                TickEvent::Heal(h) => {
+                    if st.survival() && st.health < 20.0 {
+                        st.health = (st.health + h).min(20.0);
+                    }
+                }
+                TickEvent::Damage { amount, lethal } => {
+                    if st.survival() {
+                        let damage = effects::tick_damage(st.health, amount, lethal);
+                        if damage > 0.0 {
+                            hurts.push((
+                                damage,
+                                if lethal {
+                                    "minecraft:wither"
+                                } else {
+                                    "minecraft:magic"
+                                },
+                            ));
+                        }
+                    }
+                }
+                TickEvent::Exhaust(x) => {
+                    if st.survival() {
+                        st.exhaust(x);
+                    }
+                }
+                TickEvent::Removed(id) => {
+                    if id == effects::ABSORPTION {
+                        st.absorption = 0.0;
+                    }
+                    removed.push(id);
                 }
             }
         }
@@ -357,7 +405,26 @@ fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now:
             world,
         );
     }
-    if let Some((amount, source)) = hurt {
+    // Milk first, then what the food left: a cured player is not re-poisoned
+    // by the same bite.
+    if milk {
+        effects::clear(p, registry, world);
+    }
+    effects::give_all(p, registry, world, &applied);
+    for id in removed {
+        let ev = ServerEvent::RemoveMobEffect {
+            entity_id: p.entity_id,
+            effect: id,
+        };
+        p.emit(&ev, world);
+        registry.broadcast_except(p.entity_id, &ev, world);
+        // A speed or slowness effect that ran out has to take its movement
+        // modifier off the client too.
+        if id == effects::SPEED || id == effects::SLOWNESS {
+            effects::sync_movement(p, registry, world);
+        }
+    }
+    for (amount, source) in hurts {
         combat::hurt_player(p, amount, source, None, registry, world);
     }
 }

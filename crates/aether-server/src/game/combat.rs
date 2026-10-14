@@ -22,6 +22,18 @@ fn bypasses_armor(source: &str) -> bool {
     )
 }
 
+/// Damage sources fire resistance turns away.
+fn is_fire(source: &str) -> bool {
+    matches!(
+        source,
+        "minecraft:in_fire"
+            | "minecraft:on_fire"
+            | "minecraft:lava"
+            | "minecraft:hot_floor"
+            | "minecraft:campfire"
+    )
+}
+
 /// Armour points and toughness a player is wearing.
 fn worn_armor(handle: &PlayerHandle) -> (f32, f32) {
     let inv = handle.inventory();
@@ -50,6 +62,18 @@ fn wear_armor(handle: &PlayerHandle, damage: f32) {
     }
 }
 
+/// The damage that reaches health after resistance and absorption, spending
+/// absorption as it soaks.
+fn after_effects(dealt: f32, resistance: f32, absorption: &mut f32) -> f32 {
+    let mut damage = dealt * (1.0 - resistance).max(0.0);
+    if *absorption > 0.0 {
+        let soaked = damage.min(*absorption);
+        *absorption -= soaked;
+        damage -= soaked;
+    }
+    damage
+}
+
 /// Hurt a player. Returns whether the hit landed.
 pub fn hurt_player(
     target: &PlayerHandle,
@@ -74,6 +98,13 @@ pub fn hurt_player(
         {
             return false;
         }
+        // Fire resistance: the blow never lands at all.
+        if is_fire(source) && st.effects.fire_resistant() {
+            return false;
+        }
+        // Resistance turns a fraction of the blow away, then absorption
+        // soaks what is left before health.
+        let dealt = after_effects(dealt, st.effects.resistance_fraction(), &mut st.absorption);
         st.hurt_cooldown = HURT_COOLDOWN;
         st.health -= dealt;
         st.exhaust(0.1);
@@ -173,12 +204,16 @@ pub fn die(
 ) {
     let text = death_message(&target.name, source, attacker, registry);
     crate::log::info(&format!("[death] {text}"));
+    // Death clears every effect; tell the client before the respawn screen
+    // takes over.
+    super::effects::clear(target, registry, world);
     // Everything the player held goes to the ground, each stack keeping its
     // identity; the scope journals the moves when it ends.
     let _scope = super::provenance::Scope::begin(target, world);
     let items: Vec<Stack> = {
         let mut st = target.game();
         st.window = None;
+        st.absorption = 0.0;
         let mut items: Vec<Stack> = st.cursor.take().into_iter().collect();
         st.xp_total = 0;
         let mut inv = target.inventory();
@@ -599,5 +634,31 @@ mod tests {
     fn mob_names_read_as_names() {
         assert_eq!(pretty("minecraft:cave_spider"), "Cave Spider");
         assert_eq!(pretty("minecraft:zombie"), "Zombie");
+    }
+
+    #[test]
+    fn resistance_and_absorption_cut_the_blow_before_health() {
+        // Resistance I turns a fifth away.
+        let mut absorb = 0.0;
+        assert!((after_effects(10.0, 0.2, &mut absorb) - 8.0).abs() < 1e-6);
+        // Absorption soaks what is left and is spent.
+        let mut absorb = 20.0;
+        assert_eq!(after_effects(10.0, 0.0, &mut absorb), 0.0);
+        assert_eq!(absorb, 10.0);
+        // A blow larger than the absorption leaves the rest for health.
+        let mut absorb = 3.0;
+        assert_eq!(after_effects(10.0, 0.0, &mut absorb), 7.0);
+        assert_eq!(absorb, 0.0);
+        // Full resistance takes nothing.
+        let mut absorb = 0.0;
+        assert_eq!(after_effects(10.0, 1.0, &mut absorb), 0.0);
+    }
+
+    #[test]
+    fn fire_sources_are_recognised() {
+        assert!(is_fire("minecraft:lava"));
+        assert!(is_fire("minecraft:on_fire"));
+        assert!(!is_fire("minecraft:player_attack"));
+        assert!(!is_fire("minecraft:fall"));
     }
 }

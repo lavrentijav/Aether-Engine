@@ -354,6 +354,8 @@ fn login_and_play(
             st.food = s.food;
             st.saturation = s.saturation;
             st.xp_total = s.xp_total;
+            st.effects = crate::game::effects::Effects::from_list(s.effects.clone());
+            st.absorption = st.effects.absorption_amount();
         }
     }
 
@@ -961,7 +963,7 @@ fn place_block(
 /// after a respawn: health, inventory, time, experience.
 fn after_spawn(
     handle: &crate::players::PlayerHandle,
-    _registry: &SharedRegistry,
+    registry: &SharedRegistry,
     world: &DemoWorld,
 ) {
     if !handle.full() {
@@ -991,6 +993,16 @@ fn after_spawn(
         world,
     );
     handle.emit(&ServerEvent::GameModeChange(mode), world);
+    // Effects restored from the save, before the health that the client
+    // draws its absorption hearts over.
+    let effects: Vec<crate::game::effects::Effect> =
+        handle.game().effects.iter().copied().collect();
+    for e in &effects {
+        handle.emit(&crate::game::effects::event(handle.entity_id, *e), world);
+    }
+    if !effects.is_empty() {
+        crate::game::effects::sync_movement(handle, registry, world);
+    }
     handle.emit(
         &ServerEvent::Health {
             health,
@@ -1041,6 +1053,7 @@ pub(crate) fn save_player(handle: &crate::players::PlayerHandle, world: &DemoWor
         xp_total: st.xp_total,
         mode: st.mode,
         spawn: st.spawn,
+        effects: st.effects.all().to_vec(),
     };
     let pos = if st.dead { st.spawn } else { saved.pos };
     drop(st);

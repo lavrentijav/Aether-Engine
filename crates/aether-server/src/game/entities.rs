@@ -473,6 +473,8 @@ pub fn hurt_mob(
     if m.death.is_some() || m.hurt_cd > 0 {
         return None;
     }
+    // Resistance turns part of the blow away, as it does for a player.
+    let amount = amount * (1.0 - m.effects.resistance_fraction());
     m.health -= amount;
     m.hurt_cd = 10;
     m.meta_dirty = true;
