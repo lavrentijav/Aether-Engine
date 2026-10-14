@@ -66,13 +66,16 @@ const RELEASES = [
 ]
 
 // The menu registry (Minecraft's own `MenuType` order). The crafter menu did
-// not exist before 1.21, so 1.20.5's entries after `generic_3x3` are one lower.
+// not exist before 1.21, so 1.20.5's entries after `generic_3x3` are one lower
+// — `brewing_stand` (11 in 1.21.11) sits after `blast_furnace` and shifts with
+// the rest.
 function menus(release) {
   const shift = release === 'v1_20_5' ? -1 : 0
   return {
     generic_9x3: 2,
     generic_9x6: 5,
     generic_3x3: 6,
+    brewing_stand: 11 + shift,
     crafting: 12 + shift,
     furnace: 14 + shift,
     hopper: 16 + shift,
@@ -149,6 +152,7 @@ for (const [mod, ver, proto] of RELEASES) {
   o(`    pub const COMPONENT_DAMAGE: i32 = ${comps['damage']};`)
   o(`    pub const COMPONENT_CUSTOM_NAME: i32 = ${comps['custom_name']};`)
   o(`    pub const COMPONENT_LORE: i32 = ${comps['lore']};`)
+  o(`    pub const COMPONENT_POTION_CONTENTS: i32 = ${comps['potion_contents']};`)
   o('')
 
   // Engine attribute id (1.21.11 order) -> this version's attribute id, by
@@ -187,6 +191,7 @@ for (const [mod, ver, proto] of RELEASES) {
   o(`    pub const MENU_GENERIC_9X3: i32 = ${m.generic_9x3};`)
   o(`    pub const MENU_GENERIC_9X6: i32 = ${m.generic_9x6};`)
   o(`    pub const MENU_GENERIC_3X3: i32 = ${m.generic_3x3};`)
+  o(`    pub const MENU_BREWING_STAND: i32 = ${m.brewing_stand};`)
   o(`    pub const MENU_CRAFTING: i32 = ${m.crafting};`)
   o(`    pub const MENU_FURNACE: i32 = ${m.furnace};`)
   o(`    pub const MENU_HOPPER: i32 = ${m.hopper};`)

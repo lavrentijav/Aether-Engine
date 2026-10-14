@@ -233,6 +233,7 @@ pub mod v1_20_5 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 7;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 31;
 
     /// Engine attribute id (1.21.11 order) -> this version's id; -1 absent.
     pub static ATTRIBUTE_MAP: &[i32] = &[0, 1, 2, 3, 4, 5, 6, -1, -1, -1, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, -1, -1, -1, -1, -1, -1];
@@ -240,6 +241,7 @@ pub mod v1_20_5 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 10;
     pub const MENU_CRAFTING: i32 = 11;
     pub const MENU_FURNACE: i32 = 13;
     pub const MENU_HOPPER: i32 = 15;
@@ -473,6 +475,7 @@ pub mod v1_21_1 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 7;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 31;
 
     /// Engine attribute id (1.21.11 order) -> this version's id; -1 absent.
     pub static ATTRIBUTE_MAP: &[i32] = &[0, 1, 2, 3, 4, 5, 6, -1, -1, -1, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, -1, -1, -1, -1, -1, -1];
@@ -480,6 +483,7 @@ pub mod v1_21_1 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;
@@ -733,6 +737,7 @@ pub mod v1_21_3 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 8;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 41;
 
     /// Engine attribute id (1.21.11 order) -> this version's id; -1 absent.
     pub static ATTRIBUTE_MAP: &[i32] = &[0, 1, 2, 3, 4, 5, 6, -1, -1, -1, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, -1, -1, -1, -1, -1, -1];
@@ -740,6 +745,7 @@ pub mod v1_21_3 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;
@@ -992,6 +998,7 @@ pub mod v1_21_4 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 8;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 41;
 
     /// Engine attribute id (1.21.11 order) -> this version's id; -1 absent.
     pub static ATTRIBUTE_MAP: &[i32] = &[0, 1, 2, 3, 4, 5, 6, -1, -1, -1, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, -1, -1, -1, -1, -1, -1];
@@ -999,6 +1006,7 @@ pub mod v1_21_4 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;
@@ -1252,6 +1260,7 @@ pub mod v1_21_5 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 8;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 42;
 
     /// Engine attribute id (1.21.11 order) -> this version's id; -1 absent.
     pub static ATTRIBUTE_MAP: &[i32] = &[0, 1, 2, 3, 4, 5, 6, -1, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, -1, -1, -1];
@@ -1259,6 +1268,7 @@ pub mod v1_21_5 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;
@@ -1513,6 +1523,7 @@ pub mod v1_21_6 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 8;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 42;
 
     /// Engine attribute id (1.21.11 order) -> this version's id; -1 absent.
     pub static ATTRIBUTE_MAP: &[i32] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30];
@@ -1520,6 +1531,7 @@ pub mod v1_21_6 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;
@@ -1774,6 +1786,7 @@ pub mod v1_21_8 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 8;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 42;
 
     /// Engine attribute id (1.21.11 order) -> this version's id; -1 absent.
     pub static ATTRIBUTE_MAP: &[i32] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30];
@@ -1781,6 +1794,7 @@ pub mod v1_21_8 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;
@@ -2037,6 +2051,7 @@ pub mod v1_21_9 {
     pub const COMPONENT_DAMAGE: i32 = 3;
     pub const COMPONENT_CUSTOM_NAME: i32 = 5;
     pub const COMPONENT_LORE: i32 = 8;
+    pub const COMPONENT_POTION_CONTENTS: i32 = 42;
 
     /// Engine attribute id (1.21.11 order) -> this version's id; -1 absent.
     pub static ATTRIBUTE_MAP: &[i32] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30];
@@ -2044,6 +2059,7 @@ pub mod v1_21_9 {
     pub const MENU_GENERIC_9X3: i32 = 2;
     pub const MENU_GENERIC_9X6: i32 = 5;
     pub const MENU_GENERIC_3X3: i32 = 6;
+    pub const MENU_BREWING_STAND: i32 = 11;
     pub const MENU_CRAFTING: i32 = 12;
     pub const MENU_FURNACE: i32 = 14;
     pub const MENU_HOPPER: i32 = 16;
