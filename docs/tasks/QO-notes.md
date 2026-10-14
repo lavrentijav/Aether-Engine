@@ -50,7 +50,25 @@ layout). The J4 spear test on v767 still passes.
 * 1.20.2–1.20.4 (764/765) and older still keep the subset — a different queue's
   scope.
 
+## Review fixes (docs/tasks/QO-review-1.md)
+
+Five confirmed defects, each fixed in its own commit with a test:
+
+* **J9-fix1** — 1.21.3–1.21.10 sent `entity_teleport` with the pre-1.21.2
+  body. Dropped the hand-rolled `EntityMove` arm; the shared path switches to
+  `entity_position_sync` (explicit deltas, f32 angles) from 1.21.3 on.
+* **J9-fix2** — the old codecs' hard-coded `PLAYER_ENTITY_TYPE` was 147 in
+  1.21.2/1.21.3 (needs 148) and 155 in 1.21.9 (needs 151). Dropped the
+  hand-rolled `SpawnPlayer`; the generated table is used.
+* **J9-fix3** — the damage-type capture dropped message ids containing `.`/`_`
+  (`player_explosion`, `sonic_boom`, `mace_smash`), shifting every later id.
+  Fixed the regex, added a count assertion, regenerated.
+* **J9-fix4** — `Time` wrote `tickDayTime` before 1.21.2; now gated.
+* **J9-fix5** — the drop path used the raw wire id; now through
+  `play::write_stack`, so a dropped spear keeps its trident disguise.
+
 ## Checks
 
 `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -j4 --
--D warnings`, `cargo test -p aether-server` (765 passed) all clean.
+-D warnings`, `cargo test -p aether-server` (771 passed, including the five
+fix tests) all clean.
