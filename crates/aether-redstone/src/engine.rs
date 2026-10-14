@@ -175,4 +175,19 @@ impl Redstone {
         let mut ctx = Context::new(view);
         ctx.dispatch_entity_inside(pos);
     }
+
+    /// A projectile hit the block at `pos` on `face`, at `position` (block-local,
+    /// each component `0.0..1.0`). `arrow` is whether an arrow hit. The target
+    /// block uses this to set its output power.
+    pub fn on_projectile_hit<V: RedstoneView>(
+        &self,
+        view: &mut V,
+        pos: BlockPos,
+        face: Direction,
+        position: [f32; 3],
+        arrow: bool,
+    ) {
+        let mut ctx = Context::new(view);
+        ctx.dispatch_projectile_hit(pos, face, position, arrow);
+    }
 }

@@ -15,6 +15,7 @@ mod observer;
 mod pressure_plate;
 mod redstone_block;
 mod repeater;
+mod target;
 mod torch;
 mod tripwire;
 mod wire;
@@ -36,6 +37,7 @@ pub use observer::Observer;
 pub use pressure_plate::{HeavyWeighted, LightWeighted, PressurePlate};
 pub use redstone_block::RedstoneBlock;
 pub use repeater::Repeater;
+pub use target::Target;
 #[cfg(test)]
 pub use test_observer::TestObserver;
 pub use torch::{Torch, WallTorch};
@@ -193,6 +195,20 @@ pub trait BlockBehaviour: Sync {
     /// `entityInside`: an entity entered the block. A pressure plate reads the
     /// entity count to decide whether it is pressed. The default does nothing.
     fn entity_inside(&self, _ctx: &mut Context, _state: BlockStateId, _pos: crate::pos::BlockPos) {}
+
+    /// `onProjectileHit`: a projectile hit the block at `pos` on `face`, at
+    /// `position` (block-local, each component `0.0..1.0`). `arrow` is whether
+    /// an arrow hit. The target block uses this. The default does nothing.
+    fn projectile_hit(
+        &self,
+        _ctx: &mut Context,
+        _state: BlockStateId,
+        _pos: crate::pos::BlockPos,
+        _face: Direction,
+        _position: [f32; 3],
+        _arrow: bool,
+    ) {
+    }
 }
 
 /// `LeverBlock`/`ButtonBlock.updateNeighbours`: notify the block itself and the

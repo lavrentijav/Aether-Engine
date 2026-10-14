@@ -475,6 +475,18 @@ impl<'a> Context<'a> {
         behaviour(state).entity_inside(self, state, pos);
     }
 
+    /// Dispatch a projectile hit to the block's behaviour.
+    pub fn dispatch_projectile_hit(
+        &mut self,
+        pos: BlockPos,
+        face: Direction,
+        position: [f32; 3],
+        arrow: bool,
+    ) {
+        let state = self.get_block(pos);
+        behaviour(state).projectile_hit(self, state, pos, face, position, arrow);
+    }
+
     // -- the cascade --------------------------------------------------------
 
     /// `CollectingNeighborUpdater.addAndRun`.
@@ -821,6 +833,7 @@ impl Registry {
             "minecraft:heavy_weighted_pressure_plate",
             &blocks::HeavyWeighted,
         );
+        put(&mut by_state, "minecraft:target", &blocks::Target);
         put(&mut by_state, "minecraft:tripwire", &blocks::TripWire);
         put(
             &mut by_state,
