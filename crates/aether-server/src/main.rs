@@ -138,6 +138,13 @@ fn main() -> std::process::ExitCode {
                     c.special,
                     c.unsupported.len(),
                 ));
+                if c.special > 0 {
+                    log::info(&format!(
+                        "recipes    : {} dynamic recipes not run (stubbed): {}",
+                        c.special,
+                        c.special_list.join(", ")
+                    ));
+                }
                 game::recipes::install(book);
             }
             Err(e) => log::warn(&format!(
