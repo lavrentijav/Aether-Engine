@@ -45,7 +45,7 @@ modern versions run a server-side survival game).
 | Core API: `World` facade over storage/generation/physics (`aether-api`) | ✅ |
 | Runnable demo: `aether` binary (worldgen + physics + storage + telemetry) with TOML config | ✅ |
 | Player entity; the 1.8.9 codec and the demo read `FullBright` (always max light), while 1.21.11 and 26.x compute real light (below) | ✅ |
-| Experimental join server `aether-server` (1.8.9 / protocol 47, noise terrain, creative, full-bright) — protocol verified against a raw socket client, **not yet against a live client** | 🚧 Preview |
+| Experimental join server `aether-server`, first landed as a 1.8.9 / protocol 47 preview (noise terrain, creative, full-bright); the 1.8.9 framing is verified against a raw socket client, **not yet against a live 1.8.9 client** — see the 1.21.11 and 26.x rows below | 🚧 Preview |
 | Multiplayer visibility on `aether-server`: connected players spawn, move and despawn for each other (no tab list / skins yet — see [Known Issues](KNOWN_ISSUES.md)) | ✅ |
 | Packet compression (zlib, `Set Compression`, per-connection threshold) — a spawn column drops ~45 KB → ~0.2 KB | ✅ |
 | Block-change acknowledgement (1.19+ prediction sequence) — without it a client's placement predictions are never released | ✅ |
