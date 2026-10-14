@@ -150,6 +150,7 @@ impl Redstone {
         let mut ctx = Context::new(view, self);
         let state = ctx.get_block(pos);
         behaviour::behaviour(state).on_place(&mut ctx, state, pos, behaviour::AIR);
+        behaviour::behaviour(state).set_placed_by(&mut ctx, state, pos);
         ctx.update_neighbors_at_with(pos, state, None);
         ctx.update_neighbour_shapes(pos, SetBlockFlags::UPDATE_NEIGHBORS);
     }

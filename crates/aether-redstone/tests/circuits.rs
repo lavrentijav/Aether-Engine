@@ -5,7 +5,8 @@
 //! failure points at a rule rather than at a fixture.
 
 use aether_redstone::props;
-use aether_redstone::{BlockPos, Direction, MemWorld, Redstone};
+use aether_redstone::{BlockPos, Direction, MemWorld, Redstone, SetBlockFlags};
+use aether_world::registry::BlockRegistry;
 use aether_world::BlockStateId;
 
 fn p(x: i32, y: i32, z: i32) -> BlockPos {
@@ -394,4 +395,158 @@ fn every_direction_is_reachable_and_symmetric() {
         engine.on_use(&mut w, lever);
         assert_eq!(power(&w, wire), 15, "wire {dir:?} of the lever");
     }
+}
+
+// ---------------------------------------------------------------------------
+// R9 — the divergences the stage-1 review found
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_lone_wire_is_a_cross_not_a_dot() {
+    // Finding 8: `RedStoneWireBlock.getStateForPlacement` builds the shape from
+    // `crossState`, so an isolated dust is a cross (all four sides `side`), not
+    // a dot. This also fixes the cross/dot use toggle parity.
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    let wire = p(0, 0, 0);
+    w.put(wire, "minecraft:redstone_wire");
+    engine.on_placed(&mut w, wire);
+    for dir in Direction::HORIZONTAL {
+        assert_eq!(
+            props::get(w.state(wire), props::side_prop(dir)),
+            Some("side"),
+            "{dir:?} should be a side"
+        );
+    }
+}
+
+#[test]
+fn wire_connects_to_a_comparator_on_every_side() {
+    // Finding 3: `shouldConnectTo` special-cases only the repeater. A comparator
+    // is an ordinary signal source, so the wire draws a side toward it.
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    let wire = p(0, 0, 0);
+    let comparator = p(1, 0, 0);
+    w.put(wire, "minecraft:redstone_wire");
+    w.put(comparator, "minecraft:comparator[facing=north]");
+    engine.on_placed(&mut w, wire);
+    engine.on_placed(&mut w, comparator);
+    assert_eq!(
+        props::get(w.state(wire), "east"),
+        Some("side"),
+        "the wire must connect to the comparator"
+    );
+}
+
+#[test]
+fn wire_climbs_a_slab_and_a_hopper_but_not_their_sides() {
+    // Finding 2: the up/side decision uses `isFaceSturdy`, not `isRedstoneConductor`.
+    // A bottom slab's top face is sturdy, so the wire climbs; the slab's west
+    // face is not, so the connection is `side`, not `up`. A hopper is
+    // explicitly allowed by `canSurviveOn` even though its top face is not full.
+    let engine = Redstone::new();
+    for support in ["minecraft:oak_slab", "minecraft:hopper"] {
+        let mut w = MemWorld::new();
+        let source = p(0, 0, 0);
+        let block = p(1, 0, 0);
+        let over = p(1, 1, 0);
+        w.put(source, "minecraft:redstone_wire");
+        w.put(block, support);
+        w.put(over, "minecraft:redstone_wire");
+        engine.on_placed(&mut w, source);
+        engine.on_placed(&mut w, block);
+        engine.on_placed(&mut w, over);
+        assert_eq!(
+            props::get(w.state(source), "east"),
+            Some("side"),
+            "{support}: the wire should connect sideways, not up"
+        );
+    }
+}
+
+#[test]
+fn a_repeater_placed_on_a_powered_input_waits_one_tick() {
+    // Finding 7: `DiodeBlock.setPlacedBy` schedules a tick with delay 1, not
+    // `2 * DELAY`. A delay-4 repeater placed on a live input turns on at t = 1.
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    let lever = p(0, 0, 0);
+    let repeater = p(1, 0, 0);
+    w.put(lever, "minecraft:lever[face=floor,facing=east]");
+    engine.on_placed(&mut w, lever);
+    engine.on_use(&mut w, lever);
+    w.put(repeater, "minecraft:repeater[facing=west,delay=4]");
+    engine.on_placed(&mut w, repeater);
+
+    w.run(&engine, 1);
+    assert!(
+        is_powered(&w, repeater),
+        "a placed diode turns on after exactly one tick"
+    );
+}
+
+#[test]
+fn changing_a_repeaters_delay_notifies_the_front() {
+    // Finding 10: `RepeaterBlock.useWithoutItem` writes with flag 3
+    // (`UPDATE_NEIGHBORS|UPDATE_CLIENTS`), which runs `onPlace` and so
+    // `updateNeighborsInFront`. A stale wire in front is corrected.
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    let repeater = p(1, 0, 0);
+    let wire = p(2, 0, 0);
+    w.put(repeater, "minecraft:repeater[facing=west,delay=1]");
+    w.put(wire, "minecraft:redstone_wire");
+    engine.on_placed(&mut w, repeater);
+    engine.on_placed(&mut w, wire);
+
+    // Make the wire's shape stale: a bare dot, as if it never saw the repeater.
+    w.put(wire, "minecraft:redstone_wire");
+    engine.on_use(&mut w, repeater); // cycles delay 1 -> 2
+
+    assert_eq!(
+        props::get(w.state(wire), "west"),
+        Some("side"),
+        "the delay change must notify the wire in front"
+    );
+}
+
+#[test]
+fn a_stale_tick_is_dropped_when_the_block_changed() {
+    // Finding 1: ticks are keyed by (block, pos) and guarded with `is(block)`.
+    // A lamp's pending off-tick must not run as the stone button that replaced
+    // it, and the button's own tick must still be allowed to coexist.
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    let lever = p(0, 0, 0);
+    let lamp = p(1, 0, 0);
+    w.put(lever, "minecraft:lever[face=floor,facing=east]");
+    w.put(lamp, "minecraft:redstone_lamp");
+    engine.on_placed(&mut w, lever);
+    engine.on_placed(&mut w, lamp);
+
+    engine.on_use(&mut w, lever); // on -> lamp lit
+    assert!(is_lit(&w, lamp));
+    engine.on_use(&mut w, lever); // off -> lamp schedules its 4-tick off
+    assert!(is_lit(&w, lamp), "the lamp stays lit until its tick");
+
+    // Replace the lamp with a stone button and press it.
+    let button = BlockRegistry::new()
+        .get("minecraft:stone_button[face=floor,facing=east]")
+        .unwrap();
+    engine.set_block(&mut w, lamp, button, SetBlockFlags::PLACE);
+    engine.on_use(&mut w, lamp);
+
+    // The stale lamp tick would fire at t+4; it must be dropped, and the button
+    // must still be held for its full 20 ticks.
+    w.run(&engine, 4);
+    assert!(
+        is_powered(&w, lamp),
+        "the stale lamp tick must not release the button"
+    );
+    w.run(&engine, 16);
+    assert!(
+        !is_powered(&w, lamp),
+        "the button releases after its own 20 ticks"
+    );
 }

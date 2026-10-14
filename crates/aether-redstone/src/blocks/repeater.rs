@@ -68,6 +68,14 @@ impl BlockBehaviour for Repeater {
         update_neighbors_in_front(ctx, pos, state);
     }
 
+    fn set_placed_by(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
+        // `DiodeBlock.setPlacedBy`: a diode placed onto a powered input turns on
+        // after one tick, not after its delay.
+        if should_turn_on(&ctx.signals(), pos, state) {
+            ctx.schedule_tick(pos, 1, TickPriority::Normal);
+        }
+    }
+
     fn tick(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
         if is_locked(&ctx.signals(), pos, state) {
             return;

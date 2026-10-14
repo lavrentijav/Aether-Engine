@@ -75,7 +75,7 @@ impl BlockBehaviour for Wire {
         if crate::behaviour::block_id_of(old) == crate::behaviour::block_id_of(state) {
             return;
         }
-        update(ctx, pos, state);
+        placement_update(ctx, pos, state);
         ctx.update_neighbors_of_neighboring_wires(pos);
     }
 
@@ -129,9 +129,24 @@ impl BlockBehaviour for Wire {
 
 /// Recompute a wire's shape and power, writing it if it changed.
 pub(crate) fn update(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
+    update_base(ctx, pos, state, state);
+}
+
+/// Placement uses vanilla's `crossState` as the connection base, so an isolated
+/// dust is a **cross** (all four sides `side`), not a dot. Every later update
+/// starts from the wire's own state, which is what preserves a player-set dot.
+fn placement_update(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
+    let mut base = state;
+    for dir in Direction::HORIZONTAL {
+        base = props::set_side(base, dir, "side");
+    }
+    update_base(ctx, pos, state, base);
+}
+
+fn update_base(ctx: &mut Context, pos: BlockPos, state: BlockStateId, base: BlockStateId) {
     let shaped = {
         let signals = ctx.signals();
-        connection_state(&signals, pos, state)
+        connection_state(&signals, pos, base)
     };
     let target = {
         let signals = ctx.signals();

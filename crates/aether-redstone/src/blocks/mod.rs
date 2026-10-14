@@ -121,6 +121,11 @@ pub trait BlockBehaviour: Sync {
     ) {
     }
 
+    /// `setPlacedBy`: a player placed the block. Runs after [`Self::on_place`].
+    /// A diode schedules a one-tick tick here when it is placed onto a powered
+    /// input, regardless of its delay.
+    fn set_placed_by(&self, _ctx: &mut Context, _state: BlockStateId, _pos: crate::pos::BlockPos) {}
+
     /// `affectNeighborsAfterRemoval`: the block is being replaced.
     ///
     /// The default notifies the six neighbours, which is what a plain block's
