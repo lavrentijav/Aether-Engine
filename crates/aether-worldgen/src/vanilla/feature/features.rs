@@ -9,6 +9,7 @@ use aether_world::BlockStateId;
 use super::super::blockinfo::{self, prop};
 use super::super::density::BuildError;
 use super::super::json::Json;
+use super::super::noise::NormalNoise;
 use super::super::providers::IntProvider;
 use super::super::rng::Rng;
 use super::super::surface::parse_block_state;
@@ -26,6 +27,36 @@ use super::{place_placed, Ctx, Loader, Placed};
 pub struct OreTarget {
     test: RuleTest,
     state: BlockStateId,
+}
+
+/// A `geode` configuration.
+#[derive(Debug)]
+pub struct GeodeConfig {
+    filling: StateProvider,
+    inner: StateProvider,
+    alternate_inner: StateProvider,
+    middle: StateProvider,
+    outer: StateProvider,
+    inner_placements: Vec<BlockStateId>,
+    cannot_replace: BlockSet,
+    invalid_blocks: BlockSet,
+    filling_layer: f64,
+    inner_layer: f64,
+    middle_layer: f64,
+    outer_layer: f64,
+    crack_chance: f64,
+    crack_base: f64,
+    crack_offset: i32,
+    use_potential: f64,
+    use_alternate: f64,
+    require_alternate: bool,
+    outer_wall: IntProvider,
+    distribution: IntProvider,
+    point_offset: IntProvider,
+    min_gen_offset: i32,
+    max_gen_offset: i32,
+    noise_multiplier: f64,
+    invalid_threshold: i32,
 }
 
 /// A configured feature.
@@ -147,6 +178,8 @@ pub enum Configured {
     DesertWell,
     /// `monster_room` (dungeons).
     MonsterRoom,
+    /// `geode` (amethyst).
+    Geode(Box<GeodeConfig>),
     /// A type this port does not place.
     Unsupported(String),
 }
@@ -365,6 +398,54 @@ pub(crate) fn parse(l: &mut Loader, j: &Json) -> Result<Configured, BuildError> 
         "iceberg" => Configured::Iceberg(state_of(c, "state")?),
         "desert_well" => Configured::DesertWell,
         "monster_room" => Configured::MonsterRoom,
+        "geode" => {
+            let blocks = get(c, "blocks")?;
+            let layers = get(c, "layers")?;
+            let crack = get(c, "crack")?;
+            let placements = |k: &str| -> Vec<BlockStateId> {
+                blocks
+                    .get(k)
+                    .and_then(Json::as_arr)
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(parse_block_state)
+                    .collect()
+            };
+            Configured::Geode(Box::new(GeodeConfig {
+                filling: StateProvider::parse(get(blocks, "filling_provider")?, &l.noises)?,
+                inner: StateProvider::parse(get(blocks, "inner_layer_provider")?, &l.noises)?,
+                alternate_inner: StateProvider::parse(
+                    get(blocks, "alternate_inner_layer_provider")?,
+                    &l.noises,
+                )?,
+                middle: StateProvider::parse(get(blocks, "middle_layer_provider")?, &l.noises)?,
+                outer: StateProvider::parse(get(blocks, "outer_layer_provider")?, &l.noises)?,
+                inner_placements: placements("inner_placements"),
+                cannot_replace: l
+                    .tags
+                    .holder_set(blocks.get("cannot_replace").unwrap_or(&Json::Null)),
+                invalid_blocks: l
+                    .tags
+                    .holder_set(blocks.get("invalid_blocks").unwrap_or(&Json::Null)),
+                filling_layer: layers.f64_or("filling", 1.7),
+                inner_layer: layers.f64_or("inner_layer", 2.2),
+                middle_layer: layers.f64_or("middle_layer", 3.2),
+                outer_layer: layers.f64_or("outer_layer", 4.2),
+                crack_chance: crack.f64_or("generate_crack_chance", 1.0),
+                crack_base: crack.f64_or("base_crack_size", 2.0),
+                crack_offset: crack.i32_or("crack_point_offset", 2),
+                use_potential: c.f64_or("use_potential_placements_chance", 0.35),
+                use_alternate: c.f64_or("use_alternate_layer0_chance", 0.0),
+                require_alternate: c.bool_or("placements_require_layer0_alternate", true),
+                outer_wall: IntProvider::parse(get(c, "outer_wall_distance")?)?,
+                distribution: IntProvider::parse(get(c, "distribution_points")?)?,
+                point_offset: IntProvider::parse(get(c, "point_offset")?)?,
+                min_gen_offset: c.i32_or("min_gen_offset", -16),
+                max_gen_offset: c.i32_or("max_gen_offset", 16),
+                noise_multiplier: c.f64_or("noise_multiplier", 0.05),
+                invalid_threshold: c.i32_or("invalid_blocks_threshold", 1),
+            }))
+        }
         other => {
             l.unsupported.insert(format!("feature:{other}"));
             Configured::Unsupported(other.to_string())
@@ -639,6 +720,7 @@ pub(crate) fn place_configured(ctx: &mut Ctx, f: &Configured, pos: Pos) -> bool 
         Configured::Iceberg(state) => super::extra::iceberg(ctx, *state, pos),
         Configured::DesertWell => desert_well(ctx, pos),
         Configured::MonsterRoom => monster_room(ctx, pos),
+        Configured::Geode(cfg) => geode(ctx, cfg, pos),
         Configured::Unsupported(name) => {
             ctx.d.note_unsupported(&format!("feature:{name}"));
             false
@@ -1707,6 +1789,163 @@ fn reorient_chest(lv: &Level, pos: Pos, chest: BlockStateId) -> BlockStateId {
     blockinfo::with_prop(chest, "facing", f.name())
 }
 
+/// `GeodeFeature`. `cannot_replace` is consulted before every write, so the
+/// geode never overwrites bedrock, spawners and the like.
+fn geode(ctx: &mut Ctx, cfg: &GeodeConfig, origin: Pos) -> bool {
+    let k = cfg.distribution.sample(ctx.r);
+    let noise = NormalNoise::create_legacy(ctx.lv.core.seed, -4, &[1.0]);
+    let d = k as f64 / cfg.outer_wall.max_value() as f64;
+    let e = 1.0 / cfg.filling_layer.sqrt();
+    let f = 1.0 / (cfg.inner_layer + d).sqrt();
+    let g = 1.0 / (cfg.middle_layer + d).sqrt();
+    let h = 1.0 / (cfg.outer_layer + d).sqrt();
+    let l = 1.0 / (cfg.crack_base + ctx.r.next_double() / 2.0 + if k > 3 { d } else { 0.0 }).sqrt();
+    let crack = ctx.r.next_float() < cfg.crack_chance as f32;
+
+    let mut points: Vec<(Pos, i32)> = Vec::new();
+    let mut m = 0;
+    for _ in 0..k {
+        let o = cfg.outer_wall.sample(ctx.r);
+        let p = cfg.outer_wall.sample(ctx.r);
+        let q = cfg.outer_wall.sample(ctx.r);
+        let at = origin.offset(o, p, q);
+        let state = ctx.lv.get(at);
+        if blockinfo::is_air(state) || cfg.invalid_blocks.contains(state) {
+            m += 1;
+            if m > cfg.invalid_threshold {
+                return false;
+            }
+        }
+        points.push((at, cfg.point_offset.sample(ctx.r)));
+    }
+
+    let mut cracks: Vec<Pos> = Vec::new();
+    if crack {
+        let n = ctx.r.next_int_bounded(4);
+        let o = k * 2 + 1;
+        match n {
+            0 => {
+                cracks.push(origin.offset(o, 7, 0));
+                cracks.push(origin.offset(o, 5, 0));
+                cracks.push(origin.offset(o, 1, 0));
+            }
+            1 => {
+                cracks.push(origin.offset(0, 7, o));
+                cracks.push(origin.offset(0, 5, o));
+                cracks.push(origin.offset(0, 1, o));
+            }
+            2 => {
+                cracks.push(origin.offset(o, 7, o));
+                cracks.push(origin.offset(o, 5, o));
+                cracks.push(origin.offset(o, 1, o));
+            }
+            _ => {
+                cracks.push(origin.offset(0, 7, 0));
+                cracks.push(origin.offset(0, 5, 0));
+                cracks.push(origin.offset(0, 1, 0));
+            }
+        }
+    }
+
+    let mut placements: Vec<Pos> = Vec::new();
+    let (i, j) = (cfg.min_gen_offset, cfg.max_gen_offset);
+    // `betweenClosed`: x fastest, then y, then z.
+    for z in i..=j {
+        for y in i..=j {
+            for x in i..=j {
+                let at = origin.offset(x, y, z);
+                let r =
+                    noise.get_value(at.x as f64, at.y as f64, at.z as f64) * cfg.noise_multiplier;
+                let mut s = 0.0;
+                let mut t = 0.0;
+                for (p, off) in &points {
+                    s += 1.0
+                        / ((at.x - p.x).pow(2) as f64
+                            + (at.y - p.y).pow(2) as f64
+                            + (at.z - p.z).pow(2) as f64
+                            + *off as f64)
+                            .sqrt()
+                        + r;
+                }
+                for p in &cracks {
+                    t += 1.0
+                        / ((at.x - p.x).pow(2) as f64
+                            + (at.y - p.y).pow(2) as f64
+                            + (at.z - p.z).pow(2) as f64
+                            + cfg.crack_offset as f64)
+                            .sqrt()
+                        + r;
+                }
+                if s < h {
+                    continue;
+                }
+                let cannot = &cfg.cannot_replace;
+                let put = |ctx: &mut Ctx, p: Pos, v: BlockStateId| {
+                    if !cannot.contains(ctx.lv.get(p)) {
+                        ctx.lv.set(p, v);
+                    }
+                };
+                if crack && t >= l && s < e {
+                    put(ctx, at, states().cave_air);
+                } else if s >= e {
+                    let v = cfg.filling.get(ctx.r, at);
+                    put(ctx, at, v);
+                } else if s >= f {
+                    let bl2 = ctx.r.next_float() < cfg.use_alternate as f32;
+                    let v = if bl2 {
+                        cfg.alternate_inner.get(ctx.r, at)
+                    } else {
+                        cfg.inner.get(ctx.r, at)
+                    };
+                    put(ctx, at, v);
+                    if (!cfg.require_alternate || bl2)
+                        && ctx.r.next_float() < cfg.use_potential as f32
+                    {
+                        placements.push(at);
+                    }
+                } else if s >= g {
+                    let v = cfg.middle.get(ctx.r, at);
+                    put(ctx, at, v);
+                } else {
+                    let v = cfg.outer.get(ctx.r, at);
+                    put(ctx, at, v);
+                }
+            }
+        }
+    }
+
+    for at in placements {
+        let mut s = cfg.inner_placements
+            [ctx.r.next_int_bounded(cfg.inner_placements.len() as i32) as usize];
+        for d in Dir::ALL {
+            if prop(s, "facing").is_some() {
+                s = blockinfo::with_prop(s, "facing", d.name());
+            }
+            let p = at.rel(d);
+            let other = ctx.lv.get(p);
+            if prop(s, "waterlogged").is_some() {
+                s = blockinfo::with_prop(
+                    s,
+                    "waterlogged",
+                    if is_water_source(other) {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                );
+            }
+            if blockinfo::is_air(other) || (is(other, "minecraft:water") && is_water_source(other))
+            {
+                if !cfg.cannot_replace.contains(ctx.lv.get(p)) {
+                    ctx.lv.set(p, s);
+                }
+                break;
+            }
+        }
+    }
+    true
+}
+
 fn huge_mushroom(
     ctx: &mut Ctx,
     red: bool,
@@ -1912,6 +2151,93 @@ mod tests {
             count_name(&writes, "minecraft:cobblestone") > 0,
             "no cobblestone"
         );
+    }
+
+    #[test]
+    fn geode_places() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let mut w = World::new(&gen, 0, 0);
+        w.fill(-20, 0, -20, 40, 120, 40, stone());
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(
+                r##"{"type":"minecraft:geode","config":{
+                    "blocks":{
+                        "filling_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:air"}},
+                        "inner_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:amethyst_block"}},
+                        "alternate_inner_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:budding_amethyst"}},
+                        "middle_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:calcite"}},
+                        "outer_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:smooth_basalt"}},
+                        "inner_placements":[{"Name":"minecraft:small_amethyst_bud","Properties":{"facing":"up","waterlogged":"false"}},{"Name":"minecraft:amethyst_cluster","Properties":{"facing":"up","waterlogged":"false"}}],
+                        "cannot_replace":"#minecraft:features_cannot_replace",
+                        "invalid_blocks":"#minecraft:geode_invalid_blocks"
+                    },
+                    "layers":{"filling":1.7,"inner_layer":2.2,"middle_layer":3.2,"outer_layer":4.2},
+                    "crack":{"base_crack_size":2.0,"crack_point_offset":2,"generate_crack_chance":0.95},
+                    "distribution_points":{"type":"minecraft:uniform","min_inclusive":3,"max_inclusive":4},
+                    "point_offset":{"type":"minecraft:uniform","min_inclusive":1,"max_inclusive":2},
+                    "outer_wall_distance":{"type":"minecraft:uniform","min_inclusive":4,"max_inclusive":6},
+                    "invalid_blocks_threshold":1,"max_gen_offset":16,"min_gen_offset":-16,
+                    "noise_multiplier":0.05,"placements_require_layer0_alternate":true,
+                    "use_alternate_layer0_chance":0.083,"use_potential_placements_chance":0.35
+                }}"##,
+            )
+            .unwrap(),
+        );
+        let writes = place(&gen, &w, &cfg, Pos::new(8, 50, 8), 3);
+        assert!(
+            count_name(&writes, "minecraft:amethyst_block") > 0,
+            "no amethyst"
+        );
+        assert!(
+            count_name(&writes, "minecraft:smooth_basalt") > 0,
+            "no smooth basalt"
+        );
+        assert!(count_name(&writes, "minecraft:calcite") > 0, "no calcite");
+    }
+
+    #[test]
+    fn geode_deterministic() {
+        let Some((pack, gen)) = setup() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let mut w = World::new(&gen, 0, 0);
+        w.fill(-20, 0, -20, 40, 120, 40, stone());
+        let cfg = parse_configured(
+            &gen,
+            &pack,
+            &Json::parse(
+                r##"{"type":"minecraft:geode","config":{
+                    "blocks":{
+                        "filling_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:air"}},
+                        "inner_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:amethyst_block"}},
+                        "alternate_inner_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:budding_amethyst"}},
+                        "middle_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:calcite"}},
+                        "outer_layer_provider":{"type":"minecraft:simple_state_provider","state":{"Name":"minecraft:smooth_basalt"}},
+                        "inner_placements":[{"Name":"minecraft:amethyst_cluster","Properties":{"facing":"up","waterlogged":"false"}}],
+                        "cannot_replace":"#minecraft:features_cannot_replace",
+                        "invalid_blocks":"#minecraft:geode_invalid_blocks"
+                    },
+                    "layers":{"filling":1.7,"inner_layer":2.2,"middle_layer":3.2,"outer_layer":4.2},
+                    "crack":{"base_crack_size":2.0,"crack_point_offset":2,"generate_crack_chance":0.95},
+                    "distribution_points":{"type":"minecraft:uniform","min_inclusive":3,"max_inclusive":4},
+                    "point_offset":{"type":"minecraft:uniform","min_inclusive":1,"max_inclusive":2},
+                    "outer_wall_distance":{"type":"minecraft:uniform","min_inclusive":4,"max_inclusive":6},
+                    "invalid_blocks_threshold":1,"max_gen_offset":16,"min_gen_offset":-16,
+                    "noise_multiplier":0.05,"placements_require_layer0_alternate":true,
+                    "use_alternate_layer0_chance":0.083,"use_potential_placements_chance":0.35
+                }}"##,
+            )
+            .unwrap(),
+        );
+        let a = place(&gen, &w, &cfg, Pos::new(8, 50, 8), 3);
+        let b = place(&gen, &w, &cfg, Pos::new(8, 50, 8), 3);
+        assert_eq!(a, b);
     }
 
     #[test]
