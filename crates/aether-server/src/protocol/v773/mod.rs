@@ -83,10 +83,6 @@ const PLAY_PLAYER_REMOVE: i32 = 0x43;
 const ZERO_VELOCITY: [u8; 1] = [0x00];
 
 const PLAY_SPAWN_ENTITY: i32 = 0x01;
-/// Play: absolute entity move.
-const PLAY_ENTITY_TELEPORT: i32 = 0x7B;
-/// Play: entity head yaw.
-const PLAY_HEAD_ROTATION: i32 = 0x51;
 /// Play: remove entities.
 const PLAY_DESTROY_ENTITIES: i32 = 0x4B;
 /// Play: keep-alive (a long, unlike 1.8's varint).
@@ -315,20 +311,6 @@ impl ProtocolCodec for Codec {
                     .u8(angle(pos.yaw)) // head yaw
                     .var_int(0); // no object data
                 vec![p]
-            }
-            ServerEvent::EntityMove(h) => {
-                let pos = h.pos();
-                let mut tp = PacketOut::new(PLAY_ENTITY_TELEPORT);
-                tp.var_int(h.entity_id)
-                    .f64(pos.x)
-                    .f64(pos.y)
-                    .f64(pos.z)
-                    .u8(angle(pos.yaw))
-                    .u8(angle(pos.pitch))
-                    .bool(pos.on_ground);
-                let mut head = PacketOut::new(PLAY_HEAD_ROTATION);
-                head.var_int(h.entity_id).u8(angle(pos.yaw));
-                vec![tp, head]
             }
             ServerEvent::DespawnEntity(eid) => {
                 let mut p = PacketOut::new(PLAY_DESTROY_ENTITIES);

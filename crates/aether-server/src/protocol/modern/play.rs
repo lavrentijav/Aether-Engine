@@ -944,4 +944,36 @@ mod tests {
             id("minecraft:diamond")
         );
     }
+
+    #[test]
+    fn entity_move_uses_the_old_teleport_then_the_1_21_2_position_sync() {
+        // 1.21.2 replaced the 3×f64 / angle-byte teleport with a packet
+        // carrying explicit deltas and f32 angles: `entity_position_sync`
+        // (and `entity_teleport` gained a trailing flags word). The older
+        // codecs must not keep sending the old body at the new id.
+        let v = &crate::protocol::modern::version::V1_21_1;
+        let old = position_sync(v, 7, (1.0, 2.0, 3.0), 90.0, 45.0, true);
+        assert_eq!(old.body()[0] as i32, v.packets.cb_entity_teleport);
+        // id + varint entity id + 3×f64 + yaw + pitch + onGround.
+        assert_eq!(old.body().len(), 1 + 1 + 24 + 1 + 1 + 1);
+
+        for v in [
+            &crate::protocol::modern::version::V1_21_3,
+            &crate::protocol::modern::version::V1_21_4,
+            &crate::protocol::modern::version::V1_21_5,
+            &crate::protocol::modern::version::V1_21_6,
+            &crate::protocol::modern::version::V1_21_8,
+            &crate::protocol::modern::version::V1_21_9,
+        ] {
+            let p = position_sync(v, 7, (1.0, 2.0, 3.0), 90.0, 45.0, true);
+            assert_eq!(
+                p.body()[0] as i32,
+                v.packets.cb_entity_position_sync,
+                "{}",
+                v.name
+            );
+            // id + varint entity id + 6×f64 + 2×f32 + onGround.
+            assert_eq!(p.body().len(), 1 + 1 + 48 + 8 + 1, "{}", v.name);
+        }
+    }
 }
