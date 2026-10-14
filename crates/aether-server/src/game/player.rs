@@ -66,6 +66,8 @@ pub struct PlayerState {
     pub eating: Option<(u64, u8)>,
     /// When drawing a bow started.
     pub drawing: Option<u64>,
+    /// When charging a spear started, for its right-click lunge.
+    pub charging: Option<u64>,
     /// The block being mined and the tick it started.
     pub digging: Option<((i32, i32, i32), u64)>,
     /// The tick of the last attack, for the 1.9 cooldown.
@@ -104,6 +106,7 @@ impl PlayerState {
             food_timer: 0,
             eating: None,
             drawing: None,
+            charging: None,
             digging: None,
             last_attack: 0,
             sneaking: false,

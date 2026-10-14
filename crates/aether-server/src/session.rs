@@ -742,6 +742,7 @@ fn play_loop(
                     let mut st = handle.game();
                     st.eating = None;
                     st.drawing = None;
+                    st.charging = None;
                 }
             }
             ClientEvent::CreativeSlot { slot, item, count } => {
@@ -1316,6 +1317,21 @@ fn record_slot_change(
     item: Option<aether_world::ItemTypeId>,
     count: u8,
 ) {
+    // An item the client was shown as a *substitute* comes back as the
+    // substitute; the slot's real item wins (see the compat item layer). A
+    // genuinely different report stands as what the player put there. This is
+    // what stops a creative client laundering a spear into a real trident by
+    // moving the slot around.
+    let item = match (item, slot) {
+        (Some(reported), s) if s >= 0 => {
+            let real = handle.inventory().get(s as usize).map(|st| st.item);
+            match real {
+                Some(real) => Some(handle.codec.resolve_reported_item(real, reported)),
+                None => Some(reported),
+            }
+        }
+        _ => item,
+    };
     let change = handle.set_creative_slot(slot, item, count);
     if change.is_noop() {
         return;

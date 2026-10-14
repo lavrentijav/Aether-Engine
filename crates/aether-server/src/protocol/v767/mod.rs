@@ -93,6 +93,10 @@ const SB_LOOK: i32 = 0x1C;
 const SB_FLYING: i32 = 0x1D;
 /// Serverbound: digging.
 const SB_BLOCK_DIG: i32 = 0x24;
+/// Serverbound: right-click with an item, not at a block. Needed so a
+/// released spear can be recognised even though this codec does not yet run
+/// the full gameplay path (task J5).
+const SB_USE_ITEM: i32 = 0x39;
 /// Serverbound: block placement.
 const SB_BLOCK_PLACE: i32 = 0x38;
 
@@ -379,14 +383,31 @@ impl ProtocolCodec for Codec {
                 let Ok(status) = pin.var_int() else {
                     return ClientEvent::Ignored;
                 };
-                if status != 0 && status != 2 {
-                    return ClientEvent::Ignored;
+                // The same packet carries digging and the non-dig actions,
+                // distinguished only by the status. The position and face
+                // that follow are meaningful only for the dig statuses; the
+                // release-use status is what a held right click sends, and a
+                // spear's charge is read from it.
+                match status {
+                    0 | 2 => {
+                        let Ok(packed) = pin.i64() else {
+                            return ClientEvent::Ignored;
+                        };
+                        let (x, y, z) = decode_position(packed);
+                        ClientEvent::Dig { x, y, z, seq }
+                    }
+                    1 => ClientEvent::CancelDig { seq },
+                    3 => ClientEvent::DropHeld { all: true },
+                    4 => ClientEvent::DropHeld { all: false },
+                    5 => ClientEvent::ReleaseUse,
+                    6 => ClientEvent::SwapHands,
+                    _ => ClientEvent::Ignored,
                 }
-                let Ok(packed) = pin.i64() else {
-                    return ClientEvent::Ignored;
-                };
-                let (x, y, z) = decode_position(packed);
-                ClientEvent::Dig { x, y, z, seq }
+            }
+            SB_USE_ITEM => {
+                let hand = pin.var_int().unwrap_or(0) as u8;
+                let seq = pin.var_int().unwrap_or(0);
+                ClientEvent::UseItem { hand, seq }
             }
             SB_BLOCK_PLACE => {
                 let Ok(_hand) = pin.var_int() else {
@@ -584,5 +605,74 @@ mod tests {
         pkts[0].write_to(&mut wire, None).unwrap();
         // length, id, then 300 as a VarInt: 0b10101100, 0b00000010.
         assert_eq!(wire, vec![3, PLAY_BLOCK_CHANGED_ACK as u8, 0xAC, 0x02]);
+    }
+
+    #[test]
+    fn a_use_then_release_routes_a_trident_stand_in_to_the_real_spear() {
+        // A 1.21.1 client has no spears; the compat layer shows it a trident.
+        // Its use and release must run the *real* spear's charge — no trident
+        // entity — and the slot must be resent to cancel the throw the client
+        // predicted.
+        let any = PosLook {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: true,
+        };
+
+        // Use Item: hand, sequence, then the look rotation (two f32).
+        let mut body = vec![0, 0];
+        body.extend_from_slice(&0f32.to_be_bytes());
+        body.extend_from_slice(&0f32.to_be_bytes());
+        let pkt = RawPacket {
+            id: SB_USE_ITEM,
+            data: body,
+        };
+        match Codec.decode(&pkt, any) {
+            ClientEvent::UseItem { hand, .. } => assert_eq!(hand, 0),
+            _ => panic!("use item must decode"),
+        }
+
+        // Player Action status 5: release use, ending with the sequence.
+        let mut body = vec![5];
+        body.extend_from_slice(&0i64.to_be_bytes()); // location, ignored here
+        body.push(0); // face
+        body.push(0); // sequence
+        let pkt = RawPacket {
+            id: SB_BLOCK_DIG,
+            data: body,
+        };
+        match Codec.decode(&pkt, any) {
+            ClientEvent::ReleaseUse => {}
+            _ => panic!("release use must decode"),
+        }
+
+        // What the session runs: the real item decides, not the stand-in.
+        use crate::protocol::compat::behaviour::{self, Action, Input};
+        let spear = crate::inventory::item("minecraft:iron_spear");
+        assert!(
+            behaviour::swallows_release(spear),
+            "a spear release must never spawn the trident's projectile"
+        );
+        let out = behaviour::route(spear, Input::UseRelease);
+        assert_eq!(out.action, Action::SpearCharge);
+        assert!(out.resend_slot, "the predicted trident throw is cancelled");
+    }
+
+    #[test]
+    fn the_trident_is_the_stand_in_the_item_layer_chooses_for_a_spear() {
+        // J3's item table is what produces the trident the client sees; if it
+        // ever stopped, the two halves of J4 would drift apart.
+        let spear = crate::inventory::item("minecraft:iron_spear");
+        let shown = crate::protocol::compat::items::V1_21_1
+            .wire(spear)
+            .expect("1.21.1 has a stand-in for a spear");
+        assert!(shown.disguised, "the spear is shown as another item");
+        assert_eq!(
+            crate::protocol::compat::items::V1_21_1.engine(shown.id),
+            Some(crate::inventory::item("minecraft:trident")),
+        );
     }
 }

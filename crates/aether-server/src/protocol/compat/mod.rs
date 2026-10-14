@@ -16,8 +16,11 @@
 //!   follows its block's substitution, so the item layer reuses
 //!   `tools/gen/compat/blocks.json` and the resolver in
 //!   `tools/gen/compat/gen.js`.
-//! * `gen` — the generated per-release tables, one module per release. Shared
-//!   by every table below.
+//! * [`items`] — per-release item tables and lossless item substitution (J3);
+//!   a block item follows its block's substitution.
+//! * [`behaviour`] — what the *real* item does when a client acts on the
+//!   substitute it was shown, e.g. a spear shown as a trident (J4).
+//! * `gen`, `item_gen` — the generated per-release block and item tables.
 
 use aether_world::BlockStateId;
 
@@ -52,6 +55,39 @@ pub mod gen {
     pub mod v1_21_8;
     pub mod v1_21_9;
 }
+
+#[allow(clippy::all)]
+#[rustfmt::skip]
+pub mod item_gen {
+    //! Generated per-release item tables; see `tools/gen/compat/gen_items.js`.
+    #![allow(dead_code)]
+
+    pub mod english;
+    pub mod v1_8;
+    pub mod v1_17;
+    pub mod v1_17_1;
+    pub mod v1_18;
+    pub mod v1_18_2;
+    pub mod v1_19;
+    pub mod v1_19_2;
+    pub mod v1_19_3;
+    pub mod v1_19_4;
+    pub mod v1_20_1;
+    pub mod v1_20_5;
+    pub mod v1_21_1;
+    pub mod v1_21_3;
+    pub mod v1_21_4;
+    pub mod v1_21_5;
+    pub mod v1_21_6;
+    pub mod v1_21_8;
+    pub mod v1_21_9;
+}
+
+/// The behaviour half: what the *real* item does when a client acts on the
+/// substitute it was shown (task J4).
+pub mod behaviour;
+/// The item half of the layer: per-release item tables and substitution.
+pub mod items;
 
 pub use blocks::{
     BlockTable, V1_17, V1_17_1, V1_18, V1_18_2, V1_19, V1_19_2, V1_19_3, V1_19_4, V1_20_1, V1_20_5,

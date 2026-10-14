@@ -187,6 +187,10 @@ pub struct Version {
     pub menu_furnace: i32,
     pub component_damage: i32,
     pub component_custom_name: i32,
+    /// This version's id of the `minecraft:lore` data component. A disguised
+    /// stack carries one line naming the real item, so a player can tell a
+    /// stand-in from the genuine article.
+    pub component_lore: i32,
     pub particle_explosion: i32,
     pub particle_explosion_emitter: i32,
     pub registries: Registries,
@@ -356,6 +360,7 @@ macro_rules! version {
             menu_furnace: super::gen::$m::MENU_FURNACE,
             component_damage: super::gen::$m::COMPONENT_DAMAGE,
             component_custom_name: super::gen::$m::COMPONENT_CUSTOM_NAME,
+            component_lore: super::gen::$m::COMPONENT_LORE,
             particle_explosion: super::gen::$m::PARTICLE_EXPLOSION,
             particle_explosion_emitter: super::gen::$m::PARTICLE_EXPLOSION_EMITTER,
             registries: $reg,

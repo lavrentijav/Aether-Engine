@@ -26,7 +26,12 @@ pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
         return;
     };
     let Some(id) = v.wire_item(s.item) else {
-        inventory::write_empty(p);
+        // The version has no item by that name — a modded item, or one from a
+        // release this client does not have. An empty slot makes it look as
+        // though the item vanished; show a stand-in carrying the real item's
+        // name instead, so the player can still see and handle it. The server
+        // keeps the real stack; only the picture changes.
+        write_disguised_stack(v, p, s);
         return;
     };
     p.var_int(s.count as i32).var_int(id);
@@ -38,6 +43,40 @@ pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
     } else {
         p.var_int(0).var_int(0);
     }
+}
+
+/// A stand-in item id the version always has, for an item it cannot name.
+fn stand_in_id(v: &Version) -> i32 {
+    v.item_id("minecraft:barrier")
+        .or_else(|| v.item_id("minecraft:paper"))
+        .unwrap_or(0)
+}
+
+/// Write a stack whose item this version lacks, disguised under its real name.
+///
+/// Two data components ride along: `custom_name` shows the real item's
+/// English name where the icon cannot, and `lore` carries one
+/// `Aether: minecraft:<id>` line so a disguised spear can be told from a
+/// genuine trident. The component ids are per-version (`minecraft:lore` is
+/// 11 in every release this codec speaks); a wrong id makes the client reject
+/// the whole stack, so they are generated, never guessed.
+fn write_disguised_stack(v: &Version, p: &mut PacketOut, s: &Stack) {
+    let name = crate::protocol::compat::items::english(s.item)
+        .map(str::to_owned)
+        .unwrap_or_else(|| aether_world::registry::items::display_name(s.item));
+    let marker = match s.item.vanilla_name() {
+        Some(real) => format!("Aether: {real}"),
+        None => "Aether: unknown item".to_owned(),
+    };
+    p.var_int(s.count as i32)
+        .var_int(stand_in_id(v))
+        .var_int(2) // custom_name and lore added...
+        .var_int(0) // ...and none removed
+        .var_int(v.component_custom_name)
+        .bytes(&crate::protocol::nbt::string(&name).to_network())
+        .var_int(v.component_lore)
+        .var_int(1) // one lore line
+        .bytes(&crate::protocol::nbt::string(&marker).to_network());
 }
 
 /// Entity Position Sync: absolute position and look. 26.3 made the
@@ -611,5 +650,80 @@ mod tests {
                 assert!((a - b).abs() < 0.01, "{v:?} -> {got:?}");
             }
         }
+    }
+
+    #[test]
+    fn an_item_the_version_lacks_is_a_named_stand_in_not_an_empty_slot() {
+        // A modded item: no vanilla name, so no release has it by name. The
+        // slot must still carry a stack, or the item looks as though it
+        // vanished.
+        let v = &crate::protocol::modern::version::V1_21_11;
+        let stack = Stack::new(
+            aether_world::ItemTypeId(aether_world::registry::items::ITEM_BEYOND),
+            1,
+        );
+        let mut p = PacketOut::new(0);
+        write_stack(v, &mut p, Some(&stack));
+        let body = p.body()[1..].to_vec(); // past the packet id
+        let mut pin = crate::proto::PacketIn::new(&body);
+        let count = pin.var_int().unwrap();
+        let id = pin.var_int().unwrap();
+        assert!(count > 0, "not an empty slot");
+        assert_eq!(
+            id,
+            v.item_id("minecraft:barrier").unwrap(),
+            "a real stand-in item"
+        );
+        assert_eq!(pin.var_int().unwrap(), 2, "custom_name and lore added");
+        assert_eq!(pin.var_int().unwrap(), 0, "none removed");
+        assert_eq!(
+            pin.var_int().unwrap(),
+            v.component_custom_name,
+            "the real name rides in custom_name"
+        );
+        // Skip the custom_name value: an anonymous NBT string (tag, length,
+        // bytes) — the lore component id follows it.
+        assert_eq!(pin.u8().unwrap(), 0x08, "TAG_String");
+        let name_len = pin.u16().unwrap() as usize;
+        for _ in 0..name_len {
+            pin.u8().unwrap();
+        }
+        assert_eq!(
+            pin.var_int().unwrap(),
+            v.component_lore,
+            "and the lore marker follows it"
+        );
+        assert!(contains(&body, b"Aether: "), "the marker names the item");
+    }
+
+    #[test]
+    fn a_disguised_engine_item_carries_its_real_name_and_marker() {
+        // The lore marker names the *real* item, so a disguised spear can be
+        // told from the genuine trident it is shown as.
+        let v = &crate::protocol::modern::version::V1_21_11;
+        let spear = (0..aether_world::registry::items::ITEM_BEYOND)
+            .map(aether_world::ItemTypeId)
+            .find(|i| i.vanilla_name() == Some("minecraft:iron_spear"));
+        let Some(spear) = spear else {
+            return; // the engine pin has spears; nothing to check otherwise
+        };
+        // V1_21_11 has the spear, so drive the disguise helper directly, as a
+        // version that lacked it would.
+        let mut p = PacketOut::new(0);
+        write_disguised_stack(v, &mut p, &Stack::new(spear, 1));
+        let body = p.body()[1..].to_vec();
+        assert!(
+            contains(&body, b"Aether: minecraft:iron_spear"),
+            "the marker carries the real item id"
+        );
+        assert!(
+            contains(&body, b"Iron Spear"),
+            "and the English name rides in custom_name"
+        );
+    }
+
+    /// Whether `hay` contains `needle` as a contiguous run.
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
     }
 }
