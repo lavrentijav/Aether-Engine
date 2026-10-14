@@ -345,15 +345,22 @@ impl Nav for WorldNav<'_> {
         aether_world::registry::shapes::collision_boxes(self.world.get_block(x, y, z).raw())
     }
     fn hazard(&self, x: i32, y: i32, z: i32) -> bool {
-        matches!(
-            crate::game::block_name(self.world, self.world.get_block(x, y, z)).as_deref(),
-            Some("minecraft:lava")
-                | Some("minecraft:fire")
-                | Some("minecraft:soul_fire")
-                | Some("minecraft:cactus")
-                | Some("minecraft:magma_block")
-        )
+        is_hazard(self.world.get_block(x, y, z))
     }
+}
+
+/// Whether a block state is one a walking mob must not path onto. Read from
+/// the block registry's `&'static str` name rather than `block_name`, which
+/// allocates a `String` — `hazard` is on the per-node hot path.
+fn is_hazard(state: aether_world::BlockStateId) -> bool {
+    matches!(
+        aether_world::registry::blocks::block_of_state(state).map(|(_, n)| n),
+        Some("minecraft:lava")
+            | Some("minecraft:fire")
+            | Some("minecraft:soul_fire")
+            | Some("minecraft:cactus")
+            | Some("minecraft:magma_block")
+    )
 }
 
 /// Whether cell `w` is one a mob can stand in.
@@ -1063,6 +1070,23 @@ mod tests {
         // Vanilla: yaw 0 faces +Z, 90 faces -X.
         assert!((yaw_to(0.0, 1.0) - 0.0).abs() < 1e-3);
         assert!((yaw_to(-1.0, 0.0) - 90.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn hazards_are_recognised_from_the_registry() {
+        let h = |n: &str| is_hazard(aether_world::registry::blocks::default_state(n).unwrap());
+        for name in [
+            "minecraft:lava",
+            "minecraft:fire",
+            "minecraft:soul_fire",
+            "minecraft:cactus",
+            "minecraft:magma_block",
+        ] {
+            assert!(h(name), "{name} is a hazard");
+        }
+        for name in ["minecraft:stone", "minecraft:water", "minecraft:air"] {
+            assert!(!h(name), "{name} is not a hazard");
+        }
     }
 
     fn mob_with_a_path() -> Mob {
