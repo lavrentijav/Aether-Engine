@@ -64,7 +64,7 @@ World → Region → Chunk (16×16) → Sub-Chunk (16×16×16) → AVX-Cell (4×
 - **Редстоун** — компилируемый **Directed Dependency Graph (DDG)**: ноль пространственных запросов, пока ничего не меняется.
 - **Освещение** — асинхронный flood-fill по ячейкам со слиянием в safe-points.
 - **Сущности / AI** — ECS-хранилище + Flow-Field навигация (O(1) для толп) и кэшируемый A\* для одиночек.
-- **Хранилище** — KV-база (RocksDB / Fjall), блобы Sub-Chunk со сжатием Zstandard.
+- **Хранилище** — KV-база (Fjall, плюс in-memory бэкенд для тестов), блобы Sub-Chunk со сжатием Zstandard.
 - **Телеметрия** — зоны Tracy на каждую фазу тика + экспортёр Prometheus + внутриигровая команда `/aether profile`.
 
 ## Документация
@@ -78,12 +78,27 @@ World → Region → Chunk (16×16) → Sub-Chunk (16×16×16) → AVX-Cell (4×
 
 ## Текущий статус
 
-Aether находится в **ранней альфе**. **Фаза 0 завершена**, приземлились несколько
-подсистем Фазы 1: SoA-модель мира + KV/Zstd-хранилище, базовая физика, генерация
-чанков, API ядра, BaseProxy и инструмент миграции `aether-convert`. Есть
-запускаемое демо (`aether`) и экспериментальный сервер входа для клиента 1.8.9.
-Впереди — редстоун, освещение, сущности и полный конвейер физики. Актуальный
+Aether находится в **ранней альфе**. **Фаза 0 завершена** (Cargo-воркспейс,
+runtime-диспетчеризация SIMD, телеметрия, CI с `cargo-deny`, бенчи Criterion),
+приземлились несколько подсистем Фазы 1: **SoA-модель мира + KV/Zstd-хранилище**,
+базовая физика, генерация чанков, API ядра, BaseProxy и инструмент миграции
+`aether-convert`. Есть запускаемое демо (`aether`) и `aether-server`, к которому
+ванильный клиент подключается от 1.8.9 до 1.21.11 и линии 26.x — на 1.21.11 и
+26.1–26.3 он запускает серверное выживание. Игровые подсистемы уровня движка
+(редстоун, асинхронное освещение, полный конвейер физики) ещё впереди. Актуальный
 чек-лист — в [`docs/STATUS.ru.md`](docs/STATUS.ru.md).
+
+### Сборка и тесты
+
+Тулчейн закреплён в [`rust-toolchain.toml`](rust-toolchain.toml): Rust **1.99.0**
+с `rustfmt` и `clippy`, `rustup` подхватывает его автоматически.
+
+```bash
+cargo build --workspace        # собрать все крейты
+cargo test  --workspace        # прогнать тесты
+cargo bench -p aether-core     # микробенчмарки Criterion
+cargo deny check               # лицензии, advisories, баны, неизвестные источники
+```
 
 ### Запуск демо — *«уже работает?»*
 
@@ -96,10 +111,53 @@ cargo run -p aether-demo            # использует ./aether.toml (соз
 cargo run -p aether-demo -- my.toml # свой файл конфигурации
 ```
 
-Настройки в [`aether.toml`](aether.toml): генератор (`noise`/`flat`), бэкенд
-хранилища (`memory` или `fjall` для записи на диск в `storage_path`), сид,
-точка спавна, число тиков и размер среза. Для записи мира на диск поставьте
-`storage = "fjall"` и запустите release-сборку:
+Пример вывода (генератор шума, хранилище в памяти):
+
+```text
+simd path  : avx2 (mask ops)
+world      : generator=Noise, storage=Memory, seed=2024
+
+── world cross-section  (z = 0, x = -32..=32) ──
+  70 |                             ########
+  69 |                   ##########++++++++#############
+  68 |             ######+++++++++++++++++++++++++++++++##########
+  67 |#############+++++++++++++++++++++++++++++++++++++++++++++++#####
+  66 |+++++++++++++++++++++++++++++........++++++++++++++++++++++++++++
+     legend: '#'=grass '+'=dirt '.'=stone ':'=sand ';'=gravel '~'=water '_'=bedrock
+
+── physics: player drop ──
+final feet  : (0.50, 71.000, 0.50)   on_ground=true
+
+── result ──
+  [✔] SIMD dispatch selected a backend
+  [✔] world generated & rendered
+  [✔] player fell and landed on ground
+  [✔] world storage flushed
+```
+
+**Конфигурация** ([`aether.toml`](aether.toml)) выбирает генератор
+(`noise`/`flat`), бэкенд хранилища (`memory`, либо `fjall` для записи на диск в
+`storage_path`), сид мира, точку спавна, число тиков и размер среза:
+
+```toml
+[world]
+seed = 2024
+generator = "noise"   # "noise" | "flat"
+storage = "memory"    # "memory" | "fjall"
+storage_path = "./world-data"
+
+[demo]
+center_x = 0
+center_z = 0
+view_radius = 32
+spawn_height = 120.0
+ticks = 600
+
+[telemetry]
+prometheus = true
+```
+
+Для записи мира на диск поставьте `storage = "fjall"` и запустите release-сборку:
 
 ```bash
 cargo run -p aether-demo --release
@@ -119,7 +177,10 @@ cargo build --release -p aether-server --features postgres
 target/release/aether-server aether-server.toml
 ```
 
-Затем *Сетевая игра → Прямое подключение →* `127.0.0.1`. Без
+Затем *Сетевая игра → Прямое подключение →* `127.0.0.1`. Блок `[server]`
+ограничивает комнату: `max_players` проверяется при входе, `max_connections`
+задаёт число обслуживаемых соединений (`0` = `max_players*2 + 16`), а
+`max_connections_per_ip` — лимит на адрес (`0` отключает его). Без
 `--features postgres` сборка обходится без зеркала истории и экономики; если
 база задана, а сборка без неё, сервер не стартует, а не молча её игнорирует.
 
@@ -136,13 +197,17 @@ target/release/aether-server aether-server.toml
 > каждого оператора к его адресу (`operators = ["ник@203.0.113.7"]`) или
 > задайте `whitelist`; без этого сервер предупреждает при старте.
 
-### Сборка и тесты
+### Миграция ванильного мира
 
 ```bash
-cargo build --workspace        # собрать все крейты
-cargo test  --workspace        # прогнать тесты
-cargo bench -p aether-core     # микробенчмарки Criterion
+# Anvil-мир (…/region/*.mca) -> KV-хранилище Aether
+cargo run -p aether-convert --release -- /path/to/world /path/to/output-kv
+cargo run -p aether-convert --release -- /path/to/world --mem   # пробный прогон
 ```
+
+Конвертер печатает отчёт аудита (регионы, чанки, сабчанки, контрольная сумма
+прогона, пропускная способность). Отдельная сборка живёт в репозитории-компаньоне
+[Aether-Convert](https://github.com/lavrentijav/Aether-Convert).
 
 ## Целевые показатели (QA-гейты)
 
