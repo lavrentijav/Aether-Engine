@@ -447,6 +447,31 @@ mod tests {
     }
 
     #[test]
+    fn the_source_is_the_carried_item_not_the_lowest_slot() {
+        // F6 (MEDIUM): picking the first slot whose wire id matched made the
+        // result depend on slot order. With a genuine trident in slot 9 and a
+        // spear in slot 36, a placement that moved the spear must yield the
+        // spear, not the trident (and vice versa), regardless of order.
+        let spear = id("minecraft:iron_spear");
+        let trident = id("minecraft:trident");
+        let t = &V1_21_1;
+        let Some(shown) = shown_as(t, spear) else {
+            return;
+        };
+        // The shadow is what the client carried, not any other slot.
+        let (res, _) = t.resolve_change(Some(shown), None, Some(spear));
+        assert_eq!(res, Resolution::Apply(Some(spear)));
+        // A genuine item carried is preserved as itself, even with a spear
+        // elsewhere in the window.
+        let (res, _) = t.resolve_change(Some(shown), None, Some(trident));
+        assert_eq!(res, Resolution::Apply(Some(trident)));
+        // No shadow + a genuine trident already in the destination slot is an
+        // echo of that slot, not the spear.
+        let (res, _) = t.resolve_change(Some(trident), Some(trident), None);
+        assert_eq!(res, Resolution::Apply(Some(trident)));
+    }
+
+    #[test]
     fn a_creative_pick_of_a_stand_in_target_item_is_not_refused() {
         // F1: many ordinary items share their wire id with some engine item's
         // stand-in — `oak_planks` is `pale_oak_planks`'s, `torch` is
