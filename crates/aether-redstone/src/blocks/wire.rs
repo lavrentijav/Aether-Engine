@@ -99,9 +99,15 @@ impl BlockBehaviour for Wire {
         pos: BlockPos,
         dir: Direction,
     ) -> Option<BlockStateId> {
-        // A wire's support is not re-checked for destruction this stage (see
-        // KNOWN_ISSUES): only its connection shape follows a neighbour change.
-        let _ = dir;
+        // `RedStoneWireBlock.updateShape(DOWN)`: a wire whose support is gone
+        // pops off. The support is the block below; vanilla's `canSurviveOn` is
+        // a full top face or a hopper.
+        if dir == Direction::Down {
+            let below = ctx.get_block(pos.offset(Direction::Down));
+            if !(shapes::face_full(below, Direction::Up) || shapes::is_hopper(below)) {
+                return Some(crate::behaviour::AIR);
+            }
+        }
         let shaped = {
             let signals = ctx.signals();
             connection_state(&signals, pos, state)

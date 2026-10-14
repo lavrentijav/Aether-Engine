@@ -60,6 +60,16 @@ impl BlockBehaviour for Lever {
         }
     }
 
+    fn update_shape(
+        &self,
+        ctx: &mut Context,
+        state: BlockStateId,
+        pos: BlockPos,
+        dir: Direction,
+    ) -> Option<BlockStateId> {
+        crate::blocks::face_attached_support(ctx, state, pos, dir)
+    }
+
     fn use_block(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
         let value = if props::powered(state) {
             "false"

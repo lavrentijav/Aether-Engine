@@ -382,18 +382,122 @@ fn the_same_circuit_produces_the_same_trace() {
 
 #[test]
 fn every_direction_is_reachable_and_symmetric() {
-    // A wire is powered from any side; the engine must read all six directions.
+    // The engine must read the lever's signal in all six directions. A floor
+    // lever and the wires beside it each need their own support (R13), so the
+    // six-way check reads the signal directly and the wire check is horizontal.
     let engine = Redstone::new();
     for dir in Direction::ALL {
         let mut w = MemWorld::new();
         let lever = p(0, 0, 0);
+        let under = lever.offset(Direction::Down);
+        w.put(under, "minecraft:stone");
+        w.put(lever, "minecraft:lever[face=floor,facing=north]");
+        engine.on_placed(&mut w, under);
+        engine.on_placed(&mut w, lever);
+        engine.on_use(&mut w, lever);
+        assert_eq!(engine.get_signal(&w, lever, dir), 15, "lever {dir:?}");
+    }
+    for dir in Direction::HORIZONTAL {
+        let mut w = MemWorld::new();
+        let lever = p(0, 0, 0);
         let wire = lever.offset(dir);
+        w.put(lever.offset(Direction::Down), "minecraft:stone");
+        w.put(wire.offset(Direction::Down), "minecraft:stone");
         w.put(lever, "minecraft:lever[face=floor,facing=north]");
         w.put(wire, "minecraft:redstone_wire");
+        engine.on_placed(&mut w, lever.offset(Direction::Down));
+        engine.on_placed(&mut w, wire.offset(Direction::Down));
         engine.on_placed(&mut w, lever);
         engine.on_placed(&mut w, wire);
         engine.on_use(&mut w, lever);
         assert_eq!(power(&w, wire), 15, "wire {dir:?} of the lever");
+    }
+}
+
+#[test]
+fn a_wire_pops_off_when_its_support_is_removed() {
+    // N8/R13: `RedStoneWireBlock.updateShape(DOWN)` returns air when the block
+    // below is gone.
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    let support = p(0, 0, 0);
+    let wire = p(0, 1, 0);
+    w.put(support, "minecraft:stone");
+    w.put(wire, "minecraft:redstone_wire");
+    engine.on_placed(&mut w, support);
+    engine.on_placed(&mut w, wire);
+    assert_eq!(w.block_name(wire), Some("minecraft:redstone_wire"));
+
+    engine.set_block(&mut w, support, BlockStateId::AIR, SetBlockFlags::PLACE);
+    assert_eq!(
+        w.block_name(wire),
+        Some("minecraft:air"),
+        "the wire must pop off with its support"
+    );
+}
+
+#[test]
+fn a_repeater_pops_off_when_its_support_is_removed() {
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    let support = p(0, 0, 0);
+    let repeater = p(0, 1, 0);
+    w.put(support, "minecraft:stone");
+    w.put(repeater, "minecraft:repeater[facing=west,delay=1]");
+    engine.on_placed(&mut w, support);
+    engine.on_placed(&mut w, repeater);
+    assert_eq!(w.block_name(repeater), Some("minecraft:repeater"));
+
+    engine.set_block(&mut w, support, BlockStateId::AIR, SetBlockFlags::PLACE);
+    assert_eq!(
+        w.block_name(repeater),
+        Some("minecraft:air"),
+        "the repeater must pop off"
+    );
+}
+
+#[test]
+fn a_torch_pops_off_when_its_support_is_removed() {
+    let engine = Redstone::new();
+    // Standing torch on a block.
+    let mut w = MemWorld::new();
+    let support = p(0, 0, 0);
+    let torch = p(0, 1, 0);
+    w.put(support, "minecraft:stone");
+    w.put(torch, "minecraft:redstone_torch");
+    engine.on_placed(&mut w, support);
+    engine.on_placed(&mut w, torch);
+    engine.set_block(&mut w, support, BlockStateId::AIR, SetBlockFlags::PLACE);
+    assert_eq!(w.block_name(torch), Some("minecraft:air"), "standing torch");
+
+    // Wall torch on the side of a block.
+    let mut w = MemWorld::new();
+    let support = p(0, 0, 0);
+    let torch = p(1, 0, 0);
+    w.put(support, "minecraft:stone");
+    w.put(torch, "minecraft:redstone_wall_torch[facing=east]");
+    engine.on_placed(&mut w, support);
+    engine.on_placed(&mut w, torch);
+    engine.set_block(&mut w, support, BlockStateId::AIR, SetBlockFlags::PLACE);
+    assert_eq!(w.block_name(torch), Some("minecraft:air"), "wall torch");
+}
+
+#[test]
+fn a_lever_and_button_pop_off_when_their_support_is_removed() {
+    let engine = Redstone::new();
+    for block in [
+        "minecraft:lever[face=floor,facing=east]",
+        "minecraft:stone_button[face=floor,facing=east]",
+    ] {
+        let mut w = MemWorld::new();
+        let support = p(0, 0, 0);
+        let device = p(0, 1, 0);
+        w.put(support, "minecraft:stone");
+        w.put(device, block);
+        engine.on_placed(&mut w, support);
+        engine.on_placed(&mut w, device);
+        engine.set_block(&mut w, support, BlockStateId::AIR, SetBlockFlags::PLACE);
+        assert_eq!(w.block_name(device), Some("minecraft:air"), "{block}");
     }
 }
 

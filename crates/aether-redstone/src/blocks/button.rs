@@ -91,6 +91,16 @@ impl BlockBehaviour for StoneButton {
         }
     }
 
+    fn update_shape(
+        &self,
+        ctx: &mut Context,
+        state: BlockStateId,
+        pos: BlockPos,
+        dir: Direction,
+    ) -> Option<BlockStateId> {
+        crate::blocks::face_attached_support(ctx, state, pos, dir)
+    }
+
     fn tick(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
         tick(ctx, state, pos);
     }
@@ -138,6 +148,16 @@ impl BlockBehaviour for WoodButton {
         if props::powered(state) {
             update_powered_source_neighbours(ctx, pos, state);
         }
+    }
+
+    fn update_shape(
+        &self,
+        ctx: &mut Context,
+        state: BlockStateId,
+        pos: BlockPos,
+        dir: Direction,
+    ) -> Option<BlockStateId> {
+        crate::blocks::face_attached_support(ctx, state, pos, dir)
     }
 
     fn tick(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos) {

@@ -197,3 +197,21 @@ pub(crate) fn update_powered_source_neighbours(
     ctx.update_neighbors_at(pos);
     ctx.update_neighbors_at(pos.offset(connected.opposite()));
 }
+
+/// `FaceAttachedHorizontalDirectionalBlock.updateShape`: a lever or button pops
+/// off when the face it is attached to loses its support.
+pub(crate) fn face_attached_support(
+    ctx: &Context,
+    state: BlockStateId,
+    pos: crate::pos::BlockPos,
+    dir: Direction,
+) -> Option<BlockStateId> {
+    let connected = crate::props::connected_direction(state);
+    if dir == connected.opposite() {
+        let support = ctx.get_block(pos.offset(connected.opposite()));
+        if !crate::shapes::face_full(support, connected) {
+            return Some(crate::behaviour::AIR);
+        }
+    }
+    None
+}

@@ -7,6 +7,7 @@ use crate::blocks::BlockBehaviour;
 use crate::dir::Direction;
 use crate::pos::BlockPos;
 use crate::props;
+use crate::shapes;
 use crate::view::{SetBlockFlags, TickPriority};
 
 /// The redstone repeater.
@@ -115,9 +116,17 @@ impl BlockBehaviour for Repeater {
         pos: BlockPos,
         dir: Direction,
     ) -> Option<BlockStateId> {
-        // Support destruction is handled in R13. `RepeaterBlock.updateShape`
-        // recomputes LOCKED for any direction off the facing axis, which
-        // includes UP and DOWN.
+        // `RepeaterBlock.updateShape(DOWN)`: a repeater whose support is gone
+        // pops off. `DiodeBlock.canSurviveOn` is `isFaceSturdy(UP, RIGID)`; a
+        // full top face is used here as a close approximation.
+        if dir == Direction::Down {
+            let below = ctx.get_block(pos.offset(Direction::Down));
+            if !shapes::face_full(below, Direction::Up) {
+                return Some(crate::behaviour::AIR);
+            }
+        }
+        // Then it recomputes LOCKED for any direction off the facing axis,
+        // which includes UP and DOWN.
         let f = props::facing(state);
         if dir != f && dir != f.opposite() {
             let locked = is_locked(&ctx.signals(), pos, state);

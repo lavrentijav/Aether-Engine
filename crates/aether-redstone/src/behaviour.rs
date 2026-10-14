@@ -610,12 +610,20 @@ impl<'a> Context<'a> {
         }
         if let Some(new) = behaviour(state).update_shape(self, state, neighbor, direction) {
             if new != state {
-                // `Block.updateOrDestroy`: the write clears `UPDATE_NEIGHBORS`
-                // and `UPDATE_SUPPRESS_DROPS`, and recurses with this limit.
-                let nested = flags
-                    .without(SetBlockFlags::UPDATE_NEIGHBORS)
-                    .without(SetBlockFlags::UPDATE_SUPPRESS_DROPS);
-                self.set_block_at(neighbor, new, nested, limit);
+                if new == AIR {
+                    // `Block.updateOrDestroy` destroys an air result with
+                    // `setBlock(..., 3)`, so the removed block's hook and the
+                    // neighbour fan-out run — a wire that pops off wakes its
+                    // corners.
+                    self.set_block_at(neighbor, AIR, SetBlockFlags::PLACE, limit);
+                } else {
+                    // The non-air write clears `UPDATE_NEIGHBORS` and
+                    // `UPDATE_SUPPRESS_DROPS`, and recurses with this limit.
+                    let nested = flags
+                        .without(SetBlockFlags::UPDATE_NEIGHBORS)
+                        .without(SetBlockFlags::UPDATE_SUPPRESS_DROPS);
+                    self.set_block_at(neighbor, new, nested, limit);
+                }
             }
         }
     }

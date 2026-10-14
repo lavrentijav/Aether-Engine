@@ -8,6 +8,7 @@ use crate::blocks::BlockBehaviour;
 use crate::dir::Direction;
 use crate::pos::BlockPos;
 use crate::props;
+use crate::shapes;
 use crate::view::{SetBlockFlags, TickPriority};
 
 /// A redstone torch standing on top of a block.
@@ -94,6 +95,36 @@ fn toggle_count(ctx: &Context, pos: BlockPos, now: u64) -> u32 {
     ctx.toggles_since(pos, now.saturating_sub(60))
 }
 
+/// `BaseTorchBlock.updateShape`: a standing torch pops off when its support
+/// below is gone.
+fn standing_support(ctx: &Context, pos: BlockPos, dir: Direction) -> Option<BlockStateId> {
+    if dir == Direction::Down {
+        let below = ctx.get_block(pos.offset(Direction::Down));
+        if !shapes::face_full(below, Direction::Up) {
+            return Some(crate::behaviour::AIR);
+        }
+    }
+    None
+}
+
+/// `RedstoneWallTorchBlock.updateShape`: a wall torch pops off when the block it
+/// is attached to is gone.
+fn wall_support(
+    ctx: &Context,
+    state: BlockStateId,
+    pos: BlockPos,
+    dir: Direction,
+) -> Option<BlockStateId> {
+    let facing = props::facing(state);
+    if dir == facing.opposite() {
+        let support = ctx.get_block(pos.offset(facing.opposite()));
+        if !shapes::face_full(support, facing) {
+            return Some(crate::behaviour::AIR);
+        }
+    }
+    None
+}
+
 impl BlockBehaviour for Torch {
     fn is_signal_source(&self, _state: BlockStateId) -> bool {
         true
@@ -135,6 +166,16 @@ impl BlockBehaviour for Torch {
 
     fn on_remove(&self, ctx: &mut Context, _state: BlockStateId, pos: BlockPos) {
         notify_neighbors(ctx, pos);
+    }
+
+    fn update_shape(
+        &self,
+        ctx: &mut Context,
+        _state: BlockStateId,
+        pos: BlockPos,
+        dir: Direction,
+    ) -> Option<aether_world::BlockStateId> {
+        standing_support(ctx, pos, dir)
     }
 
     fn tick(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
@@ -183,6 +224,16 @@ impl BlockBehaviour for WallTorch {
 
     fn on_remove(&self, ctx: &mut Context, _state: BlockStateId, pos: BlockPos) {
         notify_neighbors(ctx, pos);
+    }
+
+    fn update_shape(
+        &self,
+        ctx: &mut Context,
+        state: BlockStateId,
+        pos: BlockPos,
+        dir: Direction,
+    ) -> Option<aether_world::BlockStateId> {
+        wall_support(ctx, state, pos, dir)
     }
 
     fn tick(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
