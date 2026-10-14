@@ -254,6 +254,10 @@ pub fn use_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i3
             window::open(handle, world, WindowKind::Dispenser { pos: (x, y, z) });
             return true;
         }
+        Some(ContainerKind::BrewingStand) => {
+            window::open(handle, world, WindowKind::BrewingStand { pos: (x, y, z) });
+            return true;
+        }
         None => {}
     }
     if short.ends_with("_bed") {
@@ -366,17 +370,30 @@ fn raycast(
 
 /// Right-click with an item, not at a block.
 pub fn use_item(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, hand: u8) {
-    let item = {
+    let held = {
         let inv = handle.inventory();
         let slot = if hand == 1 {
             crate::inventory::OFFHAND
         } else {
             inv.held_index()
         };
-        inv.slot(slot).map(|s| s.item)
+        inv.slot(slot).cloned()
     };
-    let Some(item) = item else { return };
+    let Some(held) = held else { return };
+    let item = held.item;
     let now = super::now();
+    // A potion is drunk (thirty-two ticks to swallow) or, if it is a splash or
+    // lingering potion, thrown.
+    if let Some(name) = item.vanilla_name() {
+        if super::brewing::is_potion_item(name) {
+            if super::brewing::is_drinkable(name) {
+                handle.game().eating = Some((now, hand));
+            } else {
+                throw_potion(handle, registry, world, hand, &held, name);
+            }
+            return;
+        }
+    }
     if tables::food_id(item).is_some() {
         let mut st = handle.game();
         let always = item == crate::inventory::item("minecraft:golden_apple")
@@ -425,12 +442,96 @@ pub fn use_item(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWo
             }
         }
         handle.sync_inventory(world);
+    } else if item == crate::inventory::item("minecraft:glass_bottle") {
+        // A glass bottle filled from a water source becomes a water bottle.
+        let hit = raycast(handle, 5.0, |x, y, z| {
+            world.get_block(x, y, z) != block_ids::AIR
+        });
+        let Some(((x, y, z), _)) = hit else { return };
+        if block_name(world, x, y, z) != "minecraft:water" {
+            return;
+        }
+        if handle.game().survival() {
+            let mut inv = handle.inventory();
+            let i = if hand == 1 {
+                crate::inventory::OFFHAND
+            } else {
+                inv.held_index()
+            };
+            inv.consume_at(i);
+            let water = Stack::potion("minecraft:potion", super::brewing::WATER, 1);
+            if let Some(rest) = inv.insert(water) {
+                drop(inv);
+                entities::throw_from(handle, rest);
+            }
+        }
+        handle.sync_inventory(world);
+        crate::session::save_inventory(handle, world);
     } else if crate::protocol::compat::behaviour::is_spear(item) {
         // The real item decides, not the stand-in: a client without spears
         // was shown a trident (or a sword on 1.8.9) and presses right click
         // to charge. The server starts the *spear's* charge; the trident's
         // throw is never run.
         handle.game().charging = Some(now);
+    }
+}
+
+/// Throw a splash or lingering potion, vanilla's `ThrowablePotionItem.use`:
+/// `spawnProjectileFromRotation` with a twenty-degree lift and power 0.5.
+fn throw_potion(
+    handle: &PlayerHandle,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    hand: u8,
+    stack: &Stack,
+    name: &str,
+) {
+    let p = handle.pos();
+    let xr = (p.pitch as f64).to_radians();
+    let yr = (p.yaw as f64).to_radians();
+    let dx = -yr.sin() * xr.cos();
+    let dy = -((p.pitch as f64 - 20.0).to_radians()).sin();
+    let dz = yr.cos() * xr.cos();
+    let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-9);
+    let speed = 0.5;
+    let vel = Vector3::new(dx / len * speed, dy / len * speed, dz / len * speed);
+    let potion = stack.potion.unwrap_or(super::brewing::WATER);
+    let lingering = name.ends_with("lingering_potion");
+    entities::spawn_potion(
+        Vector3::new(p.x, p.y + 1.5, p.z),
+        vel,
+        potion,
+        lingering,
+        Some(handle.entity_id),
+    );
+    let sound = if lingering {
+        "minecraft:entity.lingering_potion.throw"
+    } else {
+        "minecraft:entity.splash_potion.throw"
+    };
+    registry.broadcast_except(
+        handle.entity_id,
+        &ServerEvent::Sound {
+            name: sound,
+            category: 7,
+            x: p.x,
+            y: p.y,
+            z: p.z,
+            volume: 0.5,
+            pitch: 1.0,
+        },
+        world,
+    );
+    if handle.game().survival() {
+        let mut inv = handle.inventory();
+        let slot = if hand == 1 {
+            crate::inventory::OFFHAND
+        } else {
+            inv.held_index()
+        };
+        inv.consume_at(slot);
+        handle.sync_inventory(world);
+        crate::session::save_inventory(handle, world);
     }
 }
 

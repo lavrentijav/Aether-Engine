@@ -1853,9 +1853,11 @@ pub const MENU_GENERIC_3X3: i32 = 6;
 pub const MENU_CRAFTING: i32 = 12;
 pub const MENU_FURNACE: i32 = 14;
 pub const MENU_HOPPER: i32 = 16;
+pub const MENU_BREWING_STAND: i32 = 11;
 pub const COMPONENT_DAMAGE: i32 = 3;
 pub const COMPONENT_CUSTOM_NAME: i32 = 6;
 pub const COMPONENT_LORE: i32 = 11;
+pub const COMPONENT_POTION_CONTENTS: i32 = 49;
 pub const PARTICLE_EXPLOSION: i32 = 30;
 pub const PARTICLE_EXPLOSION_EMITTER: i32 = 29;
 

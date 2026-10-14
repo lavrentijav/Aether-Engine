@@ -187,8 +187,11 @@ pub struct Version {
     pub menu_furnace: i32,
     pub menu_hopper: i32,
     pub menu_dispenser: i32,
+    pub menu_brewing_stand: i32,
     pub component_damage: i32,
     pub component_custom_name: i32,
+    /// This version's id of the `minecraft:potion_contents` data component.
+    pub component_potion_contents: i32,
     /// This version's id of the `minecraft:lore` data component. A disguised
     /// stack carries one line naming the real item, so a player can tell a
     /// stand-in from the genuine article.
@@ -381,8 +384,10 @@ macro_rules! version {
             menu_furnace: super::gen::$m::MENU_FURNACE,
             menu_hopper: super::gen::$m::MENU_HOPPER,
             menu_dispenser: super::gen::$m::MENU_GENERIC_3X3,
+            menu_brewing_stand: super::gen::$m::MENU_BREWING_STAND,
             component_damage: super::gen::$m::COMPONENT_DAMAGE,
             component_custom_name: super::gen::$m::COMPONENT_CUSTOM_NAME,
+            component_potion_contents: super::gen::$m::COMPONENT_POTION_CONTENTS,
             component_lore: super::gen::$m::COMPONENT_LORE,
             particle_explosion: super::gen::$m::PARTICLE_EXPLOSION,
             particle_explosion_emitter: super::gen::$m::PARTICLE_EXPLOSION_EMITTER,

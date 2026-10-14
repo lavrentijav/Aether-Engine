@@ -80,6 +80,29 @@ pub struct XpOrb {
 /// `DATA_VALUE`, after the base `Entity` fields (indices 0–7).
 const ORB_VALUE_INDEX: u8 = 8;
 
+/// A thrown splash or lingering potion in flight.
+#[derive(Debug, Clone)]
+pub struct PotionEnt {
+    /// The `minecraft:potion` registry index carried by the bottle.
+    pub potion: u16,
+    /// `true` for a lingering potion, which leaves an area-effect cloud.
+    pub lingering: bool,
+    pub shooter: Option<i32>,
+}
+
+/// A lingering potion's cloud, dripping its effects on everything inside.
+#[derive(Debug, Clone)]
+pub struct CloudEnt {
+    pub potion: u16,
+    /// Current radius in blocks; shrinks towards zero over the cloud's life.
+    pub radius: f64,
+    /// Ticks of effect once the wait is over (vanilla's 600).
+    pub duration: i32,
+    /// Ticks to wait before the cloud takes effect (vanilla's 10).
+    pub wait: i32,
+    pub age: i32,
+}
+
 /// What an entity is.
 #[derive(Debug, Clone)]
 pub enum Kind {
@@ -87,6 +110,8 @@ pub enum Kind {
     Mob(Mob),
     Arrow(Arrow),
     XpOrb(XpOrb),
+    Potion(PotionEnt),
+    Cloud(CloudEnt),
 }
 
 /// One entity.
@@ -119,6 +144,9 @@ impl Entity {
             Kind::Mob(m) => m.def.kind,
             Kind::Arrow(_) => "minecraft:arrow",
             Kind::XpOrb(_) => "minecraft:experience_orb",
+            Kind::Potion(p) if p.lingering => "minecraft:lingering_potion",
+            Kind::Potion(_) => "minecraft:splash_potion",
+            Kind::Cloud(_) => "minecraft:area_effect_cloud",
         }
     }
 
@@ -160,7 +188,7 @@ impl Entity {
                     });
                 }
             }
-            Kind::Arrow(_) => {}
+            Kind::Arrow(_) | Kind::Potion(_) | Kind::Cloud(_) => {}
             Kind::XpOrb(o) => out.push(ServerEvent::EntityMeta {
                 entity_id: self.id,
                 entries: vec![(ORB_VALUE_INDEX, MetaValue::VarInt(o.value))],
@@ -394,6 +422,47 @@ pub fn spawn_arrow(
             damage,
             stuck: false,
             stuck_ticks: 0,
+        }),
+    )
+}
+
+/// Throw a splash or lingering potion. `vel` is already the initial velocity,
+/// matching vanilla's `shootFromRotation` at power 0.5.
+pub fn spawn_potion(
+    pos: Vector3,
+    vel: Vector3,
+    potion: u16,
+    lingering: bool,
+    shooter: Option<i32>,
+) -> i32 {
+    let mut body = Body::sized(pos, 0.25, 0.25);
+    body.velocity = vel;
+    let yaw = (-vel.x).atan2(vel.z).to_degrees() as f32;
+    push(
+        body,
+        yaw,
+        Kind::Potion(PotionEnt {
+            potion,
+            lingering,
+            shooter,
+        }),
+    )
+}
+
+/// The cloud a lingering potion leaves where it broke, vanilla's
+/// `ThrownLingeringPotion.onHitAsPotion`.
+fn spawn_cloud(pos: Vector3, potion: u16) -> i32 {
+    let mut body = Body::sized(pos, 1.0, 0.5);
+    body.velocity = Vector3::new(0.0, 0.0, 0.0);
+    push(
+        body,
+        0.0,
+        Kind::Cloud(CloudEnt {
+            potion,
+            radius: 3.0,
+            duration: 600,
+            wait: 10,
+            age: 0,
         }),
     )
 }
@@ -644,6 +713,20 @@ pub enum Action {
         collector: i32,
         value: i32,
     },
+    /// A thrown potion broke: splash its effects, and leave a cloud when it
+    /// was a lingering potion.
+    PotionImpact {
+        pos: Vector3,
+        potion: u16,
+        lingering: bool,
+        shooter: Option<i32>,
+    },
+    /// A lingering cloud drips its effects on everything within `radius`.
+    CloudPulse {
+        pos: Vector3,
+        potion: u16,
+        radius: f64,
+    },
     /// An event for everyone tracking an entity.
     Tracked(i32, ServerEvent<'static>),
 }
@@ -733,6 +816,46 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                         }
                     }
                     if e.body.feet().y < -128.0 {
+                        e.dead = true;
+                    }
+                }
+                Kind::Potion(p) => {
+                    if let Some(impact) = tick_potion(
+                        world,
+                        e.id,
+                        &mut e.body,
+                        &mut e.yaw,
+                        &mut e.pitch,
+                        &views,
+                        &mob_boxes,
+                    ) {
+                        actions.push(Action::PotionImpact {
+                            pos: impact,
+                            potion: p.potion,
+                            lingering: p.lingering,
+                            shooter: p.shooter,
+                        });
+                        e.dead = true;
+                    } else if e.body.feet().y < -128.0 {
+                        e.dead = true;
+                    }
+                }
+                Kind::Cloud(c) => {
+                    c.age += 1;
+                    // A cloud shrinks at `-radius / duration` a tick, so it
+                    // reaches nothing as it expires (vanilla's
+                    // `setRadiusPerTick`).
+                    if c.age > c.wait {
+                        c.radius = (c.radius - 3.0 / c.duration as f64).max(0.0);
+                    }
+                    if c.age % 5 == 0 && c.age >= c.wait {
+                        actions.push(Action::CloudPulse {
+                            pos,
+                            potion: c.potion,
+                            radius: c.radius,
+                        });
+                    }
+                    if c.age >= c.duration {
                         e.dead = true;
                     }
                 }
@@ -1189,6 +1312,209 @@ fn tick_arrow(
     let h = (v.x * v.x + v.z * v.z).sqrt();
     *yaw = (-v.x).atan2(v.z).to_degrees() as f32;
     *pitch = (-v.y).atan2(h).to_degrees() as f32;
+}
+
+/// Step a thrown potion one tick. Returns the point where it broke, if it hit
+/// a block or a living entity.
+#[allow(clippy::too_many_arguments)]
+fn tick_potion(
+    world: &DemoWorld,
+    _id: i32,
+    body: &mut Body,
+    yaw: &mut f32,
+    pitch: &mut f32,
+    players: &[PlayerView],
+    mobs: &[(i32, aether_api::Aabb)],
+) -> Option<Vector3> {
+    // ThrowableProjectile: gravity 0.05 (`AbstractThrownPotion`'s override)
+    // and air inertia 0.99.
+    let mut v = body.velocity;
+    v.y -= 0.05;
+    v.x *= 0.99;
+    v.y *= 0.99;
+    v.z *= 0.99;
+    body.velocity = v;
+    let steps = 4;
+    for _ in 0..steps {
+        let d = Vector3::new(v.x / steps as f64, v.y / steps as f64, v.z / steps as f64);
+        body.aabb = body.aabb.offset(d);
+        let c = body.feet();
+        let centre = Vector3::new(c.x, c.y + 0.125, c.z);
+        if solid_at(world, centre.x, centre.y, centre.z) {
+            body.velocity = Vector3::new(0.0, 0.0, 0.0);
+            return Some(centre);
+        }
+        for (_, b) in mobs {
+            if b.intersects(body.aabb) {
+                return Some(centre);
+            }
+        }
+        for p in players {
+            if !p.alive {
+                continue;
+            }
+            if aether_api::Aabb::from_base(p.pos, 0.6, 1.8).intersects(body.aabb) {
+                return Some(centre);
+            }
+        }
+    }
+    let h = (v.x * v.x + v.z * v.z).sqrt();
+    *yaw = (-v.x).atan2(v.z).to_degrees() as f32;
+    *pitch = (-v.y).atan2(h).to_degrees() as f32;
+    None
+}
+
+/// The squared distance from `p` to the nearest point of `b`, vanilla's
+/// `AABB.distanceToSqr`.
+fn point_box_distance_sqr(b: aether_api::Aabb, p: Vector3) -> f64 {
+    let dx = (b.min.x - p.x).max(0.0).max(p.x - b.max.x);
+    let dy = (b.min.y - p.y).max(0.0).max(p.y - b.max.y);
+    let dz = (b.min.z - p.z).max(0.0).max(p.z - b.max.z);
+    dx * dx + dy * dy + dz * dz
+}
+
+/// A thrown potion broke at `pos`: splash its effects and, for a lingering
+/// potion, leave the cloud behind. `ThrownSplashPotion`/`AbstractThrownPotion`.
+pub fn potion_impact(
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    pos: Vector3,
+    potion: u16,
+    lingering: bool,
+    _shooter: Option<i32>,
+) {
+    registry.broadcast(
+        &ServerEvent::WorldEvent {
+            event: 2002,
+            x: pos.x.floor() as i32,
+            y: pos.y.floor() as i32,
+            z: pos.z.floor() as i32,
+            data: 0,
+        },
+        world,
+    );
+    if lingering {
+        spawn_cloud(pos, potion);
+    }
+    apply_potion_area(registry, world, pos, potion, true, 4.0);
+}
+
+/// A lingering cloud drips its effects on everything within `radius`, at full
+/// strength (vanilla's `AreaEffectCloud`).
+pub fn cloud_pulse(
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    pos: Vector3,
+    potion: u16,
+    radius: f64,
+) {
+    apply_potion_area(registry, world, pos, potion, false, radius.max(0.0));
+}
+
+/// Apply `potion` to every player and mob within `range` of `pos`. A splash
+/// scales by distance and drops short effects; a cloud applies them in full.
+fn apply_potion_area(
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    pos: Vector3,
+    potion: u16,
+    splash: bool,
+    range: f64,
+) {
+    let cutoff = range * range;
+    for handle in registry.snapshot() {
+        let p = handle.pos();
+        let box_ = aether_api::Aabb::from_base(Vector3::new(p.x, p.y, p.z), 0.6, 1.8);
+        let d2 = point_box_distance_sqr(box_, pos);
+        if d2 > cutoff {
+            continue;
+        }
+        let factor = if splash {
+            (1.0 - d2.sqrt() / 4.0).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let effects = if splash {
+            super::brewing::effects_of_scaled(potion, factor)
+        } else {
+            super::brewing::effects_of(potion)
+        };
+        apply_to_player(&handle, registry, world, &effects, factor);
+    }
+    let mut all = entities().lock().unwrap();
+    for e in all.iter_mut() {
+        let Kind::Mob(m) = &mut e.kind else {
+            continue;
+        };
+        if m.death.is_some() {
+            continue;
+        }
+        let d2 = point_box_distance_sqr(e.body.aabb, pos);
+        if d2 > cutoff {
+            continue;
+        }
+        let factor = if splash {
+            (1.0 - d2.sqrt() / 4.0).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let effects = if splash {
+            super::brewing::effects_of_scaled(potion, factor)
+        } else {
+            super::brewing::effects_of(potion)
+        };
+        for effect in &effects {
+            if super::effects::is_instant(effect.id) {
+                if effect.id == super::effects::INSTANT_HEALTH {
+                    m.health = (m.health + super::effects::instant_heal(effect.amplifier, factor))
+                        .min(m.def.health);
+                } else {
+                    m.health -= super::effects::instant_damage(effect.amplifier, factor);
+                    if m.health <= 0.0 {
+                        m.health = 0.0;
+                        m.death = Some(0);
+                    }
+                }
+                m.meta_dirty = true;
+            } else {
+                m.effects.apply(*effect);
+            }
+        }
+    }
+}
+
+/// Apply already-scaled effects to one player: instant effects at once, the
+/// rest through [`super::effects::give`].
+fn apply_to_player(
+    handle: &PlayerHandle,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    effects: &[super::effects::Effect],
+    factor: f64,
+) {
+    for effect in effects {
+        if super::effects::is_instant(effect.id) {
+            if effect.id == super::effects::INSTANT_HEALTH {
+                let mut st = handle.game();
+                if st.survival() {
+                    st.health = (st.health
+                        + super::effects::instant_heal(effect.amplifier, factor))
+                    .min(20.0);
+                }
+            } else {
+                super::combat::hurt_player(
+                    handle,
+                    super::effects::instant_damage(effect.amplifier, factor),
+                    "minecraft:magic",
+                    None,
+                    registry,
+                    world,
+                );
+            }
+        } else {
+            super::effects::give(handle, registry, world, *effect);
+        }
+    }
 }
 
 /// Bring every player's tracked set in line with what is in range.

@@ -18,6 +18,7 @@ fn menu_id(v: &Version, m: Menu) -> i32 {
         Menu::Furnace => v.menu_furnace,
         Menu::Hopper => v.menu_hopper,
         Menu::Dispenser => v.menu_dispenser,
+        Menu::BrewingStand => v.menu_brewing_stand,
     }
 }
 
@@ -36,15 +37,46 @@ pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
         write_disguised_stack(v, p, s);
         return;
     };
-    p.var_int(s.count as i32).var_int(id);
+    // A potion, splash potion or lingering potion carries its contents in the
+    // `minecraft:potion_contents` component; a worn tool carries its damage.
+    let potion = potion_contents(s);
+    let added = (s.damage > 0) as i32 + potion.is_some() as i32;
+    p.var_int(s.count as i32)
+        .var_int(id)
+        .var_int(added)
+        .var_int(0);
     if s.damage > 0 {
-        p.var_int(1)
-            .var_int(0)
-            .var_int(v.component_damage)
-            .var_int(s.damage as i32);
-    } else {
-        p.var_int(0).var_int(0);
+        p.var_int(v.component_damage).var_int(s.damage as i32);
     }
+    if let Some(potion) = potion {
+        write_potion_contents(v, p, potion);
+    }
+}
+
+/// The `minecraft:potion` registry index of a potion stack, or `None` for
+/// anything else. A potion item with no contents is water, which is what the
+/// item's own default component holds (`PotionItem.getDefaultInstance`).
+fn potion_contents(s: &Stack) -> Option<u16> {
+    let name = s.item.vanilla_name()?;
+    if !crate::game::brewing::is_potion_item(name) {
+        return None;
+    }
+    Some(s.potion.unwrap_or(crate::game::brewing::WATER))
+}
+
+/// Append `minecraft:potion_contents`, the component that names the potion.
+///
+/// Its stream codec is `PotionContents.STREAM_CODEC`: an optional potion (a
+/// boolean then the registry VarInt), an optional custom colour, a list of
+/// custom effects and an optional custom name — the client derives the
+/// effects, name and colour from the potion, so the last three are empty.
+fn write_potion_contents(v: &Version, p: &mut PacketOut, potion: u16) {
+    p.var_int(v.component_potion_contents)
+        .bool(true)
+        .var_int(potion as i32)
+        .bool(false) // no custom colour: the client computes it
+        .var_int(0) // no custom effects
+        .bool(false); // no custom name
 }
 
 /// A stand-in item id the version always has, for an item it cannot name.
@@ -722,6 +754,31 @@ mod tests {
             contains(&body, b"Iron Spear"),
             "and the English name rides in custom_name"
         );
+    }
+
+    #[test]
+    fn a_potion_stack_carries_potion_contents() {
+        let v = &crate::protocol::modern::version::V1_21_11;
+        let potion = crate::game::brewing::potion_id("minecraft:long_swiftness").unwrap();
+        let stack = Stack::potion("minecraft:potion", potion, 1);
+        let mut p = PacketOut::new(0);
+        write_stack(v, &mut p, Some(&stack));
+        let body = p.body()[1..].to_vec(); // past the packet id
+        let mut pin = crate::proto::PacketIn::new(&body);
+        assert_eq!(pin.var_int().unwrap(), 1, "count");
+        assert_eq!(
+            pin.var_int().unwrap(),
+            v.item_id("minecraft:potion").unwrap(),
+            "the potion item"
+        );
+        assert_eq!(pin.var_int().unwrap(), 1, "potion_contents added");
+        assert_eq!(pin.var_int().unwrap(), 0, "none removed");
+        assert_eq!(pin.var_int().unwrap(), v.component_potion_contents);
+        assert!(pin.bool().unwrap(), "the potion field is present");
+        assert_eq!(pin.var_int().unwrap(), potion as i32);
+        assert!(!pin.bool().unwrap(), "no custom colour");
+        assert_eq!(pin.var_int().unwrap(), 0, "no custom effects");
+        assert!(!pin.bool().unwrap(), "no custom name");
     }
 
     /// Whether `hay` contains `needle` as a contiguous run.
