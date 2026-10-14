@@ -158,6 +158,11 @@ impl State {
         }
     }
 
+    /// Force the next search to run, regardless of what changed.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     /// The columns to re-send this tick: newly visible ones, nearest first,
     /// at most `budget`. A plan cut short by the budget is continued on the
     /// next tick rather than dropped.
@@ -399,6 +404,27 @@ pub fn hidden_mask_for_render(
 /// Forget a column the client no longer has.
 pub fn forget_column(handle: &PlayerHandle, cx: i32, cz: i32) {
     handle.visibility().forget(cx, cz);
+}
+
+/// The sections whose mask is currently non-zero, for `/visibility off`.
+fn masked_columns(sent: &HashMap<(i32, i32), u32>) -> Vec<(i32, i32)> {
+    sent.iter()
+        .filter(|(_, mask)| **mask != 0)
+        .map(|(&column, _)| column)
+        .collect()
+}
+
+/// Re-send every column this client currently holds masked, so `/visibility
+/// off` shows the real blocks without waiting for columns to re-stream.
+///
+/// The caller sets `bypass` first: with it on, re-encoding a column records a
+/// zero mask, so the client ends up with every section real and the reveal
+/// planner has nothing left to do.
+pub fn reveal_all(handle: &PlayerHandle, world: &dyn BlockSource) {
+    let columns = masked_columns(handle.visibility().sent());
+    for (cx, cz) in columns {
+        handle.emit(&ServerEvent::ChunkColumn { cx, cz }, world);
+    }
 }
 
 /// Drop the columns a respawned client no longer holds, so the reveal planner
@@ -793,6 +819,19 @@ mod tests {
         st.set_visible_if((0, 0, 0), HashSet::new(), epoch_before);
         assert!(!st.dirty);
         assert!(st.is_fresh((0, 0, 0)));
+    }
+
+    #[test]
+    fn reveal_all_selects_only_columns_still_masked() {
+        // N4: `/visibility off` must re-send the columns holding stone, and
+        // leave the unmasked ones alone.
+        let mut sent = HashMap::new();
+        sent.insert((0, 0), 0);
+        sent.insert((1, 0), u32::MAX);
+        sent.insert((2, 0), 1 << 3);
+        let mut got = masked_columns(&sent);
+        got.sort();
+        assert_eq!(got, vec![(1, 0), (2, 0)]);
     }
 
     #[test]
