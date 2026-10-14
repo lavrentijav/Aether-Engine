@@ -1,8 +1,6 @@
 //! Observer circuits (`ObserverBlock`).
 
-use aether_redstone::{
-    props, BlockPos, Direction, MemWorld, Redstone, RedstoneView, SetBlockFlags,
-};
+use aether_redstone::{props, BlockPos, Direction, MemWorld, Redstone, SetBlockFlags};
 use aether_world::registry::BlockRegistry;
 use aether_world::BlockStateId;
 
