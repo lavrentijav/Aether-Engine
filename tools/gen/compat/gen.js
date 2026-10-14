@@ -26,10 +26,16 @@
 const fs = require('fs')
 const path = require('path')
 const d = require(require.resolve('minecraft-data', {
-  paths: [process.cwd(), path.join(__dirname, '..', '..', 'probe')],
+  paths: [
+    process.cwd(),
+    path.join(__dirname, '..', '..', 'probe'),
+    '/tmp/opencode/repro',
+    path.join(process.env.HOME || '', 'node_modules'),
+  ],
 }))
 
-const outDir = process.argv[2] || 'crates/aether-server/src/protocol/compat/gen'
+// Where the generated modules are written; set by `main`.
+let outDir = 'crates/aether-server/src/protocol/compat/gen'
 
 // The engine's anchor release. Its block/item ids *are* the engine's own.
 const BASE = '1.21.11'
@@ -107,9 +113,11 @@ const ENGINE_STATES = base.blocksArray.reduce(
 
 // --- substitution rules -----------------------------------------------------
 
-function loadRules() {
-  const raw = JSON.parse(fs.readFileSync(path.join(__dirname, 'blocks.json'), 'utf8'))
-  // Accept a bare array of rules or one wrapped in a documentation object.
+// Load a rules file beside this one (default `blocks.json`); a bare array or
+// one wrapped in a documentation object are both accepted. Shared with the
+// item generator, which applies the same rules to block *items*.
+function loadRules(file = 'blocks.json') {
+  const raw = JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8'))
   const list = Array.isArray(raw)
     ? raw.flatMap(x => (x && x.rules ? x.rules : [x]))
     : raw.rules
@@ -313,22 +321,33 @@ function verify() {
   if (bad) throw new Error(`${bad} anchor blocks fail the default-state round trip`)
 }
 
-verify()
-fs.mkdirSync(outDir, { recursive: true })
-const rules = loadRules()
-console.log(`engines states: ${ENGINE_STATES}, rules: ${rules.length}`)
-let totalRuns = 0
-for (const [mod, mcVersion, proto, flat] of VERSIONS) {
-  const r = flat
-    ? writeFlat(mod, mcVersion, rules)
-    : writeLegacy(mod, mcVersion, rules)
-  totalRuns += r.runs
-  console.log(
-    `${mod.padEnd(9)} ${mcVersion.padEnd(7)} proto ${String(proto).padEnd(3)}` +
-      ` runs ${String(r.runs).padStart(5)}` +
-      (flat ? ` states ${String(r.stateCount).padStart(5)}` : '') +
-      ` stone-fallbacks ${String(r.fallbacks).padStart(4)}` +
-      (r.mismatches ? ` ROUND-TRIP-MISMATCH ${r.mismatches}` : ''),
-  )
+// The resolver, the rule loader and the glob/strip helpers are exported so
+// the item generator can reuse the *block* rules for block items (task J10);
+// requiring this module must therefore not generate anything. Run it directly
+// (`node tools/gen/compat/gen.js <out-dir>`) to write the block tables.
+module.exports = { strip, prefix, glob, resolver, loadRules }
+
+function main() {
+  outDir = process.argv[2] || 'crates/aether-server/src/protocol/compat/gen'
+  verify()
+  fs.mkdirSync(outDir, { recursive: true })
+  const rules = loadRules()
+  console.log(`engines states: ${ENGINE_STATES}, rules: ${rules.length}`)
+  let totalRuns = 0
+  for (const [mod, mcVersion, proto, flat] of VERSIONS) {
+    const r = flat
+      ? writeFlat(mod, mcVersion, rules)
+      : writeLegacy(mod, mcVersion, rules)
+    totalRuns += r.runs
+    console.log(
+      `${mod.padEnd(9)} ${mcVersion.padEnd(7)} proto ${String(proto).padEnd(3)}` +
+        ` runs ${String(r.runs).padStart(5)}` +
+        (flat ? ` states ${String(r.stateCount).padStart(5)}` : '') +
+        ` stone-fallbacks ${String(r.fallbacks).padStart(4)}` +
+        (r.mismatches ? ` ROUND-TRIP-MISMATCH ${r.mismatches}` : ''),
+    )
+  }
+  console.log(`total runs ${totalRuns}, approx ${(totalRuns * 12 / 1024).toFixed(0)} KiB`)
 }
-console.log(`total runs ${totalRuns}, approx ${(totalRuns * 12 / 1024).toFixed(0)} KiB`)
+
+if (require.main === module) main()

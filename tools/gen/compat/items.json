@@ -1,6 +1,6 @@
 {
   "note": "Item substitution rules for the version-compat layer (task J3).",
-  "help": "A name glob -> stand-in, applied when the version has no item of that name; a target that is itself missing is resolved again, so rules chain. The client sees the stand-in, but with the real item's display name and an 'Aether: minecraft:<id>' lore line, and the server keeps the real stack. Block items are NOT listed here: the block rules (tools/gen/compat/blocks.json, task J2) decide those, and until they are merged in the generator falls back to a placeholder (see gen_items.js).",
+  "help": "A name glob -> stand-in, applied when the version has no item of that name; a target that is itself missing is resolved again, so rules chain. The client sees the stand-in, but with the real item's display name and an 'Aether: minecraft:<id>' lore line, and the server keeps the real stack. Block items are NOT listed here: the block rules (tools/gen/compat/blocks.json, task J2) decide those, and the generator resolves them through the same rule set and resolver as the blocks themselves (see gen_items.js, task J10).",
   "rules": [
     { "from": "minecraft:*_spear", "to": "minecraft:trident" },
     { "from": "minecraft:trident", "to": "minecraft:diamond_sword" },

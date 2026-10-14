@@ -17,12 +17,15 @@
 //   * `ITEM_BY_ID` — the version's own item names by wire id.
 //   * `ITEM_FALLBACKS` — engine items the version lacks and no rule covers.
 //
-// **Block items are a placeholder here.** A block item a version lacks should
-// follow the *block* substitution rules (`blocks.json`, task J2), which the
-// block compat layer owns; until that is merged the generator maps such an
-// item to a generic stand-in (`barrier`) and records it, so the item layer is
-// independent of the block tables. TODO(J1/J2): replace `placeholderItem`
-// with a lookup through the merged block rules and regenerate.
+// **Block items follow the block rules.** A block *item* a version lacks is
+// resolved through the same `blocks.json` rules (and the same resolver) the
+// block half of the layer uses (task J10), so the block a player places and
+// the item they hold downgrade to the same stand-in. The star of the
+// resolution is `../gen.js`, which owns the rules, the globbing and the
+// chaining; it is required as a module here (it only generates when run
+// directly). A block item no rule covers takes the version's stone item, the
+// same last resort the block table uses, so it never lands in
+// `ITEM_FALLBACKS` — that list is for items that are not blocks.
 'use strict'
 const fs = require('fs')
 const path = require('path')
@@ -37,9 +40,6 @@ const requirePaths = [
   path.join(process.env.HOME || '', 'node_modules'),
 ]
 const d = require(require.resolve('minecraft-data', { paths: requirePaths }))
-
-const outDir =
-  process.argv[2] || 'crates/aether-server/src/protocol/compat/item_gen'
 
 const BASE = '1.21.11'
 const base = d(BASE)
@@ -66,75 +66,31 @@ const VERSIONS = [
   ['v1_21_9', '1.21.9'],
 ]
 
-const strip = n => n.replace(/^minecraft:/, '')
-const prefix = n => (n.includes(':') ? n : 'minecraft:' + n)
-
-// --- substitution rules -----------------------------------------------------
-function loadRules(file) {
-  const raw = JSON.parse(fs.readFileSync(path.join(__dirname, file), 'utf8'))
-  const list = Array.isArray(raw)
-    ? raw.flatMap(x => (x && x.rules ? x.rules : [x]))
-    : raw.rules
-  return (list || [])
-    .filter(r => r && r.from && r.to)
-    .map(r => ({ from: strip(r.from), to: strip(r.to) }))
-}
-
-function glob(pattern, name) {
-  const star = pattern.indexOf('*')
-  if (star < 0) return name === pattern ? '' : null
-  const pre = pattern.slice(0, star)
-  const post = pattern.slice(star + 1)
-  if (name.length < pre.length + post.length) return null
-  if (!name.startsWith(pre) || !name.endsWith(post)) return null
-  return name.slice(pre.length, name.length - post.length)
-}
-
-// Resolve a name the version lacks to one it has, applying rules repeatedly.
-function resolver(names, rules) {
-  return function resolve(name) {
-    let cur = name
-    for (let i = 0; i < 16; i++) {
-      let next = null
-      for (const r of rules) {
-        const cap = glob(r.from, cur)
-        if (cap !== null) {
-          next = r.to.replace('*', cap)
-          break
-        }
-      }
-      if (next === null) return null
-      if (names.has(next)) return next
-      if (next === cur) return null
-      cur = next
-    }
-    return null
-  }
-}
+// The block-rule resolver, rule loader and name helpers all live in `gen.js`
+// (task J2) so the block and item halves cannot drift apart.
+const blockGen = require('./gen.js')
+const { strip, prefix, resolver, loadRules } = blockGen
 
 // --- items ------------------------------------------------------------------
 const BASE_ITEMS = base.itemsArray.slice().sort((a, b) => a.id - b.id)
 const ENGINE_ITEMS = BASE_ITEMS.length
 
-// The placeholder for a block item the version lacks, until the block rules
-// are merged in. A real item the version has, so the client still sees
-// something; see the header.
-function placeholderItem(names) {
-  for (const candidate of ['barrier', 'stone', 'oak_planks', 'dirt']) {
-    if (names.has(candidate)) return candidate
-  }
-  return null
-}
+// The engine's own block names. An engine item whose name is one of these is a
+// *block item*, so it follows the block rules rather than the item rules.
+const BASE_BLOCKS = new Set(base.blocksArray.map(b => b.name))
 
-function buildItems(mcVersion, itemRules) {
+function buildItems(mcVersion, itemRules, blockRules) {
   const t = d(mcVersion)
   const byName = {}
   for (const it of t.itemsArray) byName[it.name] = it
   const names = new Set(Object.keys(byName))
-  // Which names are block items, so a missing one takes the placeholder
-  // rather than a pure-item rule that will not match.
+  // Block *names* the version has, for the block resolver. Its output is a
+  // block name; the item of that name is the stand-in (they always share a
+  // name), so it is looked up in `byName`.
   const blockNames = new Set((t.blocksArray || []).map(b => b.name))
-  const resolve = resolver(names, itemRules)
+  const resolveItem = resolver(names, itemRules)
+  const resolveBlock = resolver(blockNames, blockRules)
+  const stone = names.has('stone') ? 'stone' : null
 
   const maxId = t.itemsArray.reduce((a, it) => Math.max(a, it.id), 0)
   const map = new Array(ENGINE_ITEMS).fill(-1)
@@ -146,13 +102,19 @@ function buildItems(mcVersion, itemRules) {
     if (names.has(name)) {
       id = byName[name].id
     } else {
-      let sub = resolve(name)
-      // TODO(J1/J2): a block item should follow the block rules; until they
-      // are merged, a generic placeholder stands in.
-      if (!sub && blockNames.has(name)) sub = placeholderItem(names)
-      if (sub) {
+      let sub = resolveItem(name)
+      // A block item follows its *block's* substitution. The block rules can
+      // chain (a target that is itself missing is resolved again) and a block
+      // no rule covers becomes stone, exactly as the block table does — so a
+      // block item never ends in `ITEM_FALLBACKS`. If the resolved block has
+      // no item of that name in this version, stone is the last resort.
+      if (!sub && BASE_BLOCKS.has(name)) {
+        const block = resolveBlock(name)
+        sub = block && names.has(block) ? block : stone
+      }
+      if (sub && byName[sub]) {
         id = byName[sub].id
-        subst = true
+        subst = sub !== name
       } else {
         fallbacks.push(prefix(name))
         continue
@@ -166,7 +128,7 @@ function buildItems(mcVersion, itemRules) {
   return { map, byId, fallbacks: fallbacks.sort() }
 }
 
-function writeEnglish() {
+function writeEnglish(outDir) {
   const out = []
   const w = s => out.push(s)
   w("//! English display names of the engine's items, indexed by engine item id.")
@@ -191,8 +153,8 @@ function writeEnglish() {
   fs.writeFileSync(path.join(outDir, 'english.rs'), out.join('\n') + '\n')
 }
 
-function itemLines(mcVersion, itemRules) {
-  const { map, byId, fallbacks } = buildItems(mcVersion, itemRules)
+function itemLines(mcVersion, itemRules, blockRules) {
+  const { map, byId, fallbacks } = buildItems(mcVersion, itemRules, blockRules)
   const out = []
   const w = s => out.push(s)
   w("/// One entry per engine item id, in id order: the version's wire id in the")
@@ -229,27 +191,35 @@ function itemLines(mcVersion, itemRules) {
   return { lines: out, fallbacks: fallbacks.length }
 }
 
-fs.mkdirSync(outDir, { recursive: true })
-const itemRules = loadRules('items.json')
-writeEnglish()
-console.log(
-  `engine items ${ENGINE_ITEMS}, item rules ${itemRules.length}, placeholder block-item stand-in`,
-)
-let total = 0
-for (const [mod, mcVersion] of VERSIONS) {
-  const it = itemLines(mcVersion, itemRules)
-  const out = [
-    `//! Compat **item** tables for ${mcVersion} (module \`${mod}\`).`,
-    '//!',
-    '//! Generated by `tools/gen/compat/gen_items.js` from PrismarineJS',
-    '//! `minecraft-data` and the item rules beside it (`items.json`). Do not',
-    '//! edit by hand. Block items are a placeholder until the block rules are',
-    '//! merged; see the generator header.',
-    '',
-    ...it.lines,
-  ]
-  fs.writeFileSync(path.join(outDir, mod + '.rs'), out.join('\n') + '\n')
-  total += it.fallbacks
-  console.log(`${mod.padEnd(9)} ${mcVersion.padEnd(7)} item-fb ${it.fallbacks}`)
+function main() {
+  const outDir =
+    process.argv[2] || 'crates/aether-server/src/protocol/compat/item_gen'
+  fs.mkdirSync(outDir, { recursive: true })
+  const itemRules = loadRules('items.json')
+  const blockRules = loadRules('blocks.json')
+  writeEnglish(outDir)
+  console.log(
+    `engine items ${ENGINE_ITEMS}, item rules ${itemRules.length}, ` +
+      `block rules ${blockRules.length} for block items`,
+  )
+  let total = 0
+  for (const [mod, mcVersion] of VERSIONS) {
+    const it = itemLines(mcVersion, itemRules, blockRules)
+    const out = [
+      `//! Compat **item** tables for ${mcVersion} (module \`${mod}\`).`,
+      '//!',
+      '//! Generated by `tools/gen/compat/gen_items.js` from PrismarineJS',
+      '//! `minecraft-data`, the item rules beside it (`items.json`) and the',
+      '//! block rules in `blocks.json` (a block item follows its block). Do',
+      '//! not edit by hand.',
+      '',
+      ...it.lines,
+    ]
+    fs.writeFileSync(path.join(outDir, mod + '.rs'), out.join('\n') + '\n')
+    total += it.fallbacks
+    console.log(`${mod.padEnd(9)} ${mcVersion.padEnd(7)} item-fb ${it.fallbacks}`)
+  }
+  console.log(`total item fallbacks ${total}`)
 }
-console.log(`total item fallbacks ${total}`)
+
+if (require.main === module) main()

@@ -10,16 +10,18 @@
 //! A substituted item is a **disguise**: the client is handed a stand-in id
 //! but is told the real item's display name
 //! (`super::item_gen::english::ENGLISH`), and the server keeps the real stack.
-//! [`ItemTable::resolve_reported`] is the other half of that: an item a client
-//! sends back that *is* the stand-in for the slot's real item resolves to the
-//! real item, so a client cannot launder a spear into a trident by moving the
-//! slot around.
+//! [`ItemTable::resolve_reported`] is the other half of that when the client
+//! echoes the stand-in back into the *same* slot. A client that instead
+//! *moves* the stand-in — through the cursor into another slot — is answered
+//! by [`ItemTable::resolve_move`], which resolves the destination against the
+//! window's authoritative items so the real item follows the move and a
+//! stand-in cannot be conjured from the wire.
 //!
 //! The block half of the layer (block-state translation and substitution,
-//! tasks J1/J2) is a sibling: block *items* a version lacks should follow its
-//! block rules. Until that is merged the generated tables use a generic
-//! placeholder stand-in for them; see `tools/gen/compat/gen_items.js` and the
-//! TODO there.
+//! tasks J1/J2) is a sibling, and a block *item* now follows its block:
+//! `tools/gen/compat/gen_items.js` resolves a block item through the same
+//! `blocks.json` rules and resolver `gen.js` uses for the blocks themselves,
+//! so the icon a player holds and the block they place downgrade together.
 
 // The per-release item tables are foundation for routing the older codecs
 // through the gameplay path (queue J, task J5); until they encode items, the
@@ -93,6 +95,102 @@ impl ItemTable {
             _ => reported,
         }
     }
+
+    /// Whether this version shows *any* engine item as a different item under
+    /// `wire` — i.e. whether a report of `wire` is ambiguous between the
+    /// genuine item of that id and the real item it disguises.
+    pub fn stand_in_wire(&self, wire: i32) -> bool {
+        wire >= 0
+            && self
+                .map
+                .iter()
+                .any(|&e| e >= 0 && e & 0x1_0000 != 0 && (e & 0xffff) == wire)
+    }
+
+    /// Resolve an item a client reported on the wire, with the window's
+    /// authoritative items as context (the cursor and every real slot).
+    ///
+    /// The wire id alone cannot say whether a report of a stand-in *is* the
+    /// stand-in or the genuine item it hides: both look identical. So a report
+    /// whose wire id is unambiguous is taken as stated, and one whose wire id
+    /// is a stand-in is matched against the items the server still holds — the
+    /// source of the move — and refused (`None`) when there is no source. This
+    /// is what carries a spear across a creative move instead of letting the
+    /// trident stand-in become a real trident. Compare [`Self::resolve_reported`],
+    /// which only looks at the destination slot.
+    pub fn resolve_move(
+        &self,
+        reported: ItemTypeId,
+        authority: &[ItemTypeId],
+    ) -> Option<ItemTypeId> {
+        let Some(r) = self.wire(reported) else {
+            // An item this version cannot express at all: nothing on the wire
+            // to launder, so the report stands for whatever it names.
+            return Some(reported);
+        };
+        if !self.stand_in_wire(r.id) {
+            return Some(reported);
+        }
+        authority
+            .iter()
+            .copied()
+            .find(|&candidate| self.wire(candidate).is_some_and(|w| w.id == r.id))
+    }
+}
+
+/// The outcome of resolving one creative slot report.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Resolution {
+    /// Write this item (or an empty slot) into the reported slot.
+    Apply(Option<ItemTypeId>),
+    /// The report was a stand-in with no authoritative source: refuse it.
+    Refuse,
+}
+
+impl ItemTable {
+    /// Resolve one creative slot report against the window's state.
+    ///
+    /// `report` is the item the client says the slot now holds (`None` for an
+    /// emptied slot), `previous` is what the server had in that slot,
+    /// `carried` is the item shadowed from an earlier report (the client's
+    /// cursor), and `authority` is every other real slot's item. Returns the
+    /// resolution and the carried item after the report, so the caller can
+    /// keep shadowing the move. This is the per-move counterpart of
+    /// [`Self::resolve_reported`]: it follows a stand-in from slot to cursor
+    /// to slot instead of only matching the slot it came back to.
+    pub fn resolve_change(
+        &self,
+        report: Option<ItemTypeId>,
+        previous: Option<ItemTypeId>,
+        carried: Option<ItemTypeId>,
+        authority: &[ItemTypeId],
+    ) -> (Resolution, Option<ItemTypeId>) {
+        // The shadow is the strongest source: it is the item the last report
+        // took off a slot, so prepend it to the window's items.
+        let mut sources = Vec::with_capacity(authority.len() + 1);
+        if let Some(c) = carried {
+            sources.push(c);
+        }
+        sources.extend_from_slice(authority);
+
+        match report {
+            None => {
+                // The slot emptied: the client is now carrying what was in it.
+                (Resolution::Apply(None), previous)
+            }
+            Some(r) if previous == Some(r) => {
+                // The client re-sent what the slot already held: nothing moved.
+                (Resolution::Apply(Some(r)), carried)
+            }
+            Some(r) => match self.resolve_move(r, &sources) {
+                Some(real) => {
+                    let carried = if carried == Some(real) { None } else { carried };
+                    (Resolution::Apply(Some(real)), carried)
+                }
+                None => (Resolution::Refuse, carried),
+            },
+        }
+    }
 }
 
 macro_rules! table {
@@ -123,6 +221,37 @@ table!(V1_21_5, v1_21_5);
 table!(V1_21_6, v1_21_6);
 table!(V1_21_8, v1_21_8);
 table!(V1_21_9, v1_21_9);
+
+/// The item table for a codec's protocol id, if this layer knows it.
+///
+/// Mirrors [`super::block_table`] so a caller (the session's creative-slot
+/// handling) can resolve a client report without naming the static. `None` for
+/// 1.21.11 and later, whose ids the engine itself uses and which therefore
+/// need no substitution, and for any protocol this layer does not cover.
+pub fn table_for(protocol: i32) -> Option<&'static ItemTable> {
+    let t = match protocol {
+        47 => &V1_8, // 1.8.9, pre-flattening
+        755 => &V1_17,
+        756 => &V1_17_1,
+        757 => &V1_18,
+        758 => &V1_18_2,
+        759 => &V1_19,
+        760 => &V1_19_2,
+        761 => &V1_19_3,
+        762 => &V1_19_4,
+        763 => &V1_20_1,
+        766 => &V1_20_5,
+        767 => &V1_21_1,
+        768 => &V1_21_3,
+        769 => &V1_21_4,
+        770 => &V1_21_5,
+        771 => &V1_21_6,
+        772 => &V1_21_8,
+        773 => &V1_21_9,
+        _ => return None,
+    };
+    Some(t)
+}
 
 /// The English display name of an engine item, for a substitute's label.
 pub fn english(item: ItemTypeId) -> Option<&'static str> {
@@ -225,17 +354,130 @@ mod tests {
     }
 
     #[test]
+    fn no_block_item_is_left_without_a_stand_in() {
+        // A block item follows its block's substitution (J10), and a block no
+        // rule covers becomes stone, so `ITEM_FALLBACKS` — the items a client
+        // is shown nothing at all for — must only ever contain items that are
+        // *not* blocks. A block name here means the block and the item drifted
+        // apart.
+        for (name, fallbacks) in [
+            ("1.8", item_gen::v1_8::ITEM_FALLBACKS),
+            ("1.17", item_gen::v1_17::ITEM_FALLBACKS),
+            ("1.19", item_gen::v1_19::ITEM_FALLBACKS),
+            ("1.20.1", item_gen::v1_20_1::ITEM_FALLBACKS),
+            ("1.21.1", item_gen::v1_21_1::ITEM_FALLBACKS),
+            ("1.21.9", item_gen::v1_21_9::ITEM_FALLBACKS),
+        ] {
+            for item in fallbacks {
+                assert!(
+                    aether_world::registry::blocks::default_state(item).is_none(),
+                    "{name}: block item {item} fell back instead of following its block rule"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_moved_stand_in_keeps_the_real_item_it_stands_for() {
+        // J10: the round trip follows a *move*, not just an echo in the same
+        // slot. `authority` is what the server still holds in the window
+        // (cursor then slots) before the move.
+        let spear = id("minecraft:iron_spear");
+        let t = &V1_21_1;
+        let Some(w) = t.wire(spear) else {
+            return; // no spear rule: nothing to move
+        };
+        let shown = t.engine(w.id).unwrap(); // the trident stand-in
+        assert!(t.stand_in_wire(t.wire(shown).unwrap().id));
+        // The source is still somewhere in the window: the destination takes
+        // the real spear, not the trident the client sent.
+        assert_eq!(t.resolve_move(shown, &[spear]), Some(spear));
+        // A genuine trident in the window is preserved as itself.
+        let trident = id("minecraft:trident");
+        assert_eq!(t.resolve_move(shown, &[trident]), Some(trident));
+        // A stand-in with no source is refused: the wire cannot conjure one.
+        assert_eq!(t.resolve_move(shown, &[]), None);
+        // An unambiguous item is always taken as stated.
+        assert_eq!(
+            t.resolve_move(id("minecraft:diamond"), &[]),
+            Some(id("minecraft:diamond"))
+        );
+    }
+
+    #[test]
+    fn a_stand_in_survives_being_carried_through_the_cursor_between_slots() {
+        // The flow KNOWN_ISSUES 15's second bullet asks for: a creative client
+        // moves a spear (shown as a trident stand-in) slot -> cursor -> empty
+        // slot -> cursor -> another slot. Each report arrives on its own, so
+        // the emptied slot has to shadow the real item for the placement that
+        // follows.
+        let spear = id("minecraft:iron_spear");
+        let t = &V1_21_1;
+        let Some(w) = t.wire(spear) else {
+            return; // no spear rule: nothing to move
+        };
+        let shown = t.engine(w.id).unwrap(); // the trident the client sees
+        let mut carried = None;
+        let mut slots: Vec<(usize, ItemTypeId)> = vec![(36, spear)];
+        // The window's items, minus the slot being reported on.
+        let others = |slots: &[(usize, ItemTypeId)], skip: usize| {
+            slots
+                .iter()
+                .filter(|(s, _)| *s != skip)
+                .map(|(_, i)| *i)
+                .collect::<Vec<_>>()
+        };
+
+        // 1. Pick up: slot 36 empties, and the spear is now on the cursor.
+        let (res, next) = t.resolve_change(None, Some(spear), carried, &others(&slots, 36));
+        assert_eq!(res, Resolution::Apply(None));
+        carried = next;
+        assert_eq!(carried, Some(spear));
+        slots.retain(|(s, _)| *s != 36);
+
+        // 2. Place into empty slot 10: the client reports the trident. The
+        //    source is gone, so only the carried shadow can identify it.
+        let (res, next) = t.resolve_change(Some(shown), None, carried, &others(&slots, 10));
+        assert_eq!(res, Resolution::Apply(Some(spear)));
+        carried = next;
+        assert_eq!(carried, None);
+        slots.push((10, spear));
+
+        // 3. Pick up and place again, into slot 11.
+        let (_, next) = t.resolve_change(None, Some(spear), carried, &others(&slots, 10));
+        carried = next;
+        let (res, _next) = t.resolve_change(Some(shown), None, carried, &others(&slots, 11));
+        assert_eq!(res, Resolution::Apply(Some(spear)));
+
+        // 4. A trident conjured from nothing is refused, not accepted.
+        let (res, _) = t.resolve_change(Some(shown), None, None, &[]);
+        assert_eq!(res, Resolution::Refuse);
+        // ...but a genuine item is always believed.
+        let (res, _) = t.resolve_change(Some(id("minecraft:diamond")), None, None, &[]);
+        assert_eq!(res, Resolution::Apply(Some(id("minecraft:diamond"))));
+    }
+
+    #[test]
+    fn the_item_table_is_found_by_protocol_and_absent_for_the_engine_version() {
+        assert!(table_for(767).is_some());
+        assert!(table_for(47).is_some());
+        // 1.21.11 uses the engine's own ids, so there is nothing to translate.
+        assert!(table_for(774).is_none());
+        assert!(table_for(999).is_none());
+    }
+
+    #[test]
     fn how_many_items_still_have_no_stand_in_is_recorded() {
-        // Block items still wait on the block rules (J2), so the count is
-        // larger than it will be after the merge; the bound is here to make a
-        // rule regression visible, and the list itself is printed below.
+        // These are all non-block items the item rules (J3) do not cover
+        // (copper tools, nautilus armour, banner patterns, ...); the bound
+        // makes a block/item regression visible. See docs/KNOWN_ISSUES.md.
         assert!(
-            item_gen::v1_21_1::ITEM_FALLBACKS.len() < 200,
-            "1.21.1 item fallbacks grew: {}",
-            item_gen::v1_21_1::ITEM_FALLBACKS.len()
+            item_gen::v1_21_1::ITEM_FALLBACKS.len() < 40,
+            "1.21.1 item fallbacks grew: {:?}",
+            item_gen::v1_21_1::ITEM_FALLBACKS
         );
         assert!(
-            item_gen::v1_17::ITEM_FALLBACKS.len() < 400,
+            item_gen::v1_17::ITEM_FALLBACKS.len() < 70,
             "1.17 item fallbacks grew: {}",
             item_gen::v1_17::ITEM_FALLBACKS.len()
         );

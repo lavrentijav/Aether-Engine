@@ -1317,20 +1317,11 @@ fn record_slot_change(
     item: Option<aether_world::ItemTypeId>,
     count: u8,
 ) {
-    // An item the client was shown as a *substitute* comes back as the
-    // substitute; the slot's real item wins (see the compat item layer). A
-    // genuinely different report stands as what the player put there. This is
-    // what stops a creative client laundering a spear into a real trident by
-    // moving the slot around.
-    let item = match (item, slot) {
-        (Some(reported), s) if s >= 0 => {
-            let real = handle.inventory().get(s as usize).map(|st| st.item);
-            match real {
-                Some(real) => Some(handle.codec.resolve_reported_item(real, reported)),
-                None => Some(reported),
-            }
-        }
-        _ => item,
+    let item = match resolve_creative_report(handle, world, slot, item) {
+        protocol::compat::items::Resolution::Apply(item) => item,
+        // The report named a stand-in the server holds no source for: refuse
+        // it and let the resync correct the client.
+        protocol::compat::items::Resolution::Refuse => return,
     };
     let change = handle.set_creative_slot(slot, item, count);
     if change.is_noop() {
@@ -1360,6 +1351,65 @@ fn record_slot_change(
         );
     }
     save_inventory(handle, world);
+}
+
+/// Resolve a creative slot report against the server's authoritative window.
+///
+/// The wire id a client sends for an item it was shown as a *substitute* is
+/// the stand-in's, and says nothing about whether the client means the real
+/// item or the genuine item of that id. The server therefore resolves it from
+/// what it still holds — the shadow cursor and every real slot — so a stand-in
+/// a client *moves* keeps the real item it stands for, and a stand-in with no
+/// source is refused rather than conjured. The decision itself is pure and
+/// lives in `compat::items`; this only gathers the window state and keeps the
+/// resulting shadow.
+///
+/// A version with no item table (1.21.11 and later, whose ids are the engine's
+/// own, so nothing is ever a stand-in) trusts the report as before, still
+/// honouring a codec's own same-slot rule.
+fn resolve_creative_report(
+    handle: &crate::players::PlayerHandle,
+    world: &DemoWorld,
+    slot: i16,
+    reported: Option<aether_world::ItemTypeId>,
+) -> protocol::compat::items::Resolution {
+    let table = protocol::compat::items::table_for(handle.codec.protocol_id());
+    let Some(table) = table else {
+        return protocol::compat::items::Resolution::Apply(match (reported, slot) {
+            (Some(r), s) if s >= 0 => match handle.inventory().get(s as usize).map(|st| st.item) {
+                Some(real) => Some(handle.codec.resolve_reported_item(real, r)),
+                None => Some(r),
+            },
+            (other, _) => other,
+        });
+    };
+
+    // Snapshot the window before the move: the shadow carry (the source a
+    // cursor move resolves to), the cursor, and every real slot. Lock order is
+    // the game state, then the inventory (see `PlayerHandle`).
+    let (previous, carried, authority) = {
+        let st = handle.game();
+        let inv = handle.inventory();
+        let mut authority = Vec::new();
+        if let Some(c) = &st.cursor {
+            authority.push(c.item);
+        }
+        authority.extend(inv.occupied().map(|(_, s)| s.item));
+        let previous = if slot >= 0 {
+            inv.get(slot as usize).map(|s| s.item)
+        } else {
+            None
+        };
+        (previous, st.creative_carry, authority)
+    };
+
+    let (resolution, carried) = table.resolve_change(reported, previous, carried, &authority);
+    handle.game().creative_carry = carried;
+    if matches!(resolution, protocol::compat::items::Resolution::Refuse) {
+        // The client's report is not what the server holds: correct it.
+        handle.sync_inventory(world);
+    }
+    resolution
 }
 
 /// Persist a player's inventory into the world's KV store.

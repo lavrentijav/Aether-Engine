@@ -84,6 +84,10 @@ pub struct PlayerState {
     /// Bumped on every window update the server sends.
     pub state_id: i32,
     pub cursor: Option<Stack>,
+    /// The item a creative client is carrying between slots, shadowed from
+    /// its slot reports so a substituted item moved through the cursor keeps
+    /// its real identity. See `session::record_slot_change`.
+    pub creative_carry: Option<aether_world::ItemTypeId>,
     pub drag: Option<Drag>,
     pub xp_total: i32,
     /// Where they come back after dying.
@@ -119,6 +123,7 @@ impl PlayerState {
             window_counter: 1,
             state_id: 1,
             cursor: None,
+            creative_carry: None,
             drag: None,
             xp_total: 0,
             spawn: (8.5, 80.0, 8.5),
