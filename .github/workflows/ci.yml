@@ -51,6 +51,8 @@ jobs:
 
       - name: Clippy (all targets)
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (postgres feature)
+        run: cargo clippy -p aether-server --features postgres --all-targets -- -D warnings
 
       - name: Build (incl. benches)
         run: cargo build --workspace --all-targets

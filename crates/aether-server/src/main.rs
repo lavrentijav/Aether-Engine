@@ -332,26 +332,25 @@ fn open_history_mirror(
         ..Default::default()
     };
     #[cfg(feature = "postgres")]
-    {
-        match db::PostgresSink::connect(&url) {
-            Ok(sink) => {
-                log::info("history    : mirroring to PostgreSQL");
-                return Some(aether_world::journal::BatchingSink::start(sink, batch));
-            }
-            Err(e) => {
-                log::warn(&format!(
-                    "history mirror disabled: cannot reach the database: {e}"
-                ));
-                return None;
-            }
+    let sink = match db::PostgresSink::connect(&url) {
+        Ok(sink) => {
+            log::info("history    : mirroring to PostgreSQL");
+            Some(aether_world::journal::BatchingSink::start(sink, batch))
         }
-    }
+        Err(e) => {
+            log::warn(&format!(
+                "history mirror disabled: cannot reach the database: {e}"
+            ));
+            None
+        }
+    };
+    // Refused at startup; see `main`.
     #[cfg(not(feature = "postgres"))]
-    {
-        // Refused at startup; see `main`.
+    let sink = {
         let _ = batch;
         None
-    }
+    };
+    sink
 }
 
 /// Connect the economy, if one is configured and compiled in.
@@ -365,20 +364,19 @@ fn open_economy(cfg: &config::DatabaseConfig) -> Option<Box<dyn economy::Economy
         return None;
     }
     #[cfg(feature = "postgres")]
-    {
-        match economy::pg::PgEconomy::connect(&url) {
-            Ok(e) => {
-                log::info("economy    : PostgreSQL");
-                return Some(Box::new(e));
-            }
-            Err(e) => {
-                log::warn(&format!("economy disabled: {e}"));
-                return None;
-            }
+    let economy: Option<Box<dyn economy::Economy>> = match economy::pg::PgEconomy::connect(&url) {
+        Ok(e) => {
+            log::info("economy    : PostgreSQL");
+            Some(Box::new(e))
         }
-    }
+        Err(e) => {
+            log::warn(&format!("economy disabled: {e}"));
+            None
+        }
+    };
     #[cfg(not(feature = "postgres"))]
-    None
+    let economy = None;
+    economy
 }
 
 /// The configuration, installed at startup.
