@@ -255,6 +255,11 @@ impl<'a> Context<'a> {
         self.view.sun_angle(pos)
     }
 
+    /// The entity count a pressure plate reads at `pos`.
+    pub fn entity_count(&self, pos: BlockPos) -> usize {
+        self.view.entity_count(pos)
+    }
+
     // -- mutation -----------------------------------------------------------
 
     /// Vanilla's `Level.setBlock(pos, state, flags)`.
@@ -462,6 +467,12 @@ impl<'a> Context<'a> {
     pub fn dispatch_use(&mut self, pos: BlockPos) {
         let state = self.get_block(pos);
         behaviour(state).use_block(self, state, pos);
+    }
+
+    /// Dispatch an "entity inside" event to the block's behaviour.
+    pub fn dispatch_entity_inside(&mut self, pos: BlockPos) {
+        let state = self.get_block(pos);
+        behaviour(state).entity_inside(self, state, pos);
     }
 
     // -- the cascade --------------------------------------------------------
@@ -781,6 +792,34 @@ impl Registry {
             &mut by_state,
             "minecraft:pale_oak_button",
             &blocks::WoodButton,
+        );
+        for name in [
+            "minecraft:oak_pressure_plate",
+            "minecraft:spruce_pressure_plate",
+            "minecraft:birch_pressure_plate",
+            "minecraft:jungle_pressure_plate",
+            "minecraft:acacia_pressure_plate",
+            "minecraft:dark_oak_pressure_plate",
+            "minecraft:mangrove_pressure_plate",
+            "minecraft:cherry_pressure_plate",
+            "minecraft:bamboo_pressure_plate",
+            "minecraft:crimson_pressure_plate",
+            "minecraft:warped_pressure_plate",
+            "minecraft:pale_oak_pressure_plate",
+            "minecraft:stone_pressure_plate",
+            "minecraft:polished_blackstone_pressure_plate",
+        ] {
+            put(&mut by_state, name, &blocks::PressurePlate);
+        }
+        put(
+            &mut by_state,
+            "minecraft:light_weighted_pressure_plate",
+            &blocks::LightWeighted,
+        );
+        put(
+            &mut by_state,
+            "minecraft:heavy_weighted_pressure_plate",
+            &blocks::HeavyWeighted,
         );
 
         // A test-only block registered over the piston's states, proving that a

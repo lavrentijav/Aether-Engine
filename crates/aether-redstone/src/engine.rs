@@ -168,4 +168,11 @@ impl Redstone {
         let mut ctx = Context::new(view);
         ctx.dispatch_use(pos);
     }
+
+    /// An entity entered the block at `pos`. A pressure plate re-reads its
+    /// entity count. The host calls this when an entity steps on or off.
+    pub fn on_entity_inside<V: RedstoneView>(&self, view: &mut V, pos: BlockPos) {
+        let mut ctx = Context::new(view);
+        ctx.dispatch_entity_inside(pos);
+    }
 }

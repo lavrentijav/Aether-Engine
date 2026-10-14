@@ -248,6 +248,16 @@ pub trait RedstoneView {
     fn sun_angle(&self, _pos: BlockPos) -> f32 {
         0.0
     }
+
+    /// The number of entities whose touch box overlaps the cell `pos` — what a
+    /// pressure plate reads to decide whether it is pressed
+    /// (`BasePressurePlateBlock.getEntityCount` over its `TOUCH_AABB`).
+    ///
+    /// The crate has no entity model, so the host counts them. The default is
+    /// none (an unpressed plate).
+    fn entity_count(&self, _pos: BlockPos) -> usize {
+        0
+    }
 }
 
 /// An in-memory world: a map of states, a block-tick queue and the redstone
@@ -274,6 +284,8 @@ pub struct MemWorld {
     analog: HashMap<BlockPos, u8>,
     /// The world's daylight: `(sky_light, sun_angle)`.
     daylight: (i32, f32),
+    /// The entity count a test sets for a pressure-plate cell.
+    entities: HashMap<BlockPos, usize>,
 }
 
 impl MemWorld {
@@ -334,6 +346,12 @@ impl MemWorld {
     /// as a daylight detector reads them.
     pub fn set_daylight(&mut self, sky_light: i32, sun_angle: f32) {
         self.daylight = (sky_light, sun_angle);
+    }
+
+    /// Set how many entities are touching the cell `pos`, as a pressure plate
+    /// would see.
+    pub fn set_entities(&mut self, pos: BlockPos, count: usize) {
+        self.entities.insert(pos, count);
     }
 
     /// Advance one game tick and run every block tick that has come due.
@@ -439,6 +457,10 @@ impl RedstoneView for MemWorld {
     fn sun_angle(&self, _pos: BlockPos) -> f32 {
         self.daylight.1
     }
+
+    fn entity_count(&self, pos: BlockPos) -> usize {
+        self.entities.get(&pos).copied().unwrap_or(0)
+    }
 }
 
 /// A world that records every state write, so a test can assert the exact
@@ -530,6 +552,10 @@ impl RedstoneView for TraceWorld {
 
     fn sun_angle(&self, pos: BlockPos) -> f32 {
         self.inner.sun_angle(pos)
+    }
+
+    fn entity_count(&self, pos: BlockPos) -> usize {
+        self.inner.entity_count(pos)
     }
 }
 

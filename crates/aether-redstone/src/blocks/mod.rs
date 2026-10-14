@@ -12,6 +12,7 @@ pub(crate) mod diode;
 mod lamp;
 mod lever;
 mod observer;
+mod pressure_plate;
 mod redstone_block;
 mod repeater;
 mod torch;
@@ -31,6 +32,7 @@ pub use default::DefaultBehaviour;
 pub use lamp::Lamp;
 pub use lever::Lever;
 pub use observer::Observer;
+pub use pressure_plate::{HeavyWeighted, LightWeighted, PressurePlate};
 pub use redstone_block::RedstoneBlock;
 pub use repeater::Repeater;
 #[cfg(test)]
@@ -185,6 +187,10 @@ pub trait BlockBehaviour: Sync {
 
     /// `useWithoutItem`: a player interacted.
     fn use_block(&self, _ctx: &mut Context, _state: BlockStateId, _pos: crate::pos::BlockPos) {}
+
+    /// `entityInside`: an entity entered the block. A pressure plate reads the
+    /// entity count to decide whether it is pressed. The default does nothing.
+    fn entity_inside(&self, _ctx: &mut Context, _state: BlockStateId, _pos: crate::pos::BlockPos) {}
 }
 
 /// `LeverBlock`/`ButtonBlock.updateNeighbours`: notify the block itself and the
