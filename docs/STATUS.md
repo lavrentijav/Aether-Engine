@@ -168,7 +168,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 - 🚧 `aether-server` as an early preview of the Vanilla-protocol layer: 1.8.9 through 1.21.11 and 26.1–26.3, survival on the modern versions
 
 **Phase 4 — Extensibility & ops**
-- 📋 Native C-ABI + WASM plugin API
+- 🚧 WASM plugin API: stage P1 shipped — `crates/aether-plugin` (Wasmtime 36 component model, `plugin.toml` manifest, sandbox limits, `before-*`/`after-*`/`on-tick`/`on-command` bus, `storage.kv`/`log`/`config`/`supports`) wired into `aether-server` behind the `plugins` feature, with `plugins/examples/hello` as the reference. Stage P2 (economy as a plugin, `storage.ledger`) and P3 (plugin registries) are next; the native C-ABI tier is still 📋.
 - 🚧 Aether-Convert migration tool (initial version shipped; hardening ahead)
 - 📋 In-game profiler, ops hardening
 

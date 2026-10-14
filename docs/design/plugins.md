@@ -1,6 +1,6 @@
 # Plugins: WASM host, low-level API, economy as a plugin, custom enchantments
 
-Status: 📋 design (2026-10-14). ROADMAP Phase 4 "Plugin API: Native C-ABI tier + WebAssembly
+Status: 🚧 stage P1 done (2026-10-14). ROADMAP Phase 4 "Plugin API: Native C-ABI tier + WebAssembly
 (Wasmtime) sandbox + `engine.supports()`" — this document is that plan, pulled forward.
 
 ## Goals
@@ -101,10 +101,13 @@ Operator config `[plugins] dir`, `[plugins.<id>] enabled`, granted capabilities,
 
 - **E1** (with the enchanting work, queue T2): registry from the data pack, effect kinds, config
   caps, custom JSON dir, registry sync to 1.21+ clients; plugin hook points left as no-op calls.
-- **P1**: `crates/aether-plugin` — wasmtime embed, WIT package, manifest/loader, limits, event bus
+- **P1** ✅: `crates/aether-plugin` — wasmtime embed, WIT package, manifest/loader, limits, event bus
   with the events above wired at their hook points in `aether-server`, `storage.kv`, `log`,
   `supports`; `plugins/examples/hello` (registers a command, cancels breaking bedrock, logs joins);
-  tests: load, event order by priority, cancel, trap isolation, time budget.
+  tests: load, event order by priority, cancel, trap isolation, time budget. Shipped with two
+  deviations recorded in [KNOWN_ISSUES §A16](../KNOWN_ISSUES.md): the host links `wasmtime-wasi`
+  under a context that grants nothing (so a Rust `wasm32-wasip2` component's std imports resolve),
+  and `after-enchant` has no hook point until the enchanting work (E1/E2).
 - **P2**: economy service: WIT economy interface, `storage.ledger`, `WasmEconomy` adapter,
   conformance suite, `plugins/economy` port; switch by config.
 - **P3**: registries for plugins: custom enchantments and custom items (shown via compat stand-ins),
