@@ -795,6 +795,8 @@ pub fn codecs() -> &'static [&'static dyn ProtocolCodec] {
     static V762: v762::Codec = v762::Codec;
     static V763: v763::Codec = v763::Codec;
     static V766: v766::Codec = v766::Codec;
+    static V765: v765::Codec = v765::Codec;
+    static V764: v764::Codec = v764::Codec;
     static V767: v767::Codec = v767::Codec;
     static V768: v768::Codec = v768::Codec;
     static V769: v769::Codec = v769::Codec;
@@ -802,12 +804,10 @@ pub fn codecs() -> &'static [&'static dyn ProtocolCodec] {
     static V771: v771::Codec = v771::Codec;
     static V772: v772::Codec = v772::Codec;
     static V773: v773::Codec = v773::Codec;
-    // Newest first. 764 and 765 are absent on purpose: before 1.20.5 the whole
-    // registry set travels as one NBT compound rather than a packet per
-    // registry, which is a separate code path still to be written.
-    static ALL: [&dyn ProtocolCodec; 22] = [
-        &V777, &V776, &V775, &V774, &V773, &V772, &V771, &V770, &V769, &V768, &V767, &V766, &V763,
-        &V762, &V761, &V760, &V759, &V758, &V757, &V756, &V755, &V47,
+    // Newest first.
+    static ALL: [&dyn ProtocolCodec; 24] = [
+        &V777, &V776, &V775, &V774, &V773, &V772, &V771, &V770, &V769, &V768, &V767, &V766, &V765,
+        &V764, &V763, &V762, &V761, &V760, &V759, &V758, &V757, &V756, &V755, &V47,
     ];
     &ALL
 }
@@ -888,6 +888,8 @@ mod tests {
         assert_eq!(codec_for(775).unwrap().version_name(), "26.1.x");
         assert_eq!(codec_for(776).unwrap().version_name(), "26.2");
         assert_eq!(codec_for(777).unwrap().version_name(), "26.3");
+        assert_eq!(codec_for(765).unwrap().version_name(), "1.20.3/1.20.4");
+        assert_eq!(codec_for(764).unwrap().version_name(), "1.20.2");
         assert!(codec_for(1).is_none(), "unknown protocol must not resolve");
     }
 }
