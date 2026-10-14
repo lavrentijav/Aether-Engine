@@ -12,8 +12,8 @@
 //!   landed, which is the same end state without the animation. Concrete powder
 //!   also sets when it touches water, before it ever falls.
 //!
-//! Crops join this module in their own submodule; see `KNOWN_ISSUES` A.11 for
-//! what they still do not do.
+//! Crops and leaf decay join this module in their own submodules; see
+//! `KNOWN_ISSUES` A.11 for what each of them still does not do.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -29,6 +29,7 @@ use crate::session::DemoWorld;
 
 mod crops;
 mod falling;
+mod leaves;
 
 /// A block position.
 type Pos = (i32, i32, i32);
@@ -46,6 +47,10 @@ const BUDGET: usize = 4096;
 
 /// Ticks before a falling block notices it is unsupported (vanilla's 2).
 const FALL_DELAY: u64 = 2;
+
+/// Ticks before a leaf recomputes its `distance` after a neighbour changes
+/// (vanilla's `updateShape` schedules a tick with delay 1).
+const LEAF_DELAY: u64 = 1;
 
 /// Ticks before sugar cane or cactus checks it still has support (vanilla's
 /// `tick` runs one tick after the change).
@@ -194,12 +199,20 @@ fn is_air(state: BlockStateId) -> bool {
     state == block_ids::AIR || matches!(name_of(state).map(short), Some("cave_air" | "void_air"))
 }
 
+/// Whether this is a leaves block (every one ends `_leaves`).
+fn is_leaves(name: &str) -> bool {
+    short(name).ends_with("_leaves")
+}
+
 /// Whether a random tick should even look at `state`: a crop below its max
 /// age, a decaying leaf, or a sugar cane / cactus that may still lengthen.
 fn is_random_tickable(state: BlockStateId) -> bool {
     let Some(name) = name_of(state) else {
         return false;
     };
+    if is_leaves(name) {
+        return leaves::is_decaying(state);
+    }
     if crops::is_crop(name) {
         let max = crops::max_age(name).unwrap_or(0);
         let age = prop(state, "age")
@@ -231,6 +244,8 @@ pub fn notify(world: &DemoWorld, x: i32, y: i32, z: i32) {
         };
         if is_falling(name) {
             schedule(p, FALL_DELAY);
+        } else if is_leaves(name) {
+            schedule(p, LEAF_DELAY);
         } else if crops::is_sugar_cane(name) || crops::is_cactus(name) {
             schedule(p, SUPPORT_DELAY);
         }
@@ -259,6 +274,8 @@ fn scheduled_update(world: &DemoWorld, registry: &SharedRegistry, rng: &mut Rng,
     let get = |x, y, z| world.get_block(x, y, z);
     if is_falling(name) {
         falling::fall(world, registry, pos, state);
+    } else if is_leaves(name) {
+        leaves::update(world, registry, pos, state);
     } else if (crops::is_sugar_cane(name) && !crops::can_survive_sugar_cane(&get, pos))
         || (crops::is_cactus(name) && !crops::can_survive_cactus(&get, pos))
     {
@@ -293,7 +310,9 @@ fn random_tick(world: &DemoWorld, registry: &SharedRegistry, rng: &mut Rng, pos:
         return;
     };
     let get = |x, y, z| world.get_block(x, y, z);
-    if crops::is_crop(name) {
+    if is_leaves(name) {
+        leaves::decay(world, registry, rng, pos, state);
+    } else if crops::is_crop(name) {
         if let Some(next) = crops::grow_crop(&get, rng, pos, state, name) {
             set(world, registry, pos, next);
         }
