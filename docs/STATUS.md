@@ -106,13 +106,14 @@ modern versions run a server-side survival game).
 | CI (build/test/clippy/fmt + `cargo-deny`) on a pinned toolchain + Criterion bench harness | ✅ |
 | **Clients 26.1.x, 26.2 and 26.3** (protocols 775–777) with the full survival game: one modern codec parameterized by per-release tables generated from the game's own reports (`tools/gen/versions.py` — packet ids, block states, items, entity types, menus, registries, tags) plus each release's layout changes (world clocks, the `attack` packet, section fluid counts, the swing packet, byte-array bitsets). Registries go by known pack with the overworld's height overridden, or with full data to a client without the pack. Every packet is checked by decoding it with the release's own codecs (`tools/wire`) | ✅ |
 | **Survival gameplay on 1.21.11 and 26.1–26.3** (`game/`): 20 TPS world tick, day/night, hunger, regeneration, starvation, fall/void/lava damage, death screen, inventory dropped on death, respawn | ✅ |
+| Status effects (`game/effects.rs`): Update / Remove Mob Effect on 1.21.11 and 26.1–26.3; golden/enchanted apples, poisonous potato, spider eye, pufferfish, rotten flesh and suspicious stew; regeneration, poison (never below one heart), wither, hunger, absorption, resistance, fire resistance and speed/slowness (movement-speed attribute); tick, expire, milk cures, saved with the player | ✅ |
 | Mobs: cow, pig, sheep, chicken, zombie, skeleton, creeper, spider — natural spawning, wander/flee/chase AI, melee, skeleton arrows, creeper explosions, undead burn in daylight, loot and XP | 🚧 Preview |
 | Combat: 1.9 attack cooldown, critical hits, knockback, armour reduction and wear, tool durability, PvP | ✅ |
 | Item entities: block drops from loot tables, Q / drop stack, pickup with the collect animation, merging, 5-minute expiry | ✅ |
 | Server-authoritative windows: every click mode, 2×2 and 3×3 crafting over all 1,359 shaped + shapeless recipes, chests and furnaces persisted as block entities, smelting + fuel | ✅ |
 | Survival mining: vanilla dig times, harvest tools, tool wear; placement consumes items; buckets, hoes, flint and steel, beds (spawn point, skip night), eating, bows | ✅ |
 | Entity tracker: entities spawn/despawn per client by range, updates only to those tracking them | ✅ |
-| Player state persisted (position, health, food, XP, mode, spawn); gameplay commands `/gamemode /time /give /summon /tp /heal /food /killall /kill /spawn /block` | ✅ |
+| Player state persisted (position, health, food, XP, mode, spawn, active status effects — save format 2, version 1 still read); gameplay commands `/gamemode /time /give /summon /tp /heal /food /killall /kill /spawn /block` | ✅ |
 | Chunks stream on a per-player thread — input is read while the horizon generates | ✅ |
 | Gameplay events on the 18 codecs before 1.21.11 (they keep the older subset) | ❌ |
 | Water and lava flow: vanilla delays and levels, falls, slope-seeking, infinite water, lava/water → obsidian/cobblestone/stone | ✅ |

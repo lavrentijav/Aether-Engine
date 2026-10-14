@@ -286,18 +286,54 @@ pub fn tick_damage(health: f32, amount: f32, lethal: bool) -> f32 {
 /// Suspicious stew's effect is really stored in the bowl from the flower it
 /// was made with; this server keeps no item components, so it rolls one of
 /// the flowers' effects instead, with vanilla's durations.
-pub fn food_effects(_item: &str, _rng: &mut Rng) -> Vec<Effect> {
-    // The food table is the next task; the effect ids it will use are named
-    // here so the registry stays whole in the meantime.
-    let _named = [
-        JUMP_BOOST,
-        NAUSEA,
-        BLINDNESS,
-        NIGHT_VISION,
-        WEAKNESS,
-        SATURATION,
-    ];
-    Vec::new()
+pub fn food_effects(item: &str, rng: &mut Rng) -> Vec<Effect> {
+    match item {
+        "minecraft:golden_apple" => vec![
+            Effect::new(REGENERATION, 1, 100),
+            Effect::new(ABSORPTION, 0, 2400),
+        ],
+        "minecraft:enchanted_golden_apple" => vec![
+            Effect::new(REGENERATION, 1, 100),
+            Effect::new(RESISTANCE, 0, 100),
+            Effect::new(FIRE_RESISTANCE, 0, 100),
+            Effect::new(ABSORPTION, 3, 2400),
+        ],
+        // 60 % chance, four seconds.
+        "minecraft:poisonous_potato" => {
+            if rng.chance(0.6) {
+                vec![Effect::new(POISON, 0, 80)]
+            } else {
+                Vec::new()
+            }
+        }
+        "minecraft:spider_eye" => vec![Effect::new(POISON, 0, 100)],
+        // Poison IV a minute, Hunger III and Nausea II fifteen seconds.
+        "minecraft:pufferfish" => vec![
+            Effect::new(POISON, 3, 1200),
+            Effect::new(HUNGER, 2, 300),
+            Effect::new(NAUSEA, 1, 300),
+        ],
+        // 80 % chance, thirty seconds.
+        "minecraft:rotten_flesh" => {
+            if rng.chance(0.8) {
+                vec![Effect::new(HUNGER, 0, 600)]
+            } else {
+                Vec::new()
+            }
+        }
+        "minecraft:suspicious_stew" => vec![match rng.range(0, 9) {
+            0 => Effect::new(NIGHT_VISION, 0, 100),   // poppy
+            1 => Effect::new(JUMP_BOOST, 0, 120),     // cornflower
+            2 => Effect::new(WEAKNESS, 0, 140),       // tulip
+            3 => Effect::new(BLINDNESS, 0, 160),      // azure bluet
+            4 => Effect::new(POISON, 0, 240),         // lily of the valley
+            5 => Effect::new(SATURATION, 0, 7),       // dandelion / blue orchid
+            6 => Effect::new(FIRE_RESISTANCE, 0, 80), // allium
+            7 => Effect::new(WITHER, 0, 160),         // wither rose
+            _ => Effect::new(REGENERATION, 0, 160),   // oxeye daisy
+        }],
+        _ => Vec::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -325,8 +361,10 @@ pub fn give(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld,
     let shown = {
         let mut st = handle.game();
         let shown = st.effects.apply(e);
-        if e.id == ABSORPTION {
-            st.absorption = st.effects.absorption_amount();
+        // Applying absorption tops up to the new amount; it never refills a
+        // partly spent shield, as vanilla's `setAbsorptionAmount(max(...))`.
+        if shown.is_some() && e.id == ABSORPTION {
+            st.absorption = st.absorption.max(st.effects.absorption_amount());
         }
         shown
     };
@@ -431,6 +469,10 @@ pub fn sync_movement(handle: &PlayerHandle, registry: &SharedRegistry, world: &D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rng() -> Rng {
+        Rng::new(0x1234_5678)
+    }
 
     #[test]
     fn a_stronger_effect_replaces_and_a_weaker_one_does_not() {
@@ -568,5 +610,39 @@ mod tests {
         assert_eq!(mods.len(), 2);
         assert_eq!(mods[0].0, "minecraft:effect.speed");
         assert_eq!(mods[1].0, "minecraft:effect.slowness");
+    }
+
+    #[test]
+    fn each_named_food_carries_its_vanilla_effects() {
+        let mut r = rng();
+        let ids = |item: &str, r: &mut Rng| -> Vec<u8> {
+            food_effects(item, r).iter().map(|e| e.id).collect()
+        };
+        assert_eq!(
+            ids("minecraft:golden_apple", &mut r),
+            vec![REGENERATION, ABSORPTION]
+        );
+        assert_eq!(
+            ids("minecraft:enchanted_golden_apple", &mut r),
+            vec![REGENERATION, RESISTANCE, FIRE_RESISTANCE, ABSORPTION]
+        );
+        assert_eq!(ids("minecraft:spider_eye", &mut r), vec![POISON]);
+        assert_eq!(
+            ids("minecraft:pufferfish", &mut r),
+            vec![POISON, HUNGER, NAUSEA]
+        );
+        // Chance foods: a big enough sample must include both outcomes.
+        let mut poison = false;
+        let mut clean = false;
+        for _ in 0..200 {
+            let got = food_effects("minecraft:poisonous_potato", &mut r);
+            match got.first().map(|e| e.id) {
+                Some(POISON) => poison = true,
+                _ => clean = true,
+            }
+        }
+        assert!(poison && clean, "the 60 % roll fires both ways");
+        assert!(food_effects("minecraft:suspicious_stew", &mut r).len() == 1);
+        assert!(food_effects("minecraft:bread", &mut r).is_empty());
     }
 }
