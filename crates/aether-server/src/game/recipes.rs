@@ -949,24 +949,20 @@ fn fallback_cook(method: Cook, input: ItemTypeId) -> Option<Cooked> {
 }
 
 /// The item a crafting ingredient leaves behind when it is consumed — vanilla's
-/// `crafting_remaining_item`: a bucket from a filled bucket, a glass bottle from
-/// a potion or honey bottle, a bowl from a stew.
+/// `craftingRemainingItem`.
+///
+/// That property is set on exactly five items (`Items.java`): the water, lava
+/// and milk buckets leave a bucket, and honey bottles and dragon's breath
+/// leave a glass bottle. Potions and the stews look similar but use
+/// `usingConvertsTo`, which is the *use* remainder, not the craft remainder,
+/// so they must not appear here — a fish bucket or a drunk potion would
+/// otherwise duplicate a bucket or bottle in a crafting grid.
 pub fn remainder(item: ItemTypeId) -> Option<ItemTypeId> {
     let short = item.vanilla_name()?.strip_prefix("minecraft:")?;
-    let out = if short.ends_with("_bucket") {
-        "minecraft:bucket"
-    } else if matches!(
-        short,
-        "potion" | "splash_potion" | "lingering_potion" | "honey_bottle" | "dragon_breath"
-    ) {
-        "minecraft:glass_bottle"
-    } else if matches!(
-        short,
-        "mushroom_stew" | "beetroot_soup" | "rabbit_stew" | "suspicious_stew"
-    ) {
-        "minecraft:bowl"
-    } else {
-        return None;
+    let out = match short {
+        "water_bucket" | "lava_bucket" | "milk_bucket" => "minecraft:bucket",
+        "honey_bottle" | "dragon_breath" => "minecraft:glass_bottle",
+        _ => return None,
     };
     ItemTypeId::vanilla(out)
 }
@@ -1451,5 +1447,34 @@ mod tests {
         // An item the table cannot smelt cooks nowhere.
         let stick = crate::inventory::item("minecraft:stick");
         assert!(cook(Cook::Smelting, stick).is_none());
+    }
+
+    #[test]
+    fn only_vanillas_craft_remainders_are_produced() {
+        let it = crate::inventory::item;
+        let bucket = it("minecraft:bucket");
+        let bottle = it("minecraft:glass_bottle");
+        for name in [
+            "minecraft:water_bucket",
+            "minecraft:lava_bucket",
+            "minecraft:milk_bucket",
+        ] {
+            assert_eq!(remainder(it(name)), Some(bucket), "{name}");
+        }
+        for name in ["minecraft:honey_bottle", "minecraft:dragon_breath"] {
+            assert_eq!(remainder(it(name)), Some(bottle), "{name}");
+        }
+        // Use-remainders, not craft-remainders: no bucket, no bottle.
+        for name in [
+            "minecraft:cod_bucket",
+            "minecraft:powder_snow_bucket",
+            "minecraft:axolotl_bucket",
+            "minecraft:potion",
+            "minecraft:splash_potion",
+            "minecraft:mushroom_stew",
+            "minecraft:rabbit_stew",
+        ] {
+            assert_eq!(remainder(it(name)), None, "{name} is not a craft remainder");
+        }
     }
 }
