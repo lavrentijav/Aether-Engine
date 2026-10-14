@@ -293,6 +293,66 @@ pub fn load_column(store: &dyn super::tickstore::TickStore, cx: i32, cz: i32) {
     super::tickstore::restore(&mut queue().lock().unwrap(), entries);
 }
 
+/// Sections scanned bottom-to-top when a column loads.
+const SCAN_CY_MIN: i32 = -4;
+const SCAN_CY_MAX: i32 = 23;
+
+/// Fluid cells examined per column load, so a loaded ocean cannot cost an
+/// unbounded scan.
+const WAKE_SCAN_MAX: usize = 4096;
+
+/// Ticks scheduled per column load. Combined with [`BUDGET`], the work a burst
+/// of column loads can impose on any one tick is bounded.
+const WAKE_BUDGET: usize = 64;
+
+/// Give freshly generated fluid that can flow a scheduled tick when its column
+/// loads.
+///
+/// A generator lays fluid down as plain blocks and schedules nothing, so a
+/// generated stream that wanted to flow would sit still until something beside
+/// it changed. This walks the column and schedules the fluid that *can* flow —
+/// any flowing or falling cell, and any source with a replaceable cell under
+/// it — leaving a settled source (one sitting on another source or on solid
+/// ground) alone. Both the scan and what it schedules are capped, and the
+/// scheduler only runs [`BUDGET`] cells a tick, so a world of loaded oceans
+/// does not stampede.
+pub fn wake_generated<B, G>(world: &aether_api::World<B, G>, cx: i32, cz: i32)
+where
+    B: aether_world::KvBackend,
+    G: aether_worldgen::ChunkGenerator,
+{
+    let mut section = [BlockStateId::AIR; 4096];
+    let mut examined = 0usize;
+    let mut woken = 0usize;
+    for cy in SCAN_CY_MIN..=SCAN_CY_MAX {
+        world.copy_section(cx, cy, cz, &mut section);
+        for (i, &state) in section.iter().enumerate() {
+            let Some(cell) = cell_of(state) else {
+                continue;
+            };
+            examined += 1;
+            if examined > WAKE_SCAN_MAX {
+                return;
+            }
+            let lx = (i & 15) as i32;
+            let lz = ((i >> 4) & 15) as i32;
+            let ly = (i >> 8) as i32;
+            let x = cx * 16 + lx;
+            let y = cy * 16 + ly;
+            let z = cz * 16 + lz;
+            let flowable =
+                !cell.is_source() || can_replace(world, world.get_block(x, y - 1, z), cell.fluid);
+            if flowable {
+                schedule((x, y, z), cell.fluid.delay());
+                woken += 1;
+                if woken >= WAKE_BUDGET {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// Whether a block state carries `waterlogged=true`.
 ///
 /// Such a block is a contained water source: it never spreads on its own (it
@@ -818,6 +878,53 @@ mod tests {
         // The waterlogged block has no waterlogged state of its own to
         // replace: flow cannot occupy it.
         assert!(!can_replace(&world, stairs, Fluid::Water));
+    }
+
+    #[test]
+    fn freshly_generated_flowing_fluid_is_woken_on_chunk_load() {
+        use aether_api::{FlatGenerator, MemStore, World};
+        let world = World::new(MemStore::new(), FlatGenerator::classic());
+        let flowing = state_of(Cell {
+            fluid: Fluid::Water,
+            level: 3,
+        });
+        world.set_block_id(0, 10, 0, flowing, world.props_of(flowing));
+        let still = state_of(Cell {
+            fluid: Fluid::Water,
+            level: 0,
+        });
+        // A lone source over air would spread, so it is woken...
+        world.set_block_id(5, 10, 5, still, world.props_of(still));
+        // ...but a source resting on another source is settled and is not.
+        world.set_block_id(8, 10, 0, still, world.props_of(still));
+        world.set_block_id(8, 9, 0, still, world.props_of(still));
+
+        // The fluid queue is process-global; isolate this test's view.
+        *queue().lock().unwrap() = Scheduler::new();
+        wake_generated(&world, 0, 0);
+        let due: Vec<Pos> = queue()
+            .lock()
+            .unwrap()
+            .entries()
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect();
+        assert!(due.contains(&(0, 10, 0)), "flowing water woken: {due:?}");
+        assert!(due.contains(&(5, 10, 5)), "source over air woken: {due:?}");
+        assert!(!due.contains(&(8, 10, 0)), "settled source left: {due:?}");
+        *queue().lock().unwrap() = Scheduler::new();
+    }
+
+    #[test]
+    fn waking_generated_fluid_from_the_column_hook_does_not_deadlock() {
+        // The hook runs inside `ensure_column`; `wake_generated` reads the
+        // column back with `copy_section`, which materializes it again. The
+        // latch is released first, so the nested call must return rather than
+        // wait on itself.
+        use aether_api::{FlatGenerator, MemStore, World};
+        let world = World::new(MemStore::new(), FlatGenerator::classic())
+            .with_column_load_hook(wake_generated);
+        assert_eq!(world.get_block(0, 0, 0), block_ids::BEDROCK);
     }
 
     #[test]
