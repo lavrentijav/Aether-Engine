@@ -20,6 +20,7 @@
 //! holding a sealed, lit pocket would differ until it is revealed.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use aether_world::visibility::{
@@ -76,11 +77,23 @@ impl State {
     }
 
     /// Adopt a freshly computed reachable set.
-    pub fn set_visible(&mut self, section: (i32, i32, i32), visible: HashSet<(i32, i32, i32)>) {
+    ///
+    /// `epoch_at_start` is the global edit epoch when the search began. The
+    /// stale flag is only cleared if no block was written while the search
+    /// ran: a write that landed mid-search is not lost, the next search runs
+    /// again.
+    pub fn set_visible_if(
+        &mut self,
+        section: (i32, i32, i32),
+        visible: HashSet<(i32, i32, i32)>,
+        epoch_at_start: u64,
+    ) {
         self.center = Some(section);
-        self.dirty = false;
         self.visible = visible;
         self.search_id = self.search_id.wrapping_add(1);
+        if EDIT_EPOCH.load(Ordering::Relaxed) == epoch_at_start {
+            self.dirty = false;
+        }
     }
 
     /// Adopt a reachable set together with the columns already sent, for the
@@ -216,6 +229,13 @@ fn cache() -> &'static Mutex<GraphCache> {
     CACHE.get_or_init(|| Mutex::new(GraphCache::default()))
 }
 
+/// Every block write that could change a graph bumps this.
+///
+/// A player's search reads it before and after the breadth-first pass, so a
+/// write that lands mid-search is not cleared. It is a single relaxed
+/// increment — no lock, no allocation.
+static EDIT_EPOCH: AtomicU64 = AtomicU64::new(0);
+
 /// Sections written since the last tick, for the tick thread to hand to the
 /// players in range. Bounded: drained once a tick.
 static DIRTY_SECTIONS: OnceLock<Mutex<HashSet<(i32, i32, i32)>>> = OnceLock::new();
@@ -244,6 +264,7 @@ pub fn invalidate_block(x: i32, y: i32, z: i32) {
 /// The cache/epoch/dirty work for one changed section.
 fn record_invalidation(key: (i32, i32, i32)) {
     invalidate_section(&mut cache().lock().unwrap(), key);
+    EDIT_EPOCH.fetch_add(1, Ordering::Relaxed);
     dirty_sections().lock().unwrap().insert(key);
 }
 
@@ -255,6 +276,7 @@ pub fn invalidate_all() {
     c.epochs.clear();
     drop(c);
     dirty_sections().lock().unwrap().clear();
+    EDIT_EPOCH.fetch_add(1, Ordering::Relaxed);
 }
 
 /// The section graph for `c`, computed and cached on first ask.
@@ -314,8 +336,9 @@ fn ensure_visible(handle: &PlayerHandle, world: &dyn BlockSource) {
     if handle.visibility().is_fresh(section) {
         return;
     }
+    let epoch = EDIT_EPOCH.load(Ordering::Relaxed);
     let visible = visible_from(world, (pos.x, pos.y, pos.z), crate::server_view_radius());
-    handle.visibility().set_visible(section, visible);
+    handle.visibility().set_visible_if(section, visible, epoch);
 }
 
 /// Which sections of column `(cx, cz)` are hidden for this visible set.
@@ -735,6 +758,30 @@ mod tests {
         assert!(!cache().lock().unwrap().graphs.contains_key(&(0, 2, 0)));
         assert!(dirty_sections().lock().unwrap().contains(&(0, 2, 0)));
         dirty_sections().lock().unwrap().clear();
+    }
+
+    #[test]
+    fn a_write_during_the_search_keeps_the_reachable_set_stale() {
+        // N2 / the residual race of finding 4: the search reads the edit epoch
+        // before it starts and only clears the stale flag if no write landed
+        // while it ran.
+        let _guard = global_test_lock();
+        let mut st = State {
+            center: Some((0, 0, 0)),
+            dirty: true,
+            ..Default::default()
+        };
+        let epoch_before = EDIT_EPOCH.load(Ordering::Relaxed);
+        EDIT_EPOCH.fetch_add(1, Ordering::Relaxed); // a write lands mid-search
+        st.set_visible_if((0, 0, 0), HashSet::new(), epoch_before);
+        assert!(st.dirty, "a mid-search write must not be cleared");
+        assert!(!st.is_fresh((0, 0, 0)));
+
+        // With no write during the search the flag clears.
+        let epoch_before = EDIT_EPOCH.load(Ordering::Relaxed);
+        st.set_visible_if((0, 0, 0), HashSet::new(), epoch_before);
+        assert!(!st.dirty);
+        assert!(st.is_fresh((0, 0, 0)));
     }
 
     #[test]
