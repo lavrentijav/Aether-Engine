@@ -3,17 +3,69 @@
 //! The behaviour is the shape of vanilla's, not its letter: animals wander
 //! and flee when hit, zombies and spiders chase and strike, skeletons keep
 //! their distance and shoot, creepers hiss and blow up, and the undead burn
-//! in daylight. Pathfinding is a straight line with a jump over one-block
-//! steps and a refusal to walk off a drop — enough to be a real threat on
-//! open ground, and an honest gap underground (see `KNOWN_ISSUES`).
+//! in daylight.
+//!
+//! Movement is A\* over the block grid (`aether_world::pathfind`, a
+//! simplified `WalkNodeEvaluator`): a mob follows a cached path to its goal,
+//! re-solving when the target moves far enough, the next waypoint is walled
+//! off, or the path runs out. The search is charged against a per-tick node
+//! budget shared by every mob, so a crowd cannot stall the tick; a mob that
+//! cannot afford a path falls back to steering straight.
+
+use std::cell::Cell;
 
 use aether_api::{Body, Vector3};
+use aether_world::pathfind::{self, Nav};
+use aether_world::registry::shapes::Box6;
 
 use super::entities::{Action, PlayerView};
 use super::tables::Rng;
 use crate::inventory::Stack;
 use crate::protocol::MetaValue;
 use crate::session::DemoWorld;
+
+/// Node expansions every mob shares per tick. Once it is spent, no mob
+/// searches again until the next tick and they steer straight.
+const NAV_NODE_BUDGET: usize = 4096;
+/// Most nodes a single search may expand.
+const MAX_PATH_NODES: usize = 512;
+/// A fresh path is solved when the goal has moved this far from the cached
+/// path's goal, or the path was blocked.
+const REPATH_DISTANCE: f64 = 2.0;
+/// Ticks a mob waits before it solves another path.
+const REPATH_COOLDOWN: u32 = 10;
+/// A path counts as reaching the goal within this many horizontal blocks.
+const GOAL_RANGE: f64 = 1.2;
+
+/// The per-tick pathfinding budget shared by every mob.
+///
+/// `Cell` because the tick is single-threaded and the `Ctx` handed to each
+/// mob is shared immutably.
+pub struct NavBudget {
+    remaining: Cell<usize>,
+}
+
+impl NavBudget {
+    pub fn new(n: usize) -> Self {
+        Self {
+            remaining: Cell::new(n),
+        }
+    }
+    /// Nodes still available this tick.
+    pub fn remaining(&self) -> usize {
+        self.remaining.get()
+    }
+    /// Charge `n` expansions against the budget.
+    pub fn spend(&self, n: usize) {
+        self.remaining.set(self.remaining.get().saturating_sub(n));
+    }
+}
+
+impl Default for NavBudget {
+    fn default() -> Self {
+        Self::new(NAV_NODE_BUDGET)
+    }
+}
 
 /// One kind of mob.
 #[derive(Debug)]
@@ -172,6 +224,14 @@ pub struct Mob {
     pub see_time: i32,
     /// Status effects running on this mob.
     pub effects: super::effects::Effects,
+    /// Cached A\* path, nearest waypoint first, as block cells.
+    pub path: Vec<[i32; 3]>,
+    /// The waypoint in [`Mob::path`] the mob is walking to.
+    pub path_at: usize,
+    /// The goal the cached path was solved for.
+    pub path_goal: Option<(f64, f64, f64)>,
+    /// Ticks before a fresh path may be solved.
+    pub repath: u32,
 }
 
 impl Mob {
@@ -210,6 +270,10 @@ impl Mob {
             meta_dirty: false,
             see_time: 0,
             effects: super::effects::Effects::default(),
+            path: Vec::new(),
+            path_at: 0,
+            path_goal: None,
+            repath: 0,
         }
     }
 
@@ -251,6 +315,128 @@ pub struct Ctx<'a> {
     pub players: &'a [PlayerView],
     pub now: u64,
     pub day: bool,
+    /// The pathfinding budget shared by every mob this tick.
+    pub nav: &'a NavBudget,
+}
+
+/// Where a mob is heading: a point, and how fast.
+struct Goal {
+    x: f64,
+    y: f64,
+    z: f64,
+    speed: f64,
+}
+
+/// A [`pathfind::Nav`] view of the server world, reading the per-state
+/// collision shapes and the names of the few hazards that matter.
+struct WorldNav<'a> {
+    world: &'a DemoWorld,
+}
+
+impl Nav for WorldNav<'_> {
+    fn boxes(&self, x: i32, y: i32, z: i32) -> &'static [Box6] {
+        aether_world::registry::shapes::collision_boxes(self.world.get_block(x, y, z).raw())
+    }
+    fn hazard(&self, x: i32, y: i32, z: i32) -> bool {
+        matches!(
+            crate::game::block_name(self.world, self.world.get_block(x, y, z)).as_deref(),
+            Some("minecraft:lava")
+                | Some("minecraft:fire")
+                | Some("minecraft:soul_fire")
+                | Some("minecraft:cactus")
+                | Some("minecraft:magma_block")
+        )
+    }
+}
+
+/// Whether cell `w` is one a mob can stand in.
+fn standable_at(world: &DemoWorld, w: [i32; 3]) -> bool {
+    pathfind::standable(&WorldNav { world }, w[0], w[1], w[2])
+}
+
+/// Solve a path from `pos` to a point, charged against the tick budget.
+fn find_path(ctx: &Ctx, pos: Vector3, goal: (f64, f64, f64)) -> Option<Vec<[i32; 3]>> {
+    let remaining = ctx.nav.remaining();
+    if remaining == 0 {
+        return None;
+    }
+    let nav = WorldNav { world: ctx.world };
+    let start = pathfind::resolve_start(
+        &nav,
+        [
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        ],
+    )?;
+    let target = [
+        goal.0.floor() as i32,
+        goal.1.floor() as i32,
+        goal.2.floor() as i32,
+    ];
+    let budget = remaining.min(MAX_PATH_NODES);
+    let result = pathfind::search(&nav, start, target, GOAL_RANGE, budget);
+    ctx.nav.spend(result.expanded);
+    result.reached.then_some(result.path)
+}
+
+/// Follow the cached path toward `goal`, solving a fresh one when it is stale,
+/// blocked or missing. Returns the waypoint to steer for, or `None` to head
+/// straight at `goal`.
+fn follow_path(m: &mut Mob, pos: Vector3, goal: (f64, f64, f64), ctx: &Ctx) -> Option<(f64, f64)> {
+    m.repath = m.repath.saturating_sub(1);
+    // Stale if the goal wandered away, or the path ran out.
+    let moved = m.path_goal.map_or(true, |(px, py, pz)| {
+        (px - goal.0).powi(2) + (py - goal.1).powi(2) + (pz - goal.2).powi(2)
+            > REPATH_DISTANCE * REPATH_DISTANCE
+    });
+    if moved || m.path_at >= m.path.len() {
+        m.path.clear();
+        m.path_at = 0;
+    }
+    // Blocked if the next waypoint is no longer standable.
+    if let Some(w) = m.path.get(m.path_at) {
+        if !standable_at(ctx.world, *w) {
+            m.path.clear();
+            m.path_at = 0;
+        }
+    }
+    if m.path.is_empty() && m.repath == 0 {
+        match find_path(ctx, pos, goal) {
+            Some(path) => {
+                m.path = path;
+                m.path_at = 0;
+                m.path_goal = Some(goal);
+                m.repath = REPATH_COOLDOWN;
+            }
+            None => {
+                m.repath = REPATH_COOLDOWN;
+                // An animal whose pick is unreachable drops it and chooses
+                // again; a hunter keeps straight-line steering as a fallback.
+                if m.target.is_none() {
+                    m.wander = None;
+                }
+                return None;
+            }
+        }
+    }
+    // Advance past waypoints already reached.
+    while m.path_at < m.path.len() {
+        let w = m.path[m.path_at];
+        let (wx, wz) = (w[0] as f64 + 0.5, w[2] as f64 + 0.5);
+        if (wx - pos.x).powi(2) + (wz - pos.z).powi(2) < 0.6 * 0.6 {
+            m.path_at += 1;
+        } else {
+            break;
+        }
+    }
+    if m.path_at >= m.path.len() {
+        m.path.clear();
+        m.path_at = 0;
+        return None;
+    }
+    let w = m.path[m.path_at];
+    Some((w[0] as f64 + 0.5, w[2] as f64 + 0.5))
 }
 
 fn yaw_to(dx: f64, dz: f64) -> f32 {
@@ -381,7 +567,7 @@ pub fn tick(
     }
 
     // Choose where to go.
-    let mut goal: Option<(f64, f64, f64)> = None; // x, z, speed
+    let mut goal: Option<Goal> = None;
     if m.def.hostile {
         let valid = m
             .target
@@ -443,9 +629,19 @@ pub fn tick(
                         m.see_time.min(0) - 1
                     };
                     if dist > 15.0 || !sees {
-                        goal = Some((p.pos.x, p.pos.z, move_speed));
+                        goal = Some(Goal {
+                            x: p.pos.x,
+                            y: p.pos.y,
+                            z: p.pos.z,
+                            speed: move_speed,
+                        });
                     } else if dist < 4.0 {
-                        goal = Some((pos.x - dx, pos.z - dz, move_speed));
+                        goal = Some(Goal {
+                            x: pos.x - dx,
+                            y: pos.y,
+                            z: pos.z - dz,
+                            speed: move_speed,
+                        });
                     }
                     if sees && dist < 15.0 && m.see_time >= 20 && m.attack_cd == 0 {
                         m.attack_cd = SKELETON_INTERVAL;
@@ -489,7 +685,12 @@ pub fn tick(
                                 m.meta_dirty = true;
                             }
                         }
-                        goal = Some((p.pos.x, p.pos.z, move_speed));
+                        goal = Some(Goal {
+                            x: p.pos.x,
+                            y: p.pos.y,
+                            z: p.pos.z,
+                            speed: move_speed,
+                        });
                     }
                     if m.fuse >= 30 {
                         actions.push(Action::Explode {
@@ -500,7 +701,12 @@ pub fn tick(
                     }
                 }
                 _ => {
-                    goal = Some((p.pos.x, p.pos.z, move_speed));
+                    goal = Some(Goal {
+                        x: p.pos.x,
+                        y: p.pos.y,
+                        z: p.pos.z,
+                        speed: move_speed,
+                    });
                     let reach = 1.2 + body_half_width(body);
                     if dist_h < reach && dy.abs() < 2.0 && m.attack_cd == 0 {
                         m.attack_cd = 20;
@@ -549,18 +755,25 @@ pub fn tick(
             if (wx - pos.x).powi(2) + (wz - pos.z).powi(2) < 0.5 {
                 m.wander = None;
             } else {
-                goal = Some((wx, wz, speed));
+                goal = Some(Goal {
+                    x: wx,
+                    y: pos.y,
+                    z: wz,
+                    speed,
+                });
             }
         }
     }
 
-    // Steer.
+    // Steer. When a path is being followed it supplies the waypoint; the
+    // straight line to the goal is the fallback when no path was found.
     let mut want = (0.0, 0.0);
-    if let Some((gx, gz, speed)) = goal {
-        let (dx, dz) = (gx - pos.x, gz - pos.z);
+    if let Some(g) = &goal {
+        let target = follow_path(m, pos, (g.x, g.y, g.z), ctx).unwrap_or((g.x, g.z));
+        let (dx, dz) = (target.0 - pos.x, target.1 - pos.z);
         let len = (dx * dx + dz * dz).sqrt();
         if len > 0.3 {
-            want = (dx / len * speed, dz / len * speed);
+            want = (dx / len * g.speed, dz / len * g.speed);
             if m.target.is_none() {
                 *yaw = yaw_to(dx, dz);
                 *pitch = 0.0;
