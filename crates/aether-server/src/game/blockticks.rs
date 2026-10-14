@@ -29,6 +29,7 @@ use crate::session::DemoWorld;
 
 mod crops;
 mod falling;
+pub mod hopper;
 mod leaves;
 
 /// A block position.
@@ -233,6 +234,8 @@ fn is_random_tickable(state: BlockStateId) -> bool {
 /// its own rule (sand falls); and the six neighbours, so a block left
 /// unsupported — sand over a mined-out cell — notices too.
 pub fn notify(world: &DemoWorld, x: i32, y: i32, z: i32) {
+    // A hopper beside or above the change may have something to move.
+    hopper::notify(world, x, y, z);
     for (dx, dy, dz) in TOUCH {
         let p = (x + dx, y + dy, z + dz);
         let state = world.get_block(p.0, p.1, p.2);

@@ -126,6 +126,12 @@ fn capture(handle: &PlayerHandle, world: &DemoWorld) -> Seen {
         Some(WindowKind::Furnace { pos }) => {
             vec![(*pos, super::containers::ContainerKind::Furnace)]
         }
+        Some(WindowKind::Hopper { pos }) => {
+            vec![(*pos, super::containers::ContainerKind::Hopper)]
+        }
+        Some(WindowKind::Dispenser { pos }) => {
+            vec![(*pos, super::containers::ContainerKind::Dispenser)]
+        }
         _ => Vec::new(),
     };
     for ((x, y, z), kind) in containers {

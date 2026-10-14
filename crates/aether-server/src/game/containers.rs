@@ -1,9 +1,10 @@
-//! Block entities that hold items: chests and furnaces.
+//! Block entities that hold items: chests, furnaces, hoppers and dispensers.
 //!
 //! Kept in memory once touched and written through to the world's KV store
 //! on every change, under their own key prefix, so they survive a restart the
 //! same way inventories do. Furnaces also tick: the ones with fuel burning or
-//! something to cook are kept in an active set the game tick walks.
+//! something to cook are kept in an active set the game tick walks. Hoppers
+//! move items on the block-tick scheduler ([`super::blockticks::hopper`]).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -16,6 +17,10 @@ use crate::session::DemoWorld;
 pub enum ContainerKind {
     Chest,
     Furnace,
+    /// Five slots; also the block that moves items between containers.
+    Hopper,
+    /// Nine slots, shared by the dispenser and the dropper.
+    Dispenser,
 }
 
 impl ContainerKind {
@@ -25,6 +30,8 @@ impl ContainerKind {
         match short {
             "chest" | "trapped_chest" | "barrel" => Some(Self::Chest),
             "furnace" | "smoker" | "blast_furnace" => Some(Self::Furnace),
+            "hopper" => Some(Self::Hopper),
+            "dispenser" | "dropper" => Some(Self::Dispenser),
             _ => None,
         }
     }
@@ -33,6 +40,28 @@ impl ContainerKind {
         match self {
             Self::Chest => 27,
             Self::Furnace => 3,
+            Self::Hopper => 5,
+            Self::Dispenser => 9,
+        }
+    }
+
+    /// The byte the KV format stores this kind as.
+    fn byte(self) -> u8 {
+        match self {
+            Self::Chest => 0,
+            Self::Furnace => 1,
+            Self::Hopper => 2,
+            Self::Dispenser => 3,
+        }
+    }
+
+    fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Chest),
+            1 => Some(Self::Furnace),
+            2 => Some(Self::Hopper),
+            3 => Some(Self::Dispenser),
+            _ => None,
         }
     }
 }
@@ -86,8 +115,11 @@ fn key(pos: Pos) -> [u8; 13] {
     k
 }
 
+/// Bumped whenever the layout changes. Version 3 replaced version 2's
+/// furnace-or-chest flag with a kind byte, so hoppers and dispensers get
+/// their own container type; versions 1 and 2 still load.
 fn encode(c: &Container) -> Vec<u8> {
-    let mut out = vec![2u8, matches!(c.kind, ContainerKind::Furnace) as u8];
+    let mut out = vec![3u8, c.kind.byte()];
     out.extend_from_slice(&c.burn.to_be_bytes());
     out.extend_from_slice(&c.burn_max.to_be_bytes());
     out.extend_from_slice(&c.cook.to_be_bytes());
@@ -101,10 +133,17 @@ fn encode(c: &Container) -> Vec<u8> {
 }
 
 fn decode(b: &[u8]) -> Option<Container> {
-    // Version 1 containers predate smelting experience and have none.
-    let (xp, inv_at) = match *b.first()? {
-        1 => (0.0f32, 14usize),
+    // Version 1 containers predate smelting experience and have none;
+    // versions 1 and 2 wrote only a furnace-or-chest flag.
+    let (kind, xp, inv_at) = match *b.first()? {
+        1 => (ContainerKind::from_byte(*b.get(1)?)?, 0.0f32, 14usize),
         2 => (
+            ContainerKind::from_byte(*b.get(1)?)?,
+            f32::from_be_bytes(b.get(14..18)?.try_into().unwrap()),
+            18usize,
+        ),
+        3 => (
+            ContainerKind::from_byte(*b.get(1)?)?,
             f32::from_be_bytes(b.get(14..18)?.try_into().unwrap()),
             18usize,
         ),
@@ -113,11 +152,6 @@ fn decode(b: &[u8]) -> Option<Container> {
     if b.len() < inv_at {
         return None;
     }
-    let kind = if b[1] == 1 {
-        ContainerKind::Furnace
-    } else {
-        ContainerKind::Chest
-    };
     let u = |o: usize| u32::from_be_bytes(b[o..o + 4].try_into().unwrap());
     let inv = crate::inventory::decode(&b[inv_at..])?;
     let mut c = Container::new(kind);
@@ -191,6 +225,141 @@ pub fn snapshot(world: &DemoWorld, pos: Pos, kind: ContainerKind) -> Container {
 /// Copies of both halves of a double chest.
 pub fn snapshot_pair(world: &DemoWorld, a: Pos, b: Pos) -> (Container, Container) {
     with_pair(world, a, b, |ca, cb| (ca.clone(), cb.clone()))
+}
+
+/// The kind of container at `pos` and the positions its slots live in — a
+/// doubled chest is two, left half first, in the order the window presents
+/// them. `None` when the block is not a container at all.
+pub fn parts_of(world: &DemoWorld, pos: Pos) -> Option<(ContainerKind, Vec<Pos>)> {
+    let state = world.get_block(pos.0, pos.1, pos.2);
+    let name = crate::game::block_name(world, state)?;
+    let kind = ContainerKind::of_block(&name)?;
+    if kind == ContainerKind::Chest {
+        let (left, right) =
+            crate::placement::chest_halves(state, pos.0, pos.1, pos.2, &|x, y, z| {
+                world.get_block(x, y, z)
+            });
+        let mut parts = vec![left];
+        if let Some(right) = right {
+            parts.push(right);
+        }
+        Some((kind, parts))
+    } else {
+        Some((kind, vec![pos]))
+    }
+}
+
+/// Move a single item from the container at `from` into the container at `to`,
+/// the way a hopper does: merge into a matching stack first, otherwise the
+/// first empty slot. Returns whether an item moved.
+///
+/// A double chest is handled as one inventory, both halves merged, so an item
+/// can be pushed into or pulled from either half.
+pub fn move_one(world: &DemoWorld, from: Pos, to: Pos) -> bool {
+    if from == to {
+        return false;
+    }
+    let (Some((from_kind, from_parts)), Some((to_kind, to_parts))) =
+        (parts_of(world, from), parts_of(world, to))
+    else {
+        return false;
+    };
+    if from_parts.iter().any(|p| to_parts.contains(p)) {
+        return false;
+    }
+    {
+        let mut map = all().lock().unwrap();
+        let load_parts = |map: &mut HashMap<Pos, Container>,
+                          kind: ContainerKind,
+                          parts: &[Pos]|
+         -> Vec<Container> {
+            parts
+                .iter()
+                .map(|p| {
+                    map.entry(*p)
+                        .or_insert_with(|| load(world, *p, kind))
+                        .clone()
+                })
+                .collect()
+        };
+        let from_conts = load_parts(&mut map, from_kind, &from_parts);
+        let to_conts = load_parts(&mut map, to_kind, &to_parts);
+        let mut src: Vec<Option<Stack>> = from_conts
+            .iter()
+            .flat_map(|c| c.slots.iter().cloned())
+            .collect();
+        let mut dst: Vec<Option<Stack>> = to_conts
+            .iter()
+            .flat_map(|c| c.slots.iter().cloned())
+            .collect();
+        if !transfer_one(&mut src, &mut dst) {
+            return false;
+        }
+        // Split the merged lists back into their halves and re-encode.
+        let mut at = 0;
+        for (i, c) in from_conts.iter().enumerate() {
+            let n = c.slots.len();
+            let mut c = c.clone();
+            c.slots.clone_from_slice(&src[at..at + n]);
+            at += n;
+            let _ = world.put_meta(&key(from_parts[i]), &encode(&c));
+            map.insert(from_parts[i], c);
+        }
+        let mut at = 0;
+        for (i, c) in to_conts.iter().enumerate() {
+            let n = c.slots.len();
+            let mut c = c.clone();
+            c.slots.clone_from_slice(&dst[at..at + n]);
+            at += n;
+            let _ = world.put_meta(&key(to_parts[i]), &encode(&c));
+            map.insert(to_parts[i], c);
+        }
+    }
+    // An item arriving at a furnace may start it cooking.
+    if to_kind == ContainerKind::Furnace {
+        for p in &to_parts {
+            active().lock().unwrap().insert(*p);
+        }
+    }
+    true
+}
+
+/// Move exactly one item from `src` into `dst`, vanilla's hopper transfer.
+/// Both are merged slot lists; either may be empty. Returns whether anything
+/// moved.
+fn transfer_one(src: &mut [Option<Stack>], dst: &mut [Option<Stack>]) -> bool {
+    for slot in src.iter_mut() {
+        let Some(stack) = slot.as_ref() else {
+            continue;
+        };
+        if stack.count == 0 {
+            continue;
+        }
+        let max = stack.max_stack();
+        let merge = dst.iter().position(|d| {
+            d.as_ref()
+                .is_some_and(|e| e.stacks_with(stack) && e.count < max)
+        });
+        if let Some(j) = merge {
+            dst[j].as_mut().unwrap().count += 1;
+            let s = slot.as_mut().unwrap();
+            s.count -= 1;
+            if s.count == 0 {
+                *slot = None;
+            }
+            return true;
+        }
+        let Some(j) = dst.iter().position(|d| d.is_none()) else {
+            continue;
+        };
+        if slot.as_ref().unwrap().count == 1 {
+            dst[j] = slot.take();
+        } else {
+            dst[j] = Some(slot.as_mut().unwrap().split(1));
+        }
+        return true;
+    }
+    false
 }
 
 /// The block at `pos` is gone: forget its container and return the items,
@@ -327,5 +496,74 @@ mod tests {
         ));
         let back = decode(&old).expect("a version 1 blob decodes");
         assert_eq!(back.xp, 0.0);
+    }
+
+    #[test]
+    fn the_new_kinds_survive_a_round_trip() {
+        for kind in [ContainerKind::Hopper, ContainerKind::Dispenser] {
+            let mut c = Container::new(kind);
+            c.slots[0] = Some(Stack::named("minecraft:stone", 7));
+            let back = decode(&encode(&c)).unwrap();
+            assert_eq!(back.kind, kind);
+            assert_eq!(back.slots, c.slots);
+        }
+    }
+
+    #[test]
+    fn the_container_kinds_have_the_slot_counts_vanilla_gives_them() {
+        assert_eq!(ContainerKind::Chest.slots(), 27);
+        assert_eq!(ContainerKind::Furnace.slots(), 3);
+        assert_eq!(ContainerKind::Hopper.slots(), 5);
+        assert_eq!(ContainerKind::Dispenser.slots(), 9);
+        assert_eq!(
+            ContainerKind::of_block("minecraft:hopper"),
+            Some(ContainerKind::Hopper)
+        );
+        assert_eq!(
+            ContainerKind::of_block("minecraft:dropper"),
+            Some(ContainerKind::Dispenser)
+        );
+        assert_eq!(
+            ContainerKind::of_block("minecraft:dispenser"),
+            Some(ContainerKind::Dispenser)
+        );
+    }
+
+    #[test]
+    fn a_transfer_moves_one_item_and_merges() {
+        let mut src = vec![Some(Stack::named("minecraft:stone", 64)), None, None];
+        let mut dst = vec![Some(Stack::named("minecraft:stone", 10)), None];
+        assert!(transfer_one(&mut src, &mut dst));
+        assert_eq!(src[0].as_ref().map(|s| s.count), Some(63));
+        assert_eq!(dst[0].as_ref().map(|s| s.count), Some(11));
+    }
+
+    #[test]
+    fn a_transfer_uses_an_empty_slot_when_it_cannot_merge() {
+        let mut src = vec![Some(Stack::named("minecraft:stone", 1)), None];
+        let mut dst = vec![Some(Stack::named("minecraft:dirt", 1)), None];
+        assert!(transfer_one(&mut src, &mut dst));
+        assert!(src[0].is_none());
+        assert_eq!(
+            dst[1].as_ref().map(|s| s.item),
+            Some(crate::inventory::item("minecraft:stone"))
+        );
+    }
+
+    #[test]
+    fn a_transfer_that_cannot_fit_reports_failure() {
+        let mut src = vec![Some(Stack::named("minecraft:stone", 1))];
+        let mut dst = vec![Some(Stack::named("minecraft:dirt", 64))];
+        assert!(!transfer_one(&mut src, &mut dst));
+        assert_eq!(src[0].as_ref().map(|s| s.count), Some(1));
+    }
+
+    #[test]
+    fn a_transfer_keeps_the_uid_of_a_whole_stack() {
+        let mut src = vec![Some(Stack::named("minecraft:diamond_sword", 1))];
+        let uid = src[0].as_ref().unwrap().uid;
+        let mut dst = vec![None];
+        assert!(transfer_one(&mut src, &mut dst));
+        assert_eq!(dst[0].as_ref().unwrap().uid, uid);
     }
 }

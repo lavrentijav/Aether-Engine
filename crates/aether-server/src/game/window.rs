@@ -33,6 +33,19 @@ enum Layout {
     Crafting,
     Chest,
     Furnace,
+    Hopper,
+    Dispenser,
+}
+
+impl Layout {
+    /// Whether the layout's container slots sit in `cont` before the player's
+    /// own 36 slots.
+    fn is_container(self) -> bool {
+        matches!(
+            self,
+            Layout::Chest | Layout::Furnace | Layout::Hopper | Layout::Dispenser
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,10 +68,12 @@ struct Ctx<'a> {
 
 impl<'a> Ctx<'a> {
     fn len(&self) -> usize {
-        match self.layout {
-            Layout::Player | Layout::Crafting => 46,
-            // A chest is 27 slots, or 54 doubled; a furnace 3.
-            Layout::Chest | Layout::Furnace => self.cont.as_ref().map_or(0, |c| c.len()) + 36,
+        if self.layout.is_container() {
+            // A chest is 27 slots, or 54 doubled; a furnace 3; a hopper 5;
+            // a dispenser 9 — then the player's own 36.
+            self.cont.as_ref().map_or(0, |c| c.len()) + 36
+        } else {
+            46
         }
     }
 
@@ -67,7 +82,7 @@ impl<'a> Ctx<'a> {
         match self.layout {
             Layout::Player => 9,
             Layout::Crafting => 10,
-            Layout::Chest | Layout::Furnace => self.cont.as_ref().map_or(0, |c| c.len()),
+            _ => self.cont.as_ref().map_or(0, |c| c.len()),
         }
     }
 
@@ -90,7 +105,7 @@ impl<'a> Ctx<'a> {
                 1..=9 => Ref::Grid(slot - 1),
                 _ => Ref::Inv(slot - main + 9),
             },
-            Layout::Chest | Layout::Furnace => {
+            _ => {
                 if slot < main {
                     Ref::Cont(slot)
                 } else {
@@ -273,7 +288,7 @@ impl<'a> Ctx<'a> {
                 s if s < hotbar => fwd(hotbar, end),
                 _ => fwd(main, hotbar),
             },
-            Layout::Chest => {
+            Layout::Chest | Layout::Hopper | Layout::Dispenser => {
                 if slot < main {
                     rev(main, end)
                 } else {
@@ -599,6 +614,14 @@ fn layout_of(w: &OpenWindow) -> (Layout, Option<ContainerTarget>) {
             Layout::Furnace,
             Some(ContainerTarget::Single(ContainerKind::Furnace, *pos)),
         ),
+        WindowKind::Hopper { pos } => (
+            Layout::Hopper,
+            Some(ContainerTarget::Single(ContainerKind::Hopper, *pos)),
+        ),
+        WindowKind::Dispenser { pos } => (
+            Layout::Dispenser,
+            Some(ContainerTarget::Single(ContainerKind::Dispenser, *pos)),
+        ),
     }
 }
 
@@ -752,8 +775,31 @@ pub fn click(
         super::entities::throw_from(handle, s);
     }
     sync(handle, world);
+    // The player may have moved an item into or out of a hopper, or a
+    // container a hopper pulls from or pushes to.
+    for pos in container_positions(handle) {
+        super::blockticks::hopper::notify(world, pos.0, pos.1, pos.2);
+    }
     if let Some(pos) = viewing_container(handle) {
         refresh_viewers(pos, world, Some(handle.entity_id));
+    }
+}
+
+/// Every container position the open window is attached to — a double chest
+/// contributes both halves.
+fn container_positions(handle: &PlayerHandle) -> Vec<(i32, i32, i32)> {
+    match handle.game().window.as_ref().map(|w| &w.kind) {
+        Some(WindowKind::Chest { left, right }) => {
+            let mut v = vec![*left];
+            if let Some(r) = right {
+                v.push(*r);
+            }
+            v
+        }
+        Some(WindowKind::Furnace { pos })
+        | Some(WindowKind::Hopper { pos })
+        | Some(WindowKind::Dispenser { pos }) => vec![*pos],
+        _ => Vec::new(),
     }
 }
 
@@ -762,7 +808,9 @@ pub fn click(
 fn viewing_container(handle: &PlayerHandle) -> Option<(i32, i32, i32)> {
     match handle.game().window.as_ref().map(|w| &w.kind) {
         Some(WindowKind::Chest { left, .. }) => Some(*left),
-        Some(WindowKind::Furnace { pos }) => Some(*pos),
+        Some(WindowKind::Furnace { pos })
+        | Some(WindowKind::Hopper { pos })
+        | Some(WindowKind::Dispenser { pos }) => Some(*pos),
         _ => None,
     }
 }
@@ -771,7 +819,9 @@ fn viewing_container(handle: &PlayerHandle) -> Option<(i32, i32, i32)> {
 fn window_shows(w: &OpenWindow, pos: (i32, i32, i32)) -> bool {
     match &w.kind {
         WindowKind::Chest { left, right } => *left == pos || *right == Some(pos),
-        WindowKind::Furnace { pos: p } => *p == pos,
+        WindowKind::Furnace { pos: p }
+        | WindowKind::Hopper { pos: p }
+        | WindowKind::Dispenser { pos: p } => *p == pos,
         _ => false,
     }
 }
@@ -855,6 +905,16 @@ fn open_window_slots(st: &PlayerState, inv: &Inventory, world: &DemoWorld) -> Op
             let mut v = c.slots;
             v.append(&mut player_part);
             (w.id, v, Some(props))
+        }
+        WindowKind::Hopper { pos } => {
+            let mut v = containers::snapshot(world, *pos, ContainerKind::Hopper).slots;
+            v.append(&mut player_part);
+            (w.id, v, None)
+        }
+        WindowKind::Dispenser { pos } => {
+            let mut v = containers::snapshot(world, *pos, ContainerKind::Dispenser).slots;
+            v.append(&mut player_part);
+            (w.id, v, None)
         }
     })
 }
@@ -940,6 +1000,8 @@ pub fn open(handle: &PlayerHandle, world: &DemoWorld, kind: WindowKind) {
             WindowKind::Chest { right, .. } if right.is_some() => (Menu::LargeChest, "Large Chest"),
             WindowKind::Chest { .. } => (Menu::Chest, "Chest"),
             WindowKind::Furnace { .. } => (Menu::Furnace, "Furnace"),
+            WindowKind::Hopper { .. } => (Menu::Hopper, "Hopper"),
+            WindowKind::Dispenser { .. } => (Menu::Dispenser, "Dispenser"),
         };
         st.window = Some(OpenWindow { id, kind });
         (id, menu, title)

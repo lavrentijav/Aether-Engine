@@ -81,9 +81,10 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
         super::interact::dig_progress(registry, world);
     }
 
-    let furnaces = containers::tick_furnaces(world);
+    let mut changed = containers::tick_furnaces(world);
+    changed.extend(super::blockticks::hopper::tick(world));
     if now % 10 == 0 {
-        for pos in furnaces {
+        for pos in changed {
             window::refresh_viewers(pos, world, None);
         }
     }
