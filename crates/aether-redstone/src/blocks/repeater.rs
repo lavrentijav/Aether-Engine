@@ -1,0 +1,233 @@
+//! The redstone repeater: `RepeaterBlock` on top of `DiodeBlock`.
+
+use aether_world::BlockStateId;
+
+use crate::behaviour::{behaviour, Context, NeighborSource, SignalCtx};
+use crate::blocks::BlockBehaviour;
+use crate::dir::Direction;
+use crate::pos::BlockPos;
+use crate::props;
+use crate::shapes;
+use crate::view::TickPriority;
+
+/// The redstone repeater.
+pub struct Repeater;
+
+impl BlockBehaviour for Repeater {
+    fn is_signal_source(&self, _state: BlockStateId) -> bool {
+        true
+    }
+
+    fn is_diode(&self) -> bool {
+        true
+    }
+
+    fn is_repeater(&self) -> bool {
+        true
+    }
+
+    fn get_signal(
+        &self,
+        _ctx: &SignalCtx,
+        state: BlockStateId,
+        _pos: BlockPos,
+        dir: Direction,
+    ) -> u8 {
+        if props::powered(state) && props::facing(state) == dir {
+            15
+        } else {
+            0
+        }
+    }
+
+    fn get_direct_signal(
+        &self,
+        ctx: &SignalCtx,
+        state: BlockStateId,
+        pos: BlockPos,
+        dir: Direction,
+    ) -> u8 {
+        self.get_signal(ctx, state, pos, dir)
+    }
+
+    fn neighbor_changed(
+        &self,
+        ctx: &mut Context,
+        state: BlockStateId,
+        pos: BlockPos,
+        _from: Option<NeighborSource>,
+    ) {
+        let state = update_locked(ctx, pos, state);
+        check_tick(ctx, pos, state);
+    }
+
+    fn on_place(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos, _old: BlockStateId) {
+        update_neighbors_in_front(ctx, pos, state);
+    }
+
+    fn on_remove(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
+        update_neighbors_in_front(ctx, pos, state);
+    }
+
+    fn tick(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
+        if is_locked(&ctx.signals(), pos, state) {
+            return;
+        }
+        let (is_on, should) = {
+            let signals = ctx.signals();
+            (props::powered(state), should_turn_on(&signals, pos, state))
+        };
+        if is_on && !should {
+            let new = props::with(state, "powered", "false").unwrap_or(state);
+            ctx.apply(pos, new);
+        } else if !is_on {
+            let new = props::with(state, "powered", "true").unwrap_or(state);
+            ctx.apply(pos, new);
+            if !should {
+                ctx.schedule_tick(pos, delay(state), TickPriority::VeryHigh);
+            }
+        }
+    }
+
+    fn update_shape(
+        &self,
+        ctx: &mut Context,
+        state: BlockStateId,
+        pos: BlockPos,
+        dir: Direction,
+    ) -> Option<BlockStateId> {
+        if dir == Direction::Down && !can_survive(ctx, pos) {
+            return Some(aether_world::registry::ids::AIR);
+        }
+        if dir.is_horizontal()
+            && dir != props::facing(state)
+            && dir != props::facing(state).opposite()
+        {
+            let locked = is_locked(&ctx.signals(), pos, state);
+            if locked != props::locked(state) {
+                let value = if locked { "true" } else { "false" };
+                return props::with(state, "locked", value);
+            }
+        }
+        None
+    }
+
+    fn use_block(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
+        let next = if props::delay(state) >= 4 {
+            1
+        } else {
+            props::delay(state) + 1
+        };
+        let new = props::with(state, "delay", &next.to_string()).unwrap_or(state);
+        ctx.set_block(pos, new);
+    }
+}
+
+fn delay(state: BlockStateId) -> u32 {
+    u32::from(props::delay(state)) * 2
+}
+
+fn can_survive(ctx: &Context, pos: BlockPos) -> bool {
+    shapes::face_full(ctx.get_block(pos.offset(Direction::Down)), Direction::Up)
+}
+
+fn wire_power(state: BlockStateId) -> u8 {
+    if behaviour(state).is_wire() {
+        props::power(state)
+    } else {
+        0
+    }
+}
+
+fn input_signal(ctx: &SignalCtx, pos: BlockPos, state: BlockStateId) -> u8 {
+    let dir = props::facing(state);
+    let input = pos.offset(dir);
+    let signal = ctx.get_signal(input, dir);
+    if signal >= 15 {
+        return signal;
+    }
+    signal.max(wire_power(ctx.get_block(input)))
+}
+
+fn should_turn_on(ctx: &SignalCtx, pos: BlockPos, state: BlockStateId) -> bool {
+    input_signal(ctx, pos, state) > 0
+}
+
+fn control_input(ctx: &SignalCtx, pos: BlockPos, dir: Direction, diodes_only: bool) -> u8 {
+    let state = ctx.get_block(pos);
+    if diodes_only {
+        if behaviour(state).is_diode() {
+            ctx.get_direct_signal(pos, dir)
+        } else {
+            0
+        }
+    } else if behaviour(state).is_redstone_block() {
+        15
+    } else if behaviour(state).is_wire() {
+        props::power(state)
+    } else if behaviour(state).is_signal_source(state) {
+        ctx.get_direct_signal(pos, dir)
+    } else {
+        0
+    }
+}
+
+fn alternate_signal(ctx: &SignalCtx, pos: BlockPos, state: BlockStateId) -> u8 {
+    let facing = props::facing(state);
+    let cw = facing.clockwise();
+    let ccw = facing.counter_clockwise();
+    control_input(ctx, pos.offset(cw), cw, true).max(control_input(ctx, pos.offset(ccw), ccw, true))
+}
+
+fn is_locked(ctx: &SignalCtx, pos: BlockPos, state: BlockStateId) -> bool {
+    alternate_signal(ctx, pos, state) > 0
+}
+
+fn update_locked(ctx: &mut Context, pos: BlockPos, state: BlockStateId) -> BlockStateId {
+    let locked = is_locked(&ctx.signals(), pos, state);
+    if locked == props::locked(state) {
+        return state;
+    }
+    let value = if locked { "true" } else { "false" };
+    let new = props::with(state, "locked", value).unwrap_or(state);
+    ctx.set_block(pos, new);
+    ctx.update_neighbors_at(pos);
+    new
+}
+
+fn should_prioritize(ctx: &SignalCtx, pos: BlockPos, state: BlockStateId) -> bool {
+    let opposite = props::facing(state).opposite();
+    let neighbour = ctx.get_block(pos.offset(opposite));
+    behaviour(neighbour).is_diode() && props::facing(neighbour) != opposite
+}
+
+fn check_tick(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
+    if is_locked(&ctx.signals(), pos, state) {
+        return;
+    }
+    let (is_on, should, prioritize) = {
+        let signals = ctx.signals();
+        (
+            props::powered(state),
+            should_turn_on(&signals, pos, state),
+            should_prioritize(&signals, pos, state),
+        )
+    };
+    if is_on != should && !ctx.will_tick_this_tick(pos) {
+        let priority = if prioritize {
+            TickPriority::ExtremelyHigh
+        } else if is_on {
+            TickPriority::VeryHigh
+        } else {
+            TickPriority::High
+        };
+        ctx.schedule_tick(pos, delay(state), priority);
+    }
+}
+
+fn update_neighbors_in_front(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
+    let facing = props::facing(state);
+    let output = pos.offset(facing.opposite());
+    ctx.queue.push_back(output);
+    ctx.update_neighbors_except(output, facing);
+}

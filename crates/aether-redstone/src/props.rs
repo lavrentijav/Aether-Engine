@@ -10,6 +10,8 @@
 use aether_world::registry::{blocks, props};
 use aether_world::BlockStateId;
 
+use crate::dir::Direction;
+
 /// The block a state belongs to, as `(block id, block name)`.
 pub fn block_of(state: BlockStateId) -> Option<(u16, &'static str)> {
     blocks::block_of_state(state)
@@ -69,6 +71,89 @@ pub fn int_or(state: BlockStateId, key: &str, default: u8) -> u8 {
     get(state, key)
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// The `power` property (0–15), or 0.
+pub fn power(state: BlockStateId) -> u8 {
+    int_or(state, "power", 0)
+}
+
+/// The `lit` property, or `false`.
+pub fn lit(state: BlockStateId) -> bool {
+    bool_or(state, "lit", false)
+}
+
+/// The `powered` property, or `false`.
+pub fn powered(state: BlockStateId) -> bool {
+    bool_or(state, "powered", false)
+}
+
+/// The `locked` property, or `false`.
+pub fn locked(state: BlockStateId) -> bool {
+    bool_or(state, "locked", false)
+}
+
+/// The `delay` property (1–4), or 1.
+pub fn delay(state: BlockStateId) -> u8 {
+    int_or(state, "delay", 1)
+}
+
+/// The `facing` property as a direction, defaulting to north.
+pub fn facing(state: BlockStateId) -> Direction {
+    match get(state, "facing") {
+        Some("north") => Direction::North,
+        Some("south") => Direction::South,
+        Some("west") => Direction::West,
+        Some("east") => Direction::East,
+        _ => Direction::North,
+    }
+}
+
+/// The attachment direction of a face-attached block (`getConnectedDirection`):
+/// a floor block attaches upward, a ceiling block downward, a wall block
+/// horizontally, and anything else falls back to `facing`.
+pub fn connected_direction(state: BlockStateId) -> Direction {
+    match get(state, "face") {
+        Some("floor") => Direction::Up,
+        Some("ceiling") => Direction::Down,
+        _ => facing(state),
+    }
+}
+
+/// The property name for a horizontal direction's wire side.
+pub fn side_prop(dir: Direction) -> &'static str {
+    match dir {
+        Direction::North => "north",
+        Direction::South => "south",
+        Direction::West => "west",
+        Direction::East => "east",
+        _ => "north",
+    }
+}
+
+/// Whether wire connects on `dir` (its `north`/`south`/`west`/`east` side is
+/// not `none`).
+pub fn side_connected(state: BlockStateId, dir: Direction) -> bool {
+    get(state, side_prop(dir)).is_some_and(|v| v != "none")
+}
+
+/// A copy of `state` with wire side `dir` set.
+pub fn set_side(state: BlockStateId, dir: Direction, value: &str) -> BlockStateId {
+    with(state, side_prop(dir), value).unwrap_or(state)
+}
+
+/// Whether no side of a wire connects (`isDot`).
+pub fn is_dot(state: BlockStateId) -> bool {
+    Direction::HORIZONTAL
+        .iter()
+        .all(|&d| !side_connected(state, d))
+}
+
+/// Whether all four sides of a wire connect (`isCross`).
+pub fn is_cross(state: BlockStateId) -> bool {
+    Direction::HORIZONTAL
+        .iter()
+        .all(|&d| side_connected(state, d))
 }
 
 #[cfg(test)]

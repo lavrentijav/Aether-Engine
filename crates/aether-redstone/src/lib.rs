@@ -31,6 +31,15 @@
 //! and written through `aether-world`'s existing state schema (see [`props`]) —
 //! there is no second property system.
 //!
+//! ## Extending it
+//!
+//! A redstone component is a type implementing [`blocks::BlockBehaviour`] in
+//! its own [`blocks`] module, registered in [`behaviour`] against a block name.
+//! The registry compiles that into a `BlockStateId`-indexed table **once**, so
+//! the hot path is an array index with no string comparison, and the engine
+//! never matches on a block name. Adding comparator, observer or piston later
+//! is "write a module and register it" — the engine and dispatch do not change.
+//!
 //! ## Power model
 //!
 //! Two channels, exactly as vanilla:
@@ -68,10 +77,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod behaviour;
+pub mod blocks;
 pub mod dir;
 pub mod engine;
 pub mod pos;
 pub mod props;
+pub mod shapes;
 pub mod view;
 
 pub use dir::Direction;

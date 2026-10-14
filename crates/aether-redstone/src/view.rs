@@ -67,12 +67,6 @@ pub trait RedstoneView {
     /// anything. The engine generates its own update cascade around it.
     fn set_block(&mut self, pos: BlockPos, state: BlockStateId);
 
-    /// Whether `pos` holds a redstone conductor — a full solid opaque block.
-    ///
-    /// Conductors carry strong power from a source into weak power for their
-    /// neighbours, and cut redstone wire that runs over them.
-    fn is_conductor(&self, pos: BlockPos) -> bool;
-
     /// Schedule `pos` to be re-evaluated after `delay` game ticks.
     ///
     /// Scheduling the same position again while it is pending is a no-op: the
@@ -193,14 +187,6 @@ impl RedstoneView for MemWorld {
         self.blocks.insert(pos, state);
     }
 
-    fn is_conductor(&self, pos: BlockPos) -> bool {
-        // A conductor is a full solid opaque cube — the engine's own summary of
-        // vanilla's "full collision shape" test.
-        aether_world::registry::blocks::props_of_state(self.state(pos))
-            .map(|p| p.solid)
-            .unwrap_or(false)
-    }
-
     fn schedule_block_tick(&mut self, pos: BlockPos, delay: u32, priority: TickPriority) {
         if self.pending.contains_key(&pos) {
             return;
@@ -274,10 +260,6 @@ impl RedstoneView for TraceWorld {
     fn set_block(&mut self, pos: BlockPos, state: BlockStateId) {
         self.writes.push((pos, state));
         self.inner.set_block(pos, state);
-    }
-
-    fn is_conductor(&self, pos: BlockPos) -> bool {
-        self.inner.is_conductor(pos)
     }
 
     fn schedule_block_tick(&mut self, pos: BlockPos, delay: u32, priority: TickPriority) {
