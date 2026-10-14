@@ -483,11 +483,17 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
         } => {
             let mut p = PacketOut::new(ids.cb_update_mob_effect);
             let flags = (*ambient as u8) | ((*visible as u8) << 1) | ((*show_icon as u8) << 2);
-            p.var_int(*entity_id)
-                .var_int(*effect as i32)
-                .var_int(*amplifier as i32)
-                .var_int(*duration)
-                .u8(flags);
+            p.var_int(*entity_id).var_int(*effect as i32);
+            if v.gen < Gen::V1_20_5 {
+                // Pre-1.20.5: the amplifier is a signed byte and the flags
+                // byte is followed by an *optional* factor-data compound,
+                // which this server never sends — but the presence bool is
+                // not optional, and omitting it leaves the packet a byte
+                // short so the client rejects it.
+                p.u8(*amplifier).var_int(*duration).u8(flags).bool(false);
+            } else {
+                p.var_int(*amplifier as i32).var_int(*duration).u8(flags);
+            }
             vec![p]
         }
         ServerEvent::RemoveMobEffect { entity_id, effect } => {
@@ -1340,5 +1346,49 @@ mod tests {
         let mut pin = crate::proto::PacketIn::new(&body[1..]);
         assert_eq!(pin.var_int().unwrap(), 3);
         assert_eq!(pin.string().unwrap(), r#"{"text":"Steve died"}"#);
+    }
+
+    #[test]
+    fn update_mob_effect_uses_the_pre_1_20_5_body_on_764_and_765() {
+        // 764/765 `entity_effect`, per minecraft-data:
+        // entityId varint, effectId varint, amplifier **i8**, duration varint,
+        // hideParticles **i8**, factorCodec **option**<anonymousNbt>.
+        // 1.20.5 replaced the tail with a single flags u8. Omitting the
+        // option bool leaves the packet a byte short and kicks the client.
+        let ev = ServerEvent::UpdateMobEffect {
+            entity_id: 7,
+            effect: 20,
+            amplifier: 2,
+            duration: 300,
+            ambient: false,
+            visible: true,
+            show_icon: true,
+        };
+        for v in [
+            &crate::protocol::modern::version::V1_20_2,
+            &crate::protocol::modern::version::V1_20_4,
+        ] {
+            let pkts = encode(v, &ev).unwrap();
+            let body = pkts[0].body();
+            assert_eq!(body[0] as i32, v.packets.cb_update_mob_effect);
+            let mut pin = crate::proto::PacketIn::new(&body[1..]);
+            assert_eq!(pin.var_int().unwrap(), 7, "{}", v.name);
+            assert_eq!(pin.var_int().unwrap(), 20, "{}", v.name);
+            assert_eq!(pin.u8().unwrap(), 2, "{}: amplifier is an i8", v.name);
+            assert_eq!(pin.var_int().unwrap(), 300, "{}", v.name);
+            assert_eq!(pin.u8().unwrap(), 0b110, "{}: visible|show_icon", v.name);
+            assert!(!pin.bool().unwrap(), "{}: factorCodec is absent", v.name);
+            assert!(pin.u8().is_err(), "{}: nothing may trail", v.name);
+        }
+        // 1.20.5 uses the VarInt amplifier and no factor option.
+        let v = &crate::protocol::modern::version::V1_20_5;
+        let pkts = encode(v, &ev).unwrap();
+        let mut pin = crate::proto::PacketIn::new(&pkts[0].body()[1..]);
+        assert_eq!(pin.var_int().unwrap(), 7);
+        assert_eq!(pin.var_int().unwrap(), 20);
+        assert_eq!(pin.var_int().unwrap(), 2, "amplifier is a VarInt here");
+        assert_eq!(pin.var_int().unwrap(), 300);
+        assert_eq!(pin.u8().unwrap(), 0b110);
+        assert!(pin.u8().is_err(), "no factor option from 1.20.5");
     }
 }
