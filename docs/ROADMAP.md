@@ -50,6 +50,7 @@ concurrency foundations must be proven before gameplay mechanics are layered on 
 - 📋 Internal Binary Protocol between Gateway and World Engines.
 - 📋 Stateless seamless world hand-off (TCP stays open, route switches).
 - 🚧 Vanilla client protocol compatibility layer. **Pulled forward** as an early preview: `aether-server` lets a **Minecraft 1.8.9 (protocol 47)** client connect and spawn into noise-generated terrain (offline, no compression/encryption). Connected players see each other spawn, move and disconnect (Spawn Player / Entity Teleport / Entity Head Look / Destroy Entities), though without a tab list yet — see [Known Issues](KNOWN_ISSUES.md). Framing is verified against a raw socket client. Since then the server has grown codecs up to 1.21.11 and **26.1–26.3** (protocols 774–777), which run the full survival game; 26.x support is generated from each release's own reports, so a new release (26.4) is a regeneration plus its layout changes. [Design Notes §3–4](DESIGN_NOTES.md#3-render-distance-lod-ladder-vs-ultra-full-mode) sketch the longer-range LOD ladder / Ultra-Full mode and a separate Surface API for LOD mods — both unstarted.
+- 📋 **Visibility culling / anti-xray** (optional module, off by default): sections the player cannot see even after turning or moving a little are sent as stone — section visibility graph + BFS with a margin, optional rays. See [design/visibility-culling.md](design/visibility-culling.md).
 
 ### Phase 4 — Extensibility, migration & ops
 *Goal: production readiness.*
