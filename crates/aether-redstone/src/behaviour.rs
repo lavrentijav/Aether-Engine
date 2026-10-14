@@ -51,6 +51,11 @@ impl NeighborSource {
 /// `maxChainedNeighborUpdates`. Beyond it the rest is dropped with an error.
 const MAX_CHAINED: usize = 512;
 
+/// The initial recursion limit for shape updates — vanilla's default `j` of
+/// `512` in `Block.updateOrDestroy` / `Level.setBlock`. Each nested shape
+/// update decrements it, so a malformed shape loop terminates.
+pub(crate) const SHAPE_UPDATE_LIMIT: u32 = 512;
+
 // ---------------------------------------------------------------------------
 // Read-only signal context
 // ---------------------------------------------------------------------------
@@ -169,6 +174,7 @@ enum NeighborUpdate {
         direction: Direction,
         neighbor: BlockPos,
         flags: SetBlockFlags,
+        limit: u32,
     },
 }
 
@@ -235,14 +241,24 @@ impl<'a> Context<'a> {
 
     /// Vanilla's `Level.setBlock(pos, state, flags)`.
     ///
-    /// The raw write is the host's; this runs the side effects the flags select:
-    /// the removal hook when the block changes and `UPDATE_NEIGHBORS` is set,
-    /// the placement hook unless `UPDATE_SKIP_ON_PLACE`, the neighbour fan-out
-    /// when `UPDATE_NEIGHBORS` is set, and the shape updates unless
-    /// `UPDATE_KNOWN_SHAPE`.
+    /// The raw write is the host's; this runs the side effects the flags select,
+    /// in vanilla's order: the write, the removal hook of the old block, the
+    /// placement hook of the new block, the neighbour fan-out under
+    /// `UPDATE_NEIGHBORS`, then the shape updates unless `UPDATE_KNOWN_SHAPE`.
     ///
     /// Returns `false` if the state was already `state`.
     pub fn set_block(&mut self, pos: BlockPos, state: BlockStateId, flags: SetBlockFlags) -> bool {
+        self.set_block_at(pos, state, flags, SHAPE_UPDATE_LIMIT)
+    }
+
+    /// `Level.setBlock(pos, state, flags, limit)`.
+    fn set_block_at(
+        &mut self,
+        pos: BlockPos,
+        state: BlockStateId,
+        flags: SetBlockFlags,
+        limit: u32,
+    ) -> bool {
         let old = self.get_block(pos);
         if old == state {
             return false;
@@ -251,11 +267,13 @@ impl<'a> Context<'a> {
         let new_block = world_blocks::block_of_state(state).map(|(b, _)| b);
         let moved = flags.contains(SetBlockFlags::UPDATE_MOVE_BY_PISTON);
 
+        // The write happens first, so a removal hook reads the new world — as
+        // `LevelChunk.setBlockState` does before `affectNeighborsAfterRemoval`.
+        self.view.set_block(pos, state);
+
         if old_block != new_block && (flags.contains(SetBlockFlags::UPDATE_NEIGHBORS) || moved) {
             behaviour(old).on_remove(self, old, pos);
         }
-
-        self.view.set_block(pos, state);
 
         if !flags.contains(SetBlockFlags::UPDATE_SKIP_ON_PLACE) {
             behaviour(state).on_place(self, state, pos, old);
@@ -265,8 +283,8 @@ impl<'a> Context<'a> {
             self.update_neighbors_at_with(pos, old, None);
         }
 
-        if !flags.contains(SetBlockFlags::UPDATE_KNOWN_SHAPE) {
-            self.update_neighbour_shapes(pos, flags);
+        if !flags.contains(SetBlockFlags::UPDATE_KNOWN_SHAPE) && limit > 0 {
+            self.update_shapes(pos, old, state, flags, limit - 1);
         }
         true
     }
@@ -517,24 +535,62 @@ impl<'a> Context<'a> {
                 direction,
                 neighbor,
                 flags,
+                limit,
             } => {
-                self.execute_shape_update(*neighbor, *direction, *flags);
+                self.execute_shape_update(*neighbor, *direction, *flags, *limit);
                 false
             }
         }
     }
 
-    pub(crate) fn update_neighbour_shapes(&mut self, pos: BlockPos, flags: SetBlockFlags) {
-        let shape_flags = flags
+    /// The three shape-update passes vanilla runs around a write: the old
+    /// block's indirect pass, the new block's direct pass, then the new block's
+    /// indirect pass (`Level.setBlock`).
+    pub(crate) fn update_shapes(
+        &mut self,
+        pos: BlockPos,
+        old: BlockStateId,
+        new: BlockStateId,
+        flags: SetBlockFlags,
+        limit: u32,
+    ) {
+        let k = flags
             .without(SetBlockFlags::UPDATE_NEIGHBORS)
             .without(SetBlockFlags::UPDATE_SUPPRESS_DROPS);
+        behaviour(old).update_indirect_neighbour_shapes(self, old, pos, k, limit);
+        self.update_neighbour_shapes(pos, new, k, limit);
+        behaviour(new).update_indirect_neighbour_shapes(self, new, pos, k, limit);
+    }
+
+    /// `BlockState.updateNeighbourShapes`: ask each neighbour for its
+    /// `updateShape`, in `UPDATE_SHAPE_ORDER`.
+    pub(crate) fn update_neighbour_shapes(
+        &mut self,
+        pos: BlockPos,
+        _state: BlockStateId,
+        flags: SetBlockFlags,
+        limit: u32,
+    ) {
         for dir in Direction::UPDATE_SHAPE_ORDER {
             self.add_and_run(NeighborUpdate::Shape {
                 direction: dir.opposite(),
                 neighbor: pos.offset(dir),
-                flags: shape_flags,
+                flags,
+                limit,
             });
         }
+    }
+
+    /// Run a single shape update on `neighbor` directly — used by a block's
+    /// `updateIndirectNeighbourShapes` to reach a non-adjacent cell.
+    pub(crate) fn shape_update_at(
+        &mut self,
+        neighbor: BlockPos,
+        direction: Direction,
+        flags: SetBlockFlags,
+        limit: u32,
+    ) {
+        self.execute_shape_update(neighbor, direction, flags, limit);
     }
 
     /// `NeighborUpdater.executeShapeUpdate`.
@@ -543,15 +599,23 @@ impl<'a> Context<'a> {
         neighbor: BlockPos,
         direction: Direction,
         flags: SetBlockFlags,
+        limit: u32,
     ) {
         let state = self.get_block(neighbor);
+        // `(i & 128) == 0 || !blockState2.is(REDSTONE_WIRE)`.
+        if flags.contains(SetBlockFlags::UPDATE_SKIP_SHAPE_UPDATE_ON_WIRE)
+            && behaviour(state).is_wire()
+        {
+            return;
+        }
         if let Some(new) = behaviour(state).update_shape(self, state, neighbor, direction) {
             if new != state {
+                // `Block.updateOrDestroy`: the write clears `UPDATE_NEIGHBORS`
+                // and `UPDATE_SUPPRESS_DROPS`, and recurses with this limit.
                 let nested = flags
                     .without(SetBlockFlags::UPDATE_NEIGHBORS)
-                    .without(SetBlockFlags::UPDATE_SUPPRESS_DROPS)
-                    .union(SetBlockFlags::UPDATE_KNOWN_SHAPE);
-                self.set_block(neighbor, new, nested);
+                    .without(SetBlockFlags::UPDATE_SUPPRESS_DROPS);
+                self.set_block_at(neighbor, new, nested, limit);
             }
         }
     }
@@ -676,6 +740,13 @@ fn build() -> Registry {
     // new component decides its own wire connection without a core edit.
     #[cfg(test)]
     register(&mut by_state, "minecraft:observer", &blocks::TestObserver);
+    // A test-only recording block for the notification-order findings.
+    #[cfg(test)]
+    register(
+        &mut by_state,
+        "minecraft:note_block",
+        &blocks::test_spy::Spy,
+    );
 
     Registry { by_state }
 }
@@ -696,4 +767,95 @@ pub const AIR: BlockStateId = ids::AIR;
 /// The block id of a state, for scheduled-tick identity.
 pub fn block_id_of(state: BlockStateId) -> Option<u16> {
     world_blocks::block_of_state(state).map(|(b, _)| b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocks::test_spy;
+    use crate::{MemWorld, Redstone};
+
+    fn p(x: i32, y: i32, z: i32) -> BlockPos {
+        BlockPos::new(x, y, z)
+    }
+
+    #[test]
+    fn removal_notification_runs_after_the_write_and_carries_the_old_state() {
+        // N3: `LevelChunk` writes first, then `affectNeighborsAfterRemoval`, and
+        // `Level.setBlock`'s `UPDATE_NEIGHBORS` pass (which supplies the source)
+        // uses the OLD block. The default removal hook does not fan out itself.
+        let engine = Redstone::new();
+        let mut w = MemWorld::new();
+        let spy = p(0, 0, 0);
+        let stone = p(1, 0, 0);
+        w.put(spy, "minecraft:note_block");
+        w.put(stone, "minecraft:stone");
+        engine.on_placed(&mut w, spy);
+        test_spy::take();
+
+        let stone_state = w.state(stone);
+        engine.set_block(&mut w, stone, ids::AIR, SetBlockFlags::PLACE);
+
+        let log = test_spy::take();
+        let n = log
+            .iter()
+            .find(|n| n.pos == spy)
+            .expect("the spy must be notified of the removal");
+        assert_eq!(n.from, stone_state, "the source is the old block");
+        assert_eq!(
+            n.source_now,
+            ids::AIR,
+            "the write must have happened before the notification"
+        );
+    }
+
+    #[test]
+    fn except_facing_update_carries_the_diode_as_source() {
+        // N6: `DiodeBlock.updateNeighborsInFront` passes `this` (the repeater)
+        // as the source to `updateNeighborsAtExceptFromFacing`, not the block
+        // that happens to sit at the notified position.
+        let engine = Redstone::new();
+        let mut w = MemWorld::new();
+        let repeater = p(1, 0, 0);
+        let output = p(2, 0, 0);
+        let spy = p(3, 0, 0);
+        w.put(repeater, "minecraft:repeater[facing=west,delay=1]");
+        w.put(output, "minecraft:stone");
+        w.put(spy, "minecraft:note_block");
+        let repeater_state = w.state(repeater);
+        test_spy::take();
+
+        engine.on_placed(&mut w, repeater);
+
+        let log = test_spy::take();
+        let to_spy: Vec<_> = log.iter().filter(|n| n.pos == spy).collect();
+        assert!(
+            !to_spy.is_empty(),
+            "the zone in front of the repeater must be notified"
+        );
+        for n in to_spy {
+            assert_eq!(
+                n.from, repeater_state,
+                "the source must be the repeater, not the stone at the output"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_block_removal_notifies_each_neighbour_once() {
+        // N3: with the default removal hook empty, the only fan-out for a plain
+        // block is the `UPDATE_NEIGHBORS` pass — exactly once per neighbour.
+        let engine = Redstone::new();
+        let mut w = MemWorld::new();
+        let spy = p(0, 0, 0);
+        let block = p(1, 0, 0);
+        w.put(spy, "minecraft:note_block");
+        w.put(block, "minecraft:redstone_block");
+        engine.on_placed(&mut w, spy);
+        test_spy::take();
+
+        engine.set_block(&mut w, block, ids::AIR, SetBlockFlags::PLACE);
+        let count = test_spy::take().iter().filter(|n| n.pos == spy).count();
+        assert_eq!(count, 1, "the neighbour must be notified exactly once");
+    }
 }

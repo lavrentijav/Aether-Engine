@@ -20,7 +20,7 @@
 
 use aether_world::BlockStateId;
 
-use crate::behaviour::{self, block_id_of, Context};
+use crate::behaviour::{self, block_id_of, Context, SHAPE_UPDATE_LIMIT};
 use crate::dir::Direction;
 use crate::pos::BlockPos;
 use crate::view::{RedstoneView, SetBlockFlags};
@@ -112,7 +112,13 @@ impl Redstone {
         behaviour::behaviour(state).on_place(&mut ctx, state, pos, behaviour::AIR);
         behaviour::behaviour(state).set_placed_by(&mut ctx, state, pos);
         ctx.update_neighbors_at_with(pos, state, None);
-        ctx.update_neighbour_shapes(pos, SetBlockFlags::UPDATE_NEIGHBORS);
+        ctx.update_shapes(
+            pos,
+            behaviour::AIR,
+            state,
+            SetBlockFlags::UPDATE_NEIGHBORS,
+            SHAPE_UPDATE_LIMIT,
+        );
     }
 
     /// A block was removed from `pos`, whose old state was `old`. The host has
@@ -120,7 +126,14 @@ impl Redstone {
     pub fn on_removed<V: RedstoneView>(&self, view: &mut V, pos: BlockPos, old: BlockStateId) {
         let mut ctx = Context::new(view);
         behaviour::behaviour(old).on_remove(&mut ctx, old, pos);
-        ctx.update_neighbour_shapes(pos, SetBlockFlags::NONE);
+        ctx.update_neighbors_at_with(pos, old, None);
+        ctx.update_shapes(
+            pos,
+            old,
+            behaviour::AIR,
+            SetBlockFlags::NONE,
+            SHAPE_UPDATE_LIMIT,
+        );
     }
 
     /// A neighbour of the block at `pos` (the block at `from`) changed.

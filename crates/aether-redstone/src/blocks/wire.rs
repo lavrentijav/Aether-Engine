@@ -109,6 +109,35 @@ impl BlockBehaviour for Wire {
         (shaped != state).then_some(shaped)
     }
 
+    fn update_indirect_neighbour_shapes(
+        &self,
+        ctx: &mut Context,
+        state: BlockStateId,
+        pos: BlockPos,
+        flags: SetBlockFlags,
+        limit: u32,
+    ) {
+        // `RedStoneWireBlock.updateIndirectNeighbourShapes` wakes the diagonal
+        // wires of an up-and-over, which a direct shape update cannot reach.
+        for dir in Direction::HORIZONTAL {
+            if props::get(state, props::side_prop(dir)) == Some("none") {
+                continue;
+            }
+            let side = pos.offset(dir);
+            if behaviour(ctx.get_block(side)).is_wire() {
+                continue;
+            }
+            let below = side.offset(Direction::Down);
+            if behaviour(ctx.get_block(below)).is_wire() {
+                ctx.shape_update_at(below, dir.opposite(), flags, limit);
+            }
+            let above = side.offset(Direction::Up);
+            if behaviour(ctx.get_block(above)).is_wire() {
+                ctx.shape_update_at(above, dir.opposite(), flags, limit);
+            }
+        }
+    }
+
     fn use_block(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos) {
         let mut toggled = state;
         if props::is_cross(state) {

@@ -82,6 +82,8 @@ impl SetBlockFlags {
     pub const UPDATE_SUPPRESS_DROPS: Self = Self(32);
     /// `UPDATE_MOVE_BY_PISTON`.
     pub const UPDATE_MOVE_BY_PISTON: Self = Self(64);
+    /// `UPDATE_SKIP_SHAPE_UPDATE_ON_WIRE` — a shape update skips redstone wire.
+    pub const UPDATE_SKIP_SHAPE_UPDATE_ON_WIRE: Self = Self(128);
     /// `UPDATE_SKIP_ON_PLACE` — suppress the placement hook.
     pub const UPDATE_SKIP_ON_PLACE: Self = Self(512);
     /// `UPDATE_NONE`.

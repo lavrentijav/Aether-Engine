@@ -115,12 +115,11 @@ impl BlockBehaviour for Repeater {
         pos: BlockPos,
         dir: Direction,
     ) -> Option<BlockStateId> {
-        // Support destruction is not re-checked this stage (see KNOWN_ISSUES):
-        // only the `locked` property follows a side-input change.
-        if dir.is_horizontal()
-            && dir != props::facing(state)
-            && dir != props::facing(state).opposite()
-        {
+        // Support destruction is handled in R13. `RepeaterBlock.updateShape`
+        // recomputes LOCKED for any direction off the facing axis, which
+        // includes UP and DOWN.
+        let f = props::facing(state);
+        if dir != f && dir != f.opposite() {
             let locked = is_locked(&ctx.signals(), pos, state);
             if locked != props::locked(state) {
                 let value = if locked { "true" } else { "false" };
@@ -240,8 +239,11 @@ fn check_tick(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
 }
 
 fn update_neighbors_in_front(ctx: &mut Context, pos: BlockPos, state: BlockStateId) {
+    // `DiodeBlock.updateNeighborsInFront`: notify the block behind the diode and
+    // its neighbours, skipping the facing, with **the diode itself** as the
+    // source block.
     let facing = props::facing(state);
     let output = pos.offset(facing.opposite());
     ctx.neighbor_changed_at(output, state);
-    ctx.update_neighbors_except(output, facing);
+    ctx.update_neighbors_at_except_from_facing(output, state, facing, None);
 }

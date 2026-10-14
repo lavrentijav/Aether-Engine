@@ -65,7 +65,8 @@
 //! LIFO stack where a multi-neighbour update yields to freshly generated
 //! updates before resuming, with the chain limit. State changes go through
 //! `set_block(pos, state, flags)` with vanilla's `Block.UpdateFlags`, so the
-//! placement/removal hooks and the shape updates run where vanilla runs them.
+//! placement/removal hooks and the recursive shape updates (including
+//! `updateIndirectNeighbourShapes`) run where vanilla runs them.
 //! See [`Redstone`] and `docs/KNOWN_ISSUES.md` for the full list of differences.
 //!
 //! ## Not in this stage

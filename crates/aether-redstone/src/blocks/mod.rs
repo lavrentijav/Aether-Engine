@@ -16,6 +16,8 @@ mod wire;
 
 #[cfg(test)]
 mod test_observer;
+#[cfg(test)]
+pub mod test_spy;
 
 pub use button::{StoneButton, WoodButton};
 pub use comparator::Comparator;
@@ -146,12 +148,11 @@ pub trait BlockBehaviour: Sync {
 
     /// `affectNeighborsAfterRemoval`: the block is being replaced.
     ///
-    /// The default notifies the six neighbours, which is what a plain block's
-    /// removal does once `UPDATE_NEIGHBORS` is set. Components override it with
-    /// their own fan-out.
-    fn on_remove(&self, ctx: &mut Context, _state: BlockStateId, pos: crate::pos::BlockPos) {
-        ctx.update_neighbors_at(pos);
-    }
+    /// The default does nothing, as vanilla's `BlockBehaviour` does; the sole
+    /// removal fan-out is the `UPDATE_NEIGHBORS` pass in `Level.setBlock`. A
+    /// component overrides this only when it needs its own removal notification
+    /// (a wire's corner update, a torch's neighbour notify).
+    fn on_remove(&self, _ctx: &mut Context, _state: BlockStateId, _pos: crate::pos::BlockPos) {}
 
     /// `tick`: a scheduled block tick came due.
     fn tick(&self, _ctx: &mut Context, _state: BlockStateId, _pos: crate::pos::BlockPos) {}
@@ -166,6 +167,19 @@ pub trait BlockBehaviour: Sync {
         _dir: Direction,
     ) -> Option<BlockStateId> {
         None
+    }
+
+    /// `updateIndirectNeighbourShapes`: reach cells that a direct shape update
+    /// cannot. Only redstone wire overrides it (to wake the diagonal wires of an
+    /// up-and-over); the default does nothing.
+    fn update_indirect_neighbour_shapes(
+        &self,
+        _ctx: &mut Context,
+        _state: BlockStateId,
+        _pos: crate::pos::BlockPos,
+        _flags: crate::view::SetBlockFlags,
+        _limit: u32,
+    ) {
     }
 
     /// `useWithoutItem`: a player interacted.

@@ -592,3 +592,103 @@ fn two_worlds_do_not_share_torch_burnout_history() {
     b.run(&engine, 2);
     assert!(is_lit(&b, torch_b), "B's fresh torch must not be burnt out");
 }
+
+#[test]
+fn a_shape_change_wakes_a_diagonal_wire() {
+    // N4: `RedStoneWireBlock.updateIndirectNeighbourShapes` wakes the wire one
+    // block up-and-over. When A's power changes, B (diagonally above A, over a
+    // block) must adopt its connection; a direct shape update never reaches B.
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    let lever = p(-1, 0, 0);
+    let a = p(0, 0, 0);
+    let block = p(1, 0, 0);
+    let b = p(1, 1, 0);
+    w.put(lever, "minecraft:lever[face=floor,facing=east]");
+    w.put(a, "minecraft:redstone_wire");
+    w.put(block, "minecraft:stone");
+    w.put(b, "minecraft:redstone_wire");
+    for pos in [lever, a, block, b] {
+        engine.on_placed(&mut w, pos);
+    }
+
+    // Make B stale (all sides `none`), as if it never saw A.
+    w.put(b, "minecraft:redstone_wire");
+    // Power A: A changes, and its indirect pass must wake the diagonal B.
+    engine.on_use(&mut w, lever);
+    assert_eq!(
+        props::get(w.state(b), "west"),
+        Some("side"),
+        "the diagonal wire must wake on A's change"
+    );
+}
+
+#[test]
+fn a_repeater_recomputes_its_lock_on_a_vertical_update() {
+    // N5: `RepeaterBlock.updateShape` recomputes LOCKED for any direction off
+    // the facing axis, including UP/DOWN.
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    let lever = p(0, 0, 0);
+    let repeater = p(1, 0, 0);
+    let lock = p(1, 0, -1);
+    let lock_source = p(1, 0, -2);
+    w.put(lever, "minecraft:lever[face=floor,facing=east]");
+    w.put(repeater, "minecraft:repeater[facing=west,delay=1]");
+    w.put(lock, "minecraft:repeater[facing=north,delay=1]");
+    w.put(lock_source, "minecraft:redstone_block");
+    for pos in [lever, repeater, lock, lock_source] {
+        engine.on_placed(&mut w, pos);
+    }
+    w.run(&engine, 2);
+    assert!(is_powered(&w, lock));
+
+    // Reset `locked` behind the engine's back, then nudge the cell above the
+    // repeater; only a vertical recompute restores `locked`.
+    w.put(repeater, "minecraft:repeater[facing=west,delay=1]");
+    assert_eq!(props::get(w.state(repeater), "locked"), Some("false"));
+    w.put(p(1, 1, 0), "minecraft:stone");
+    engine.on_placed(&mut w, p(1, 1, 0));
+    assert_eq!(
+        props::get(w.state(repeater), "locked"),
+        Some("true"),
+        "a vertical update must recompute the lock"
+    );
+}
+
+#[test]
+fn skip_shape_update_on_wire_suppresses_the_wire_shape_update() {
+    // N7: `NeighborUpdater.executeShapeUpdate` skips redstone wire when the
+    // `UPDATE_SKIP_SHAPE_UPDATE_ON_WIRE` (128) flag is set.
+    let engine = Redstone::new();
+    let rb = BlockRegistry::new()
+        .get("minecraft:redstone_block")
+        .unwrap();
+
+    // With the flag: the wire next to the new block is left untouched.
+    let mut w = MemWorld::new();
+    let wire = p(0, 0, 0);
+    let block = p(1, 0, 0);
+    w.put(wire, "minecraft:redstone_wire"); // stale, all sides `none`
+    engine.set_block(
+        &mut w,
+        block,
+        rb,
+        SetBlockFlags::CLIENTS.union(SetBlockFlags::UPDATE_SKIP_SHAPE_UPDATE_ON_WIRE),
+    );
+    assert_eq!(
+        props::get(w.state(wire), "east"),
+        Some("none"),
+        "the wire's shape update must be skipped"
+    );
+
+    // Without the flag: the wire connects to the new signal source.
+    let mut w = MemWorld::new();
+    w.put(wire, "minecraft:redstone_wire");
+    engine.set_block(&mut w, block, rb, SetBlockFlags::CLIENTS);
+    assert_eq!(
+        props::get(w.state(wire), "east"),
+        Some("side"),
+        "without the flag the wire must update"
+    );
+}
