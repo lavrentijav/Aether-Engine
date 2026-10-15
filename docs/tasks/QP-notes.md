@@ -124,6 +124,32 @@ one commit each, with a test reproducing the review's sequence:
 N4 and N5 share `resolve_change` and are one commit; reverting the N4 branch
 makes both the sequence test and the property test fail.
 
+## Round-4 fix (QP-fix13)
+
+A stale cursor shadow could diverge the stand-in/real identity under a creative
+cursor replacement (a conjure onto a non-empty cursor sends no packet). Fix:
+
+* `resolve_change` now only trusts the shadow when the report **reconciles**
+  with it (`reconciles`: same wire id and a count the shadow could carry —
+  `r_count <= carried.count`, or a merge onto the same real item bounded by what
+  that stack holds). A count above the shadow into an empty or foreign slot
+  invalidates it and writes the *genuine* reported item — never the engine-only
+  stand-in, never more of it than was carried.
+* The echo guard (same-wire report with no shadow match) is restored, scoped to
+  the no-carry case and to a count that did not grow, and now **discards** the
+  shadow: the report is not the shadow's item, so the cursor is not what the
+  server thought.
+
+Tests: `a_conjure_onto_a_non_empty_cursor_invalidates_the_shadow`,
+`a_stand_in_wire_conjure_cannot_materialise_the_engine_item`; `run_reports` now
+conjures onto a non-empty cursor too. Loosening `reconciles` makes the
+stand-in-wire test fail; the property test caught the echo-guard's own stale
+shadow before the discard was added.
+
+**Residual (documented):** a conjure of the stand-in's own item with the *same*
+count as the shadow is indistinguishable from a legitimate move of the engine-only
+item; resolved in the safe anti-laundering direction (the engine-only item wins).
+
 ## Left / interface note for the J5 (J9) agent
 
 The per-move logic keys off `compat::items::table_for(handle.codec.protocol_id())`.

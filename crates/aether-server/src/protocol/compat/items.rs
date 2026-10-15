@@ -14,9 +14,10 @@
 //! echoes the stand-in back into the *same* slot. A client that instead
 //! *moves* the stand-in — through the cursor into another slot — is answered
 //! by [`ItemTable::resolve_change`], which follows the single shadowed cursor
-//! item so the real item goes with the move, a report with no source is a
-//! *creation* (the genuine item the wire names), and a stand-in cannot be
-//! duplicated or conjured from the wire.
+//! item *only when the report reconciles with it* (same wire id and a count it
+//! could have carried); a report it cannot explain is a *creation* that
+//! invalidates the shadow, so a stand-in cannot be duplicated, conjured from
+//! the wire, or materialised after the client replaced its cursor unseen.
 //!
 //! The block half of the layer (block-state translation and substitution,
 //! tasks J1/J2) is a sibling, and a block *item* now follows its block:
@@ -158,21 +159,29 @@ impl ItemTable {
     /// stand-in or the genuine item it hides, and the server never sees the
     /// client's cursor directly. It therefore:
     ///
-    /// * if it is **carrying** a stack whose wire id matches the report, treats
-    ///   the report as that stack being **placed**: the slot takes the real
-    ///   carried item, the cursor takes whatever the slot held (a swap) or the
-    ///   part of the carried stack that did not fit (a merge), so the real item
-    ///   follows the move and the shadow is spent only by what was placed;
+    /// * if the report is **reconciled** with the carried shadow — same wire id
+    ///   and a count the shadow could have carried (no more than it held, or a
+    ///   merge onto the same real item) — treats the report as that stack being
+    ///   **placed**: the slot takes the real carried item, the cursor takes
+    ///   whatever the slot held (a swap) or the part of the carried stack that
+    ///   did not fit (a merge), so the real item follows the move and the shadow
+    ///   is spent only by what was placed;
+    /// * if it is not reconciled but the slot already shows the same wire id,
+    ///   keeps the slot's own real item (a re-send/echo) and leaves the shadow
+    ///   alone;
     /// * otherwise treats the report as a **swap or creation** with a cursor the
-    ///   server does not know: the slot takes the reported item, and whatever
-    ///   the slot held moves to the cursor (N4) — or nothing, if it was empty.
+    ///   server does not know: the slot takes the genuine reported item, and
+    ///   whatever the slot held moves to the cursor (N4).
     ///
     /// A client can put a creative-menu item on its cursor with no packet, so
-    /// "carrying" is a guess and a non-matching report must still move the
-    /// replaced item to the cursor rather than drop it (N4). A prior design kept
-    /// the slot's own item on a same-wire report (an "echo"); that stranded a
-    /// genuine same-wire item the client had conjured and later converted a
-    /// stand-in, so the non-carrying branch is now an unconditional swap.
+    /// the shadow can be stale. A report the shadow cannot explain — a count
+    /// above what it carried into an empty or foreign slot, i.e. the client
+    /// conjured a stand-in-wire item the server never had — **invalidates** the
+    /// shadow rather than materialising the engine-only item (round 4): the
+    /// genuine reported item is written, never more of the stand-in than was
+    /// carried. A same-wire report with **no** shadow keeps the slot's real item
+    /// (the echo guard restored from before N1, scoped to the no-carry case so
+    /// it cannot swallow a genuine swap).
     pub fn resolve_change(
         &self,
         report: Option<(ItemTypeId, u8)>,
@@ -190,7 +199,8 @@ impl ItemTable {
                 (Resolution::Apply(None), carry)
             }
             Some((r_item, r_count)) => {
-                if let Some(c) = carried.filter(|c| self.same_wire(c.item, r_item)) {
+                if let Some(c) = carried.filter(|c| self.reconciles(*c, r_item, r_count, previous))
+                {
                     // The client placed the carried stack into this slot.
                     let (slot_item, carry) = match previous {
                         // Merge onto its own kind: only what was *added* is
@@ -229,14 +239,56 @@ impl ItemTable {
                     };
                     return (Resolution::Apply(Some((slot_item, r_count))), carry);
                 }
+                // The report does not match the shadow. If it is the slot's own
+                // wire id *and* the count did not grow, the client re-sent the
+                // slot (or only shrank it): keep the real item already there. A
+                // grown count is a merge from a cursor the server never
+                // shadowed, not an echo, so it falls through to the swap below.
+                //
+                // The shadow is *discarded* either way: the report is not the
+                // shadow's item, so the client's cursor is not what the server
+                // thought — it replaced the cursor behind the server's back. A
+                // stale shadow must not survive to re-materialise the engine-only
+                // item later (round 4).
+                if let Some(p) =
+                    previous.filter(|(p, pc)| self.same_wire(*p, r_item) && r_count <= *pc)
+                {
+                    return (Resolution::Apply(Some(p)), None);
+                }
                 // The server does not know the client's cursor: `r` is a
-                // conjured genuine item (an empty slot) or a swap whose cursor
-                // item differs from the shadow. Either way the slot's old item
-                // leaves to the cursor, so shadow it rather than drop it (N4).
+                // conjured genuine item or a swap whose cursor item differs from
+                // the shadow. Either way the slot takes the genuine reported
+                // item and the slot's old item leaves to the cursor (N4).
                 let carry = previous.map(|(item, count)| Carried { item, count });
                 (Resolution::Apply(Some((r_item, r_count))), carry)
             }
         }
+    }
+
+    /// Whether the carried shadow can explain a slot report: same wire id, and
+    /// a count it could have carried there.
+    ///
+    /// A count no greater than the shadow is a move or a partial placement. A
+    /// larger count is only explicable as a merge onto the *same real item*
+    /// (the client piling the carried stack onto an identical one), bounded by
+    /// what that stack could hold. Anything else is a cursor the client
+    /// replaced behind the server's back, and the shadow is not trusted.
+    fn reconciles(
+        &self,
+        carried: Carried,
+        r_item: ItemTypeId,
+        r_count: u8,
+        previous: Option<(ItemTypeId, u8)>,
+    ) -> bool {
+        if !self.same_wire(carried.item, r_item) {
+            return false;
+        }
+        if r_count <= carried.count {
+            return true;
+        }
+        previous.is_some_and(|(p_item, p_count)| {
+            p_item == carried.item && r_count <= p_count.saturating_add(carried.count)
+        })
     }
 }
 
@@ -537,9 +589,10 @@ mod tests {
                     cursor = Some((item, count - 1));
                     sent = true;
                 }
-                // Conjure a genuine menu item onto the cursor (no packet): the
-                // client now carries something the server never shadowed (N4).
-                8 if allow_creation && cursor.is_none() => {
+                // Conjure a genuine menu item onto the cursor (no packet). It
+                // replaces whatever the client was carrying, so the server's
+                // shadow — if any — is now stale (N4, round 4).
+                8 if allow_creation => {
                     cursor = Some((menu[(xorshift(&mut rng) as usize) % menu.len()], 64));
                 }
                 _ => {}
@@ -848,10 +901,11 @@ mod tests {
         let (res, _) = t.resolve_change(Some((shown, 1)), None, held(trident, 1));
         assert_eq!(res, Resolution::Apply(Some((trident, 1))));
         // A genuine trident already in the destination slot, with nothing on the
-        // cursor, is a swap whose replaced item is the trident itself.
+        // cursor, is the slot re-sending itself: the real item stays and no
+        // cursor item is invented (the echo guard).
         let (res, carry) = t.resolve_change(Some((trident, 1)), Some((trident, 1)), None);
         assert_eq!(res, Resolution::Apply(Some((trident, 1))));
-        assert_eq!(carry, held(trident, 1));
+        assert_eq!(carry, None, "an echo does not invent a cursor item");
     }
 
     #[test]
@@ -988,6 +1042,55 @@ mod tests {
         // Place the rest.
         let (res, carry) = t.resolve_change(Some((shown, 63)), None, carry);
         assert_eq!(res, Resolution::Apply(Some((pale, 63))));
+        assert_eq!(carry, None);
+    }
+
+    #[test]
+    fn a_conjure_onto_a_non_empty_cursor_invalidates_the_shadow() {
+        // Round 4: the server's model of the cursor can be stale — a creative
+        // client puts a menu item on the cursor with no packet. A report the
+        // shadow cannot explain must invalidate it and write the genuine item,
+        // not materialise the engine-only item the client never had.
+        let pale = id("minecraft:pale_oak_planks");
+        let diamond = id("minecraft:diamond");
+        let t = &V1_21_1;
+
+        // The cursor is non-empty on the server: a picked-up stand-in.
+        let (_, carry) = t.resolve_change(None, Some((pale, 1)), None);
+        assert_eq!(carry, held(pale, 1));
+
+        // The client replaces the cursor with a conjured diamond and places it.
+        let (res, carry) = t.resolve_change(Some((diamond, 1)), None, carry);
+        assert_eq!(res, Resolution::Apply(Some((diamond, 1))));
+        assert_eq!(carry, None, "the stale shadow is invalidated, not trusted");
+    }
+
+    #[test]
+    fn a_stand_in_wire_conjure_cannot_materialise_the_engine_item() {
+        // Round 4: a genuine menu item whose wire id collides with a stand-in
+        // (oak_planks, the stand-in for pale_oak_planks) conjured onto the
+        // cursor and placed with a count the shadow never carried. The server
+        // must write the genuine oak_planks — never the engine-only
+        // pale_oak_planks, and never more of it than was carried.
+        let pale = id("minecraft:pale_oak_planks");
+        let oak = id("minecraft:oak_planks");
+        let t = &V1_21_1;
+        assert_eq!(shown_as(t, pale), Some(oak), "pale shows as oak");
+        assert!(t.stand_in_wire(t.wire(oak).unwrap().id));
+
+        // Pick one pale_oak_planks up.
+        let (_, carry) = t.resolve_change(None, Some((pale, 1)), None);
+        assert_eq!(carry, held(pale, 1));
+
+        // The client conjures a full stack of genuine oak_planks onto the
+        // cursor and places it into an empty slot. The count (64) is far more
+        // than the shadow (1) carried, so the shadow cannot explain it.
+        let (res, carry) = t.resolve_change(Some((oak, 64)), None, carry);
+        assert_eq!(
+            res,
+            Resolution::Apply(Some((oak, 64))),
+            "the genuine oak_planks, not 64 engine-only pale_oak_planks"
+        );
         assert_eq!(carry, None);
     }
 
