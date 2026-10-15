@@ -161,16 +161,24 @@ impl Commands {
         if spec.name.is_empty() {
             return Err("command name must not be empty".to_string());
         }
-        let mut specs = self.specs.lock().unwrap();
         let key = (caller.to_string(), spec.name.clone());
-        if specs.contains_key(&key) {
+        // Cheap duplicate check, then release the lock before the host call:
+        // `register_command` reaches the core registry, and holding `specs`
+        // across a host call would risk a lock-order inversion for no reason.
+        if self.specs.lock().unwrap().contains_key(&key) {
             return Err(format!("command `{}` is already registered", spec.name));
         }
-        // Register the command with the core registry first, so a core-name
-        // clash or a duplicate is refused before we hold a spec for it.
+        // Register with the core registry first, so a core-name clash or a
+        // duplicate is refused before a spec is stored. No lock is held here.
         let node = command_node(caller, &spec);
         if let Some(backend) = self.backend.get() {
             backend.register_command(caller, &spec.name, &node, spec.op)?;
+        }
+        let mut specs = self.specs.lock().unwrap();
+        // Re-check under the lock: a concurrent register that slipped past the
+        // fast check above must not be silently overwritten.
+        if specs.contains_key(&key) {
+            return Err(format!("command `{}` is already registered", spec.name));
         }
         specs.insert(key, spec);
         Ok(())
@@ -719,6 +727,62 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn register_does_not_hold_a_lock_across_the_host_call() {
+        // A backend whose `register_command` re-enters `register` on the same
+        // `Commands`: with the `specs` lock held across the host call this
+        // would deadlock; with the fix it completes.
+        struct Reentrant {
+            commands: StdMutex<Option<Arc<Commands>>>,
+        }
+        impl HostBackend for Reentrant {
+            fn kv_get(&self, _: &str, _: &str) -> Option<Vec<u8>> {
+                None
+            }
+            fn kv_put(&self, _: &str, _: &str, _: &[u8]) {}
+            fn kv_delete(&self, _: &str, _: &str) {}
+            fn kv_list(&self, _: &str, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn log(&self, _: &str, _: LogLevel, _: &str) {}
+            fn config(&self, _: &str, _: &str) -> Option<String> {
+                None
+            }
+            fn supports(&self, _: &str, _: &str) -> bool {
+                false
+            }
+            fn register_command(
+                &self,
+                plugin: &str,
+                name: &str,
+                _node: &str,
+                _op: u8,
+            ) -> Result<(), String> {
+                if name == "outer" {
+                    // Re-enter while the host call is in flight.
+                    let commands = self.commands.lock().unwrap().clone().unwrap();
+                    commands
+                        .register(plugin, spec("inner", "/inner", vec![]))
+                        .unwrap();
+                }
+                Ok(())
+            }
+        }
+
+        let slot = Arc::new(OnceLock::new());
+        let commands = Arc::new(Commands::new(Arc::clone(&slot)));
+        let backend = Arc::new(Reentrant {
+            commands: StdMutex::new(Some(Arc::clone(&commands))),
+        });
+        let _ = slot.set(backend as Arc<dyn HostBackend>);
+
+        commands
+            .register("p", spec("outer", "/outer", vec![]))
+            .unwrap();
+        assert!(commands.get("p", "outer").is_some());
+        assert!(commands.get("p", "inner").is_some());
     }
 
     #[test]
