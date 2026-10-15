@@ -94,17 +94,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-sdk-plugin"
-version = "0.1.0"
-dependencies = [
- "aether-plugin",
-]
-
-[[package]]
 name = "aether-redstone"
 version = "0.1.0"
 dependencies = [
  "aether-world",
+]
+
+[[package]]
+name = "aether-sdk-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-plugin",
 ]
 
 [[package]]

@@ -61,6 +61,22 @@ pub trait HostBackend: Send + Sync {
     fn config_revision(&self, _plugin: &str) -> u64 {
         0
     }
+
+    /// Register a plugin command in the core command registry, so it is
+    /// dispatched and permission-checked the same way a core command is.
+    ///
+    /// The SDK's command builder calls this; a host without a command registry
+    /// (a test, a stripped build) accepts and remembers nothing. `Err` carries
+    /// the core's reason — a core name, or a name already taken.
+    fn register_command(
+        &self,
+        _plugin: &str,
+        _name: &str,
+        _node: &str,
+        _op: u8,
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Sandbox and scheduling limits for the whole host.

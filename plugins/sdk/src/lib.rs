@@ -81,7 +81,7 @@ impl Default for SdkPlugin {
         let clock = Arc::new(Clock::default());
         let messages = Arc::new(Messages::new(Arc::clone(&backend)));
         SdkPlugin {
-            commands: Arc::new(Commands::default()),
+            commands: Arc::new(Commands::new(Arc::clone(&backend))),
             scheduler: Arc::new(Scheduler::new(Arc::clone(&clock))),
             cooldowns: Arc::new(Cooldowns::new(Arc::clone(&clock))),
             confirm: Arc::new(Confirm::new(clock, Arc::clone(&messages))),
@@ -94,6 +94,7 @@ impl Default for SdkPlugin {
 impl NativePlugin for SdkPlugin {
     fn init(&mut self, ctx: &mut NativeContext) -> Result<(), String> {
         let backend = Arc::clone(ctx.backend);
+        self.commands.set_backend(Arc::clone(&backend));
         self.messages.set_backend(Arc::clone(&backend));
         self.players.set_backend(backend);
 
@@ -133,12 +134,29 @@ impl NativePlugin for SdkPlugin {
 ///
 /// Keyed by `(caller, name)` so two dependents may each register their own
 /// commands without colliding, and so a caller can only parse its own specs.
+///
+/// Registering also registers the command in the **core** command registry (via
+/// the host backend), so it is dispatched and permission-checked by the core's
+/// single gate — a command reaching the SDK is never a side path around it.
+/// The spec is kept here only for `usage` and `parse`.
 #[derive(Default)]
 struct Commands {
     specs: Mutex<HashMap<(String, String), CommandSpec>>,
+    backend: Arc<OnceLock<Arc<dyn HostBackend>>>,
 }
 
 impl Commands {
+    fn new(backend: Arc<OnceLock<Arc<dyn HostBackend>>>) -> Commands {
+        Commands {
+            specs: Mutex::new(HashMap::new()),
+            backend,
+        }
+    }
+
+    fn set_backend(&self, backend: Arc<dyn HostBackend>) {
+        let _ = self.backend.set(backend);
+    }
+
     fn register(&self, caller: &str, spec: CommandSpec) -> Result<(), String> {
         if spec.name.is_empty() {
             return Err("command name must not be empty".to_string());
@@ -147,6 +165,12 @@ impl Commands {
         let key = (caller.to_string(), spec.name.clone());
         if specs.contains_key(&key) {
             return Err(format!("command `{}` is already registered", spec.name));
+        }
+        // Register the command with the core registry first, so a core-name
+        // clash or a duplicate is refused before we hold a spec for it.
+        let node = command_node(caller, &spec);
+        if let Some(backend) = self.backend.get() {
+            backend.register_command(caller, &spec.name, &node, spec.op)?;
         }
         specs.insert(key, spec);
         Ok(())
@@ -176,6 +200,15 @@ impl Commands {
             out.push((declared.name.clone(), value.clone()));
         }
         out
+    }
+}
+
+/// The permission node a spec registers under: its own, or `plugin.<id>.<name>`
+/// when it names none — the same default the core registry's manifest path uses.
+fn command_node(caller: &str, spec: &CommandSpec) -> String {
+    match &spec.permission {
+        Some(node) if !node.is_empty() => node.clone(),
+        _ => format!("plugin.{caller}.{}", spec.name),
     }
 }
 
@@ -672,6 +705,7 @@ mod tests {
             name: name.to_string(),
             parent: None,
             permission: None,
+            op: 0,
             usage: usage.to_string(),
             description: String::new(),
             args: args
@@ -738,6 +772,86 @@ mod tests {
             commands.parse("a", "pay", &["10".to_string()]),
             vec![("amount".to_string(), "10".to_string())]
         );
+    }
+
+    #[test]
+    fn the_default_node_is_derived_from_the_caller_and_name() {
+        let spec = spec("home", "/home", vec![]);
+        assert_eq!(command_node("essentials", &spec), "plugin.essentials.home");
+        let mut named = spec;
+        named.permission = Some("essentials.home.use".to_string());
+        assert_eq!(command_node("essentials", &named), "essentials.home.use");
+    }
+
+    #[test]
+    fn register_forwards_to_the_core_command_registry() {
+        // A backend that records every registration and refuses a core name,
+        // standing in for the server's command registry.
+        #[derive(Default)]
+        struct Core {
+            registered: StdMutex<Vec<(String, String, String, u8)>>,
+        }
+        impl HostBackend for Core {
+            fn kv_get(&self, _: &str, _: &str) -> Option<Vec<u8>> {
+                None
+            }
+            fn kv_put(&self, _: &str, _: &str, _: &[u8]) {}
+            fn kv_delete(&self, _: &str, _: &str) {}
+            fn kv_list(&self, _: &str, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn log(&self, _: &str, _: LogLevel, _: &str) {}
+            fn config(&self, _: &str, _: &str) -> Option<String> {
+                None
+            }
+            fn supports(&self, _: &str, _: &str) -> bool {
+                false
+            }
+            fn register_command(
+                &self,
+                plugin: &str,
+                name: &str,
+                node: &str,
+                op: u8,
+            ) -> Result<(), String> {
+                if name == "give" {
+                    return Err("`/give` is a core command".to_string());
+                }
+                self.registered.lock().unwrap().push((
+                    plugin.to_string(),
+                    name.to_string(),
+                    node.to_string(),
+                    op,
+                ));
+                Ok(())
+            }
+        }
+
+        let core = Arc::new(Core::default());
+        let slot = Arc::new(OnceLock::new());
+        let commands = Commands::new(Arc::clone(&slot));
+        let _ = slot.set(core.clone() as Arc<dyn HostBackend>);
+
+        let mut s = spec("home", "/home <name>", vec![("name", ArgKind::Word)]);
+        s.permission = Some("essentials.home".to_string());
+        s.op = 2;
+        commands.register("essentials", s).unwrap();
+        assert_eq!(
+            core.registered.lock().unwrap().as_slice(),
+            [(
+                "essentials".to_string(),
+                "home".to_string(),
+                "essentials.home".to_string(),
+                2
+            )]
+        );
+
+        // A core name is refused by the registry and no spec is stored.
+        let err = commands
+            .register("essentials", spec("give", "/give", vec![]))
+            .unwrap_err();
+        assert!(err.contains("core"), "{err}");
+        assert!(commands.get("essentials", "give").is_none());
     }
 
     #[test]

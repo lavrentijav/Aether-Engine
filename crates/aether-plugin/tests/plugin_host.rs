@@ -589,7 +589,7 @@ fn native_manifest(id: &str, priority: i32, subscribe: &[&str], requires: &[&str
             priority,
             capabilities: vec![],
             subscribe: subscribe.iter().map(|s| s.to_string()).collect(),
-            commands: vec!["native".to_string()],
+            commands: vec![CommandDecl::Plain("native".to_string())],
             tick_period: 1,
             deny_on_fault: false,
             tier: PluginTier::Native,

@@ -63,10 +63,18 @@ interface commands {
 
     /// A command the SDK should register and dispatch. Subcommands are
     /// separate specs naming their `parent`, so the shape stays a flat list.
+    ///
+    /// `permission` is the node the core command registry checks before the
+    /// command runs (empty derives `plugin.<id>.<name>`); `op` is the vanilla
+    /// op level it requires. Registration goes through the core registry, so a
+    /// command declared here is dispatched and permission-checked like any
+    /// core command, never as a side path around the gate.
     record command-spec {
         name: string,
         parent: option<string>,
         permission: option<string>,
+        /// Vanilla op level (0 everyone … 4 owner).
+        op: u8,
         usage: string,
         description: string,
         args: list<arg>,

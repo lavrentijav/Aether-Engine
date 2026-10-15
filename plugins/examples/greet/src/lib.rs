@@ -37,6 +37,7 @@ impl Guest for Greet {
             name: "greet".to_string(),
             parent: None,
             permission: None,
+            op: 0,
             usage: "/greet".to_string(),
             description: "Say hello.".to_string(),
             args: Vec::new(),

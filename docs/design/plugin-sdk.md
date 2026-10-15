@@ -300,10 +300,16 @@ sdk.commands.register(
 ```
 
 The builder type (`CommandSpec`) is constructed by pure sugar in the thin client; `register` is the
-service call that validates and registers the node with the host tree (name, usage, permission,
-**static** completions). Dispatch still enters the dependent's frozen `on-command` export; the thin
+service call that validates the spec (name, usage, permission node, op level, **static**
+completions) and registers it in the **core command registry** through the host backend
+(`HostBackend::register_command` → `commands::registry::register_plugin`). The ownership rule
+applies there: a core name (implemented or a CMD0 stub) is refused, so an SDK command is dispatched
+and permission-checked by the core's single gate (`commands::permitted`, node + op level), never as
+a side path around it. Dispatch still enters the dependent's frozen `on-command` export; the thin
 client's generated dispatch calls `commands.parse(name, args)` (one call) and then the handler, so
-permission and usage stay uniform across plugins. Subcommands are nested specs.
+permission and usage stay uniform across plugins. The dependent still lists its command names in
+`plugin.toml` (`commands = [...]`) so the host's router calls its `on-command`; the SDK spec is the
+richer form. Subcommands are nested specs.
 
 **Dynamic tab-completion is the one helper that cannot fit `@0.1.0`.** The host drives completion
 from its tree, so the guest must answer a new callback (`on-complete`) or `command-result` must grow
