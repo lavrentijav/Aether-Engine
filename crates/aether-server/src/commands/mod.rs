@@ -793,7 +793,7 @@ mod tests {
     fn the_permission_gate_is_level_against_op() {
         // A declared public node: the op level is the only remaining gate, so
         // a non-op (level 0) may run op-0 commands and an op (level 4) any.
-        crate::permissions::declare_node("test.gate.allow", crate::permissions::Default::Allow)
+        crate::permissions::declare_node("test.gate.allow", crate::permissions::NodeDefault::Allow)
             .unwrap();
         assert!(super::permitted_level(0, "test.gate.allow", 0));
         assert!(!super::permitted_level(0, "test.gate.allow", 1));
