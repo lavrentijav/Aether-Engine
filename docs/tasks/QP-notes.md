@@ -106,6 +106,24 @@ one commit each, with a test reproducing the review's sequence:
   instead of stone (1.8 has no `fire` item); the residual — block `fire` vs item
   flint and steel — is documented.
 
+## Round-3 fixes (QP-review-3, J10-fix12)
+
+`docs/tasks/QP-review-3.md` confirmed N1–N3 fixed and found N4/N5:
+
+* **N4** (`J10-fix12`): the fall-through branch now moves the replaced slot item
+  to the cursor instead of dropping it, so a swap whose cursor the server never
+  shadowed (a menu item conjured onto the cursor sends no packet) keeps the
+  stand-in. The same-wire "echo" branch is gone — the replaced item is always
+  shadowed.
+* **N5** (`J10-fix12`): the shadow is now `Carried { item, count }`, so a
+  partial placement spends only the items placed.
+* **property test** (`J10-fix12`): `run_reports` gains a "conjure onto the
+  cursor" op and asserts `server == client`, every disguised item is mirrored
+  in slots+shadow, and the full multiset (count included) is conserved.
+
+N4 and N5 share `resolve_change` and are one commit; reverting the N4 branch
+makes both the sequence test and the property test fail.
+
 ## Left / interface note for the J5 (J9) agent
 
 The per-move logic keys off `compat::items::table_for(handle.codec.protocol_id())`.
