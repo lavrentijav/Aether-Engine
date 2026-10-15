@@ -82,6 +82,13 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
     // lock is held here. The host applies each plugin's own period and budget.
     crate::plugins::on_tick(now);
 
+    // A menu was clicked this tick and the client may have predicted a change:
+    // resync its window once. Coalescing here means a burst of clicks costs
+    // one full-window send, not one per click.
+    for p in &players {
+        crate::game::window::flush_menu_resync(p, world);
+    }
+
     if now % 2 == 0 {
         broadcast_equipment(&players, registry, world);
     }

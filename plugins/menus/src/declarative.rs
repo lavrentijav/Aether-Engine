@@ -24,14 +24,23 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use aether_plugin::menus::{MenuAction, MenuCondition, MenuDefinition, MenuItem, MenuLayout};
-use aether_plugin::{LogLevel, NativeContext};
+use aether_plugin::{HostBackend, LogLevel, NativeContext};
 use serde::Deserialize;
 
 /// The operator-config key naming the directory, relative to the server's
 /// working directory.
 const DEFAULT_DIR: &str = "plugins/menus/menus";
+
+/// The configured menus directory, or the default.
+pub fn dir_from_config(config: &std::collections::BTreeMap<String, String>) -> String {
+    config
+        .get("menus_dir")
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_DIR.to_string())
+}
 
 /// A menu file's on-disk shape.
 #[derive(Debug, Deserialize)]
@@ -80,11 +89,14 @@ struct FileItem {
 /// unreadable file or a bad schema is logged and skipped, never fatal: a
 /// broken menu file must not stop the server or the other menus.
 pub fn load(ctx: &NativeContext) -> Vec<MenuDefinition> {
-    let dir = ctx
-        .config
-        .get("menus_dir")
-        .cloned()
-        .unwrap_or_else(|| DEFAULT_DIR.to_string());
+    load_dir(&dir_from_config(ctx.config), ctx.backend)
+}
+
+/// Read and parse every `*.toml` under `dir`. This does blocking filesystem
+/// I/O, so it is only ever called at `init` or from the reload worker thread —
+/// never on the tick thread.
+pub fn load_dir(dir: &str, backend: &Arc<dyn HostBackend>) -> Vec<MenuDefinition> {
+    let log = |level: LogLevel, message: String| backend.log("menus", level, &message);
     let dir = PathBuf::from(dir);
     let mut files: Vec<PathBuf> = match std::fs::read_dir(&dir) {
         Ok(entries) => entries
@@ -93,9 +105,9 @@ pub fn load(ctx: &NativeContext) -> Vec<MenuDefinition> {
             .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("toml"))
             .collect(),
         Err(e) => {
-            ctx.log(
+            log(
                 LogLevel::Info,
-                &format!("menus: no declarative directory {} ({e})", dir.display()),
+                format!("menus: no declarative directory {} ({e})", dir.display()),
             );
             return Vec::new();
         }
@@ -106,11 +118,11 @@ pub fn load(ctx: &NativeContext) -> Vec<MenuDefinition> {
         match std::fs::read_to_string(&path) {
             Ok(text) => match parse_str(&text) {
                 Ok(def) => out.push(def),
-                Err(e) => ctx.log(LogLevel::Warn, &format!("menus: {}: {e}", path.display())),
+                Err(e) => log(LogLevel::Warn, format!("menus: {}: {e}", path.display())),
             },
-            Err(e) => ctx.log(
+            Err(e) => log(
                 LogLevel::Warn,
-                &format!("menus: cannot read {}: {e}", path.display()),
+                format!("menus: cannot read {}: {e}", path.display()),
             ),
         }
     }

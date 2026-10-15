@@ -307,6 +307,13 @@ impl Inventory {
     /// ends there. That loses one hop of provenance per merge, which is the
     /// price of stacks behaving the way every player expects them to.
     pub fn insert(&mut self, mut stack: Stack) -> Option<Stack> {
+        // A menu item is a display stand-in, never a real item: it must never
+        // reach a real inventory. If this ever fires, a menu slot leaked into
+        // the inventory path (see `Stack::is_menu_item`).
+        debug_assert!(
+            !stack.is_menu_item(),
+            "a display-only menu stack must not enter a real inventory"
+        );
         self.ensure();
         let order: Vec<usize> = (FIRST_HOTBAR..OFFHAND).chain(9..FIRST_HOTBAR).collect();
         let max = stack.max_stack();

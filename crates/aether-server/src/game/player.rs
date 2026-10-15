@@ -45,6 +45,9 @@ pub enum WindowKind {
     /// `menu` id is the plugin's handle for it; `slots` is what the client is
     /// shown.
     Menu {
+        /// The plugin that opened it, so a click is delivered only to that
+        /// plugin and not broadcast to every native plugin.
+        owner: String,
         /// The plugin-assigned menu instance id, for routing clicks.
         menu: u64,
         /// The window shape, which decides the menu registry id and slot count.
@@ -175,6 +178,16 @@ pub struct PlayerState {
     pub env_timer: u32,
     /// Health, food and saturation as last sent, so changes are noticed.
     pub sent_health: (f32, i32, f32),
+    /// Menu clicks accepted so far in the tick named by [`Self::menu_click_tick`].
+    /// A client that floods menu clicks is rate-limited per tick (see
+    /// `game::window`), so plugin callbacks and resyncs are bounded.
+    pub menu_clicks: u32,
+    /// The tick [`Self::menu_clicks`] counts against.
+    pub menu_click_tick: u64,
+    /// A menu was clicked and the client may have predicted a change; the tick
+    /// loop resyncs the window once, coalescing every click in the tick into
+    /// one full-window send instead of one per click.
+    pub menu_resync: bool,
 }
 
 impl PlayerState {
@@ -207,6 +220,9 @@ impl PlayerState {
             spawn: (8.5, 80.0, 8.5),
             env_timer: 0,
             sent_health: (-1.0, -1, -1.0),
+            menu_clicks: 0,
+            menu_click_tick: 0,
+            menu_resync: false,
         }
     }
 

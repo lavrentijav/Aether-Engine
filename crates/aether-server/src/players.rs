@@ -242,6 +242,49 @@ pub struct Registry {
     players: RwLock<HashMap<i32, Arc<PlayerHandle>>>,
 }
 
+#[cfg(test)]
+impl PlayerHandle {
+    /// A handle with an empty inventory and a real (loopback) outbox, for
+    /// tests that drive the click path or the plugin host without a socket
+    /// handshake. Uses the 1.21.11 codec.
+    pub(crate) fn for_test(entity_id: i32, name: &str) -> Arc<PlayerHandle> {
+        use std::net::{TcpListener, TcpStream};
+        static CODEC: crate::protocol::modern::Codec =
+            crate::protocol::modern::Codec(&crate::protocol::modern::version::V1_21_11);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let client = TcpStream::connect(listener.local_addr().unwrap()).expect("loopback peer");
+        // Nobody reads the other end; the outbox drains into the kernel buffer
+        // and the tests never push enough to fill it.
+        std::mem::forget(client);
+        let (server, _) = listener.accept().expect("loopback accept");
+        let outbox = Outbox::start(Conn::new(server), name).expect("outbox");
+        Arc::new(PlayerHandle {
+            entity_id,
+            uuid: entity_id as u128,
+            name: name.to_string(),
+            ip: None,
+            properties: Vec::new(),
+            codec: &CODEC,
+            outbox,
+            pos: Mutex::new(PosLook {
+                x: 0.0,
+                y: 64.0,
+                z: 0.0,
+                yaw: 0.0,
+                pitch: 0.0,
+                on_ground: true,
+            }),
+            inventory: Mutex::new(crate::inventory::Inventory::new()),
+            session: Mutex::new(crate::commands::Session::default()),
+            game: Mutex::new(crate::game::player::PlayerState::new(
+                crate::protocol::GameMode::Survival,
+            )),
+            tracked: Mutex::new(std::collections::HashSet::new()),
+            visibility: Mutex::new(crate::visibility::State::default()),
+        })
+    }
+}
+
 pub type SharedRegistry = Arc<Registry>;
 
 impl Registry {
@@ -295,6 +338,16 @@ impl Registry {
     /// joiner without holding the registry lock while writing to sockets).
     pub fn snapshot(&self) -> Vec<Arc<PlayerHandle>> {
         self.players.read().unwrap().values().cloned().collect()
+    }
+
+    /// Insert an already-built handle, for tests that need a player in the
+    /// registry without a live socket handshake.
+    #[cfg(test)]
+    pub(crate) fn insert_for_test(&self, handle: Arc<PlayerHandle>) {
+        self.players
+            .write()
+            .unwrap()
+            .insert(handle.entity_id, handle);
     }
 
     /// Send an event to everyone except `exclude`, encoded per recipient.

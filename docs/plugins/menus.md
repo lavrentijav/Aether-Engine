@@ -97,6 +97,11 @@ actions = ["[economy] take 100", "[give] minecraft:diamond_sword 1", "[close]"]
 registered with the core command registry, so they are dispatched and
 permission-checked like any command — a core name is refused, never shadowed.
 
+`/menus reload` rereads the files on a worker thread and installs them on the
+next tick, so it never blocks the tick. A player may process at most 8 menu
+clicks per tick; a menu window is resynced at most once per tick regardless of
+how many clicks arrived.
+
 ## Placeholders
 
 `%player%` expands to the clicking player's name wherever a menu string is used
@@ -114,9 +119,9 @@ the service for each `%name%` left in the text.
 * **Security** is the core's, not the plugin's: a menu click runs only the
   actions the operator wrote, through host mechanisms (the command registry,
   chat, `[give]`), and never manipulates the inventory directly.
-* **Optional integrations** (`economy`, `sound`, `players`) are resolved as
-  services and degrade honestly: `balance` conditions fail closed and
-  `[economy]`/`[sound]` are inert until those services exist.
+* **Optional integrations** (`economy`) are resolved as services and degrade
+  honestly: `balance` conditions fail closed and `[economy]` is inert until the
+  service exists. `[give]` and `[sound]` go through the core.
 
 See [KNOWN_ISSUES §20](../KNOWN_ISSUES.md) for the current limits (window
 shapes, glint/model rendering, pre-1.20.2 codecs).

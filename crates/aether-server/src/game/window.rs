@@ -694,6 +694,12 @@ fn layout_of(w: &OpenWindow) -> (Layout, Option<ContainerTarget>) {
     }
 }
 
+/// How many menu clicks a player may have processed in one tick before the
+/// rest are dropped. A vanilla client sends at most a handful; a flood is a
+/// client trying to make the server re-run plugin callbacks and resend the
+/// window once per packet. 8/tick is 160/s, far above any human rate.
+const MENU_CLICKS_PER_TICK: u32 = 8;
+
 /// The menu id of a window kind, if it is a virtual menu. Pure, so the click
 /// router can be tested without a player.
 fn open_menu_id_kind(kind: &WindowKind) -> Option<u64> {
@@ -706,13 +712,13 @@ fn open_menu_id_kind(kind: &WindowKind) -> Option<u64> {
 /// Where a click goes. Pure and total: the security invariant is that a click
 /// on an open menu is **always** [`ClickTarget::Menu`] for every window id,
 /// slot, button and mode, so it never reaches the inventory click logic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ClickTarget {
     /// The player's own or a container window: the normal click logic runs.
     Inventory,
-    /// A virtual menu owned by `u64`: the click is delivered to the plugin
-    /// and no inventory logic runs.
-    Menu(u64),
+    /// A virtual menu owned by a plugin: the click is delivered only to that
+    /// plugin and no inventory logic runs.
+    Menu { owner: String, menu: u64 },
 }
 
 fn route_click(open: Option<&WindowKind>, window: u8) -> ClickTarget {
@@ -720,9 +726,12 @@ fn route_click(open: Option<&WindowKind>, window: u8) -> ClickTarget {
         // Window 0 is the player's own inventory, even while a menu is open.
         return ClickTarget::Inventory;
     }
-    match open.and_then(open_menu_id_kind) {
-        Some(menu) => ClickTarget::Menu(menu),
-        None => ClickTarget::Inventory,
+    match open {
+        Some(WindowKind::Menu { owner, menu, .. }) => ClickTarget::Menu {
+            owner: owner.clone(),
+            menu: *menu,
+        },
+        _ => ClickTarget::Inventory,
     }
 }
 
@@ -739,9 +748,32 @@ pub fn open_menu_id(handle: &PlayerHandle) -> Option<u64> {
 /// The menu slots this player is currently shown, for a plugin updating one.
 pub fn menu_slots(handle: &PlayerHandle) -> Option<(u64, MenuShape, Vec<Option<Stack>>)> {
     match handle.game().window.as_ref().map(|w| &w.kind) {
-        Some(WindowKind::Menu { menu, shape, slots }) => Some((*menu, *shape, slots.clone())),
+        Some(WindowKind::Menu {
+            menu, shape, slots, ..
+        }) => Some((*menu, *shape, slots.clone())),
         _ => None,
     }
+}
+
+/// Send the open menu window once if a click asked for a resync and did not
+/// already get one. Called once per player per tick from the tick loop, so a
+/// burst of clicks in one tick costs one full-window send, not one per click.
+pub fn flush_menu_resync(handle: &PlayerHandle, world: &DemoWorld) {
+    let pending = {
+        let mut st = handle.game();
+        std::mem::take(&mut st.menu_resync)
+    };
+    if pending && open_menu_id_kind_any(handle) {
+        sync_open(handle, world);
+    }
+}
+
+/// Whether the player currently has a menu window open. Cheap read.
+fn open_menu_id_kind_any(handle: &PlayerHandle) -> bool {
+    matches!(
+        handle.game().window.as_ref().map(|w| &w.kind),
+        Some(WindowKind::Menu { .. })
+    )
 }
 
 /// Handle one click. Returns stacks to throw from the player.
@@ -756,16 +788,35 @@ pub fn click(
     // A virtual menu is read-only from the inventory's point of view: **no**
     // click — left, right, shift, number-key swap, offhand, drop, double-click
     // collect or creative middle-click — may move a stack, because the slots
-    // are stand-ins for actions, not items. The click is handed to the plugin
-    // that owns the menu, and the client is resynced so any local prediction
-    // (a client-side peek at the item, a shift-click animation) is reverted.
+    // are stand-ins for actions, not items. The click is handed only to the
+    // plugin that owns the menu, and the client is resynced so any local
+    // prediction is reverted — but the resync is deferred and coalesced: a
+    // burst of clicks in one tick costs **one** full-window send, not one per
+    // click, and the per-tick rate limit caps the plugin callbacks.
     let routed = {
         let st = handle.game();
         route_click(st.window.as_ref().map(|w| &w.kind), window)
     };
-    if let ClickTarget::Menu(menu) = routed {
-        crate::plugins::menu_click(handle, menu, slot as i32, button, mode);
-        sync_open(handle, world);
+    if let ClickTarget::Menu { owner, menu } = routed {
+        let accepted = {
+            let mut st = handle.game();
+            let now = crate::game::now();
+            if st.menu_click_tick != now {
+                st.menu_click_tick = now;
+                st.menu_clicks = 0;
+            }
+            let accepted = st.menu_clicks < MENU_CLICKS_PER_TICK;
+            if accepted {
+                st.menu_clicks += 1;
+            }
+            accepted
+        };
+        if accepted {
+            crate::plugins::menu_click(handle, &owner, menu, slot as i32, button, mode);
+            // Request one resync for this tick; the tick loop sends it once,
+            // after every click that arrived in the tick has been handled.
+            handle.game().menu_resync = true;
+        }
         return;
     }
     let mut crafted: Vec<(aether_world::ItemTypeId, u8)> = Vec::new();
@@ -1212,6 +1263,7 @@ fn fit_menu_slots(shape: MenuShape, mut slots: Vec<Option<Stack>>) -> Vec<Option
 pub fn open_menu(
     handle: &PlayerHandle,
     world: &DemoWorld,
+    owner: &str,
     menu: u64,
     shape: MenuShape,
     title: &str,
@@ -1224,7 +1276,12 @@ pub fn open_menu(
         st.drag = None;
         st.window = Some(OpenWindow {
             id,
-            kind: WindowKind::Menu { menu, shape, slots },
+            kind: WindowKind::Menu {
+                owner: owner.to_string(),
+                menu,
+                shape,
+                slots,
+            },
         });
         (id, shape.menu())
     };
@@ -1316,9 +1373,9 @@ pub fn close(handle: &PlayerHandle, world: &DemoWorld) {
         // the state lock is released, since the callback may open another menu.
         let menu = match st.window.as_ref() {
             Some(OpenWindow {
-                kind: WindowKind::Menu { menu, .. },
+                kind: WindowKind::Menu { owner, menu, .. },
                 ..
-            }) => Some(*menu),
+            }) => Some((owner.clone(), *menu)),
             _ => None,
         };
         let mut back: Vec<Stack> = Vec::new();
@@ -1348,8 +1405,8 @@ pub fn close(handle: &PlayerHandle, world: &DemoWorld) {
     for s in leftovers {
         super::entities::throw_from(handle, s);
     }
-    if let Some(menu) = menu {
-        crate::plugins::menu_close(handle, menu);
+    if let Some((owner, menu)) = menu {
+        crate::plugins::menu_close(handle, &owner, menu);
     }
     sync(handle, world);
 }
@@ -1609,6 +1666,7 @@ mod tests {
         st.window = Some(OpenWindow {
             id: 7,
             kind: WindowKind::Menu {
+                owner: "menus".to_string(),
                 menu,
                 shape,
                 slots: fit_menu_slots(shape, slots),
@@ -1667,6 +1725,7 @@ mod tests {
         // menu is delivered to the plugin, and no container window ever is.
         assert_eq!(
             open_menu_id_kind(&WindowKind::Menu {
+                owner: "menus".to_string(),
                 menu: 9,
                 shape: MenuShape::Chest6,
                 slots: vec![],
@@ -1687,7 +1746,11 @@ mod tests {
     }
 
     #[test]
-    fn every_click_on_a_menu_routes_to_the_plugin_not_the_inventory() {
+    fn the_click_router_sends_every_menu_click_to_the_plugin() {
+        // Unit test of the pure router. The *real* security property — a real
+        // `click` on a real `Inventory` touching nothing — is
+        // `clicking_a_real_menu_never_touches_the_real_inventory` below; this
+        // one only pins the router's decision table.
         // A deterministic xorshift over random window/slot/button/mode
         // sequences. The router ignores the slot, button and mode on purpose:
         // that is the invariant — no click *type* can steer a menu click into
@@ -1700,6 +1763,7 @@ mod tests {
             seed
         };
         let menu = WindowKind::Menu {
+            owner: "menus".to_string(),
             menu: 77,
             shape: MenuShape::Chest6,
             slots: vec![],
@@ -1720,11 +1784,101 @@ mod tests {
                 assert_eq!(route_click(Some(&menu), window), ClickTarget::Inventory);
                 continue;
             }
-            assert_eq!(route_click(Some(&menu), window), ClickTarget::Menu(77));
+            assert_eq!(
+                route_click(Some(&menu), window),
+                ClickTarget::Menu {
+                    owner: "menus".to_string(),
+                    menu: 77
+                }
+            );
             // A real container window never routes to a menu.
             assert_eq!(route_click(Some(&chest), window), ClickTarget::Inventory);
             assert_eq!(route_click(None, window), ClickTarget::Inventory);
         }
+    }
+
+    #[test]
+    fn clicking_a_real_menu_never_touches_the_real_inventory() {
+        // The real thing: a real PlayerHandle, a real Inventory and a real
+        // `click`, over every click type. Byte-compares the inventory and the
+        // cursor before and after, and asserts the click was actually routed
+        // into the menu branch (so removing the interception fails the test).
+        let world = test_world(21);
+        let handle = crate::players::PlayerHandle::for_test(4242, "Steve");
+        {
+            let mut inv = handle.inventory();
+            inv.put_slot(9, Some(Stack::named("minecraft:diamond", 5)));
+            inv.put_slot(36, Some(Stack::named("minecraft:dirt", 64)));
+            inv.put_slot(45, Some(Stack::named("minecraft:shield", 1)));
+        }
+        let inv_before = crate::inventory::encode(&handle.inventory());
+        handle.game().cursor = Some(Stack::named("minecraft:emerald", 3));
+        let cursor_before = handle.game().cursor.clone();
+
+        let menu_items = vec![
+            Some(Stack::named("minecraft:emerald_block", 1)),
+            None,
+            Some(Stack::named("minecraft:barrier", 1)),
+        ];
+        open_menu(
+            &handle,
+            &world,
+            "menus",
+            5,
+            MenuShape::Chest3,
+            "Test",
+            menu_items,
+        );
+        let window_id = handle.game().window.as_ref().expect("menu open").id;
+
+        // Menu slots (0..27), the player rows below (27..62), the offhand,
+        // outside the window (-999) and past the end: every slot, button and
+        // mode — left, right, shift, number-key swap, offhand, drop, drag,
+        // double-click collect, creative middle-click.
+        for slot in [-999i16, 0, 1, 2, 13, 26, 27, 36, 40, 61, 62, 200] {
+            for button in -1i8..=10 {
+                for mode in 0..=6 {
+                    click(&handle, &world, window_id, slot, button, mode);
+                }
+            }
+        }
+
+        assert_eq!(
+            crate::inventory::encode(&handle.inventory()),
+            inv_before,
+            "every click type must leave the real inventory byte-identical"
+        );
+        assert_eq!(
+            handle.game().cursor,
+            cursor_before,
+            "the cursor is untouched"
+        );
+        assert!(
+            handle.game().menu_resync,
+            "the click must have been routed to the menu branch, not the inventory"
+        );
+    }
+
+    #[test]
+    fn the_menu_click_rate_limit_bounds_the_tick() {
+        let world = test_world(22);
+        let handle = crate::players::PlayerHandle::for_test(4243, "Alex");
+        open_menu(
+            &handle,
+            &world,
+            "menus",
+            6,
+            MenuShape::Chest3,
+            "Test",
+            Vec::new(),
+        );
+        let window_id = handle.game().window.as_ref().unwrap().id;
+        // The tick counter is 0 in a test; the cap is per tick, so the count
+        // saturates at MENU_CLICKS_PER_TICK no matter how many arrive.
+        for _ in 0..1000 {
+            click(&handle, &world, window_id, 0, 0, 0);
+        }
+        assert!(handle.game().menu_clicks <= MENU_CLICKS_PER_TICK);
     }
 
     #[test]

@@ -30,6 +30,10 @@ use aether_plugin::{
     HostBackend, LogLevel, NativeContext, NativePlugin, NativeRegistration, Player,
 };
 
+/// The id under which this plugin owns every menu window it opens, so a click
+/// is routed back to it and not broadcast to other native plugins.
+const MENUS_OWNER: &str = "menus";
+
 /// The menus plugin's manifest. `menu` opens a named menu; `menus` reloads
 /// the declarative files (op-gated).
 pub fn manifest() -> Manifest {
@@ -44,7 +48,11 @@ pub fn manifest() -> Manifest {
         capabilities: Vec::new(),
         // No event subscription: menus are opened by commands, the API and
         // clicks, none of which is a bus event.
-        subscribe: Vec::new(),
+        // `on-command` answers `/menu`, `/menus` and each declarative menu's
+        // `open_commands`; `on-tick` drives the off-thread `/menus reload`
+        // (the file read runs on a worker thread and the result is installed
+        // here, on the tick, never blocking it).
+        subscribe: vec!["on-command".to_string(), "on-tick".to_string()],
         commands: vec![
             CommandDecl::Plain("menu".to_string()),
             CommandDecl::Detailed {
@@ -70,7 +78,6 @@ pub fn registration() -> NativeRegistration {
 
 /// One open menu instance.
 struct OpenMenu {
-    caller: String,
     player: u64,
     def: MenuDefinition,
 }
@@ -82,6 +89,10 @@ struct Menus {
     backend: OnceLock<Arc<dyn HostBackend>>,
     services: OnceLock<Arc<ServiceRegistry>>,
     state: Mutex<State>,
+    /// Declarative menus a `/menus reload` worker thread finished loading,
+    /// waiting to be installed on the next tick. `None` means no reload is
+    /// pending; the read itself never happens on the tick thread.
+    pending: Mutex<Option<Vec<MenuDefinition>>>,
 }
 
 /// The mutable state, behind one lock.
@@ -121,8 +132,14 @@ impl Menus {
             .collect()
     }
 
-    /// Open `def` for `player`, replacing any window and remembering the
-    /// previous menu for `[back]`.
+    /// Open `def` for `player`, replacing whatever they had open and pushing
+    /// the replaced menu onto the per-player history so `[back]` can return.
+    ///
+    /// A player has exactly one window, so this drops the previous instance
+    /// (of any name) before installing the new one — a `[open]` chain never
+    /// leaks a stale instance. The window is owned by [`MENUS_OWNER`], not by
+    /// the dependent that asked for it: *this* plugin runs the actions, so it
+    /// must be the plugin a click is routed back to.
     fn open_internal(
         &self,
         caller: &str,
@@ -133,30 +150,41 @@ impl Menus {
             return Err("menu layout has no slots".to_string());
         }
         let items = self.visible_items(player, def);
-        let (id, replaced) = {
+        let id = {
             let mut st = self.state.lock().unwrap();
-            // Replacing a window drops the old instance; remember it so
-            // `[back]` can return.
-            let prev = self.current_id(&st, caller, player.id, &def.name);
+            // The menu this player currently has open, if any.
+            let prev = st
+                .open
+                .values()
+                .find(|m| m.player == player.id)
+                .map(|m| m.def.clone());
+            // A player has one window: drop every instance of theirs.
+            st.open.retain(|_, m| m.player != player.id);
+            st.named.retain(|(_, p, _), _| *p != player.id);
+            // Remember the replaced menu for `[back]`, unless it is the same
+            // one (reopening a menu must not push a self-loop).
+            if let Some(prev) = prev {
+                if prev.name != def.name {
+                    st.history.entry(player.id).or_default().push((
+                        caller.to_string(),
+                        prev,
+                        caller.to_string(),
+                    ));
+                }
+            }
             st.next_id += 1;
             let id = st.next_id;
             st.open.insert(
                 id,
                 OpenMenu {
-                    caller: caller.to_string(),
                     player: player.id,
                     def: def.clone(),
                 },
             );
             st.named
                 .insert((caller.to_string(), player.id, def.name.clone()), id);
-            (id, prev)
+            id
         };
-        if let Some(prev_id) = replaced {
-            if prev_id != id {
-                self.remove_instance(prev_id);
-            }
-        }
         let Some(backend) = self.backend() else {
             return Err("menus: host backend unavailable".to_string());
         };
@@ -165,10 +193,10 @@ impl Menus {
         } else {
             def.title.clone()
         };
-        if backend.open_menu(caller, player.id, id, &title, def.layout, &items) {
+        if backend.open_menu(MENUS_OWNER, player.id, id, &title, def.layout, &items) {
             Ok(())
         } else {
-            self.remove_instance(id);
+            self.handle_close(player, id);
             Err("menus: the host cannot open a window for that player".to_string())
         }
     }
@@ -178,16 +206,6 @@ impl Menus {
         st.named
             .get(&(caller.to_string(), player, name.to_string()))
             .copied()
-    }
-
-    fn remove_instance(&self, id: u64) {
-        let mut st = self.state.lock().unwrap();
-        if let Some(menu) = st.open.remove(&id) {
-            let key = (menu.caller, menu.player, menu.def.name);
-            if st.named.get(&key) == Some(&id) {
-                st.named.remove(&key);
-            }
-        }
     }
 
     /// A click reached a menu. Returns the actions run, for tests.
@@ -282,9 +300,17 @@ impl Menus {
                     self.log("economy action ignored: no economy service");
                 }
                 MenuAction::Give { item, count } => {
+                    // Give through the core, so the overflow is dropped at the
+                    // player's feet and journalled, exactly like `/give`. (The
+                    // SDK `players.give` is a stub until CMD-32 lands.)
                     let item = self.expand(item, player);
-                    if let Some(players) = self.services().and_then(|s| sdk::players(s)) {
-                        players.give("menus", player, &item, *count);
+                    if let Some(b) = self.backend() {
+                        let left = b.give_item("menus", player.id, &item, *count);
+                        if left > 0 {
+                            self.log(&format!(
+                                "give `{item}` x{left} could not be handed over; left is {left}"
+                            ));
+                        }
                     }
                 }
                 MenuAction::Back => self.go_back(player),
@@ -407,20 +433,17 @@ impl Menus {
             st.registry.insert(def.name.clone(), def);
         }
     }
+
+    /// Take the menus a reload worker finished reading, if any. Called once
+    /// per tick by the plugin.
+    fn take_pending(&self) -> Option<Vec<MenuDefinition>> {
+        self.pending.lock().unwrap().take()
+    }
 }
 
 impl MenusService for Menus {
     fn open(&self, caller: &str, player: &Player, def: &MenuDefinition) -> Result<(), String> {
-        // Remember the menu being replaced for `[back]`, but only a named one.
-        if let Some(prev) = self.named_menu(&def.name) {
-            self.state
-                .lock()
-                .unwrap()
-                .history
-                .entry(player.id)
-                .or_default()
-                .push((caller.to_string(), prev, caller.to_string()));
-        }
+        // `open_internal` records the replaced menu for `[back]` itself.
         self.open_internal(caller, player, def)
     }
 
@@ -567,11 +590,21 @@ impl NativePlugin for MenusPlugin {
                 }
             }
             "menus" if args.first().map(String::as_str) == Some("reload") => {
-                let loaded = declarative::load(_ctx);
-                let n = loaded.len();
-                self.inner.install_menus(loaded);
-                self.register_open_commands(_ctx);
-                return Some(lines(vec![format!("Reloaded {n} menu(s).")]));
+                // Read the files on a worker thread and install them on the
+                // next tick: the tick thread must not block on filesystem I/O.
+                let dir = declarative::dir_from_config(_ctx.config);
+                let backend = Arc::clone(_ctx.backend);
+                let inner = Arc::clone(&self.inner);
+                let spawned = std::thread::Builder::new()
+                    .name("menus-reload".into())
+                    .spawn(move || {
+                        let loaded = declarative::load_dir(&dir, &backend);
+                        *inner.pending.lock().unwrap() = Some(loaded);
+                    });
+                return Some(match spawned {
+                    Ok(_) => lines(vec!["Reloading menus…".to_string()]),
+                    Err(e) => lines(vec![format!("menus: cannot start reload: {e}")]),
+                });
             }
             "menus" => return Some(lines(vec!["Usage: /menus reload".to_string()])),
             // A declarative menu's own `open_commands` entry.
@@ -610,6 +643,18 @@ impl NativePlugin for MenusPlugin {
     fn on_menu_close(&mut self, _ctx: &mut NativeContext, p: &Player, menu: u64) {
         self.inner.handle_close(p, menu);
     }
+
+    fn on_tick(&mut self, ctx: &mut NativeContext, _n: u64) {
+        // Install any declarative menus a reload worker finished reading. This
+        // is the only place the registry changes after `init`, so the read
+        // never blocks the tick.
+        if let Some(menus) = self.inner.take_pending() {
+            let n = menus.len();
+            self.inner.install_menus(menus);
+            self.register_open_commands(ctx);
+            ctx.log(LogLevel::Info, &format!("Reloaded {n} menu(s)."));
+        }
+    }
 }
 
 fn lines(v: Vec<String>) -> aether_plugin::bindings::aether::plugin::types::CommandResult {
@@ -634,8 +679,8 @@ mod tests {
         commands: StdMutex<Vec<String>>,
         messages: StdMutex<Vec<String>>,
         sounds: StdMutex<Vec<String>>,
-        /// Pretend world state: a click on a menu must leave this untouched.
-        inventory: StdMutex<Vec<i32>>,
+        /// `(item, count)` pairs handed over through `give_item`.
+        given: StdMutex<Vec<(String, u32)>>,
     }
 
     impl HostBackend for Rec {
@@ -674,6 +719,10 @@ mod tests {
         }
         fn play_sound(&self, _: &str, _: u64, name: &str) {
             self.sounds.lock().unwrap().push(name.to_string());
+        }
+        fn give_item(&self, _: &str, _: u64, item: &str, count: u32) -> u64 {
+            self.given.lock().unwrap().push((item.to_string(), count));
+            0
         }
         fn run_command(&self, _: &str, _: Option<u64>, cmd: &str) -> Vec<String> {
             self.commands.lock().unwrap().push(cmd.to_string());
@@ -718,9 +767,8 @@ mod tests {
     }
 
     #[test]
-    fn a_click_runs_the_slots_actions_and_touches_no_inventory() {
+    fn a_click_runs_the_slots_actions_for_every_click_type() {
         let rec = Arc::new(Rec::default());
-        rec.inventory.lock().unwrap().push(42);
         let m = menus_with(rec.clone());
         m.open("caller", &player(), &shop()).unwrap();
         let id = rec.opened.lock().unwrap()[0].0;
@@ -729,12 +777,71 @@ mod tests {
         m.handle_click(&player(), id, 0, 0, 0);
         assert_eq!(rec.commands.lock().unwrap().as_slice(), ["buy sword"]);
         // Shift-click, right-click, number-key swap, drop, drag and creative
-        // middle-click on the same slot all do the same and never touch the
-        // inventory.
+        // middle-click on the same slot all run the same action: the click
+        // *type* decides nothing here.
         for (button, mode) in [(0, 1), (1, 0), (2, 2), (0, 4), (0, 5), (2, 3)] {
             m.handle_click(&player(), id, 0, button, mode);
         }
-        assert_eq!(rec.inventory.lock().unwrap().as_slice(), [42]);
+        assert!(rec
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| c == "buy sword"));
+    }
+
+    #[test]
+    fn a_give_action_hands_items_over_through_the_host() {
+        let rec = Arc::new(Rec::default());
+        let m = menus_with(rec.clone());
+        let def = MenuBuilder::new("g")
+            .button(
+                0,
+                "minecraft:chest",
+                "Take",
+                vec![MenuAction::Give {
+                    item: "minecraft:diamond".into(),
+                    count: 8,
+                }],
+            )
+            .build();
+        m.open("caller", &player(), &def).unwrap();
+        let id = rec.opened.lock().unwrap()[0].0;
+        m.handle_click(&player(), id, 0, 0, 0);
+        assert_eq!(
+            rec.given.lock().unwrap().as_slice(),
+            [("minecraft:diamond".to_string(), 8)]
+        );
+    }
+
+    #[test]
+    fn back_returns_to_the_previous_menu() {
+        let rec = Arc::new(Rec::default());
+        let m = menus_with(rec.clone());
+        let first = MenuBuilder::new("first")
+            .button(
+                0,
+                "minecraft:compass",
+                "Go",
+                vec![MenuAction::Open("second".into())],
+            )
+            .build();
+        let second = MenuBuilder::new("second")
+            .button(0, "minecraft:oak_door", "Back", vec![MenuAction::Back])
+            .build();
+        m.install_menus(vec![first, second]);
+        let first = m.named_menu("first").unwrap();
+
+        m.open("menus", &player(), &first).unwrap();
+        let id = rec.opened.lock().unwrap()[0].0;
+        // Open `second` from `first`; the click also pushes `first`.
+        m.handle_click(&player(), id, 0, 0, 0);
+        let id2 = rec.opened.lock().unwrap()[1].0;
+        // `back` reopens `first` (its title falls back to its name).
+        m.handle_click(&player(), id2, 0, 0, 0);
+        let opened = rec.opened.lock().unwrap();
+        assert_eq!(opened.len(), 3);
+        assert_eq!(opened.last().unwrap().1, "first");
     }
 
     #[test]
@@ -829,12 +936,14 @@ mod tests {
     }
 
     #[test]
-    fn random_click_sequences_never_touch_the_real_inventory() {
+    fn random_click_sequences_run_only_the_menus_own_actions() {
+        // The menus plugin has no inventory method to call at all — the slots
+        // are virtual and the core guarantees the inventory is untouched (the
+        // real end-to-end property test lives in `game::window`). What this
+        // bounds here is that a click can only ever produce an effect the menu
+        // authored: no click type or slot invents a command, message or gift.
         let rec = Arc::new(Rec::default());
-        rec.inventory.lock().unwrap().extend([10, 20, 30, 40]);
         let m = menus_with(rec.clone());
-
-        // A 6-row menu with every slot a clickable, action-running button.
         let mut builder = MenuBuilder::new("all").layout(L::Chest6);
         for slot in 0..54 {
             builder = builder.button(
@@ -843,20 +952,15 @@ mod tests {
                 "Button",
                 vec![
                     MenuAction::Command("say hi".into()),
-                    MenuAction::Give {
-                        item: "minecraft:dirt".into(),
-                        count: 1,
-                    },
+                    MenuAction::Sound("minecraft:ui.button.click".into()),
                 ],
             );
         }
         m.open("caller", &player(), &builder.build()).unwrap();
         let id = rec.opened.lock().unwrap()[0].0;
-        let before = rec.inventory.lock().unwrap().clone();
 
-        // Walk every click type — left, right, shift, number-key swap, drop,
-        // drag, double-click collect, creative middle-click — over random
-        // slots, including the player-inventory rows and outside-the-window.
+        // Every click type over random slots, including the player rows and
+        // outside the window.
         let mut seed = 0x2545_f491_4f6c_dd1du64;
         let mut next = move || {
             seed ^= seed << 13;
@@ -870,8 +974,70 @@ mod tests {
             let mode = (next() % 8) as i32;
             m.handle_click(&player(), id, slot, button, mode);
         }
-        // The menu ran actions, but never the player's real inventory.
-        assert_eq!(*rec.inventory.lock().unwrap(), before);
+        assert!(rec.commands.lock().unwrap().iter().all(|c| c == "say hi"));
+        assert!(rec
+            .sounds
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|s| s == "minecraft:ui.button.click"));
+        assert!(rec.messages.lock().unwrap().is_empty());
+        assert!(rec.given.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reload_reads_off_thread_and_installs_on_the_next_tick() {
+        use aether_plugin::service::ServiceRegistry;
+        use std::collections::BTreeMap;
+
+        let dir = std::env::temp_dir().join(format!("aether-menus-reload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.toml"),
+            "name = \"a\"\n[[item]]\nslot = 0\nmaterial = \"stone\"\n",
+        )
+        .unwrap();
+
+        let backend: Arc<dyn HostBackend> = Arc::new(Rec::default());
+        let services = Arc::new(ServiceRegistry::new());
+        let mut config = BTreeMap::new();
+        config.insert("menus_dir".to_string(), dir.to_string_lossy().into_owned());
+        let caps: Vec<String> = Vec::new();
+        let mut ctx = NativeContext {
+            id: "menus",
+            capabilities: &caps,
+            config: &config,
+            services: &services,
+            backend: &backend,
+        };
+
+        let mut plugin = MenusPlugin::default();
+        plugin.init(&mut ctx).unwrap();
+        assert!(plugin.inner.named_menu("a").is_some());
+        assert!(plugin.inner.named_menu("b").is_none());
+
+        // A second file appears; `/menus reload` must not read it on this
+        // (tick) thread — it returns at once and the read happens off-thread.
+        std::fs::write(
+            dir.join("b.toml"),
+            "name = \"b\"\n[[item]]\nslot = 0\nmaterial = \"dirt\"\n",
+        )
+        .unwrap();
+        plugin.on_command(&mut ctx, &player(), "menus", &["reload".to_string()]);
+
+        // The new menu is only present once a tick installs the worker's
+        // result.
+        let mut installed = false;
+        for _ in 0..2000 {
+            plugin.on_tick(&mut ctx, 1);
+            if plugin.inner.named_menu("b").is_some() {
+                installed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(installed, "the reload result was never installed on a tick");
     }
 
     #[test]

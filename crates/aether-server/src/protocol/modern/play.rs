@@ -1105,9 +1105,13 @@ mod tests {
         // data the four-list record. Nothing else is set, so exactly two
         // components ride along.
         for v in [
+            &crate::protocol::modern::version::V1_21_5,
+            // 1.21.4 is protocol 769, exactly where the record form begins: it
+            // must be exercised, or a 1.21.4 client would desync on the field
+            // count.
+            &crate::protocol::modern::version::V1_21_4,
             &crate::protocol::modern::version::V1_21_11,
             &crate::protocol::modern::version::V26_1,
-            &crate::protocol::modern::version::V1_21_5,
         ] {
             let stack = Stack::menu_item(
                 aether_world::ItemTypeId::vanilla("minecraft:stone").unwrap(),

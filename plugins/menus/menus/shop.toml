@@ -7,7 +7,10 @@
 name = "shop"
 title = "&6&lShop"
 layout = "chest6"
-permission = "shop.use"
+# Permission left off so the example opens out of the box: the permission model
+# (CMD-01/02) is not landed, so a `permission = "..."` here would deny even an
+# operator. Uncomment once the core permission service is present.
+# permission = "shop.use"
 open_commands = ["shop", "store"]
 
 [[item]]

@@ -57,6 +57,21 @@ mod imp {
         out
     }
 
+    /// A command a plugin asked to run from inside a host callback, held for
+    /// execution **after** the host lock is released.
+    ///
+    /// Running it inline would re-enter the one `HOST` mutex: a menu's
+    /// `[command]` reaches `commands::dispatch`, which for a non-core name
+    /// calls back into `plugins::on_command`, which locks `HOST` again on the
+    /// same thread — a self-deadlock. So the backend only records the command;
+    /// `menu_click` drains and dispatches it once the guard has dropped.
+    struct DeferredCommand {
+        plugin: String,
+        /// `Some` for a player command, `None` for `[console]`.
+        player: Option<u64>,
+        command: String,
+    }
+
     /// The world, operator config and player registry behind the host imports.
     struct ServerBackend {
         world: Arc<DemoWorld>,
@@ -67,6 +82,9 @@ mod imp {
         /// keyed by caller id, so the gate applies to native and WASM
         /// dependents alike.
         granted: Mutex<std::collections::BTreeMap<String, Vec<String>>>,
+        /// Commands requested from inside a host callback (see
+        /// [`DeferredCommand`]), drained outside the lock.
+        pending: Mutex<Vec<DeferredCommand>>,
     }
 
     impl ServerBackend {
@@ -193,7 +211,7 @@ mod imp {
 
         fn open_menu(
             &self,
-            _plugin: &str,
+            plugin: &str,
             player: u64,
             menu: u64,
             title: &str,
@@ -210,7 +228,9 @@ mod imp {
                     *cell = menu_stack(it);
                 }
             }
-            crate::game::window::open_menu(&handle, &self.world, menu, shape, title, slots);
+            // The owner is recorded with the window, so a later click is
+            // delivered only to the plugin that opened it.
+            crate::game::window::open_menu(&handle, &self.world, plugin, menu, shape, title, slots);
             true
         }
 
@@ -255,26 +275,71 @@ mod imp {
             );
         }
 
-        fn run_command(&self, _plugin: &str, player: Option<u64>, command: &str) -> Vec<String> {
-            // Console dispatch is a separate facility (CMD-07); until it lands
-            // a `[console]` action is a no-op rather than a silent player run.
+        /// Give items through the core's own `give_or_drop`, so a menu `[give]`
+        /// behaves exactly like `/give`: whatever does not fit is dropped,
+        /// owned, at the player's feet and journalled. Returns the leftover
+        /// count (0 on success); an unknown item name gives nothing.
+        fn give_item(&self, _plugin: &str, player: u64, item: &str, count: u32) -> u64 {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return count as u64;
+            };
+            let Some(id) = aether_world::ItemTypeId::vanilla(item) else {
+                return count as u64;
+            };
+            let (_taken, left) =
+                crate::ground::give_or_drop(&handle, &self.registry, &self.world, id, count as u64);
+            left
+        }
+
+        /// Record a command to run after the host lock is released. It is
+        /// **not** dispatched here: dispatching inline would re-enter `HOST`
+        /// (a `[command]` reaching `plugins::on_command` locks it again on the
+        /// same thread) and deadlock the tick. `menu_click` drains the queue.
+        fn run_command(&self, plugin: &str, player: Option<u64>, command: &str) -> Vec<String> {
+            self.pending.lock().unwrap().push(DeferredCommand {
+                plugin: plugin.to_string(),
+                player,
+                command: command.to_string(),
+            });
+            Vec::new()
+        }
+    }
+
+    /// Dispatch every command a host callback deferred, once no host lock is
+    /// held. Player commands go through the core dispatcher (the same gate as
+    /// any typed command); `[console]` has no dispatcher yet, so it is logged
+    /// and dropped rather than silently run as the player.
+    fn drain_deferred(backend: &Arc<ServerBackend>) {
+        let pending: Vec<DeferredCommand> = {
+            let mut q = backend.pending.lock().unwrap();
+            std::mem::take(&mut *q)
+        };
+        for cmd in pending {
+            let DeferredCommand {
+                plugin,
+                player,
+                command,
+            } = cmd;
             let Some(id) = player else {
                 crate::log::warn(&format!(
-                    "menus: `[console] {command}` ignored (no console dispatch yet)"
+                    "plugin `{plugin}`: `[console] {command}` ignored (no console dispatch yet)"
                 ));
-                return Vec::new();
+                continue;
             };
-            let Some(handle) = self.registry.by_entity(id as i32) else {
-                return Vec::new();
+            let Some(handle) = backend.registry.by_entity(id as i32) else {
+                continue;
             };
             let text = if command.starts_with('/') {
-                command.to_owned()
+                command
             } else {
                 format!("/{command}")
             };
-            match crate::commands::dispatch(&text, &handle, &self.registry, &self.world) {
-                Some(reply) => reply.0,
-                None => Vec::new(),
+            if let Some(reply) =
+                crate::commands::dispatch(&text, &handle, &backend.registry, &backend.world)
+            {
+                for line in reply.0 {
+                    handle.emit(&ServerEvent::Chat(line), &*backend.world);
+                }
             }
         }
     }
@@ -319,6 +384,10 @@ mod imp {
     }
 
     static HOST: OnceLock<Mutex<PluginHost>> = OnceLock::new();
+    /// The concrete backend, so a menu click can drain deferred commands
+    /// outside the host lock (the [`PluginHost`] holds it only as
+    /// `Arc<dyn HostBackend>` and cannot reach the concrete queue).
+    static BACKEND: OnceLock<Arc<ServerBackend>> = OnceLock::new();
 
     /// Load every plugin the operator configured. Called once at startup.
     pub fn install(cfg: &Arc<Config>, world: &Arc<DemoWorld>, registry: &SharedRegistry) {
@@ -330,7 +399,12 @@ mod imp {
             config: Arc::clone(cfg),
             registry: Arc::clone(registry),
             granted: Mutex::new(std::collections::BTreeMap::new()),
+            pending: Mutex::new(Vec::new()),
         });
+        // Kept so a menu click can drain the deferred-command queue **after**
+        // the host lock is released; the host itself cannot reach the
+        // concrete backend to do that.
+        let _ = BACKEND.set(Arc::clone(&backend));
         // Kept so each plugin's effective grant can be recorded for the SDK's
         // capability gate; `host` takes ownership of the other handle.
         let grant_sink = Arc::clone(&backend);
@@ -573,18 +647,36 @@ mod imp {
         })
     }
 
-    /// A click on a virtual menu: delivered to the native plugins (the menus
-    /// service host). The core has already guaranteed the click cannot move an
-    /// item, so this only dispatches.
-    pub fn menu_click(handle: &PlayerHandle, menu: u64, slot: i32, button: i8, mode: i32) {
+    /// A click on a virtual menu: delivered to the plugin that owns it. The
+    /// core has already guaranteed the click cannot move an item, so this only
+    /// dispatches.
+    ///
+    /// The host lock is taken for the callback and **released before any
+    /// command the callback asked to run is dispatched** — otherwise a
+    /// `[command]` action would re-enter the host to reach a plugin command
+    /// and hang the tick. See [`DeferredCommand`].
+    pub fn menu_click(
+        handle: &PlayerHandle,
+        owner: &str,
+        menu: u64,
+        slot: i32,
+        button: i8,
+        mode: i32,
+    ) {
         with((), |h| {
-            h.menu_click(&player(handle), menu, slot, button, mode)
+            h.menu_click(owner, &player(handle), menu, slot, button, mode)
         });
+        if let Some(backend) = BACKEND.get() {
+            drain_deferred(backend);
+        }
     }
 
     /// A virtual menu was closed; tell the plugin that owns it.
-    pub fn menu_close(handle: &PlayerHandle, menu: u64) {
-        with((), |h| h.menu_close(&player(handle), menu));
+    pub fn menu_close(handle: &PlayerHandle, owner: &str, menu: u64) {
+        with((), |h| h.menu_close(owner, &player(handle), menu));
+        if let Some(backend) = BACKEND.get() {
+            drain_deferred(backend);
+        }
     }
 
     pub fn after_player_join(handle: &PlayerHandle) {
@@ -615,9 +707,16 @@ mod imp {
     }
 
     /// A plugin command, if one is registered. `None` lets the built-ins run.
+    ///
+    /// The **core command registry** is the source of truth for who owns a
+    /// name, so the plugin is resolved from it and asked directly — a plugin
+    /// that registered a command at runtime (a declarative menu's
+    /// `open_commands`) cannot be found through a static manifest list.
     pub fn on_command(handle: &PlayerHandle, name: &str, args: &[String]) -> Option<Vec<String>> {
+        let entry = crate::commands::registry::plugin_command(name)?;
         with(None, |h| {
-            h.on_command(&player(handle), name, args).map(|r| r.lines)
+            h.on_command_for(&entry.plugin, &player(handle), name, args)
+                .map(|r| r.lines)
         })
     }
 
@@ -694,6 +793,96 @@ mod imp {
             assert_eq!(entry.plugin, "registers_test_plugin");
             assert_eq!(entry.op, 3);
         }
+
+        /// A throwaway world on a temp store, for the plugin-host e2e test.
+        fn test_world(seed: u64) -> crate::session::DemoWorld {
+            use aether_api::{FjallStore, World};
+            let dir =
+                std::env::temp_dir().join(format!("aether-mn1-host-{}-{seed}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let store = FjallStore::open(&dir).expect("temp store");
+            let generator =
+                crate::worldgen::Generator::load("", "", seed).expect("noise generator");
+            let revision = generator.revision();
+            let cfg = crate::gencache::CacheConfig {
+                root: String::new(),
+                ..Default::default()
+            };
+            let generator = crate::gencache::Cached::with_revision(generator, seed, revision, &cfg);
+            World::new(store, generator)
+        }
+
+        /// The deadlock repro from review 1 (B1), end to end through the real
+        /// host: a declarative menu whose button runs a **plugin** command.
+        /// Before the fix the click held the `HOST` lock and the command's
+        /// dispatch re-locked it on the same thread, hanging forever; the click
+        /// is run on a worker thread and joined with a timeout so a regression
+        /// fails the test instead of hanging the suite.
+        #[test]
+        fn a_menu_command_action_runs_without_deadlocking_the_host() {
+            use std::sync::Arc;
+            use std::time::Duration;
+
+            let dir = std::env::temp_dir().join(format!("aether-mn1-e2e-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let menus_dir = dir.join("menus");
+            std::fs::create_dir_all(&menus_dir).unwrap();
+            std::fs::write(
+                menus_dir.join("shop.toml"),
+                r#"
+name = "shop"
+title = "Shop"
+layout = "chest3"
+open_commands = ["shop"]
+
+[[item]]
+slot = 0
+material = "minecraft:stone"
+name = "Reopen"
+actions = ["[command] menu shop"]
+"#,
+            )
+            .unwrap();
+            let plugins_dir = dir.join("plugins");
+            std::fs::create_dir_all(&plugins_dir).unwrap();
+
+            let mut cfg = crate::config::Config::default();
+            cfg.plugins.dir = plugins_dir.to_string_lossy().into_owned();
+            let mut entry = crate::config::PluginEntry::default();
+            entry.config.insert(
+                "menus_dir".to_string(),
+                menus_dir.to_string_lossy().into_owned(),
+            );
+            cfg.plugins.plugins.insert("menus".to_string(), entry);
+            let cfg = Arc::new(cfg);
+
+            let world = Arc::new(test_world(31));
+            let registry: crate::players::SharedRegistry =
+                Arc::new(crate::players::Registry::default());
+            let handle = crate::players::PlayerHandle::for_test(9001, "Steve");
+            registry.insert_for_test(Arc::clone(&handle));
+
+            super::install(&cfg, &world, &registry);
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let world2 = Arc::clone(&world);
+            let handle2 = Arc::clone(&handle);
+            std::thread::spawn(move || {
+                // `/shop` registers at load; open it, then click its button.
+                let _ = super::on_command(&handle2, "shop", &[]);
+                // Bind the id first: a `MutexGuard` in an `if let` scrutinee
+                // lives for the whole body, and `click` takes the same lock.
+                let id = handle2.game().window.as_ref().map(|w| w.id);
+                if let Some(id) = id {
+                    crate::game::window::click(&handle2, &world2, id, 0, 0, 0);
+                }
+                let _ = tx.send(());
+            });
+            rx.recv_timeout(Duration::from_secs(15))
+                .expect("a `[command]` menu action deadlocked the plugin host");
+            // The button's command re-opened the menu.
+            assert!(handle.game().window.is_some());
+        }
     }
 }
 
@@ -740,8 +929,16 @@ mod imp {
     pub fn before_container_click(_h: &PlayerHandle, _w: u32, _s: i32) -> Option<String> {
         None
     }
-    pub fn menu_click(_h: &PlayerHandle, _menu: u64, _slot: i32, _button: i8, _mode: i32) {}
-    pub fn menu_close(_h: &PlayerHandle, _menu: u64) {}
+    pub fn menu_click(
+        _h: &PlayerHandle,
+        _owner: &str,
+        _menu: u64,
+        _slot: i32,
+        _button: i8,
+        _mode: i32,
+    ) {
+    }
+    pub fn menu_close(_h: &PlayerHandle, _owner: &str, _menu: u64) {}
     pub fn after_player_join(_h: &PlayerHandle) {}
     pub fn after_player_leave(_h: &PlayerHandle) {}
     pub fn after_entity_death(_e: u64, _k: Option<u64>) {}
