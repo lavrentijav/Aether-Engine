@@ -3,10 +3,27 @@
 Status: ✅ implemented, default **off** (2026-10-14). The section face graph and the reachable-set
 BFS live in `aether_world::visibility`; the cache, the per-player state, the stone masking and the
 per-tick reveal budget live in `crates/aether-server/src/visibility.rs`, wired through
-`players.rs::render` and the game tick. Config is `[visibility]` below. Not yet done: the optional
-ray refinement (point 4) and block-level buried-ore masking (point 6) — parsed and ignored; the real
-light of a hidden section (the codec reads one `BlockSource` for both blocks and light), and
-re-hiding a section that becomes hidden again. See [Known Issues A.16](../KNOWN_ISSUES.md).
+`players.rs::render` and the game tick. This is the `culling` mode of the optional anti-xray module
+(AX1); the default `engine` mode lives in the same file and masks individual buried ores instead of
+whole sections. Config is `[anti_xray]` below. Not yet done: the optional ray refinement (point 4),
+re-hiding a section that becomes hidden again, and the real light of a hidden section (the codec
+reads one `BlockSource` for both blocks and light). See
+[Known Issues A.16](../KNOWN_ISSUES.md).
+
+## Two modes (`[anti_xray] mode`)
+
+AX1 ships two strategies behind one config section, `[anti_xray]`:
+
+- **`engine`** (default, cheap): inside *visible* sections, an ore-like block with all six
+  neighbours opaque is sent as the surrounding stone/deepslate/netherrack and re-sent for real the
+  moment a neighbour changes (break, explosion, fluid) so it is on the client before the player can
+  mine to it. This is the design's point 6, `mask_buried_ores`, promoted to the default.
+- **`culling`** (this document's design): whole sections the player cannot see, even after turning
+  or moving a little, are sent as stone. Points 1–5 below.
+
+The configurable `hidden_blocks` list (default: every ore, ancient debris and monster spawner)
+feeds `engine` directly and is the block set the section graph is not asked about in `culling`
+(there the whole section is masked).
 
 ## Goal
 
@@ -19,7 +36,7 @@ Why:
 - **Bandwidth and client load.** A hidden section encodes as a single-valued palette (stone): a
   few bytes instead of kilobytes, on 1.18+ protocols. Underground-heavy columns shrink a lot.
 
-Switchable: `visibility.enabled = false` by default until it is proven; per world.
+Switchable: `[anti_xray] enabled = false` by default until it is proven; per world (`worlds`).
 
 ## Design (recommended)
 
@@ -43,38 +60,51 @@ Switchable: `visibility.enabled = false` by default until it is proven; per worl
 5. **Reveal.** When a hidden section becomes visible (player moved, block broken, explosion,
    piston), send the real section before the client can look at it. Budget re-sends per tick
    (priority: nearest first) to avoid spikes when a player digs into a big cave.
-6. **Block-level mode (later, optional).** Inside *visible* sections, ores not adjacent to any
-   transparent block can still be sent as stone and revealed on exposure (like Paper's anti-xray
-   engine-mode 1). Separate flag `visibility.mask_buried_ores`.
+6. **Block-level mode (shipped as the default `engine` mode).** Inside *visible* sections, ores
+   not adjacent to any transparent block are sent as the surrounding stone/deepslate/netherrack and
+   revealed on exposure (like Paper's anti-xray engine-mode 1). Config
+   `[anti_xray] mode = "engine"` and `hidden_blocks`; no separate `mask_buried_ores` flag — engine
+   mode *is* that mode. The per-block reveal runs from the same game tick as the section reveal, at
+   block granularity.
 
 ## What must keep working
 
 - Collision and movement prediction: hidden = stone keeps the client from falling into "void";
-  "omit/air" mode is only for spectators/flying and is riskier.
+  "omit/air" mode is only for spectators/flying and is riskier. Engine mode replaces an ore with
+  the rock that already surrounded it, so collision never changes at all.
 - Light: hidden sections are sent with the light the real section has, so nothing flickers on reveal.
 - Block updates and the journal do not change; this is purely the network send layer per player.
 - Every protocol version: hidden-section encoding goes through the same per-version chunk writer
-  (single-valued palette on 1.18+, a full stone section on older formats).
+  (single-valued palette on 1.18+, a full stone section before that); engine mode needs no codec
+  work at all because it substitutes whole block states, which every version already speaks.
 - Fast movement (elytra, ender pearl, teleport, high speed): widen the margin with velocity, and
   send real sections ahead along the motion vector.
-- Admin bypass (`/aether visibility off` for a player), and spectators get everything.
+- Admin bypass (`/visibility off` for a player, the `aether.antixray.bypass` permission node, and
+  the `bypass_players` config list), and spectators get everything.
 
 ## Tests to write with it
 
 - A sealed cave three sections away is never sent as real; breaking into it reveals it within N ticks.
 - Turning 180° in place never shows a hole (no direction culling).
 - Surface/open terrain: zero sections hidden (no false positives above ground).
-- Bandwidth benchmark: deep column with/without the module.
+- Bandwidth benchmark: a deep column with and without the module (see `benches/anti_xray.rs`).
 - Reveal ordering under a burst (TNT crater) stays within the per-tick budget.
+- Engine mode: an enclosed ore is sent as the surrounding rock; an exposed one is not; breaking a
+  neighbour reveals the ore next to it.
 
 ## Config sketch
 
 ```toml
-[visibility]
+[anti_xray]
 enabled = false
+mode = "engine"           # "engine" (buried ores) | "culling" (sections)
+hidden_blocks = []        # empty = every ore, ancient debris and monster spawner
+worlds = []               # world-dir names this applies to; empty = all
+bypass_players = []       # names always allowed to see everything
+
+# culling mode only:
 margin_blocks = 5
 hidden_fill = "stone"     # "stone" | "air"
-ray_refinement = false
-mask_buried_ores = false
 reveal_budget_per_tick = 32
 ```
+

@@ -229,17 +229,26 @@ impl PlayerHandle {
                     None => world,
                 };
                 let view = crate::protocol::ColumnView::new(base, *cx, *cz);
-                // Anti-xray: mask the sections this player cannot see before
-                // the codec ever reads them, so every version's cheapest
-                // single-valued stone form falls out of the existing encoder.
-                let hidden = crate::visibility::hidden_mask_for_render(self, world, *cx, *cz);
-                if hidden != 0 {
-                    let fill = crate::visibility::fill_for(self);
-                    let masked =
-                        crate::visibility::MaskedColumn::new(&view, *cx, *cz, hidden, fill);
-                    self.codec.encode(ev, &masked)
-                } else {
-                    self.codec.encode(ev, &view)
+                // Anti-xray: mask what this player cannot see before the codec
+                // ever reads it. Culling hides whole sections; engine hides
+                // individual buried ores. Both go through the existing per-
+                // version encoder, so no codec knows about either.
+                match crate::visibility::mask_for_render(self, world, *cx, *cz) {
+                    crate::visibility::ColumnMask::None => self.codec.encode(ev, &view),
+                    crate::visibility::ColumnMask::Sections { hidden, fill } => {
+                        let masked =
+                            crate::visibility::MaskedColumn::new(&view, *cx, *cz, hidden, fill);
+                        self.codec.encode(ev, &masked)
+                    }
+                    crate::visibility::ColumnMask::Engine => {
+                        let masked = crate::visibility::EngineColumn::new(
+                            &view,
+                            crate::visibility::hidden_states(),
+                        );
+                        let packets = self.codec.encode(ev, &masked);
+                        crate::visibility::record_engine(self, *cx, *cz, masked.masked_any());
+                        packets
+                    }
                 }
             }
             ServerEvent::UnloadColumn { cx, cz } => {

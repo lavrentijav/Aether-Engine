@@ -378,26 +378,31 @@ fn login_and_play(
     // sent as real blocks even in the first burst, so the reachable set is
     // computed from the spawn position before the handle exists and the same
     // columns are masked here. It is seeded into the handle below, so the
-    // reveal planner knows what this client already holds.
-    let vis = crate::visibility_config()
-        .enabled
+    // reveal planner knows what this client already holds. Engine mode needs
+    // no reachable set — it masks individual buried ores.
+    let anti_xray = crate::anti_xray_enabled();
+    let mode = crate::anti_xray_config().mode;
+    let vis = (anti_xray && mode == crate::config::AntiXrayMode::Culling)
         .then(|| crate::visibility::visible_from(world, (spawn.x, spawn.y, spawn.z), r));
+    let engine_hidden = (anti_xray && mode == crate::config::AntiXrayMode::Engine)
+        .then(crate::visibility::hidden_states);
     let fill = crate::visibility::fill_for_mode(game_mode);
     for cz in spawn_cz - initial..=spawn_cz + initial {
         for cx in spawn_cx - initial..=spawn_cx + initial {
             let view = crate::protocol::ColumnView::new(world, cx, cz);
-            let packets = match &vis {
-                Some(vis) => {
-                    let hidden = crate::visibility::desired_hidden(vis, cx, cz);
-                    if hidden != 0 {
-                        let masked =
-                            crate::visibility::MaskedColumn::new(&view, cx, cz, hidden, fill);
-                        codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &masked)
-                    } else {
-                        codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view)
-                    }
+            let packets = if let Some(vis) = &vis {
+                let hidden = crate::visibility::desired_hidden(vis, cx, cz);
+                if hidden != 0 {
+                    let masked = crate::visibility::MaskedColumn::new(&view, cx, cz, hidden, fill);
+                    codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &masked)
+                } else {
+                    codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view)
                 }
-                None => codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view),
+            } else if let Some(hidden) = engine_hidden {
+                let masked = crate::visibility::EngineColumn::new(&view, hidden);
+                codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &masked)
+            } else {
+                codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view)
             };
             for pkt in packets {
                 pkt.send(s)?;
@@ -435,9 +440,11 @@ fn login_and_play(
         handle.set_compat_pack_offered();
     }
     // Seed the visibility bookkeeping with the masked first burst: what the
-    // client holds, and the reachable set those masks came from, so the reveal
-    // planner never re-sends a column it already sent and never forgets one it
-    // has not.
+    // client holds, and (culling) the reachable set those masks came from, so
+    // the reveal planner never re-sends a column it already sent and never
+    // forgets one it has not. Engine mode marks every column as possibly
+    // masked, so `/visibility off` re-sends the whole loaded area.
+    let section = crate::visibility::section_of(pos);
     if let Some(visible) = vis {
         let mut sent = std::collections::HashMap::new();
         for cz in spawn_cz - initial..=spawn_cz + initial {
@@ -448,8 +455,15 @@ fn login_and_play(
                 );
             }
         }
-        let section = crate::visibility::section_of(pos);
         handle.visibility().seed(section, visible, sent);
+    } else if engine_hidden.is_some() {
+        let mut sent = std::collections::HashMap::new();
+        for cz in spawn_cz - initial..=spawn_cz + initial {
+            for cx in spawn_cx - initial..=spawn_cx + initial {
+                sent.insert((cx, cz), 1);
+            }
+        }
+        handle.visibility().seed(section, HashSet::new(), sent);
     }
     // A returning player gets what they had; a new one gets the starter
     // hotbar. Seeding over a restored inventory would overwrite the first nine

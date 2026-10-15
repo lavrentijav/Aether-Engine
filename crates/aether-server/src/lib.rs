@@ -516,20 +516,50 @@ fn warn_if_exposed(cfg: &Config) {
     }
 }
 
-/// The `[visibility]` settings, or the defaults (off) before startup installs
+/// The permission node that lets a player bypass anti-xray.
+///
+/// Until the permission store (CMD-01) lands, a player's only levels are 4 (an
+/// operator) and 0 (everyone else), so this node is effectively
+/// [`is_operator`]; it is named now so the store can resolve it later.
+pub const ANTIXRAY_BYPASS_PERMISSION: &str = "aether.antixray.bypass";
+
+/// The `[anti_xray]` settings, or the defaults (off) before startup installs
 /// the config.
-pub fn visibility_config() -> config::VisibilityConfig {
+pub fn anti_xray_config() -> config::AntiXrayConfig {
     CONFIG
         .get()
-        .map(|c| c.visibility.clone())
+        .map(|c| c.anti_xray.clone())
         .unwrap_or_default()
 }
 
-/// Whether visibility culling is on. A single load and branch, for the block
-/// write path, which must cost nothing on the default (off) configuration.
+/// Whether anti-xray is on for the running world. A single load and branch,
+/// for the block write path, which must cost nothing on the default (off)
+/// configuration.
 #[inline]
-pub fn visibility_enabled() -> bool {
-    CONFIG.get().is_some_and(|c| c.visibility.enabled)
+pub fn anti_xray_enabled() -> bool {
+    CONFIG
+        .get()
+        .is_some_and(|c| c.anti_xray.enabled && c.anti_xray.applies_to_world(&c.server.world_dir))
+}
+
+/// Whether `handle` may see everything: an explicit `/visibility off`, the
+/// [`ANTIXRAY_BYPASS_PERMISSION`] node (operators, until CMD-01), or a name in
+/// `[anti_xray] bypass_players`.
+pub fn anti_xray_bypass(handle: &players::PlayerHandle) -> bool {
+    if handle.visibility().bypass {
+        return true;
+    }
+    let cfg = match CONFIG.get() {
+        Some(c) => c,
+        None => return false,
+    };
+    if cfg.is_operator(&handle.name, handle.ip) {
+        return true;
+    }
+    cfg.anti_xray
+        .bypass_players
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(&handle.name))
 }
 
 /// The chunk radius kept loaded around a player, from the config.

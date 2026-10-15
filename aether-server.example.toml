@@ -116,14 +116,20 @@ dir = "world-cache"     # empty disables the cache
 ttl_hours = 24          # entries older than this are regenerated
 max_entries = 20000     # above this the oldest are swept away, hourly
 
-[visibility]
-# Anti-xray / visibility culling. Off by default until it is proven.
-# A section the player cannot see is sent as solid stone instead of its real
-# blocks, so x-ray mods and transparent resource packs see only stone. See
-# docs/design/visibility-culling.md.
+[anti_xray]
+# Anti-xray. Off by default until it is proven.
+# "engine" (cheap): an ore-like block fully enclosed by opaque blocks is sent
+#   as the surrounding stone/deepslate/netherrack, and revealed the moment a
+#   neighbour changes (break, explosion, fluid). "culling" (the design in
+#   docs/design/visibility-culling.md): a whole section the player cannot see
+#   is sent as solid stone.
 enabled = false
+mode = "engine"          # "engine" (buried ores) or "culling" (sections)
+hidden_blocks = []       # empty = every ore, ancient debris and monster spawner
+worlds = []              # world-dir names this applies to; empty = all
+bypass_players = []      # names always allowed to see everything
+
+# culling mode only:
 margin_blocks = 5        # "could see it if he turned or stepped" sphere, in blocks
 hidden_fill = "stone"    # "stone" (safe) or "air" (spectators/flying only)
-ray_refinement = false   # reserved, not implemented
-mask_buried_ores = false # reserved, not implemented
 reveal_budget_per_tick = 32  # columns re-sent (revealed) per tick, nearest first

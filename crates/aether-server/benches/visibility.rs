@@ -1,7 +1,7 @@
 //! Block-write cost of the visibility invalidation hook.
 //!
 //! Culling is off in this process — no config is installed, so
-//! `visibility_enabled()` is false — which is the configuration every default
+//! `anti_xray_enabled()` is false — which is the configuration every default
 //! deployment runs. The hook must then cost the same as doing nothing: a read
 //! of a `OnceLock` and a branch, no lock and no allocation. The two benches
 //! below are meant to be compared against each other; a gap would be the
