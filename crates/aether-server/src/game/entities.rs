@@ -1090,11 +1090,13 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                         // next time the stack moved).
                         let arrow = crate::inventory::item("minecraft:arrow");
                         let actor = aether_world::journal::ActorId(handle.uuid);
-                        let (steps, left) = handle.inventory().give_many_report(arrow, 1);
-                        if left > 0 {
+                        let mut inv = handle.inventory();
+                        let Some(bodies) = provenance::give_one_events(actor, &mut inv, arrow)
+                        else {
                             continue;
-                        }
-                        for body in provenance::give_events(actor, arrow, &steps) {
+                        };
+                        drop(inv);
+                        for body in bodies {
                             let _ = world.journal().append(actor, body);
                         }
                         actions.push(Action::Picked {
