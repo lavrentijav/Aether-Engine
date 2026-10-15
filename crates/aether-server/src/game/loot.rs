@@ -1764,6 +1764,64 @@ mod tests {
         assert!((rate - 0.125).abs() < 0.005, "seed rate was {rate}");
     }
 
+    #[test]
+    fn tag_expand_false_emits_every_member() {
+        // `expand:false` is a singleton that drops the whole tag at once.
+        let table = LootTable {
+            pools: vec![Pool {
+                rolls: NumberProvider::Constant(1.0),
+                bonus_rolls: NumberProvider::Constant(0.0),
+                conditions: Vec::new(),
+                functions: Vec::new(),
+                entries: vec![Entry {
+                    weight: 1,
+                    conditions: Vec::new(),
+                    functions: Vec::new(),
+                    kind: EntryKind::Tag {
+                        items: vec!["minecraft:a".into(), "minecraft:b".into()],
+                        expand: false,
+                    },
+                }],
+            }],
+        };
+        let mut rng = Rng::new(1);
+        let out = table.roll(&LootContext::default(), &mut rng);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|s| s.item == "minecraft:a"));
+        assert!(out.iter().any(|s| s.item == "minecraft:b"));
+    }
+
+    /// `expand:true` is a composite — one weighted candidate per tag member,
+    /// so a roll yields exactly one disc, not the whole tag.
+    #[test]
+    fn real_creeper_tag_yields_one_disc() {
+        let Ok(root) = std::env::var("AETHER_VANILLA_PACK") else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let tables = LootTables::open(&root);
+        let t = tables
+            .entity_table("minecraft:creeper")
+            .expect("creeper table");
+        let ctx = LootContext {
+            entity_kind: Some("minecraft:creeper".into()),
+            attacker_kind: Some("minecraft:skeleton".into()),
+            ..Default::default()
+        };
+        let mut rng = Rng::new(7);
+        let mut discs = 0u32;
+        for _ in 0..20_000 {
+            let out = t.roll(&ctx, &mut rng);
+            let disc: Vec<_> = out
+                .iter()
+                .filter(|s| s.item.starts_with("minecraft:music_disc_"))
+                .collect();
+            assert_eq!(disc.len(), 1, "expected one disc, got {:?}", disc);
+            discs += 1;
+        }
+        assert_eq!(discs, 20_000);
+    }
+
     /// Every table in the pack must parse; the ones that do not are printed.
     #[test]
     fn every_real_table_parses() {
