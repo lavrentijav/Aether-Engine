@@ -690,6 +690,81 @@ impl std::str::FromStr for GameMode {
     }
 }
 
+/// The starter hotbar for a codec whose player has a **client-side**
+/// inventory — the pre-1.20.2 codecs (protocols ≤ 763).
+///
+/// Those codecs do not run the gameplay path: they never render arbitrary
+/// stacks and never receive a creative slot report, so the server knows
+/// nothing about what the player holds unless it put it there. This is what it
+/// puts there, as engine item *names* (not ids, which differ per release), so
+/// each codec resolves them through the compat item table to its own numbering
+/// — see [`legacy_codec_item_hooks`]. Every entry is present, by the same name,
+/// in every supported release, so a slot is never left empty.
+pub const STARTER_HOTBAR: [(&str, u8); 7] = [
+    ("minecraft:stone", 64),
+    ("minecraft:cobblestone", 64),
+    ("minecraft:dirt", 64),
+    ("minecraft:sand", 64),
+    ("minecraft:gravel", 64),
+    ("minecraft:glass", 64),
+    ("minecraft:sandstone", 64),
+];
+
+/// The compat item table for a pre-1.20.2 codec's protocol id, if this layer
+/// knows it. `None` for a protocol the layer does not cover — including the
+/// 1.20.2+ codecs, which take their table from their shared `Version`.
+pub(crate) fn legacy_item_table(protocol: i32) -> Option<&'static compat::items::ItemTable> {
+    let t = match protocol {
+        47 => &compat::items::V1_8,
+        755 => &compat::items::V1_17,
+        756 => &compat::items::V1_17_1,
+        757 => &compat::items::V1_18,
+        758 => &compat::items::V1_18_2,
+        759 => &compat::items::V1_19,
+        760 => &compat::items::V1_19_2,
+        761 => &compat::items::V1_19_3,
+        762 => &compat::items::V1_19_4,
+        763 => &compat::items::V1_20_1,
+        _ => return None,
+    };
+    Some(t)
+}
+
+/// The item half of the compat layer, bound to a pre-1.20.2 codec.
+///
+/// The old codecs predate the gameplay path, so they render no arbitrary
+/// stacks; three things on their join and placement path still need the item
+/// layer, and this one macro installs all three so no codec repeats the
+/// binding:
+///
+/// * [`ProtocolCodec::initial_hotbar`] seeds the server's inventory with
+///   [`STARTER_HOTBAR`], which the client is then handed so it can build;
+/// * [`ProtocolCodec::block_for_item`] says which block a held item places —
+///   the placement packet names only the hand, so the server must already know
+///   what is in it;
+/// * [`ProtocolCodec::resolve_reported_item`] keeps the real engine item when a
+///   client echoes a stand-in back, exactly as the wired codecs do per slot.
+macro_rules! legacy_codec_item_hooks {
+    ($proto:expr) => {
+        fn initial_hotbar(&self) -> Vec<(String, u8)> {
+            super::STARTER_HOTBAR
+                .iter()
+                .map(|(name, count)| ((*name).to_owned(), *count))
+                .collect()
+        }
+
+        fn block_for_item(&self, item: &str) -> Option<BlockStateId> {
+            super::modern::block_for_item(item)
+        }
+
+        fn resolve_reported_item(&self, server: ItemTypeId, reported: ItemTypeId) -> ItemTypeId {
+            super::legacy_item_table($proto)
+                .map_or(reported, |t| t.resolve_reported(server, reported))
+        }
+    };
+}
+pub(crate) use legacy_codec_item_hooks;
+
 /// One wire dialect: how neutral state becomes packets and back.
 pub trait ProtocolCodec: Sync + Send {
     /// Human-readable version this codec speaks, for logs and the server list.
@@ -896,6 +971,49 @@ mod tests {
             let c = codec_for(proto).unwrap_or_else(|| panic!("no codec for {proto}"));
             assert!(c.full_gameplay(), "{proto} must run the full game");
             assert!(c.supports_containers(), "{proto} must support windows");
+        }
+    }
+
+    #[test]
+    fn the_pre_1_20_2_codecs_are_wired_into_the_item_layer() {
+        // 1.8.9 and 1.17-1.20.1 keep the client-trusting subset, so they render
+        // no arbitrary stacks; but their join hotbar, their block placement and
+        // the stand-in round trip all go through the compat item tables now.
+        for proto in [47, 755, 756, 757, 758, 759, 760, 761, 762, 763] {
+            let c = codec_for(proto).unwrap_or_else(|| panic!("no codec for {proto}"));
+            assert!(!c.full_gameplay(), "{proto} must stay on the old subset");
+            let table =
+                legacy_item_table(proto).unwrap_or_else(|| panic!("no compat table for {proto}"));
+
+            // The starter hotbar is as long as the shared list, and every entry
+            // resolves to a real wire id on this release.
+            let hotbar = c.initial_hotbar();
+            assert_eq!(hotbar.len(), STARTER_HOTBAR.len(), "{proto}");
+            for (name, count) in &hotbar {
+                assert!(*count > 0, "{proto}: {name} with no count");
+                assert!(
+                    table.wire(crate::inventory::item(name)).is_some(),
+                    "{proto}: {name} has no stand-in"
+                );
+            }
+
+            // The held block item decides what a placement places.
+            assert_eq!(
+                c.block_for_item("minecraft:stone"),
+                Some(aether_api::block_ids::STONE),
+                "{proto}"
+            );
+            assert_eq!(c.block_for_item("minecraft:diamond_sword"), None, "{proto}");
+
+            // A version that shows a spear as a trident resolves the echo back
+            // to the real spear, exactly as the wired codecs do per slot.
+            let spear = crate::inventory::item("minecraft:iron_spear");
+            let trident = crate::inventory::item("minecraft:trident");
+            if let Some(w) = table.wire(spear) {
+                if w.disguised && table.engine(w.id) == Some(trident) {
+                    assert_eq!(c.resolve_reported_item(spear, trident), spear, "{proto}");
+                }
+            }
         }
     }
 
