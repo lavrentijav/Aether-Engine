@@ -901,4 +901,271 @@ mod tests {
         let (prefix, _suffix) = split_line(text, "", width);
         assert!(!prefix.ends_with('\u{00a7}'), "no dangling § in the prefix");
     }
+
+    // --- Wire encoding -------------------------------------------------
+
+    /// The style the codec serving `protocol` reports.
+    fn style_for(protocol: i32) -> SidebarStyle {
+        for c in crate::protocol::codecs() {
+            if c.supports(protocol) {
+                return c.sidebar_style();
+            }
+        }
+        SidebarStyle::Unsupported
+    }
+
+    #[test]
+    fn the_wire_table_knows_every_spoken_protocol() {
+        assert_eq!(wire_for(47).unwrap().objective, 0x3B);
+        assert_eq!(wire_for(47).unwrap().team, 0x3E);
+        assert_eq!(wire_for(755).unwrap().objective, 0x53);
+        assert_eq!(wire_for(760).unwrap().objective, 0x56);
+        assert_eq!(wire_for(764).unwrap().objective, 0x5A);
+        assert_eq!(wire_for(765).unwrap().reset, 0x42);
+        assert_eq!(wire_for(774).unwrap().objective, 0x68);
+        assert_eq!(wire_for(774).unwrap().team, 0x6B);
+        assert_eq!(wire_for(774).unwrap().reset, 0x4D);
+        // A protocol we do not speak has no scoreboard wire.
+        assert!(wire_for(999).is_none());
+    }
+
+    #[test]
+    fn the_style_follows_the_number_format() {
+        // Only 1.20.3+ has a number format, and that is exactly the split
+        // between the two sidebar strategies.
+        assert_eq!(style_for(47), SidebarStyle::Teams, "1.8");
+        assert_eq!(style_for(755), SidebarStyle::Teams, "1.17");
+        assert_eq!(style_for(764), SidebarStyle::Teams, "1.20.2");
+        assert_eq!(style_for(765), SidebarStyle::DisplayNames, "1.20.3");
+        assert_eq!(style_for(774), SidebarStyle::DisplayNames, "1.21.11");
+    }
+
+    #[test]
+    fn a_1_8_objective_uses_a_string_criterion() {
+        let wire = wire_for(47).unwrap();
+        let ops = encode(
+            &wire,
+            &ScoreboardOp::ObjectiveAdd {
+                name: "aether.side".to_string(),
+                display: "§6Hi".to_string(),
+            },
+        );
+        let mut pin = crate::proto::PacketIn::new(ops[0].body());
+        assert_eq!(pin.var_int().unwrap(), 0x3B);
+        assert_eq!(pin.string().unwrap(), "aether.side");
+        assert_eq!(pin.u8().unwrap(), 0, "action: add");
+        assert_eq!(pin.string().unwrap(), "§6Hi", "1.8 carries a raw string");
+        assert_eq!(
+            pin.string().unwrap(),
+            "integer",
+            "the criterion is a string"
+        );
+    }
+
+    #[test]
+    fn a_1_8_score_has_an_action_field() {
+        let wire = wire_for(47).unwrap();
+        let ops = encode(
+            &wire,
+            &ScoreboardOp::ScoreSet {
+                objective: "aether.side".to_string(),
+                entry: "§0".to_string(),
+                value: 15,
+                display: None,
+                hide_numbers: true,
+            },
+        );
+        let mut pin = crate::proto::PacketIn::new(ops[0].body());
+        assert_eq!(pin.var_int().unwrap(), 0x3C);
+        assert_eq!(pin.string().unwrap(), "aether.side");
+        assert_eq!(pin.var_int().unwrap(), 0, "create/update");
+        assert_eq!(pin.string().unwrap(), "§0");
+        assert_eq!(pin.var_int().unwrap(), 15);
+    }
+
+    #[test]
+    fn a_1_8_reset_uses_the_score_packet_action() {
+        // 1.8 has no reset-score packet; the score packet's action 1 does it.
+        let wire = wire_for(47).unwrap();
+        let ops = encode(
+            &wire,
+            &ScoreboardOp::ResetScore {
+                objective: "aether.side".to_string(),
+                entry: "§0".to_string(),
+            },
+        );
+        let mut pin = crate::proto::PacketIn::new(ops[0].body());
+        assert_eq!(pin.var_int().unwrap(), 0x3C);
+        assert_eq!(pin.string().unwrap(), "aether.side");
+        assert_eq!(pin.var_int().unwrap(), 1, "remove");
+        assert_eq!(pin.string().unwrap(), "§0");
+    }
+
+    #[test]
+    fn a_json_objective_wraps_the_text_in_a_component() {
+        let wire = wire_for(755).unwrap();
+        let ops = encode(
+            &wire,
+            &ScoreboardOp::ObjectiveAdd {
+                name: "aether.side".to_string(),
+                display: "§6Hi".to_string(),
+            },
+        );
+        let mut pin = crate::proto::PacketIn::new(ops[0].body());
+        assert_eq!(pin.var_int().unwrap(), 0x53);
+        let _name = pin.string().unwrap();
+        assert_eq!(pin.u8().unwrap(), 0);
+        assert_eq!(pin.string().unwrap(), "{\"text\":\"§6Hi\"}");
+        assert_eq!(pin.var_int().unwrap(), 0, "criterion is a VarInt here");
+    }
+
+    #[test]
+    fn a_modern_objective_carries_nbt_text_and_a_blank_number_format() {
+        let wire = wire_for(774).unwrap();
+        let ops = encode(
+            &wire,
+            &ScoreboardOp::ObjectiveAdd {
+                name: "aether.side".to_string(),
+                display: "§6Hi".to_string(),
+            },
+        );
+        let body = ops[0].body();
+        let mut pin = crate::proto::PacketIn::new(body);
+        assert_eq!(pin.var_int().unwrap(), 0x68);
+        let _name = pin.string().unwrap();
+        assert_eq!(pin.u8().unwrap(), 0);
+        // Anonymous NBT: tag byte 8 (TAG_String), then a 2-byte length, then
+        // the text itself (`§6Hi` in UTF-8).
+        assert_eq!(pin.u8().unwrap(), 8, "TAG_String");
+        let len = pin.u16().unwrap() as usize;
+        assert_eq!(len, 5, "the text's byte length");
+        assert!(
+            body.windows(5).any(|w| w == "§6Hi".as_bytes()),
+            "the NBT string carries the title"
+        );
+        pin.skip(len).unwrap();
+        // ... then the criterion VarInt and `number_format = blank`.
+        assert_eq!(pin.var_int().unwrap(), 0, "criterion: integer");
+        assert!(pin.bool().unwrap(), "a number format is present");
+        assert_eq!(pin.var_int().unwrap(), 0, "blank hides the red number");
+    }
+
+    #[test]
+    fn a_modern_score_carries_its_display_name() {
+        let wire = wire_for(774).unwrap();
+        let ops = encode(
+            &wire,
+            &ScoreboardOp::ScoreSet {
+                objective: "aether.side".to_string(),
+                entry: "sbl0".to_string(),
+                value: 15,
+                display: Some("Line".to_string()),
+                hide_numbers: true,
+            },
+        );
+        let mut pin = crate::proto::PacketIn::new(ops[0].body());
+        assert_eq!(pin.var_int().unwrap(), 0x6C);
+        assert_eq!(pin.string().unwrap(), "aether.side");
+        assert_eq!(pin.string().unwrap(), "sbl0");
+        assert_eq!(pin.var_int().unwrap(), 15);
+        assert!(pin.bool().unwrap(), "a display name follows");
+        assert_eq!(pin.u8().unwrap(), 8, "TAG_String");
+        let len = pin.u16().unwrap() as usize;
+        assert_eq!(len, 4, "\"Line\"");
+        pin.skip(len).unwrap();
+        // After the display-name NBT comes `number_format = blank`:
+        // present (1) then blank (0).
+        assert!(pin.bool().unwrap(), "a number format is present");
+        assert_eq!(pin.var_int().unwrap(), 0, "blank");
+    }
+
+    #[test]
+    fn a_modern_reset_score_has_its_own_packet() {
+        let wire = wire_for(774).unwrap();
+        let ops = encode(
+            &wire,
+            &ScoreboardOp::ResetScore {
+                objective: "aether.side".to_string(),
+                entry: "sbl0".to_string(),
+            },
+        );
+        let mut pin = crate::proto::PacketIn::new(ops[0].body());
+        assert_eq!(pin.var_int().unwrap(), 0x4D);
+        assert_eq!(pin.string().unwrap(), "aether.side");
+        assert_eq!(pin.string().unwrap(), "sbl0");
+    }
+
+    #[test]
+    fn a_1_8_team_splits_a_long_line_into_prefix_and_suffix() {
+        let wire = wire_for(47).unwrap();
+        let text = "0123456789abcdefghijklmnopqrstuvwxyz";
+        let ops = encode(
+            &wire,
+            &ScoreboardOp::TeamUpdate {
+                name: "sbl0".to_string(),
+                prefix: text.to_string(),
+                suffix: String::new(),
+            },
+        );
+        let mut pin = crate::proto::PacketIn::new(ops[0].body());
+        assert_eq!(pin.var_int().unwrap(), 0x3E);
+        assert_eq!(pin.string().unwrap(), "sbl0");
+        assert_eq!(pin.u8().unwrap(), 2, "change");
+        // 1.8 order: name, prefix, suffix, ...
+        assert_eq!(pin.string().unwrap(), "0123456789abcdef");
+        assert_eq!(pin.string().unwrap(), "ghijklmnopqrstuv");
+    }
+
+    #[test]
+    fn a_modern_team_uses_the_flags_byte() {
+        // 1.21.9 moved friendly-fire into a flag byte and visibility and
+        // collision into VarInt enums; a classic-layout packet would shift.
+        let wire = wire_for(774).unwrap();
+        let ops = encode(
+            &wire,
+            &ScoreboardOp::TeamAdd {
+                name: "sbl0".to_string(),
+                prefix: "line".to_string(),
+                suffix: String::new(),
+                members: vec!["§0".to_string()],
+            },
+        );
+        let mut pin = crate::proto::PacketIn::new(ops[0].body());
+        assert_eq!(pin.var_int().unwrap(), 0x6B);
+        assert_eq!(pin.string().unwrap(), "sbl0");
+        assert_eq!(pin.u8().unwrap(), 0, "add");
+        assert_eq!(pin.u8().unwrap(), 8, "display name is TAG_String");
+        let len = pin.u16().unwrap() as usize;
+        pin.skip(len).unwrap();
+        assert_eq!(pin.u8().unwrap(), 0, "flags: none set");
+        assert_eq!(pin.var_int().unwrap(), 0, "visibility: always");
+        assert_eq!(pin.var_int().unwrap(), 0, "collision: always");
+    }
+
+    #[test]
+    fn an_old_team_packet_keeps_the_1_8_field_order() {
+        // The 1.8 team packet has no collision rule and puts prefix before
+        // the friendly-fire byte; the modern one puts them after.
+        let wire = wire_for(47).unwrap();
+        let ops = encode(
+            &wire,
+            &ScoreboardOp::TeamAdd {
+                name: "sbl0".to_string(),
+                prefix: "line".to_string(),
+                suffix: String::new(),
+                members: vec!["§0".to_string()],
+            },
+        );
+        let mut pin = crate::proto::PacketIn::new(ops[0].body());
+        assert_eq!(pin.var_int().unwrap(), 0x3E);
+        assert_eq!(pin.string().unwrap(), "sbl0");
+        assert_eq!(pin.u8().unwrap(), 0, "add");
+        assert_eq!(pin.string().unwrap(), "line", "1.8: prefix comes first");
+        assert_eq!(pin.string().unwrap(), "", "then suffix");
+        assert_eq!(pin.u8().unwrap(), 0, "then friendly fire");
+        assert_eq!(pin.string().unwrap(), "always", "then name-tag visibility");
+        assert_eq!(pin.u8().unwrap(), 0xFF, "then colour");
+        assert_eq!(pin.var_int().unwrap(), 1, "one member");
+        assert_eq!(pin.string().unwrap(), "§0");
+    }
 }
