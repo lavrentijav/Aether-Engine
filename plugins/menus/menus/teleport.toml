@@ -1,0 +1,18 @@
+# Example declarative menu: warps. Opened from `settings` via `[open]`.
+
+name = "teleport"
+title = "&b&lWarps"
+layout = "chest3"
+
+[[item]]
+slot = 11
+material = "minecraft:grass_block"
+name = "&aSpawn"
+lore = ["&7Go to spawn"]
+actions = ["[command] spawn", "[close]"]
+
+[[item]]
+slot = 15
+material = "minecraft:oak_door"
+name = "&eBack"
+actions = ["[back]"]

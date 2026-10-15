@@ -362,6 +362,23 @@ actions = ["[economy] take 100", "[give] diamond_sword 1", "[close]"]
     }
 
     #[test]
+    fn the_shipped_example_menus_parse() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("menus");
+        let mut n = 0;
+        for entry in std::fs::read_dir(&dir).expect("example menus dir") {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let def = parse_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert!(!def.name.is_empty(), "{}", path.display());
+            n += 1;
+        }
+        assert!(n >= 3, "expected the shipped example menus, found {n}");
+    }
+
+    #[test]
     fn conditions_parse_every_form() {
         assert_eq!(
             parse_condition("permission:shop.buy"),
