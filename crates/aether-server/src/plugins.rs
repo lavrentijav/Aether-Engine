@@ -171,9 +171,11 @@ mod imp {
                 Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
             }
         }
-        let ids = host.ids();
-        if ids.is_empty() {
+        // Nothing loaded: leave the host uninstalled so no event takes the
+        // process-wide plugin lock and no epoch ticker runs for nothing.
+        if host.ids().is_empty() {
             crate::log::info("plugin     : none active");
+            return;
         }
         let _ = HOST.set(Mutex::new(host));
     }

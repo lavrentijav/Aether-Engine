@@ -234,26 +234,21 @@ pub struct PluginHost {
     tick_deadline: Option<Instant>,
     /// The shared budget as a duration, kept beside the deadline.
     tick_budget: Duration,
+    /// Whether the background epoch ticker has been started. It starts with
+    /// the first plugin; a host that never loads one never spawns a thread.
+    ticker_started: bool,
 }
 
 impl PluginHost {
-    /// Build a host and start the epoch ticker that drives the per-call
-    /// timeout. The ticker advances the engine's epoch every millisecond; a
-    /// call's deadline is `budget_ms` increments away.
+    /// Build a host. The epoch ticker that drives the per-call timeout is
+    /// started lazily by the first [`add`](PluginHost::add), so a host that
+    /// ends up with no plugins spawns no thread and wakes nothing.
     pub fn new(config: HostConfig, backend: Arc<dyn HostBackend>) -> Result<PluginHost> {
         let mut wasm = Config::new();
         wasm.epoch_interruption(true);
         // Init is bounded by fuel rather than by the per-call epoch budget.
         wasm.consume_fuel(true);
         let engine = Engine::new(&wasm)?;
-        let ticker = engine.clone();
-        std::thread::Builder::new()
-            .name("plugin-epoch".into())
-            .spawn(move || loop {
-                std::thread::sleep(Duration::from_millis(1));
-                ticker.increment_epoch();
-            })
-            .map_err(|e| Error::new(format!("cannot start the epoch ticker: {e}")))?;
         let tick_budget = Duration::from_millis(config.tick_budget_ms.max(1));
         Ok(PluginHost {
             engine,
@@ -262,7 +257,34 @@ impl PluginHost {
             plugins: Vec::new(),
             tick_deadline: None,
             tick_budget,
+            ticker_started: false,
         })
+    }
+
+    /// Start the epoch ticker if it is not already running. It advances the
+    /// engine's epoch every millisecond; a call's deadline is a number of
+    /// increments away. Idempotent, and only ever called once a plugin exists.
+    fn ensure_ticker(&mut self) -> Result<()> {
+        if self.ticker_started {
+            return Ok(());
+        }
+        let ticker = self.engine.clone();
+        std::thread::Builder::new()
+            .name("plugin-epoch".into())
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(1));
+                ticker.increment_epoch();
+            })
+            .map_err(|e| Error::new(format!("cannot start the epoch ticker: {e}")))?;
+        self.ticker_started = true;
+        Ok(())
+    }
+
+    /// Whether the background epoch ticker is running. It starts with the
+    /// first plugin loaded, so false here means the host has spawned no
+    /// thread and the server can skip installing it at all.
+    pub fn has_epoch_ticker(&self) -> bool {
+        self.ticker_started
     }
 
     /// Reset the shared tick budget. Called at the start of every server tick,
@@ -363,6 +385,9 @@ impl PluginHost {
                 manifest.id, ack.id
             )));
         }
+        // A plugin exists now, so timed event calls will happen: start the
+        // epoch clock they are bounded by.
+        self.ensure_ticker()?;
         self.plugins.push(LoadedPlugin {
             manifest,
             store,

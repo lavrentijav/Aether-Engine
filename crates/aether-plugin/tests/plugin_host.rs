@@ -288,6 +288,21 @@ fn the_shared_tick_budget_bounds_all_plugins_together() {
 }
 
 #[test]
+fn no_epoch_ticker_until_a_plugin_loads() {
+    let (mut h, _backend) = host();
+    assert!(
+        !h.has_epoch_ticker(),
+        "a host with no plugins must not spawn the epoch thread"
+    );
+    let (m, caps, cfg) = recorder("r", 0, &["after-player-join"], &[], &[]);
+    h.add(&m, &caps, &cfg).unwrap();
+    assert!(
+        h.has_epoch_ticker(),
+        "loading a plugin starts the epoch clock it is bounded by"
+    );
+}
+
+#[test]
 fn a_duplicate_manifest_id_is_refused() {
     let (mut h, _backend) = host();
     let (first, caps, cfg) = recorder("dup", 0, &["after-player-join"], &[], &[]);
