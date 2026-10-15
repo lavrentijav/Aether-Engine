@@ -29,9 +29,14 @@ on_lookup_failure = "offline"   # hybrid: what to do if the Mojang API is unreac
      (`premium_lock(name_lower → mojang uuid, first_seen, last_seen)`). Locked names must pass online auth;
      an offline attempt under that name is refused with a clear message ("this name is premium, log in with
      the official launcher"). The player keeps the Mojang uuid (inventory, ops, journal all key on it).
-  2. A name that is not locked: look it up in the profile API. If a premium account with that name exists →
-     require online auth (so nobody can squat a premium name offline first); on success, lock it.
-     If no such account → admit offline with the offline uuid.
+  2. Offline play stays open for everyone (cracked launchers may use any name, including names that
+     are registered at Mojang). Only names locked by a successful online login **on this server** are
+     protected. For a name that is not locked: look it up in the profile API; if a premium account with
+     that name exists, *offer* online auth (send Encryption Request). If `hasJoined` succeeds → online
+     login + lock the name. If it fails (cracked clients that answer the request without a session) →
+     admit offline in the same connection (encryption already on). If the client drops during auth
+     (vanilla client with a failed session), the next attempt from the same IP + name within 5 minutes
+     is admitted offline without the encryption offer. No premium account → offline directly.
   3. Lookups cached (positive 1 h, negative 10 min), bounded; API failure → `on_lookup_failure`.
   4. Name change at Mojang: lock is by uuid too; a locked uuid arriving under a new name moves the lock.
   5. An offline-uuid player whose name later becomes premium: admins get a command to migrate data
