@@ -3,6 +3,7 @@
 use aether_api::{block_ids, JournalActor, Vector3};
 
 use super::entities;
+use super::mobs;
 use super::player::HURT_COOLDOWN;
 use super::tables;
 use crate::inventory::Stack;
@@ -384,14 +385,33 @@ pub fn on_mob_hurt(
         },
         world,
     );
-    let drops = entities::with_rng(|r| tables::mob_drops(hit.kind, killer.is_some(), r));
-    let mut stacks: Vec<Stack> = drops
+    let ctx = super::loot::LootContext {
+        player_kill: killer.is_some(),
+        entity_kind: Some(hit.kind.to_owned()),
+        entity_on_fire: hit.on_fire,
+        entity_components: if hit.kind == "minecraft:sheep" {
+            vec![(
+                "minecraft:sheep/color".to_owned(),
+                mobs::wool_name(hit.wool).to_owned(),
+            )]
+        } else {
+            Vec::new()
+        },
+        entity_type_specific: if hit.kind == "minecraft:sheep" {
+            Some((
+                "minecraft:sheep".to_owned(),
+                vec![("sheared".to_owned(), hit.sheared as i64)],
+            ))
+        } else {
+            None
+        },
+        ..Default::default()
+    };
+    let drops = entities::with_rng(|r| tables::mob_drops_ctx(hit.kind, &ctx, r));
+    let stacks: Vec<Stack> = drops
         .into_iter()
         .map(|(i, n)| Stack::named(&i, n))
         .collect();
-    if hit.kind == "minecraft:sheep" {
-        stacks.push(Stack::named("minecraft:white_wool", 1));
-    }
     entities::drop_at_block(
         hit.pos.x.floor() as i32,
         hit.pos.y.floor() as i32,

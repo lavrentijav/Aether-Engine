@@ -1,0 +1,18 @@
+[package]
+name = "aether-redstone"
+description = "Aether Engine redstone core: a standalone, storage-free model of vanilla 1.21.11 redstone power, wire, repeaters, torches and lamps."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Only ids and the block-state property helpers are needed. `default-features
+# = false` keeps the persistence backends (Fjall, Zstd) out of this crate: the
+# engine is pure logic over a `RedstoneView`, never storage.
+aether-world = { workspace = true, default-features = false }
+
+[lints]
+workspace = true

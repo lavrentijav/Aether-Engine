@@ -521,6 +521,12 @@ pub struct MobHit {
     pub kind: &'static str,
     pub xp: i32,
     pub pos: Vector3,
+    /// Sheep wool colour index, for the loot table's colour component.
+    pub wool: u8,
+    /// Whether a sheep was sheared when it died.
+    pub sheared: bool,
+    /// Whether the mob was on fire, for `furnace_smelt` on its loot.
+    pub on_fire: bool,
 }
 
 /// Hurt the mob `id` by `amount`, knocked back away from `from`.
@@ -576,6 +582,9 @@ pub fn hurt_mob(
         kind: m.def.kind,
         xp: m.def.xp,
         pos,
+        wool: m.wool,
+        sheared: m.sheared,
+        on_fire: m.burning > 0,
     })
 }
 
@@ -773,6 +782,8 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
             })
             .collect();
         let mut rng = rng().lock().unwrap();
+        // Pathfinding work every mob shares this tick.
+        let nav = mobs::NavBudget::default();
         for e in all.iter_mut() {
             e.age += 1;
             let id = e.id;
@@ -899,6 +910,7 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                         players: &views,
                         now,
                         day,
+                        nav: &nav,
                     };
                     if mobs::tick(
                         id,

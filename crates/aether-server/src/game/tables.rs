@@ -6,9 +6,11 @@
 //! rest of the server uses — and the generated tables are sorted by name, so
 //! each is a binary search.
 
+use aether_world::registry::{blocks, props};
 use aether_world::ItemTypeId;
 
 use super::data;
+use super::loot::{LootContext, LootTables};
 
 // The id-keyed forms of the name-keyed lookups below: hot code holds an
 // `ItemTypeId`, but the game data is keyed by name. Every hot id is a vanilla
@@ -282,14 +284,49 @@ fn roll(drops: &[LootDrop], silk: bool, player_kill: bool, rng: &mut Rng) -> Vec
     out
 }
 
-/// What breaking `block` with `tool` drops.
+/// What breaking `block` with `tool` drops, as `(item, count)`.
+///
+/// The pack's loot table runs when one exists; otherwise the built-in tables
+/// below answer, so the game still works without a data pack.
+pub fn block_drops(block: &str, tool: Option<&str>, rng: &mut Rng) -> Vec<(String, u8)> {
+    let ctx = LootContext::block(tool);
+    block_drops_ctx(block, &ctx, rng)
+}
+
+/// Like [`block_drops`] but with a full context — the block's state
+/// properties, a tool's enchantments, an explosion radius.
+pub fn block_drops_ctx(block: &str, ctx: &LootContext, rng: &mut Rng) -> Vec<(String, u8)> {
+    if !can_harvest(block, ctx.tool.as_deref()) {
+        return Vec::new();
+    }
+    if let Some(t) = LootTables::global().block_table(block) {
+        return t
+            .roll(ctx, rng)
+            .into_iter()
+            .map(|s| (s.item, s.count))
+            .collect();
+    }
+    block_drops_fallback(block, ctx.tool.as_deref(), rng)
+}
+
+/// The state `state`'s block name and its property pairs, for a loot context.
+pub fn block_state_context(
+    state: aether_world::BlockStateId,
+) -> Option<(String, Vec<(String, String)>)> {
+    let (block, name) = blocks::block_of_state(state)?;
+    let (lo, _) = blocks::STATE_RANGE[block as usize];
+    let properties = props::values_of(block, state.raw().saturating_sub(lo))
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    Some((name.to_owned(), properties))
+}
+
+/// The built-in block drops, used when the pack has no table for `block`.
 ///
 /// The generated loot covers most blocks; a few whose real tables have
 /// conditions the data flattens away are written out here.
-pub fn block_drops(block: &str, tool: Option<&str>, rng: &mut Rng) -> Vec<(String, u8)> {
-    if !can_harvest(block, tool) {
-        return Vec::new();
-    }
+fn block_drops_fallback(block: &str, tool: Option<&str>, rng: &mut Rng) -> Vec<(String, u8)> {
     let shears = tool == Some("minecraft:shears");
     let short = block.strip_prefix("minecraft:").unwrap_or(block);
     // Leaves: saplings 5 %, sticks 2 %, apples 0.5 % from oak; the leaves
@@ -373,8 +410,21 @@ pub fn block_xp(block: &str) -> Option<(u8, u8)> {
     })
 }
 
-/// What killing a `kind` mob drops.
-pub fn mob_drops(kind: &str, player_kill: bool, rng: &mut Rng) -> Vec<(String, u8)> {
+/// What killing a `kind` mob drops, with a full context — looting, whether
+/// the mob was on fire, its components and `type_specific` fields.
+pub fn mob_drops_ctx(kind: &str, ctx: &LootContext, rng: &mut Rng) -> Vec<(String, u8)> {
+    if let Some(t) = LootTables::global().entity_table(kind) {
+        return t
+            .roll(ctx, rng)
+            .into_iter()
+            .map(|s| (s.item, s.count))
+            .collect();
+    }
+    mob_drops_fallback(kind, ctx.player_kill, rng)
+}
+
+/// The built-in mob drops, used when the pack has no table for `kind`.
+fn mob_drops_fallback(kind: &str, player_kill: bool, rng: &mut Rng) -> Vec<(String, u8)> {
     let Some(drops) = find(&data::ENTITY_LOOT, kind) else {
         return Vec::new();
     };

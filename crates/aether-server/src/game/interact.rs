@@ -203,7 +203,12 @@ pub fn on_broken(
     }
     let held = handle.held_item();
     let held_name = held.and_then(|i| i.vanilla_name());
-    let drops = entities::with_rng(|r| tables::block_drops(&name, held_name, r));
+    let ctx = super::loot::LootContext {
+        tool: held_name.map(str::to_owned),
+        block: tables::block_state_context(broken),
+        ..Default::default()
+    };
+    let drops = entities::with_rng(|r| tables::block_drops_ctx(&name, &ctx, r));
     entities::drop_at_block(
         x,
         y,
