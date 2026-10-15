@@ -113,6 +113,10 @@ const LEGACY_BLOCK_ITEMS = {
   potatoes: 'potato',
   tripwire: 'string',
   redstone_wire: 'redstone',
+  // 1.8 has no `fire` item; the way to make fire there is flint and steel, so a
+  // campfire item becomes that rather than stone. The block stays `fire` (a
+  // fire source) — the icon differs but the pair is thematically consistent.
+  fire: 'flint_and_steel',
 }
 
 function buildItems(mcVersion, itemRules, blockRules) {

@@ -544,10 +544,27 @@ mod tests {
             let w = t.wire(id(name)).unwrap();
             assert_eq!(t.name(w.id), Some("minecraft:banner"), "{name}");
         }
-        // The one case with no item at all: 1.8 has no `fire` item, so a
-        // campfire can only be shown as stone. Documented, not a regression.
-        let campfire = t.wire(id("minecraft:campfire")).unwrap();
-        assert_eq!(t.name(campfire.id), Some("minecraft:stone"));
+        // 1.8 has no `fire` item; a campfire's block stand-in is `fire`, and
+        // the item that makes fire there is flint and steel, so the campfire
+        // item maps to that rather than stone (F7).
+        for name in ["minecraft:campfire", "minecraft:soul_campfire"] {
+            let w = t.wire(id(name)).unwrap();
+            assert!(w.disguised, "{name}");
+            assert_eq!(t.name(w.id), Some("minecraft:flint_and_steel"), "{name}");
+        }
+        // No block item whose block has a *rule* is left as stone: the only
+        // block items that still show stone are those whose block also has no
+        // rule (granite, deepslate, ...), where the block table is stone too.
+        let stone = t.wire(id("minecraft:stone")).unwrap().id;
+        for name in [
+            "minecraft:oak_sign",
+            "minecraft:white_banner",
+            "minecraft:campfire",
+            "minecraft:cherry_planks",
+        ] {
+            let w = t.wire(id(name)).unwrap();
+            assert_ne!(w.id, stone, "{name} must not fall to stone");
+        }
     }
 
     #[test]
