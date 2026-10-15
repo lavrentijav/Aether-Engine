@@ -77,6 +77,7 @@ CREATE INDEX IF NOT EXISTS aether_events_at        ON aether_events (at DESC);
 CREATE INDEX IF NOT EXISTS aether_events_item      ON aether_events (item_uid) WHERE item_uid IS NOT NULL;
 ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS cause        BIGINT;
 ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS derived_from BIGINT[];
+ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS reason       SMALLINT;
 CREATE INDEX IF NOT EXISTS aether_events_cause     ON aether_events (cause) WHERE cause IS NOT NULL;
 CREATE INDEX IF NOT EXISTS aether_events_derived   ON aether_events USING GIN (derived_from) WHERE derived_from IS NOT NULL;
 ";
@@ -90,7 +91,7 @@ CREATE INDEX IF NOT EXISTS aether_events_derived   ON aether_events USING GIN (d
 /// One text-shaped row builder plus a cast list is far less code than sixteen
 /// `&dyn ToSql` of four different types per event shape, and Postgres parses
 /// the text exactly as it would a literal.
-const COLUMNS: [(&str, &str); 18] = [
+const COLUMNS: [(&str, &str); 19] = [
     ("seq", "bigint"),
     ("at_ms", "bigint"),
     ("actor", "uuid"),
@@ -109,6 +110,7 @@ const COLUMNS: [(&str, &str); 18] = [
     ("place_to", "text"),
     ("cause", "bigint"),
     ("derived_from", "bigint[]"),
+    ("reason", "smallint"),
 ];
 /// How many of them.
 const NCOLS: usize = COLUMNS.len();
@@ -126,6 +128,7 @@ fn udt_name(ty: &str) -> &'static str {
         "text" => "text",
         "uuid" => "uuid",
         "bigint[]" => "_int8",
+        "smallint" => "int2",
         other => unreachable!("COLUMNS carries no type `{other}`"),
     }
 }
@@ -272,10 +275,17 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
             v[14] = Some(place_text(from));
             v[15] = Some(place_text(to));
         }
-        EventBody::ItemDestroy { uid, from } => {
+        EventBody::ItemDestroy { uid, from, reason } => {
             v[3] = Some("item_destroy".into());
             v[11] = Some(uid_text(uid.0));
             v[14] = Some(place_text(from));
+            v[18] = Some((*reason as u8).to_string());
+        }
+        EventBody::ItemMerge { into, from, count } => {
+            v[3] = Some("item_merge".into());
+            v[11] = Some(uid_text(into.0));
+            v[13] = Some(count.to_string());
+            v[17] = Some(format!("{{{}}}", uid_text(from.0)));
         }
         EventBody::ItemDerive {
             uid,
@@ -515,6 +525,7 @@ mod live_tests {
                 body: EventBody::ItemDestroy {
                     uid: ItemUid(0xdead_beef),
                     from: Place::Ground { x: 1, y: 2, z: 3 },
+                    reason: aether_world::journal::DestroyReason::Despawn,
                 },
             },
         ]
@@ -664,6 +675,41 @@ mod tests {
         // An inventory slot has no world position, so those stay null rather
         // than defaulting to 0,0,0 and polluting every area query.
         assert!(v[4].is_none() && v[7].is_none());
+    }
+
+    #[test]
+    fn a_destroy_row_carries_its_reason_and_a_merge_row_both_uids() {
+        let destroy = Event {
+            seq: 11,
+            at_ms: 1,
+            actor: ActorId(1),
+            cause: None,
+            body: EventBody::ItemDestroy {
+                uid: ItemUid(9),
+                from: Place::Ground { x: 0, y: 0, z: 0 },
+                reason: aether_world::journal::DestroyReason::Consumed,
+            },
+        };
+        let v = row_values(&destroy);
+        assert_eq!(v[3].as_deref(), Some("item_destroy"));
+        assert_eq!(v[18].as_deref(), Some("1"), "consumed is reason 1");
+
+        let merge = Event {
+            seq: 12,
+            at_ms: 1,
+            actor: ActorId(1),
+            cause: None,
+            body: EventBody::ItemMerge {
+                into: ItemUid(1),
+                from: ItemUid(2),
+                count: 3,
+            },
+        };
+        let v = row_values(&merge);
+        assert_eq!(v[3].as_deref(), Some("item_merge"));
+        assert_eq!(v[11].as_deref(), Some("1"), "item_uid is the destination");
+        assert_eq!(v[13].as_deref(), Some("3"));
+        assert_eq!(v[17].as_deref(), Some("{2}"), "the source uid");
     }
 
     #[test]
