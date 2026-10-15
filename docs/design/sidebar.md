@@ -86,7 +86,6 @@ Tab list: the `playerlist_header` packet (a different id in every generation, `m
 title = "&6&lAether"
 update_hz = 4          # times per second; default 4, capped at 20
 tab = false            # mirror the board into the tab list header/footer
-clock = "world"        # what %time% shows: "world" (default) | "server"
 mode = "override"      # "override" | "yield" (see limitations)
 
 [[layout]]
@@ -103,39 +102,36 @@ lines = ["&dVIP", "&7Online: &f%online%"]
 The highest-priority layout whose conditions pass is drawn. Conditions: `permission` (needs the SDK
 permission service; fails closed while CMD-01/02 are absent), `world`, and `placeholder`/`equals`.
 
-**Built-in placeholders**: `%player%`, `%displayname%`, `%ping%`, `%online%`, `%max%`, `%world%`,
-`%x%` `%y%` `%z%`, `%tps%`, `%health%`, `%level%`, `%time%` (world or server clock per the `clock`
-setting), `%world_time%` and `%server_time%` (explicit). `%ping%` and `%tps%` are measured, not
-invented: the core times the keep-alive round trip and smooths the actual tick rate. `&`-colour
-codes are translated to `§`. An unknown token is left literal, so a typo shows up instead of
-vanishing.
+**Placeholders are not the sidebar's own.** They are shared with menus and chat, so the registry is
+the SDK's `placeholders` service (`sdk.placeholders@0.1`) — see
+[plugin-sdk.md §7.9](plugin-sdk.md#79-placeholders--one-shared-name-registry). The sidebar
+**requires** it and resolves every title and line through `resolve(caller, player, text)`. Built-in
+tokens: `%player%`, `%displayname%`, `%ping%`, `%online%`, `%max%`, `%world%`, `%x%`/`%y%`/`%z%`,
+`%tps%`, `%health%`, `%level%`, `%time%`/`%world_time%` (world clock) and `%server_time%` (server
+wall clock). `%ping%` and `%tps%` are measured, not invented: the core times the keep-alive round
+trip and smooths the actual tick rate. The sidebar applies `&`→`§` colour translation to its own
+strings; an unknown token is left literal, so a typo shows up instead of vanishing.
 
-**Other plugins** register their own (`%economy_balance%`, `%rank_prefix%`) through the
-`sidebar@0.1` service. Two shapes, one per tier:
-
-```rust
-// Native consumer: resolve the service once, hand over a closure.
-sidebar.register_placeholder("economy_balance".into(), Arc::new(|q| economy.balance(q.player)));
-sidebar.set_line(player, 3, "&6%economy_balance%".into());
-sidebar.toggle(player);   // /sidebar toggle
-```
-
-A **WASM** plugin imports the `aether:sidebar@0.1` interface (its own package, versioned
-separately from the frozen plugin world; adding an *import* refuses nobody). A component cannot
-hand the host a closure and the frozen world has no placeholder callback export, so a WASM provider
-**declares** a name and **pushes** a value per player — the same policy/value split, one crossing
-per push — typically from its own tick or after a transaction:
+**Other plugins** feed placeholders (`%economy_balance%`, `%rank_prefix%`) through that shared
+service — a native closure, or (for WASM) a declared name + a pushed per-player value:
 
 ```rust
-// WASM consumer: declare once, push the per-player value.
-sidebar::register_placeholder("economy_balance");
-sidebar::set_placeholder("economy_balance", &p, balance.to_string());
-sidebar::set_line(&p, 3, "&6Shop: /shop");
+// Native: hand over a closure once.
+placeholders().register("economy_balance".into(), Arc::new(|q| economy.balance(q.player)))?;
 ```
 
-The host bridge (`crates/aether-plugin/src/sdk.rs`) forwards each import to the same
-`SidebarService` the native path uses; with the sidebar plugin disabled the call is refused and
-answers the neutral value, so a dependent still loads.
+```rust
+// WASM: declare once, push the per-player value.
+placeholders::register("economy_balance");
+placeholders::set("economy_balance", &p, balance.to_string());
+```
+
+To put a value on **this** panel specifically, the same plugins use the `sidebar@0.1` service:
+`sidebar.set_line(player, 3, "&6%economy_balance%")` / `clear_line` / `show` / `hide` / `toggle`.
+A WASM plugin imports `aether:sidebar/sidebar@0.1` (its own package). The host bridge
+(`crates/aether-plugin/src/sdk.rs`) forwards each import to the registered provider; with the
+sidebar plugin disabled the call is refused and answers the neutral value, so a dependent still
+loads.
 
 The **plugin** also registers a `/sidebar toggle|show|hide|reload` command (through the core command
 registry, so it is permission-checked like any other).
@@ -146,14 +142,16 @@ registry, so it is permission-checked like any other).
   changed line, add/remove lines, title-only rename, hide), the fifteen-line cap, 1.8 splitting, and
   wire-level encoding per family — 1.8 string criterion and score action, JSON components, modern
   NBT + blank number format + `reset_score`, the 1.8 vs modern team field order, and the tab list.
-- `plugins/sidebar`: config parsing, placeholder resolution + colour translation, and an end-to-end
-  test that drives the real `NativePlugin` through a recording `HostBackend` (board pushed and
-  resolved, service placeholder + line override, toggle, tab mirror).
-- `crates/aether-plugin/tests/sidebar_bridge.rs`: a real WASM component
+- `plugins/sidebar`: config parsing, colour translation, and an end-to-end test that drives the
+  real `NativePlugin` through a recording `HostBackend` and a stub placeholders service (board
+  pushed and resolved, line override, toggle, tab mirror).
+- `plugins/sdk`: the placeholder runtime (built-ins, native/pushed registration, the resolved-token
+  cache, per-tick query refresh).
+- `crates/aether-plugin/tests/sidebar_bridge.rs` and `placeholders_bridge.rs`: a real WASM component
   (`tests/fixtures/sidebar/sidebar.wasm`, built from `tests/guests/sidebar`) calls every
-  `aether:sidebar` import and the host forwards each to a mock provider with the caller's id; a
-  second test pins the neutral answer when no provider is registered. `tests/wit_world.rs` pins the
-  `aether:sidebar@0.1.0` package identity.
+  `aether:sidebar` and `aether:sdk/placeholders` import and the host forwards each to a mock
+  provider with the caller's id; further tests pin the neutral answer when no provider is
+  registered. `tests/wit_world.rs` pins the `aether:sidebar@0.1.0` package identity.
 
 Checks per [`COMMON.md`](../tasks/COMMON.md): `cargo fmt`, `cargo clippy -- -D warnings`,
 `cargo-locked test`.
@@ -166,12 +164,10 @@ Checks per [`COMMON.md`](../tasks/COMMON.md): `cargo fmt`, `cargo clippy -- -D w
   to.
 - **Player `%level%` is 0.** The experience level is tracked on `PlayerState` but not routed into
   `PlayerExtra` yet; ping, world time and TPS are real.
-- **WASM placeholders are pushed, not called back.** A WASM provider must `set-placeholder` on each
-  update; there is no host→guest callback (the frozen `aether:plugin@0.1.0` world has no such
-  export). The sidebar reads the last pushed value when it redraws.
-- **Placeholder names are global.** Two plugins declaring the same `%name%` share the slot (last
-  value wins, per player); native closures win over pushed values. Fine for the intended
-  namespaced-by-convention names (`economy_balance`, `rank_prefix`), not a hard guarantee.
+- **Placeholders live in the SDK, not here.** `%time%` is the world clock and `%server_time%` the
+  server wall clock; there is no sidebar-local clock switch (the former `clock` config was dropped
+  when the registry became shared). WASM providers push values rather than being called back, and
+  placeholder names are global — both documented at [`plugin-sdk.md §7.9`](plugin-sdk.md#79-placeholders--one-shared-name-registry).
 - **The 26.1–26.3 packet ids were taken from each release's own data generator**, not assumed: the
   table values for 775/776 (a shift of two from 1.21.11) and 777 (a shift of four) come from
   `packets.json` produced by that release's `net.minecraft.data.Main --reports`
