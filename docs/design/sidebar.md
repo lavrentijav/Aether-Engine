@@ -167,7 +167,9 @@ Checks per [`COMMON.md`](../tasks/COMMON.md): `cargo fmt`, `cargo clippy -- -D w
 - **Placeholder names are global.** Two plugins declaring the same `%name%` share the slot (last
   value wins, per player); native closures win over pushed values. Fine for the intended
   namespaced-by-convention names (`economy_balance`, `rank_prefix`), not a hard guarantee.
-- **26.1–26.3 scoreboard packet ids are unverified** — no data-generator report for those releases
-  was available when the table was written, so they reuse 1.21.11's ids. The field shapes are
-  correct; a wrong id would be corrected by regenerating the table from the release's own
-  `packets.json`.
+- **The 26.1–26.3 packet ids were taken from each release's own data generator**, not assumed: the
+  table values for 775/776 (a shift of two from 1.21.11) and 777 (a shift of four) come from
+  `packets.json` produced by that release's `net.minecraft.data.Main --reports`
+  (`set_display_objective`, `set_objective`, `set_player_team`, `set_score`, `reset_score`; the
+  header/footer packet renamed `tab_list`). The field *shapes* are unchanged from 1.21.9+, which the
+  release notes corroborate.

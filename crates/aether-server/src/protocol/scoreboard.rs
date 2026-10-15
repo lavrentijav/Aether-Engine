@@ -609,9 +609,18 @@ pub fn tab_for(protocol: i32) -> Option<TabWire> {
             id: 0x73,
             text: TextForm::Nbt,
         },
-        // 1.21.9+; the 26.x ids are unverified (see `wire_for`).
-        773..=777 => TabWire {
+        // 1.21.9 – 1.21.11. The report calls this packet `tab_list`.
+        773 | 774 => TabWire {
             id: 0x78,
+            text: TextForm::Nbt,
+        },
+        // 26.1/26.2 and 26.3 (`tab_list`, from each release's `packets.json`).
+        775 | 776 => TabWire {
+            id: 0x7a,
+            text: TextForm::Nbt,
+        },
+        777 => TabWire {
+            id: 0x7d,
             text: TextForm::Nbt,
         },
         _ => return None,
@@ -740,9 +749,10 @@ fn write_team(
 /// scoreboard packets (nothing this server speaks). The one table that knows
 /// every version's four ids; the codecs themselves just report their protocol.
 ///
-/// The ids are from PrismarineJS `minecraft-data` (`pc/<version>/protocol.json`),
-/// packet `scoreboard_objective` / `scoreboard_score` /
-/// `scoreboard_display_objective` / `teams` / `reset_score`.
+/// The ids for protocols this server speaks up to 1.21.11 are from
+/// PrismarineJS `minecraft-data` (`pc/<version>/protocol.json`); the 26.1–26.3
+/// ids (`775`, `776`, `777`) come from each release's own data-generator
+/// `packets.json`, which the bot data does not yet carry.
 pub fn wire_for(protocol: i32) -> Option<Wire> {
     Some(match protocol {
         47 => Wire::legacy_1_8(),
@@ -763,13 +773,16 @@ pub fn wire_for(protocol: i32) -> Option<Wire> {
         768 | 769 => Wire::modern(0x64, 0x68, 0x5c, 0x67, 0x49, TeamForm::Nbt),
         // 1.21.5 – 1.21.8.
         770..=772 => Wire::modern(0x63, 0x67, 0x5b, 0x66, 0x48, TeamForm::Nbt),
-        // 1.21.9+ : the team packet gained a flags byte and VarInt enums.
+        // 1.21.9 – 1.21.11: the team packet gained a flags byte and VarInt
+        // enums.
         773 | 774 => Wire::modern(0x68, 0x6c, 0x60, 0x6b, 0x4d, TeamForm::NbtFlags),
-        // 26.1–26.3. Packet ids are unverified here (no data for them in the
-        // generator's reports), so they reuse 1.21.11's; the field *shapes*
-        // are correct, and a wrong id would be corrected by regenerating this
-        // table from the release's own `packets.json`.
-        775..=777 => Wire::modern(0x68, 0x6c, 0x60, 0x6b, 0x4d, TeamForm::NbtFlags),
+        // 26.1 and 26.2 (775, 776): ids from each release's own data-generator
+        // `packets.json` (`set_display_objective`, `set_objective`,
+        // `set_player_team`, `set_score`, `reset_score`). Two packets were
+        // inserted before them, so every id shifted by two.
+        775 | 776 => Wire::modern(0x6a, 0x6e, 0x62, 0x6d, 0x4f, TeamForm::NbtFlags),
+        // 26.3 (777): shifted by four from 1.21.11, not two.
+        777 => Wire::modern(0x6c, 0x70, 0x64, 0x6f, 0x50, TeamForm::NbtFlags),
         _ => return None,
     })
 }
@@ -991,6 +1004,20 @@ mod tests {
         assert_eq!(wire_for(774).unwrap().objective, 0x68);
         assert_eq!(wire_for(774).unwrap().team, 0x6B);
         assert_eq!(wire_for(774).unwrap().reset, 0x4D);
+        // 26.x, from each release's own data-generator `packets.json`: 26.1 and
+        // 26.2 share a shift of two, 26.3 a shift of four, from 1.21.11.
+        for p in [775, 776] {
+            let w = wire_for(p).unwrap();
+            assert_eq!(
+                (w.objective, w.team, w.reset),
+                (0x6A, 0x6D, 0x4F),
+                "26.1/26.2"
+            );
+            assert_eq!((w.score, w.display), (0x6E, 0x62));
+        }
+        let w = wire_for(777).unwrap();
+        assert_eq!((w.objective, w.team, w.reset), (0x6C, 0x6F, 0x50), "26.3");
+        assert_eq!((w.score, w.display), (0x70, 0x64));
         // A protocol we do not speak has no scoreboard wire.
         assert!(wire_for(999).is_none());
     }
@@ -1216,6 +1243,10 @@ mod tests {
         assert_eq!(tab_for(765).unwrap().id, 0x6a);
         assert_eq!(tab_for(765).unwrap().text, TextForm::Nbt, "1.20.3+");
         assert_eq!(tab_for(774).unwrap().id, 0x78);
+        // 26.x `tab_list`, from the release reports.
+        assert_eq!(tab_for(775).unwrap().id, 0x7a);
+        assert_eq!(tab_for(776).unwrap().id, 0x7a);
+        assert_eq!(tab_for(777).unwrap().id, 0x7d);
     }
 
     #[test]
