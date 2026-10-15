@@ -228,6 +228,11 @@ Three coordinated declarations, checked at load:
    client mirrors the manifest `requires` list, so the two cannot drift, and a dependent runs
    `generate!` in-crate against the shipped `dependent` world (see §11).
 
+   A non-SDK service rides the same way: the **sidebar** service is its own package
+   (`aether:sidebar@0.1`, imported by `dependent` and by the host's combined `services` world) and
+   is not a `requires` — a plugin that wants it imports it, and a host without the `plugins/sidebar`
+   provider refuses the call neutrally. See [`sidebar.md`](sidebar.md).
+
 **Optional services** (economy, regions) use the same machinery but are **not** declared as
 `requires`: a dependent calls `services.lookup("economy", "0.1")`, gets `false`/`None` when absent,
 and degrades. Only hard dependencies go in `requires`.

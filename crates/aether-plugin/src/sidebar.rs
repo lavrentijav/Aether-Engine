@@ -75,9 +75,22 @@ pub type PlaceholderFn = Arc<dyn Fn(&PlaceholderQuery) -> Option<String> + Send 
 
 /// The service other plugins resolve to put text on a sidebar.
 pub trait SidebarService: Send + Sync {
-    /// Register (or replace) a placeholder. `name` is the token without its
-    /// surrounding `%`. Returns whether an existing provider was replaced.
+    /// Register (or replace) a placeholder backed by a **native closure**.
+    /// `name` is the token without its surrounding `%`. Returns whether an
+    /// existing provider was replaced. A WASM provider cannot hand over a
+    /// closure; it uses [`Self::register_placeholder_name`] and
+    /// [`Self::set_placeholder_value`] instead.
     fn register_placeholder(&self, name: String, provider: PlaceholderFn) -> bool;
+
+    /// Declare a placeholder name a **caller** will fill with
+    /// [`Self::set_placeholder_value`] (the WASM path). Returns whether a
+    /// provider already existed.
+    fn register_placeholder_name(&self, caller: &str, name: String) -> bool;
+
+    /// Set `name`'s value for `player`, from `caller`. Implies
+    /// `register_placeholder_name`. The sidebar reads the last value when it
+    /// redraws.
+    fn set_placeholder_value(&self, caller: &str, name: String, player: u64, value: String);
 
     /// Set line `index` (0 is the top) for `player`, overriding config.
     fn set_line(&self, player: u64, index: usize, text: String);

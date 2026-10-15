@@ -16,21 +16,44 @@ use std::collections::HashMap;
 use aether_plugin::sidebar::{PlaceholderFn, PlaceholderQuery};
 
 /// The registered providers, by token name (without the `%`).
+///
+/// Two ways to fill a token: a native closure (`providers`) resolved on each
+/// redraw, and a per-player value a WASM (or native) plugin pushes through the
+/// sidebar service (`values`). A token with both prefers the closure.
 #[derive(Default)]
 pub struct Placeholders {
     providers: HashMap<String, PlaceholderFn>,
+    /// `%name%` → player id → the last value pushed for that player.
+    values: HashMap<String, HashMap<u64, String>>,
 }
 
 impl Placeholders {
-    /// Register (or replace) `name`. Returns whether an earlier provider was
-    /// replaced.
+    /// Register (or replace) `name` with a native closure. Returns whether an
+    /// earlier provider was replaced.
     pub fn register(&mut self, name: String, provider: PlaceholderFn) -> bool {
         self.providers.insert(name, provider).is_some()
     }
 
+    /// Declare `name` as a pushed-value placeholder. Returns whether it was
+    /// already known (by a closure or a prior declaration).
+    pub fn declare(&mut self, name: String) -> bool {
+        if self.providers.contains_key(&name) {
+            return true;
+        }
+        // A name with a prior value is already declared.
+        !self.values.entry(name).or_default().is_empty()
+    }
+
+    /// Set `name`'s value for `player`, declaring it if needed.
+    pub fn set_value(&mut self, name: String, player: u64, value: String) {
+        self.values.entry(name).or_default().insert(player, value);
+    }
+
     /// The registered token names, for diagnostics.
     pub fn names(&self) -> Vec<&str> {
-        self.providers.keys().map(|s| s.as_str()).collect()
+        let mut names: Vec<&str> = self.providers.keys().map(|s| s.as_str()).collect();
+        names.extend(self.values.keys().map(|s| s.as_str()));
+        names
     }
 
     /// Resolve every `%token%` in `line`. An unknown token is left literal, so
@@ -68,12 +91,16 @@ impl Placeholders {
         out
     }
 
-    /// One token's value: a registered provider first, then a built-in.
+    /// One token's value: a native provider, then a pushed per-player value,
+    /// then a built-in.
     fn value(&self, token: &str, q: &PlaceholderQuery) -> Option<String> {
         if let Some(provider) = self.providers.get(token) {
             if let Some(v) = provider(q) {
                 return Some(v);
             }
+        }
+        if let Some(v) = self.values.get(token).and_then(|m| m.get(&q.player)) {
+            return Some(v.clone());
         }
         builtin(token, q)
     }

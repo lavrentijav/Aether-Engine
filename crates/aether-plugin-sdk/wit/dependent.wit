@@ -21,4 +21,10 @@ world dependent {
     import aether:sdk/scheduler@0.1.0;
     import aether:sdk/cooldowns@0.1.0;
     import aether:sdk/confirm@0.1.0;
+
+    /// The sidebar service, so a dependent can put lines on a player's panel
+    /// and feed placeholders (`%economy_balance%`). Its provider is the
+    /// `plugins/sidebar` plugin, which may be disabled — the call then returns
+    /// the neutral answer.
+    import aether:sidebar/sidebar@0.1.0;
 }

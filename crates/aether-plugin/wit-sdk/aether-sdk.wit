@@ -224,4 +224,6 @@ world services {
     import scheduler;
     import cooldowns;
     import confirm;
+    /// The sidebar service (a separate package, versioned on its own).
+    import aether:sidebar/sidebar@0.1.0;
 }

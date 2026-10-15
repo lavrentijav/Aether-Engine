@@ -110,15 +110,32 @@ invented: the core times the keep-alive round trip and smooths the actual tick r
 codes are translated to `§`. An unknown token is left literal, so a typo shows up instead of
 vanishing.
 
-**Other plugins** register their own (`%economy_balance%`, `%rank_prefix%`) through the `sidebar@0.1`
-service registered in the host's service registry:
+**Other plugins** register their own (`%economy_balance%`, `%rank_prefix%`) through the
+`sidebar@0.1` service. Two shapes, one per tier:
 
 ```rust
-// native consumer: resolve the service once, then
-sidebar.set_line(player, 3, "&6%economy_balance%".into());
+// Native consumer: resolve the service once, hand over a closure.
 sidebar.register_placeholder("economy_balance".into(), Arc::new(|q| economy.balance(q.player)));
+sidebar.set_line(player, 3, "&6%economy_balance%".into());
 sidebar.toggle(player);   // /sidebar toggle
 ```
+
+A **WASM** plugin imports the `aether:sidebar@0.1` interface (its own package, versioned
+separately from the frozen plugin world; adding an *import* refuses nobody). A component cannot
+hand the host a closure and the frozen world has no placeholder callback export, so a WASM provider
+**declares** a name and **pushes** a value per player — the same policy/value split, one crossing
+per push — typically from its own tick or after a transaction:
+
+```rust
+// WASM consumer: declare once, push the per-player value.
+sidebar::register_placeholder("economy_balance");
+sidebar::set_placeholder("economy_balance", &p, balance.to_string());
+sidebar::set_line(&p, 3, "&6Shop: /shop");
+```
+
+The host bridge (`crates/aether-plugin/src/sdk.rs`) forwards each import to the same
+`SidebarService` the native path uses; with the sidebar plugin disabled the call is refused and
+answers the neutral value, so a dependent still loads.
 
 The **plugin** also registers a `/sidebar toggle|show|hide|reload` command (through the core command
 registry, so it is permission-checked like any other).
@@ -144,9 +161,12 @@ Checks per [`COMMON.md`](../tasks/COMMON.md): `cargo fmt`, `cargo clippy -- -D w
   to.
 - **Player `%level%` is 0.** The experience level is tracked on `PlayerState` but not routed into
   `PlayerExtra` yet; ping, world time and TPS are real.
-- **WASM plugins cannot register placeholders yet.** The `sidebar@0.1` service is typed in
-  `crates/aether-plugin` for native consumers. A WASM consumer needs a WIT interface (a new package
-  version, since exports are frozen), which is deferred.
+- **WASM placeholders are pushed, not called back.** A WASM provider must `set-placeholder` on each
+  update; there is no host→guest callback (the frozen `aether:plugin@0.1.0` world has no such
+  export). The sidebar reads the last pushed value when it redraws.
+- **Placeholder names are global.** Two plugins declaring the same `%name%` share the slot (last
+  value wins, per player); native closures win over pushed values. Fine for the intended
+  namespaced-by-convention names (`economy_balance`, `rank_prefix`), not a hard guarantee.
 - **26.1–26.3 scoreboard packet ids are unverified** — no data-generator report for those releases
   was available when the table was written, so they reuse 1.21.11's ids. The field shapes are
   correct; a wrong id would be corrected by regenerating the table from the release's own

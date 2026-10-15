@@ -357,6 +357,18 @@ impl SidebarService for SidebarSvc {
             .register(name, provider)
     }
 
+    fn register_placeholder_name(&self, _caller: &str, name: String) -> bool {
+        self.0.placeholders.write().unwrap().declare(name)
+    }
+
+    fn set_placeholder_value(&self, _caller: &str, name: String, player: u64, value: String) {
+        self.0
+            .placeholders
+            .write()
+            .unwrap()
+            .set_value(name, player, value);
+    }
+
     fn set_line(&self, player: u64, index: usize, text: String) {
         if index >= MAX_LINES {
             return;
