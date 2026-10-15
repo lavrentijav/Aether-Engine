@@ -129,7 +129,7 @@ the operator binds it beyond loopback:
 | header count / size | 64 / 16 KiB | fixed | an endless header stream |
 | body | 64 KiB | fixed | an oversized login form |
 | request deadline | 10 s | `request_deadline_ms` | slowloris (one byte per read); the victim gets `408` |
-| expensive-endpoint rate | 50/s, burst 100 | `rate_per_sec`, `rate_burst` | hammering `/tile`, `/tile_at`, `/history`, `/changes`, `/player`; over-rate gets `429` |
+| expensive-endpoint rate | 50/s, burst 200 | `rate_per_sec`, `rate_burst` | hammering `/tile`, `/tile_at`, `/history`, `/changes`, `/player`; over-rate gets `429` |
 | `/changes` radius / results / scan | 256 blocks / 4096 rows / 100 k events | fixed | one query over an unbounded area or journal |
 
 `/tile_at` tiles are cached by `(tile, at)`, so scrubbing the time slider does not recompute the same

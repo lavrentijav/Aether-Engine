@@ -85,7 +85,7 @@ server; `WebAdmin::handle(&Request)` is the pure router the tests drive without 
 `WebAdminConfig`: `tile_px` (default 128), `y_min`/`y_max` (default −64…319), an optional `token`,
 and `history_limit`. The plugin reads these from its `[plugins.webadmin]` config, plus the DoS
 limits: `bind`, `token`, `max_conns` (default 32), `max_per_ip` (8), `request_deadline_ms` (10000),
-`rate_per_sec` (50) and `rate_burst` (100). The token is seeded into the shared `Auth`, and
+`rate_per_sec` (50) and `rate_burst` (200). The token is seeded into the shared `Auth`, and
 `/webadmin token` mints a one-time one.
 
 See [docs/webadmin.md](../../docs/webadmin.md) for the full hardening table (connection caps,

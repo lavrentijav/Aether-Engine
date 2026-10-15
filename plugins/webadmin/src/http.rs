@@ -134,7 +134,7 @@ impl Default for WebAdminConfig {
             max_per_ip: 8,
             request_deadline: Duration::from_secs(10),
             rate_per_sec: 50.0,
-            rate_burst: 100.0,
+            rate_burst: 200.0,
         }
     }
 }
