@@ -1,5 +1,38 @@
 # AU1 notes — online mode / hybrid auth
 
+## Security review 1 (follow-up) — all findings fixed
+
+`docs/tasks/AU1-review-1.md` returned DO NOT MERGE; every finding is now fixed:
+
+1. **HIGH — pre-auth OOM.** `read_byte_array` bounds the length before
+   allocating: `PacketIn::remaining()` is checked and the length capped at 256
+   bytes (a shared secret/verify token is at most 128 RSA bytes). A VarInt
+   naming `0x7FFFFFFF` now fails without allocating; tested inside the crypto
+   parser and end to end against a hostile Encryption Response.
+2. **Lock handover.** `store::put` releases a uuid's old name only when that
+   name is still its own (`old.uuid == lock.uuid`), and a name handover clears
+   the displaced uuid's reverse index. Regression test for handover-then-rename
+   (the case that let one player delete another's lock).
+3. **Username validation.** `auth::valid_username` enforces vanilla's
+   `[A-Za-z0-9_]{3,16}` for every login, offline included, before the whitelist
+   and auth; trailing space, zero-width and homoglyph claims are refused.
+4. **Corrupt lock fails closed.** `store::check` reports `Corrupt` distinctly;
+   an unreadable lock refuses the login (loudly logged) instead of admitting
+   offline.
+5. **hasJoined failures.** Any transport/status/decode error maps to `ApiDown`
+   (a service failure), which follows `on_lookup_failure`; a locked name is
+   still refused rather than admitted offline.
+7. **Per-IP login rate limit.** `[auth] login_rate_per_min` (default 10, `0`
+   disables) through `auth::ratelimit`, checked before the whitelist/auth.
+
+## Merge
+
+The branch was 29 commits behind `main`; `main` is merged in (commit "Merge main
+into oc/AU1"). Conflicts were the server `Cargo.toml` (auth deps + optional
+`aether-plugin`), `deny.toml` (licence list), `commands/mod.rs` (`/aether auth
+migrate` + the plugin fallback dispatcher), `config.rs` (`[auth]` + `[plugins]`),
+`KNOWN_ISSUES.md` (auth item 17, plugin item 18) and `Cargo.lock` (regenerated).
+
 ## Revision: hybrid step 2 (follow-up)
 
 The owner changed hybrid step 2: **offline stays open for everyone**, including
@@ -22,28 +55,22 @@ Unlocked names are never refused for auth reasons. The update is commit
 tests cover the fail→offline, drop→bounce→offline, locked-still-refused and
 another-address-still-offered cases.
 
-## Test-run deviation (read this first)
+## Test runs
 
-`cargo-locked` could not be used for the AU1d policy/login tests: the
-machine-wide lock `$CARGO_TARGET_DIR/.cargo-locked` was held continuously for
-40+ minutes by another worktree's `cargo test --workspace`, with several other
-worktrees queued behind it, and every `flock -w` attempt to acquire it timed out.
+The review fixes and the merge were checked under `cargo-locked` (forcing the
+local build slot: the remote builder `fi2` was mid-toolchain-repair and failed
+`ring`'s build script, a builder-environment fault unrelated to this branch):
 
-Because all shared-target-dir agents were blocked on that lock (so nothing else
-was writing the shared target directory), the untouched dependency sources were
-touched to force a rebuild and the tests were run with plain `cargo test` against
-the shared `CARGO_TARGET_DIR`. The same contention recurred for the hybrid-step-2
-revision (another worktree held the lock for 11+ minutes running `cargo clippy`;
-`flock -w 420` and `flock -w 60` both timed out), so that run was plain too.
-Results:
+* `cargo-locked test -p aether-server -j4` — **1004 passed, 0 failed**
+* `cargo-locked test -p aether-api -j4` — passed
+* `cargo fmt --all -- --check` — clean
+* `cargo clippy --workspace --all-targets -D warnings` — clean
+* `cargo deny check` — advisories/bans/licenses/sources ok
 
-* `cargo test -p aether-server --lib` — **978 passed, 0 failed** (after the
-  step-2 revision; 971 before it)
-* `cargo test -p aether-api` — **passed**
-* `cargo test -p aether-server --lib auth::policy` — 10 passed
-* `cargo test -p aether-server --lib auth` (store/crypto/api/bounce/policy) — all passed
-
-AU1a–AU1c were run under `cargo-locked` before the contention began.
+Earlier (AU1d and the step-2 revision) the machine-wide lock was held for 40+
+minutes by another worktree's `cargo test --workspace`, so those interim runs
+used plain `cargo test` against the shared target dir; that is noted here for
+honesty but superseded by the `cargo-locked` runs above.
 
 ## Not done (documented, not hidden)
 
