@@ -138,15 +138,16 @@ is implemented in commit `RP1-d`:
   carrier is an *engine* state chosen so the codec's own per-version block
   table lands on the matching wire state, no codec changed and `compat/gen/*`
   regenerates byte-identical.
-* **Gating.** `PlayerHandle` records the client's resource-pack status; a
-  carrier is sent only once the status is `successfully_loaded`. Every
-  pre-1.20.2 codec reports its play-state `resource_pack_receive` id
-  (`resource_pack_status_id`), the session decodes it, and on the load
-  transition re-sends the view (`streamer.center(chunk, true)`). Accepted,
-  declined, failed, and "never reported" all keep the plain stand-in.
+* **Gating.** `PlayerHandle` records the client's resource-pack status *and*
+  whether the pack offered was the compat pack; a carrier is sent only when
+  both hold (see the review-1 blocker below). Every pre-1.20.2 codec reports
+  its play-state `resource_pack_receive` id (`resource_pack_status_id`), the
+  session decodes it, and on the load transition re-sends the view
+  (`streamer.center(chunk, true)`). Accepted, declined, failed, and "never
+  reported" all keep the plain stand-in.
 * **Config.** `[compat.pack]` (`enabled`, `url`, `hash`, `required` default
-  `false`, `dir`, `client_jar`). It wins over `[resource_pack]` for a release
-  that has a generated pack.
+  `false`, `pack_format`, `dir`, `client_jar`). It wins over `[resource_pack]`
+  for a release that has a generated pack and a matching `pack_format`.
 * **Generator.** `tools/gen/compat/pack.json` is the checked-in, stable
   assignment file; `gen_pack.js` expands it to `compat/pack_gen/<release>.rs`
   (appends, never reshuffles). `tools/pack/build.js` builds the actual pack —
@@ -164,3 +165,38 @@ Not done (documented in the design §13): auto-assigning the whole per-release
 gap set; configuration-phase status for 1.20.2+; 1.8–1.12 packs; item
 re-skinning; and live in-game verification (no client here — the tests assert
 the carrier's wire state and the pack's variant key agree instead).
+
+## Review 1 fixes (`docs/tasks/RP1-review-1.md`)
+
+Verdict was DO NOT MERGE; fixed one commit each.
+
+* **`RP1-g` — blocker: carriers only from the compat pack.** The status reply
+  says a pack loaded, not which one, so the operator's plain `[resource_pack]`
+  was enabling carriers. `PlayerHandle.compat_pack` records whether the compat
+  pack was the one offered (set once at join from `select_resource_pack`), and
+  `pack_table` requires it as well as the loaded status. The plain pack now
+  falls back to the J2 stand-in. Test:
+  `players::tests::a_client_that_loaded_a_different_pack_never_sees_carriers`,
+  `session::placement_tests::the_plain_resource_pack_never_counts_as_the_compat_pack`.
+* **`RP1-h` — design: real carriers canonical.** The invariant had no code; a
+  genuine (craftable, tunable) note block could sit in the disguise state and
+  render as pale-oak planks. The generator now emits `CANONICAL` (every carrier
+  state → the carrier's default state), `PackTable::display` canonicalises a
+  real carrier state and refuses to let a disguise use a canonical state, and
+  both `CarrierView` and the `BlockChange` remap go through `display`. Test:
+  `protocol::compat::pack::tests::a_real_carrier_is_canonicalised_and_never_shows_the_disguise`.
+* **`RP1-f` — minor: checked status.** `protocol::PackStatus` with `from_wire`;
+  `ClientEvent::ResourcePackStatus(PackStatus)`; the session matches instead of
+  casting a VarInt to `u8` (256 used to read as "loaded").
+* **`RP1-i` — minor: no fictional hotbar.** `initial_hotbar` is the starter
+  list only for 1.8.9, which sends it; 1.17–1.20.1 return empty, so the server
+  inventory stays empty and placement keeps its own fallback. Test:
+  `players::tests::a_codec_that_sends_no_hotbar_seeds_nothing`.
+* **`RP1-j` — minor: pack_format contract.** `[compat.pack] pack_format` must
+  match the release's table or the compat pack is not offered. Tests in
+  `config::tests` and `session::placement_tests`.
+
+The review also noted the Part A.1 *block-items-follow-block-rules* and
+*per-move round trip* bullets are J10's (`oc/QP`) and not done here; they stay
+recorded as a split, not counted as done. The audit numbers (§A.2) remain a
+documented, reproducible-by-script claim rather than an in-tree test.

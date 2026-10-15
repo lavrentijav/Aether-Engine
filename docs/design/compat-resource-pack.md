@@ -144,19 +144,28 @@ carrier or the disguise breaks prediction/rendering:
    entity-free; `brewing_stand` has one and is listed only for its weak-light
    state. Prefer entity-free carriers; drop a carrier the moment it needs a BE.
 
-## 7. The server keeps real carriers canonical
+## 7. The server shows real carriers canonical
 
-* On placement and on any state change, the server writes genuine carrier blocks
-  as the canonical state; a redstone/right-click that would change a real note
-  block's note is either suppressed or immediately canonicalised.
-* A `note_block` sound is played by the server (it already knows real note
-  blocks), so canonicalisation does not lose the sound; the pack leaves the
-  canonical state's model and the vanilla `note_block` sound event alone.
-* Mushroom blocks have no interaction; pinning their faces to `false` is enough.
-* The engine's **own** light pass reads the carrier (that is what is in the
-  world), so an opaque full-cube carrier is also correct for the server's
-  lighting; an X that emits light is lit on the server by the *engine block* it
-  really is, and only the client is fooled.
+The carrier is a disguise **on the wire only**: the world holds the real block
+(a disguised X, or a genuine carrier such as a tuned note block). Two mappings
+give the client a picture it can trust:
+
+* A disguised block X is sent as its assigned carrier **disguise state**.
+* A **genuine** carrier block is sent as the carrier's **canonical state** —
+  the state the pack leaves vanilla — whatever its real state. This is what
+  stops a real, tuned `note_block[note=1]` (a craftable, tunable block, which
+  can sit in exactly the state a disguise occupies) from rendering as the
+  disguised block.
+
+The engine keeps the true state; only the wire is canonicalised. The generator
+emits the canonical map (every carrier state → the carrier's default state) and
+refuses a disguise that would land on a canonical state. A `note_block` sound is
+played by the server from the engine block, and the pack never touches the
+canonical state's model or the vanilla sound. Mushroom blocks have no
+interaction. The engine's own light pass reads the block in the world (the real
+one, not the carrier), so the server's lighting is unaffected; only the client
+is shown the carrier. (This supersedes the earlier "the light pass reads the
+carrier" wording — it reads the real block; the carrier never enters the world.)
 
 ## 8. Pack generation and delivery
 
@@ -199,15 +208,26 @@ dir = "packs/compat"
 url = ""
 # Whether the client must accept. See “declined pack” below.
 required = false
+# The pack's pack_format; must equal the release's generated table's format
+# (15 for 1.20.1) or the pack is not offered. 0 matches nothing.
+pack_format = 0
 # Vanilla client jar used at build time only; never committed or shipped.
 client_jar = ""
 ```
 
-Precedence: `[compat.pack]` (generated, per-version) wins over
-`[resource_pack]` (manual, one pack) for a client whose release has a generated
-pack; otherwise `[resource_pack]` applies. `JoinParams.resource_pack` already
-threads through every codec's Resource Pack Send, so the server only has to
-select `(url, hash, required)` per client.
+Precedence and the format contract: `[compat.pack]` is offered only to a client
+whose release has a generated carrier table **and** whose table's `pack_format`
+equals the configured `pack_format`; otherwise `[resource_pack]` applies.
+`JoinParams.resource_pack` already threads through every codec's Resource Pack
+Send, so the server only selects `(url, hash, required)` per client, and records
+whether the compat pack was the one offered (a status reply says *a* pack
+loaded, not which).
+
+A release with a *different* `pack_format` (say 1.21.4) than the configured one
+is a real limitation of this single-URL prototype: serving two releases needs
+two packs and per-release URLs. Follow-up: a manifest mapping `pack_format →
+{url, hash}` (`packs/compat/index.json`, §8.4), which `build.js` would write and
+the config would name.
 
 ## 10. Pitfalls
 
@@ -264,33 +284,40 @@ One 1.21 block on 1.20.1 via `note_block`. Steps:
   releases rather than naming them (§8). A release with no assignments has an
   empty table and `table_for` returns `None`, so it keeps the plain stand-in.
 * **`required = false` by default.** A carrier state is sent only to a player
-  whose status is `successfully_loaded`; until then, on a decline, or when the
-  release has no status handshake, the plain stand-in is used, and the view is
-  re-sent on acceptance (§7, §10).
+  whose status is `successfully_loaded` **and** whose offered pack was the
+  compat pack (a status reply says a pack loaded, not which — the operator's
+  plain `[resource_pack]` must not enable carriers); until then, on a decline,
+  or when the release has no status handshake, the plain stand-in is used, and
+  the view is re-sent on acceptance (§7, §10).
 * **Separate `compat/pack_gen/*`, selected at run time.** `compat/gen/*` stays
   byte-identical; the pack is fully optional.
 * **Checked-in assignment file** (`tools/gen/compat/pack.json`): stable,
   reviewable; the generator appends assignments and never reshuffles existing
   carrier states, so a state a client cached keeps its meaning.
 
-## 13. Prototype in tree (commit `RP1-d`)
+## 13. Prototype in tree (through review 1)
 
 One block, `minecraft:pale_oak_planks`, disguised on **1.20.1** via
 `note_block[instrument=harp,note=1,powered=false]` (pack_format 15):
 
 * `compat::pack` — `PackTable`, `table_for(protocol)`, `CarrierView`; the
   carrier is an engine state (584) the codec's own `V1_20_1` table maps to the
-  wire state (541) the pack retextures.
-* `PlayerHandle` pack status + `render` remap, gated on `successfully_loaded`;
-  every pre-1.20.2 codec reports its play-state `resource_pack_receive` id and
-  the session re-sends the view on load.
-* `[compat.pack]` config; `tools/gen/compat/gen_pack.js` → `pack_gen/v1_20_1.rs`;
-  `tools/pack/build.js` builds the pack (merged blockstates, model, texture)
-  from a client jar or a supplied texture.
+  wire state (541) the pack retextures. `PackTable::display` sends the disguise
+  state for a disguised block and the carrier's **canonical** state for a real
+  carrier state (§7), so a tuned note block is never taken for a disguise.
+* `PlayerHandle` pack status + `render` remap, gated on *both* the
+  `successfully_loaded` status and the compat pack having been the offered pack
+  — the operator's plain `[resource_pack]` must not enable carriers. Every
+  pre-1.20.2 codec reports its play-state `resource_pack_receive` id; the
+  session decodes it as a checked `PackStatus` and re-sends the view on load.
+* `[compat.pack]` config with `pack_format`, enforced against the release's
+  table; `tools/gen/compat/gen_pack.js` → `pack_gen/v1_20_1.rs` (with
+  `CANONICAL`); `tools/pack/build.js` builds the pack (merged blockstates,
+  model, texture) from a client jar or a supplied texture.
 
 Left for follow-ups (not in the prototype): auto-assignment of the full
 per-release gap set; configuration-phase status for 1.20.2+; pre-flattening
-(1.8–1.12) packs; item re-skinning (`item_model` / CustomModelData); and the
-in-game verification, which needs a live client this environment does not have
-(checked instead by tests that the wire state and the pack's variant key
-agree).
+(1.8–1.12) packs; a per-release pack manifest/URL map (§9); item re-skinning
+(`item_model` / CustomModelData); and the in-game verification, which needs a
+live client this environment does not have (checked instead by tests that the
+wire state and the pack's variant key agree).
