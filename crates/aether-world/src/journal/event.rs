@@ -366,8 +366,6 @@ pub enum DecodeError {
     Truncated,
     /// A tag byte names no known variant.
     UnknownTag(u8),
-    /// A string field was not UTF-8.
-    NotUtf8,
 }
 
 impl std::fmt::Display for DecodeError {
@@ -376,7 +374,6 @@ impl std::fmt::Display for DecodeError {
             DecodeError::Version(v) => write!(f, "unsupported journal format version {v}"),
             DecodeError::Truncated => write!(f, "journal entry ends mid-field"),
             DecodeError::UnknownTag(t) => write!(f, "unknown journal tag {t}"),
-            DecodeError::NotUtf8 => write!(f, "journal string field is not UTF-8"),
         }
     }
 }
