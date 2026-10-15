@@ -198,4 +198,8 @@ for (const a of assignments) {
 }
 
 console.log(`pack written to ${outDir} (pack_format ${packFormat})`)
-console.log('zip the directory and serve it; set [compat.pack] url/hash in the server config.')
+console.log(
+  'zip the directory and serve it; set [compat.pack] url, hash and ' +
+    `pack_format = ${packFormat} in the server config (the format must match or ` +
+    'the pack is not offered).',
+)

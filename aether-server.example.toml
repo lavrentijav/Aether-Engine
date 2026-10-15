@@ -61,6 +61,7 @@ enabled = false
 url = ""            # public base URL of the generated pack; empty disables
 hash = ""           # SHA-1 of the pack, lowercase hex
 required = false    # a declined pack falls back to the plain stand-in
+pack_format = 0     # the pack's format; must match the release's table (e.g. 15 for 1.20.1)
 dir = "packs/compat"   # where build.js writes packs (not read by the server)
 client_jar = ""     # vanilla client jar build.js reads textures from; never shipped
 

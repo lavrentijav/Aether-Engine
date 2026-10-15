@@ -491,13 +491,17 @@ fn select_resource_pack(
     cfg: &Config,
     codec: &dyn ProtocolCodec,
 ) -> (crate::config::ResourcePackConfig, bool) {
-    if cfg.compat.pack.active()
-        && crate::protocol::compat::pack::table_for(codec.protocol_id()).is_some()
-    {
-        (cfg.compat.pack.offer(), true)
-    } else {
-        (cfg.resource_pack.clone(), false)
+    if cfg.compat.pack.active() {
+        if let Some(table) = crate::protocol::compat::pack::table_for(codec.protocol_id()) {
+            // The pack the operator configured must declare this release's own
+            // `pack_format`; a mismatch is a pack for another release and would
+            // not be applied, so fall through to `[resource_pack]`.
+            if cfg.compat.pack.offers_format(table.pack_format) {
+                return (cfg.compat.pack.offer(), true);
+            }
+        }
     }
+    (cfg.resource_pack.clone(), false)
 }
 
 /// Whether handling `event` can move, make or use up items. Movement and the
@@ -1820,7 +1824,8 @@ mod placement_tests {
         // with the compat packs on.
         let cfg: Config = toml::from_str(
             "[resource_pack]\nurl = \"https://example/plain.zip\"\n\
-             [compat.pack]\nenabled = true\nurl = \"https://example/compat.zip\"\n",
+             [compat.pack]\nenabled = true\nurl = \"https://example/compat.zip\"\n\
+             pack_format = 15\n",
         )
         .unwrap();
         let (pack, compat) = select_resource_pack(&cfg, crate::protocol::codec_for(47).unwrap());
@@ -1832,13 +1837,33 @@ mod placement_tests {
     }
 
     #[test]
-    fn the_compat_pack_is_offered_for_a_release_it_was_generated_for() {
-        let cfg: Config = toml::from_str(
-            "[compat.pack]\nenabled = true\nurl = \"https://example/compat.zip\"\nhash = \"abc\"\n",
-        )
+    fn the_compat_pack_is_offered_only_when_its_pack_format_matches() {
+        let codec = crate::protocol::codec_for(763).unwrap();
+        let table = crate::protocol::compat::pack::table_for(763).unwrap();
+
+        // The right format: offered.
+        let cfg: Config = toml::from_str(&format!(
+            "[compat.pack]\nenabled = true\nurl = \"https://example/compat.zip\"\n\
+             hash = \"abc\"\npack_format = {}\n",
+            table.pack_format
+        ))
         .unwrap();
-        let (pack, compat) = select_resource_pack(&cfg, crate::protocol::codec_for(763).unwrap());
+        let (pack, compat) = select_resource_pack(&cfg, codec);
         assert_eq!(pack.url, "https://example/compat.zip");
         assert!(compat, "the compat pack is the offered one");
+
+        // The wrong format (or none): not offered — the pack is for another
+        // release, so the plain `[resource_pack]` applies instead.
+        for bad in [0u32, table.pack_format + 1] {
+            let cfg: Config = toml::from_str(&format!(
+                "[resource_pack]\nurl = \"https://example/plain.zip\"\n\
+                 [compat.pack]\nenabled = true\nurl = \"https://example/compat.zip\"\n\
+                 pack_format = {bad}\n",
+            ))
+            .unwrap();
+            let (pack, compat) = select_resource_pack(&cfg, codec);
+            assert_eq!(pack.url, "https://example/plain.zip", "format {bad}");
+            assert!(!compat, "format {bad} must not enable carriers");
+        }
     }
 }

@@ -173,6 +173,12 @@ pub struct CompatPackConfig {
     /// default: a declined pack falls back to the plain stand-in rather than
     /// disconnecting.
     pub required: bool,
+    /// The `pack_format` the configured pack declares. Enforced against the
+    /// generated carrier table's own format: a mismatch means the pack is for a
+    /// different release, so the compat pack is not offered to that client
+    /// (the plain `[resource_pack]`, if any, applies instead). `0` never
+    /// matches a real table, so leaving it unset keeps the pack off.
+    pub pack_format: u32,
     /// Directory the generated packs live in (used by `tools/pack/build.js`,
     /// not read by the server).
     pub dir: String,
@@ -185,6 +191,13 @@ impl CompatPackConfig {
     /// Whether a compat pack should be offered at all.
     pub fn active(&self) -> bool {
         self.enabled && !self.url.is_empty()
+    }
+
+    /// Whether the configured pack may be offered to a release whose generated
+    /// carrier table declares `format`. The contract the resource pack rests
+    /// on: the pack's `pack_format` must be the release's.
+    pub fn offers_format(&self, format: u32) -> bool {
+        self.pack_format != 0 && self.pack_format == format
     }
 
     /// The resource-pack offer to send, in the shape every codec already
@@ -599,6 +612,7 @@ enabled = false
 url = ""
 hash = ""
 required = false
+pack_format = 0
 dir = "packs/compat"
 client_jar = ""
 
@@ -755,7 +769,8 @@ mod tests {
         );
 
         let cfg: Config = toml::from_str(
-            "[compat.pack]\nenabled = true\nurl = \"https://example/pack.zip\"\nhash = \"abc123\"\n",
+            "[compat.pack]\nenabled = true\nurl = \"https://example/pack.zip\"\n\
+             hash = \"abc123\"\npack_format = 15\n",
         )
         .unwrap();
         assert!(cfg.compat.pack.active());
@@ -763,6 +778,12 @@ mod tests {
         assert_eq!(offer.url, "https://example/pack.zip");
         assert_eq!(offer.hash, "abc123");
         assert!(!offer.required, "required stays false unless asked for");
+        // The format contract: the pack is offered only for a matching format,
+        // and an unset format (0) matches nothing.
+        assert!(cfg.compat.pack.offers_format(15));
+        assert!(!cfg.compat.pack.offers_format(0));
+        assert!(!cfg.compat.pack.offers_format(46));
+        assert!(!CompatPackConfig::default().offers_format(0));
 
         // `enabled` alone, with no URL, offers nothing.
         let cfg: Config = toml::from_str("[compat.pack]\nenabled = true\n").unwrap();
