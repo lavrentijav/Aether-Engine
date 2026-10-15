@@ -20,7 +20,10 @@ set -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MCC="${MCC:-/srv/dev/tools/mcc/MinecraftClient}"
 HOST="${MCC_HOST:-fi2.walk.boykisser.online}"
-ACCOUNT="${MCC_ACCOUNT:-_alpha_01}"
+# Dedicated non-premium bot: has no Mojang profile, so hybrid auth admits it
+# offline directly (no encryption offer, no bounce). The owner's real account
+# is not used for testing any more. See auth.sh / mcc-testing.md.
+ACCOUNT="${MCC_ACCOUNT:-_aether_bot1}"
 TEMPLATE="$HERE/mcc-template.ini"
 SCRATCH_ROOT="${MCC_SCRATCH:-/tmp/opencode/live}"
 
