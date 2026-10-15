@@ -288,6 +288,21 @@ fn the_shared_tick_budget_bounds_all_plugins_together() {
 }
 
 #[test]
+fn a_duplicate_manifest_id_is_refused() {
+    let (mut h, _backend) = host();
+    let (first, caps, cfg) = recorder("dup", 0, &["after-player-join"], &[], &[]);
+    let (second, second_caps, second_cfg) = recorder("dup", 0, &["after-player-join"], &[], &[]);
+    h.add(&first, &caps, &cfg).unwrap();
+    let err = h.add(&second, &second_caps, &second_cfg).unwrap_err();
+    assert!(err.to_string().contains("already loaded"), "{err}");
+    assert_eq!(
+        h.ids(),
+        vec!["dup".to_string()],
+        "only one copy stays loaded"
+    );
+}
+
+#[test]
 fn a_fail_closed_plugin_vetoes_when_it_traps() {
     let (mut h, _backend) = host();
     let (mut m, caps, cfg) = recorder(

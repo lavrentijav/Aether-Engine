@@ -302,6 +302,14 @@ impl PluginHost {
         config: &BTreeMap<String, String>,
     ) -> Result<()> {
         let manifest = file.manifest.clone();
+        // Ids are the KV namespace and the log tag; two plugins sharing one
+        // would read and rewrite each other's state.
+        if self.plugins.iter().any(|p| p.manifest.id == manifest.id) {
+            return Err(Error::new(format!(
+                "plugin `{}` is already loaded: manifest ids must be unique",
+                manifest.id
+            )));
+        }
         let entry = manifest.entry_path(&file.dir);
         if !entry.is_file() {
             return Err(Error::new(format!(
