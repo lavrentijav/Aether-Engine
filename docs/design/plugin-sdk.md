@@ -452,14 +452,20 @@ let line = placeholders().resolve("sidebar", &p, "&6%rank_prefix% &f%player%");
   from the host's per-player view (`%player%`, `%displayname%`, `%ping%`, `%online%`, `%max%`,
   `%world%`, `%x%`/`%y%`/`%z%`, `%tps%`, `%health%`, `%level%`, `%time%`/`%world_time%`,
   `%server_time%`). An unknown token is left **literal**, so a typo is visible rather than
-  vanishing. Registering a provider of a built-in name overrides it (a plugin's own `%tps%`, say).
+  vanishing.
+- **Trust — ownership, not a shared global namespace.** A custom name is **owned by the caller that
+  first registers or pushes it**; a second caller's `register`/`register_name`/`set_value` for that
+  name is refused (and logged), so an untrusted WASM plugin cannot spoof another's
+  `%economy_balance%`. The **built-in** names are reserved from the pushed path: a plugin may not
+  `set` `%player%`/`%tps%`/… . A **native** closure *may* shadow a built-in (it is trusted-by-install)
+  — e.g. a plugin's own `%tps%`. **Reading** (`resolve`) is unrestricted, which is the point of a
+  shared registry: the sidebar resolves `%economy_balance%` owned by the economy plugin. Names are
+  chosen by convention (`economy_balance`, `rank_prefix`); first writer owns the slot.
 - **Caching.** Each resolved token is cached **per player, per token** for `placeholder_cache_ticks`
   (`[plugins.sdk]`, default 20 = one second), so a database-backed provider is not called for every
   consumer on every redraw. A **pushed** value (`set`) and a newly registered provider take effect
   immediately (the cache is refreshed/cleared), so an interactive value is never stale. The
   per-player query (position, ping) is rebuilt each tick, so a moved player is not frozen.
-- **Names are global**, namespaced by convention (`economy_balance`, `rank_prefix`); two plugins
-  declaring the same token share the slot (last value wins, native closures win over pushed values).
 - **Cost:** a native `resolve` is one in-process call; a WASM one is one boundary crossing. The
   tokenizer is a single pass and allocates one `String` for the result.
 

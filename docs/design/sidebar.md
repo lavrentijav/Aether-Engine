@@ -64,19 +64,22 @@ The strategy is derived from whether the version has a number format (`Wire::num
 
 | protocols | versions | text | teams | display slot | reset |
 |---|---|---|---|---|---|
-| 47 | 1.8.9 | raw `§` string | 1.8 layout, 16-char halves | byte | score action `1` |
-| 755–762 | 1.17–1.19.4 | JSON component | classic, 64-char halves | byte | score action `1` |
-| 763–764 | 1.20/1.20.1, 1.20.2 | JSON component | classic | byte / VarInt | score action `1` |
-| 765–772 | 1.20.3–1.21.8 | NBT component | NBT strings, classic order | VarInt | `reset_score` |
-| 773–774 | 1.21.9–1.21.11 | NBT component | NBT strings + flags byte | VarInt | `reset_score` |
-| 775–777 | 26.1–26.3 | NBT component | as 1.21.11 | VarInt | `reset_score` |
+| 47 | 1.8.9 | raw `§` string | `Legacy`: `displayName` + 16-char halves | byte | score action `1` |
+| 755–762 | 1.17–1.19.4 | JSON component | `Classic` (JSON name/prefix/suffix, coll. string) | byte | score action `1` |
+| 763–764 | 1.20/1.20.1, 1.20.2 | JSON component | `Classic` | byte / VarInt | score action `1` |
+| 765–769 | 1.20.3–1.21.4 | NBT component | `Nbt` (NBT name/prefix/suffix, coll. string) | VarInt | `reset_score` |
+| 770 | 1.21.5 | NBT component | `NbtEnums` (collision/visibility became VarInt enums) | VarInt | `reset_score` |
+| 771–774 | 1.21.6–1.21.11 | NBT component | `NbtFlags` (friendly-fire is a flag byte) | VarInt | `reset_score` |
+| 775–777 | 26.1–26.3 | NBT component | `NbtFlags` | VarInt | `reset_score` |
 
 Truncation: objective names stay short; 1.8 splits a long line across a 16-char prefix and a
 16-char suffix (a split never leaves a dangling `§`); from 1.13 the halves are 64 characters. The
-title is `aether.side`, clear of the vanilla `/scoreboard` names.
+title is `aether.side`, clear of the vanilla `/scoreboard` names. Every id and layout above is
+pinned against `minecraft-data` (and, for 26.x, each release's own data-generator `packets.json`).
 
-Tab list: the `playerlist_header` packet (a different id in every generation, `message_header` in
-1.19.2), JSON before 1.20.3 and NBT from 1.20.3.
+Tab list: the header/footer packet — `playerlist_header` (renamed `message_header` in 1.19.2,
+where the tab list itself is `0x63`, and `tab_list` from 26.x) — with a different id in every
+generation, JSON before 1.20.3 and NBT from 1.20.3.
 
 ## Plugin: config, layouts, placeholders
 
@@ -134,7 +137,9 @@ sidebar plugin disabled the call is refused and answers the neutral value, so a 
 loads.
 
 The **plugin** also registers a `/sidebar toggle|show|hide|reload` command (through the core command
-registry, so it is permission-checked like any other).
+registry, so it is permission-checked like any other). `toggle`/`show`/`hide` are open to any
+player; `reload` is refused unless the caller is an operator (`p.operator`) and runs on a background
+thread — the file read never blocks the tick thread, the parsed config is applied on the next tick.
 
 ## Tests
 
@@ -159,15 +164,19 @@ Checks per [`COMMON.md`](../tasks/COMMON.md): `cargo fmt`, `cargo clippy -- -D w
 ## Limitations
 
 - **CMD-15 is not landed.** The core keeps only what a sidebar needs (the sidebar model + these
-  packets). The full vanilla `/scoreboard` model, commands and storage are a separate task
-  (CMD-15a/b); `mode = "yield"` is parsed but inert until there is a vanilla sidebar model to yield
-  to.
-- **Player `%level%` is 0.** The experience level is tracked on `PlayerState` but not routed into
-  `PlayerExtra` yet; ping, world time and TPS are real.
+  packets); the full vanilla `/scoreboard` model, commands and storage are a separate task
+  (CMD-15a/b). `mode = "yield"` is **wired**: the plugin asks
+  `HostBackend::vanilla_sidebar_claimed` and hides its own panel while the vanilla model owns the
+  slot, but until CMD-15 lands the core always answers `false`, so `yield` has no visible effect
+  yet. `override` is the default.
+- **`%level%` is 0, `%world%` is the overworld and `%displayname%` is the login.** The experience
+  level is tracked on `PlayerState` but not routed into `PlayerExtra`, no per-player dimension is
+  plumbed through, and nicks are not stored; `%ping%`, `%tps%`, and the clocks are real.
 - **Placeholders live in the SDK, not here.** `%time%` is the world clock and `%server_time%` the
   server wall clock; there is no sidebar-local clock switch (the former `clock` config was dropped
-  when the registry became shared). WASM providers push values rather than being called back, and
-  placeholder names are global — both documented at [`plugin-sdk.md §7.9`](plugin-sdk.md#79-placeholders--one-shared-name-registry).
+  when the registry became shared). WASM providers push values rather than being called back; a
+  custom name is owned by its first registrant, and the built-ins are reserved — both documented at
+  [`plugin-sdk.md §7.9`](plugin-sdk.md#79-placeholders--one-shared-name-registry).
 - **The 26.1–26.3 packet ids were taken from each release's own data generator**, not assumed: the
   table values for 775/776 (a shift of two from 1.21.11) and 777 (a shift of four) come from
   `packets.json` produced by that release's `net.minecraft.data.Main --reports`
