@@ -850,17 +850,33 @@ impl LootTables {
 
     /// A table by id (`minecraft:blocks/diamond_ore`), parsed and cached.
     pub fn table(&self, id: &str) -> Option<Arc<LootTable>> {
+        self.table_impl(id, &mut Vec::new())
+    }
+
+    /// [`Self::table`] carrying the chain of ids being resolved, so a
+    /// `loot_table` reference that loops back on itself is cut instead of
+    /// recursing without bound.
+    fn table_impl(&self, id: &str, stack: &mut Vec<String>) -> Option<Arc<LootTable>> {
         if let Some(v) = self.cache.lock().unwrap().get(id) {
             return v.clone();
         }
-        // Parse without the lock held: a `loot_table` entry resolves nested
-        // tables through this same method.
-        let parsed = self.parse(id).map(Arc::new);
+        if stack.iter().any(|s| s == id) {
+            self.unsupported
+                .lock()
+                .unwrap()
+                .insert(format!("{id}: cyclic loot_table reference"));
+            return None;
+        }
+        let mut t = self.parse(id)?;
+        stack.push(id.to_owned());
+        self.resolve_nested(&mut t, stack);
+        stack.pop();
+        let arc = Arc::new(t);
         self.cache
             .lock()
             .unwrap()
-            .insert(id.to_owned(), parsed.clone());
-        parsed
+            .insert(id.to_owned(), Some(Arc::clone(&arc)));
+        Some(arc)
     }
 
     /// Types the parser skipped, for the startup report.
@@ -917,8 +933,7 @@ impl LootTables {
         let tags = self.tags.as_ref();
         let mut warn = BTreeSet::new();
         match parse_table(id, &json, tags, &mut warn) {
-            Ok(mut t) => {
-                self.resolve_nested(&mut t, 0);
+            Ok(t) => {
                 if !warn.is_empty() {
                     self.unsupported.lock().unwrap().extend(warn);
                 }
@@ -936,31 +951,26 @@ impl LootTables {
 
     /// Replace `loot_table` references with their parsed tables, so the
     /// rolling path needs no registry.
-    fn resolve_nested(&self, table: &mut LootTable, depth: usize) {
-        if depth > 4 {
-            return;
-        }
+    fn resolve_nested(&self, table: &mut LootTable, stack: &mut Vec<String>) {
         for pool in &mut table.pools {
             for entry in &mut pool.entries {
-                resolve_entry_nested(entry, self, depth);
+                resolve_entry_nested(entry, self, stack);
             }
         }
     }
 }
 
-fn resolve_entry_nested(entry: &mut Entry, tables: &LootTables, depth: usize) {
-    if depth > 4 {
-        return;
-    }
+fn resolve_entry_nested(entry: &mut Entry, tables: &LootTables, stack: &mut Vec<String>) {
     match &mut entry.kind {
         EntryKind::LootTable(id) => {
-            if let Some(t) = tables.table(id) {
+            let id = id.clone();
+            if let Some(t) = tables.table_impl(&id, stack) {
                 entry.kind = EntryKind::Nested(t);
             }
         }
         EntryKind::Alternatives(c) | EntryKind::Group(c) | EntryKind::Sequence(c) => {
             for child in c {
-                resolve_entry_nested(child, tables, depth + 1);
+                resolve_entry_nested(child, tables, stack);
             }
         }
         _ => {}
@@ -1656,6 +1666,36 @@ mod tests {
     fn table_from(json: &str) -> LootTable {
         let j = Json::parse(json).unwrap();
         parse_table("minecraft:test", &j, None, &mut BTreeSet::new()).unwrap()
+    }
+
+    /// A `loot_table` reference that loops back on itself must be cut, not
+    /// recursed until the stack overflows.
+    #[test]
+    fn cyclic_loot_table_references_do_not_recurse() {
+        let dir = std::env::temp_dir().join(format!("aether-loot-cycle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lt = dir.join("data/minecraft/loot_table");
+        std::fs::create_dir_all(&lt).unwrap();
+        std::fs::write(
+            lt.join("a.json"),
+            r#"{"pools":[{"rolls":1,"entries":[
+                {"type":"minecraft:loot_table","value":"minecraft:b"}]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            lt.join("b.json"),
+            r#"{"pools":[{"rolls":1,"entries":[
+                {"type":"minecraft:loot_table","value":"minecraft:a"}]}]}"#,
+        )
+        .unwrap();
+        let tables = LootTables::open(dir.to_str().unwrap());
+        assert!(tables.table("minecraft:a").is_some());
+        assert!(
+            tables.unsupported().iter().any(|s| s.contains("cyclic")),
+            "the cycle should be recorded: {:?}",
+            tables.unsupported()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
