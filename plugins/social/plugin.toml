@@ -1,0 +1,13 @@
+# Manifest for the social plugin (CMD-44). See crates/aether-plugin/src/manifest.rs.
+id = "social"
+name = "Social"
+version = "0.1.0"
+api = "0.1"
+entry = "social.wasm"
+priority = 50
+
+capabilities = ["log", "config", "supports", "storage.kv", "players"]
+
+subscribe = ["on-command"]
+
+commands = ["party", "pc", "tpparty", "pt", "friend"]

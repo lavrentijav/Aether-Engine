@@ -1,0 +1,13 @@
+# Manifest for the integrations plugin (CMD-45). See crates/aether-plugin/src/manifest.rs.
+id = "integrations"
+name = "Integrations"
+version = "0.1.0"
+api = "0.1"
+entry = "integrations.wasm"
+priority = 50
+
+capabilities = ["log", "config", "supports", "players", "scheduler", "net.http"]
+
+subscribe = ["on-command", "after-player-join", "before-chat"]
+
+commands = ["discord", "vote", "votetop", "link", "unlink", "webstats"]

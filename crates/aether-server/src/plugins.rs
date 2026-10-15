@@ -158,6 +158,19 @@ mod imp {
                 .map(|h| self.player(h))
                 .collect()
         }
+
+        /// The core command registry, so a command registered through the SDK's
+        /// builder is dispatched and permission-checked like a core one. The
+        /// ownership and duplicate rules live in the registry.
+        fn register_command(
+            &self,
+            plugin: &str,
+            name: &str,
+            node: &str,
+            op: u8,
+        ) -> Result<(), String> {
+            crate::commands::registry::register_plugin(name, plugin, node, op)
+        }
     }
 
     static HOST: OnceLock<Mutex<PluginHost>> = OnceLock::new();
@@ -178,10 +191,10 @@ mod imp {
             memory_mib: cfg.plugins.memory_mib.max(1),
             max_faults: cfg.plugins.max_faults.max(1),
             init_fuel: cfg.plugins.init_fuel.max(1),
-            reserved_commands: crate::commands::RESERVED_COMMANDS
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
+            // Every core name — implemented and specified-but-unimplemented —
+            // so the host itself refuses to route one to a plugin, in addition
+            // to the registry's ownership check at registration.
+            reserved_commands: reserved_command_names(),
         };
         let mut host = match PluginHost::new(host_config, backend) {
             Ok(h) => h,
@@ -204,13 +217,20 @@ mod imp {
             }
             let caps = effective_capabilities(&file.manifest.capabilities, &entry.capabilities);
             match host.add(&file, &caps, &entry.config) {
-                Ok(()) => crate::log::info(&format!(
-                    "plugin     : {} v{} (priority {}, {} event(s))",
-                    id,
-                    file.manifest.version,
-                    file.manifest.priority,
-                    file.manifest.subscribe.len()
-                )),
+                Ok(()) => {
+                    // Register the plugin's commands through the command
+                    // registry, with the ownership and permission model the
+                    // core uses; a core name is refused here, not shadowed.
+                    register_commands(&file.manifest);
+                    crate::log::info(&format!(
+                        "plugin     : {} v{} (priority {}, {} event(s), {} command(s))",
+                        id,
+                        file.manifest.version,
+                        file.manifest.priority,
+                        file.manifest.subscribe.len(),
+                        file.manifest.commands.len()
+                    ));
+                }
                 Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
             }
         }
@@ -265,6 +285,41 @@ mod imp {
             Ok(()) => crate::log::info(&format!("plugin     : {id} (native SDK)")),
             Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
         }
+    }
+
+    /// Register a loaded plugin's commands in the command registry, so they are
+    /// dispatched and permission-checked the same way core commands are. A core
+    /// name is refused (logged) rather than shadowed; the host's reserved set
+    /// is the belt to this braces.
+    fn register_commands(manifest: &aether_plugin::Manifest) {
+        for decl in &manifest.commands {
+            let node = decl.node(&manifest.id);
+            if let Err(e) = crate::commands::registry::register_plugin(
+                decl.name(),
+                &manifest.id,
+                &node,
+                decl.op(),
+            ) {
+                crate::log::warn(&format!(
+                    "plugin `{}`: command not registered: {e}",
+                    manifest.id
+                ));
+            }
+        }
+    }
+
+    /// Every core command name, implemented or specified: the set a plugin may
+    /// never answer.
+    fn reserved_command_names() -> Vec<String> {
+        let mut names: Vec<String> = crate::commands::RESERVED_COMMANDS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        for e in crate::commands::registry::CORE {
+            names.push(e.name.to_string());
+            names.extend(e.aliases.iter().map(|a| (*a).to_string()));
+        }
+        names
     }
 
     /// Call `f` with the host, if one is installed.
@@ -408,6 +463,51 @@ mod imp {
             );
             // A grant the manifest never asked for is not forced on it.
             assert!(effective_capabilities(&[], &["log".to_string()]).is_empty());
+        }
+
+        #[test]
+        fn the_reserved_set_covers_core_and_specified_names() {
+            // The host's reserved set is what stops a plugin being routed a
+            // core name; it must include the implemented ones and the
+            // specified-but-unimplemented stubs alike.
+            let names = super::reserved_command_names();
+            assert!(names.iter().any(|n| n == "give"), "implemented core name");
+            assert!(names.iter().any(|n| n == "stop"), "CMD-09 stub");
+            assert!(names.iter().any(|n| n == "xp"), "a stub alias");
+            assert!(!names.iter().any(|n| n == "hello"));
+        }
+
+        #[test]
+        fn a_plugin_command_is_registered_unless_the_core_owns_the_name() {
+            use aether_plugin::manifest::{CommandDecl, Manifest, PluginTier};
+            let base = |commands: Vec<CommandDecl>| Manifest {
+                id: "registers_test_plugin".to_string(),
+                version: String::new(),
+                api: "0.1".to_string(),
+                entry: "x.wasm".to_string(),
+                tier: PluginTier::Wasm,
+                name: String::new(),
+                priority: 0,
+                capabilities: vec![],
+                subscribe: vec![],
+                commands,
+                requires: Vec::new(),
+                tick_period: 1,
+                deny_on_fault: false,
+            };
+            // A core name is refused (logged), not registered.
+            super::register_commands(&base(vec![CommandDecl::Plain("give".to_string())]));
+            assert!(crate::commands::registry::plugin_command("give").is_none());
+            // A new name is registered with its op level.
+            super::register_commands(&base(vec![CommandDecl::Detailed {
+                name: "registers_test_cmd".to_string(),
+                node: String::new(),
+                op: 3,
+            }]));
+            let entry = crate::commands::registry::plugin_command("registers_test_cmd")
+                .expect("registered");
+            assert_eq!(entry.plugin, "registers_test_plugin");
+            assert_eq!(entry.op, 3);
         }
     }
 }

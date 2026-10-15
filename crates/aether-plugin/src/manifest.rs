@@ -84,9 +84,11 @@ pub struct Manifest {
     /// called, so it costs nothing.
     #[serde(default)]
     pub subscribe: Vec<String>,
-    /// Command names the plugin answers in `on-command`.
+    /// Commands the plugin answers in `on-command`. A plugin may only add
+    /// **new** names: the core owns the vanilla names (and its own), so a
+    /// declaration that collides is refused when the server registers it.
     #[serde(default)]
-    pub commands: Vec<String>,
+    pub commands: Vec<CommandDecl>,
     /// How often `on-tick` fires, in ticks. Only meaningful when subscribed;
     /// `0` is treated as every tick.
     #[serde(default = "default_tick_period")]
@@ -98,6 +100,62 @@ pub struct Manifest {
     /// tick budget fails closed rather than letting the action through.
     #[serde(default)]
     pub deny_on_fault: bool,
+}
+
+/// A command a plugin declares in `plugin.toml`.
+///
+/// Two spellings, both valid, so the simple case stays simple:
+///
+/// ```toml
+/// commands = ["hello"]                       # anyone may run /hello
+/// commands = [{ name = "admin", op = 3 }]    # /admin needs op level 3
+/// ```
+///
+/// The permission check happens in the server's command registry before the
+/// plugin's `on-command` is entered, not inside the plugin.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum CommandDecl {
+    /// `/name`, op level 0.
+    Plain(String),
+    /// `/name` with a permission node and required op level.
+    Detailed {
+        /// The command name, without the leading slash.
+        name: String,
+        /// Permission node; empty resolves to `plugin.<id>.<name>`.
+        #[serde(default)]
+        node: String,
+        /// Vanilla op level (0 everyone … 4 owner).
+        #[serde(default)]
+        op: u8,
+    },
+}
+
+impl CommandDecl {
+    /// The command name, without the leading slash.
+    pub fn name(&self) -> &str {
+        match self {
+            CommandDecl::Plain(n) => n,
+            CommandDecl::Detailed { name, .. } => name,
+        }
+    }
+
+    /// The required op level (clamped to the vanilla 0..=4 range).
+    pub fn op(&self) -> u8 {
+        match self {
+            CommandDecl::Plain(_) => 0,
+            CommandDecl::Detailed { op, .. } => (*op).min(4),
+        }
+    }
+
+    /// The permission node, resolving the default from `plugin_id`.
+    pub fn node(&self, plugin_id: &str) -> String {
+        match self {
+            CommandDecl::Plain(_) => format!("plugin.{plugin_id}.{}", self.name()),
+            CommandDecl::Detailed { node, .. } if !node.is_empty() => node.clone(),
+            CommandDecl::Detailed { .. } => format!("plugin.{plugin_id}.{}", self.name()),
+        }
+    }
 }
 
 fn default_api() -> String {
@@ -125,7 +183,12 @@ impl Manifest {
 
     /// Whether `name` is one of the plugin's registered commands.
     pub fn serves_command(&self, name: &str) -> bool {
-        self.commands.iter().any(|c| c == name)
+        self.commands.iter().any(|c| c.name() == name)
+    }
+
+    /// The declared command `name`, if any.
+    pub fn command(&self, name: &str) -> Option<&CommandDecl> {
+        self.commands.iter().find(|c| c.name() == name)
     }
 
     /// The services this plugin requires, parsed from `requires`. An invalid
@@ -183,6 +246,18 @@ pub fn load(path: &Path) -> Result<ManifestFile, String> {
             manifest.api
         ));
     }
+    for c in &manifest.commands {
+        let name = c.name();
+        if name.is_empty() {
+            return Err(format!("{}: a command name is empty", path.display()));
+        }
+        if name.contains('/') || name.contains(char::is_whitespace) {
+            return Err(format!(
+                "{}: command `{name}` must be a single word without a slash",
+                path.display()
+            ));
+        }
+    }
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -203,7 +278,7 @@ entry = "hello.wasm"
 priority = 10
 capabilities = ["log", "storage.kv"]
 subscribe = ["on-tick", "before-block-break"]
-commands = ["hello"]
+commands = ["hello", { name = "admin", node = "hello.admin", op = 3 }]
 tick_period = 20
 "#;
 
@@ -216,6 +291,15 @@ tick_period = 20
         assert!(!m.subscribes("after-damage"), "unlisted events are off");
         assert!(m.serves_command("hello"));
         assert_eq!(m.label(), "hello", "an absent name falls back to the id");
+        // A plain name is op 0 and derives its node; a detailed one carries
+        // its own node and op.
+        let hello = m.command("hello").unwrap();
+        assert_eq!(hello.op(), 0);
+        assert_eq!(hello.node("hello"), "plugin.hello.hello");
+        let admin = m.command("admin").unwrap();
+        assert_eq!(admin.op(), 3);
+        assert_eq!(admin.node("hello"), "hello.admin");
+        assert!(!m.serves_command("admin2"));
 
         let minimal: Manifest = toml::from_str("id = \"x\"\nentry = \"x.wasm\"").unwrap();
         assert_eq!(minimal.api, API_VERSION);

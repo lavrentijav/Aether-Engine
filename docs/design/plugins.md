@@ -1,4 +1,4 @@
-# Plugins: WASM host, low-level API, economy as a plugin, custom enchantments
+# Plugins: core / native / WASM tiers, low-level API, economy as a plugin, custom enchantments
 
 Status: 🚧 stage P1 done (2026-10-14). ROADMAP Phase 4 "Plugin API: Native C-ABI tier + WebAssembly
 (Wasmtime) sandbox + `engine.supports()`" — this document is that plan, pulled forward.
@@ -12,8 +12,54 @@ Status: 🚧 stage P1 done (2026-10-14). ROADMAP Phase 4 "Plugin API: Native C-A
 3. **Enchantments become data**: vanilla ones from the data pack, level caps configurable or off,
    custom enchantments defined by config files or plugins.
 
-Non-goals now: native C-ABI tier (later; same WIT package, different loader), hot reload (later),
-client-side mods.
+Non-goals now: the native **C-ABI** tier for third parties (later; same WIT package, different
+loader — distinct from the in-workspace native tier below, which is plain Rust), hot reload
+(later), client-side mods.
+
+## Tiers: core, native, WASM
+
+There are three places a feature can live. A feature moves **out** of the core whenever it is
+optional, i.e. whenever a vanilla-like server would run without it.
+
+| tier | where | written as | for |
+|---|---|---|---|
+| **C — core** | `crates/` | engine code | only what **every** server needs **and** hot-path mechanisms **with no policy** |
+| **N — native plugin** | `plugins/<name>/` (Rust crate in this workspace) | a workspace crate linked **in-process**, same plugin API/events as WASM, **no WASM boundary**, full speed | optional but **performance-sensitive or deeply integrated** |
+| **W — WASM plugin** | `plugins/<name>/` (`.wasm` component) | a sandboxed Wasmtime component (untrusted third-party style) | optional, **not** performance-critical |
+
+**Core rules.**
+- The core is the world model, storage/journal, worldgen, physics, the tick, redstone, light, the
+  protocol and compat layer, and the *mechanisms* other tiers use.
+- The core keeps **no policy**: a decision that an operator could want to change belongs in a
+  plugin. When the core must run code at a hot point (a block break, a command) it calls a fixed
+  **hook**; the hook has no default behaviour beyond "allow".
+- The core must build and run correctly with **every** plugin disabled. `config.operators` is the
+  seed for the built-in `op` group, not a dependency on the permissions plugin.
+
+**Native rules.**
+- A native plugin is a normal Rust crate in this workspace under `plugins/<name>/`. It implements
+  the same `aether:plugin` world (lifecycle, events, host imports) as a WASM plugin, but it is
+  linked into the server binary and called **directly** — no serialization, no sandbox, no epoch
+  budget. It may use an internal fast path the WIT boundary cannot express.
+- Enabled/disabled in operator config like any plugin; **never required by the core**. A native
+  plugin that needs a core hook that does not exist extends the API (event/registry/import), it does
+  not patch the engine.
+- The **native plugin loader** is a task of its own (`CMD-00N`, on the P1 API): it discovers
+  native plugins, runs their `init`/`shutdown`, dispatches the same events with priority ordering,
+  and exposes the same services. See `docs/tasks/CMD-00N-native-loader.md`.
+- Because they are in-process, native plugins can degrade the whole server; they are trusted code
+  the operator chooses to build (or install from the same source), not arbitrary third-party code.
+
+**WASM rules.**
+- Untrusted or third-party-style code, sandboxed by Wasmtime (epoch/fuel/memory limits, capability
+  checks). Slower: pay the boundary and the sandbox.
+- Use for optional, non-hot-path features (economy, shops, chat formatting, social, fun,
+  integrations, stats).
+
+**Choosing:**
+- *Does every server need it, or is it a hot-path mechanism with no policy?* → **core**.
+- *Is it optional but performance-sensitive or deeply integrated with engine data?* → **native**.
+- *Is it optional, not performance-critical, and safe to sandbox?* → **WASM**.
 
 **World versioning (decided while shipping P1).** The component model has no optional exports, so a
 world's export set is a contract and adding one export refuses every component already built against
@@ -27,10 +73,14 @@ world type a component was compiled against.
 ## Layering
 
 ```
-plugins (.wasm components)          plugins/economy, plugins/examples/*, third-party
-   │  WIT: aether:plugin/*@0.1
-crates/aether-plugin                 host: wasmtime engine, loader, manifest, limits,
-   │                                 event bus, registries, capability checks
+core (crates/aether-server, …)      hot path + mechanisms + the event bus
+   │  hooks: before-*/after-* events, registries, host imports
+native plugins (plugins/<name>/)    Rust crates linked in-process, same API, full speed
+   │  (no boundary)
+WASM plugins (plugins/<name>/*.wasm) sandboxed, untrusted, WIT: aether:plugin/*@0.1
+   │
+crates/aether-plugin                 host: loader (native + wasmtime), manifest, event bus,
+   │                                 registries, capability checks, limits
 crates/aether-server                 calls the bus at fixed hook points; services (Economy, …)
                                      resolve to a plugin implementation or a built-in one
 ```
@@ -116,7 +166,11 @@ Operator config `[plugins] dir`, `[plugins.<id>] enabled`, granted capabilities,
   tests: load, event order by priority, cancel, trap isolation, time budget. Shipped with two
   deviations recorded in [KNOWN_ISSUES §A16](../KNOWN_ISSUES.md): the host links `wasmtime-wasi`
   under a context that grants nothing (so a Rust `wasm32-wasip2` component's std imports resolve),
-  and `after-enchant` has no hook point until the enchanting work (E1/E2).
+  and `after-enchant` has no hook point until the enchanting work (E1/E2). Plugin commands are
+  resolved through the command registry (see below), not a side path.
+- **P1-N (CMD-00N)**: the **native** plugin loader — the same API/events/bus as P1 but for Rust
+  crates linked in-process (no wasmtime, no boundary), enabled/disabled by config. This unblocks the
+  native tier (permissions, regions/claims, WorldEdit, history, profiler, moderation, essentials).
 - **P2**: economy service: WIT economy interface, `storage.ledger`, `WasmEconomy` adapter,
   conformance suite, `plugins/economy` port; switch by config.
 - **P3**: registries for plugins: custom enchantments and custom items (shown via compat stand-ins),

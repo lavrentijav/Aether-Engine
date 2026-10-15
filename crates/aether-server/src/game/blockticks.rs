@@ -395,6 +395,7 @@ fn set(world: &DemoWorld, registry: &SharedRegistry, pos: Pos, to: BlockStateId)
         return;
     }
     world.set_block_id(pos.0, pos.1, pos.2, to, world.props_of(to));
+    crate::visibility::invalidate_block(pos.0, pos.1, pos.2);
     registry.broadcast(
         &ServerEvent::BlockChange {
             x: pos.0,

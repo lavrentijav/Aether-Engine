@@ -19,6 +19,7 @@ pub static PACKETS: Packets = Packets {
     cb_container_set_data: 19,
     cb_damage_event: 25,
     cb_entity_event: 34,
+    cb_entity_teleport: -1,
     cb_entity_position_sync: 35,
     cb_explode: 36,
     cb_game_event: 39,
@@ -2009,9 +2010,11 @@ pub const MENU_GENERIC_3X3: i32 = 6;
 pub const MENU_CRAFTING: i32 = 12;
 pub const MENU_FURNACE: i32 = 14;
 pub const MENU_HOPPER: i32 = 16;
+pub const MENU_BREWING_STAND: i32 = 11;
 pub const COMPONENT_DAMAGE: i32 = 3;
 pub const COMPONENT_CUSTOM_NAME: i32 = 6;
 pub const COMPONENT_LORE: i32 = 11;
+pub const COMPONENT_POTION_CONTENTS: i32 = 53;
 pub const PARTICLE_EXPLOSION: i32 = 30;
 pub const PARTICLE_EXPLOSION_EMITTER: i32 = 29;
 
