@@ -98,6 +98,11 @@ impl SetBlockFlags {
     /// its own neighbour work.
     pub const CLIENTS: Self = Self(2);
 
+    /// A "reset" write: clients only, with the shape-update pass suppressed —
+    /// vanilla's `setBlock(..., 18)` (`UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE`),
+    /// used by the observer and target to clear a stale output.
+    pub const RESET: Self = Self(18);
+
     /// Combine two flag sets.
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)

@@ -986,3 +986,36 @@ fn a_destroyed_component_drops_its_item() {
         "the wire's item must be dropped at its cell"
     );
 }
+
+#[test]
+fn reset_flags_suppress_the_shape_pass() {
+    // F4: the observer and target clear a stale output with vanilla's
+    // `setBlock(..., 18)` = UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE, which suppresses
+    // the shape-update pass. A write with CLIENTS (2) runs it. A stale wire next
+    // to the new block shows the difference: it wakes only under the shape pass.
+    let engine = Redstone::new();
+    let rb = BlockRegistry::new()
+        .get("minecraft:redstone_block")
+        .unwrap();
+
+    // With RESET (18): the shape pass is suppressed, the wire stays a dot.
+    let mut w = MemWorld::new();
+    let wire = p(0, 0, 0);
+    w.put(wire, "minecraft:redstone_wire");
+    engine.set_block(&mut w, p(1, 0, 0), rb, SetBlockFlags::RESET);
+    assert_eq!(
+        props::get(w.state(wire), "east"),
+        Some("none"),
+        "RESET must suppress the shape pass"
+    );
+
+    // With CLIENTS (2): the shape pass runs and the wire connects.
+    let mut w = MemWorld::new();
+    w.put(wire, "minecraft:redstone_wire");
+    engine.set_block(&mut w, p(1, 0, 0), rb, SetBlockFlags::CLIENTS);
+    assert_eq!(
+        props::get(w.state(wire), "east"),
+        Some("side"),
+        "CLIENTS must run the shape pass"
+    );
+}

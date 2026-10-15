@@ -40,7 +40,7 @@ impl BlockBehaviour for Target {
             && !ctx.has_scheduled_tick(pos)
         {
             let new = props::with(state, "power", "0").unwrap_or(state);
-            ctx.set_block(pos, new, SetBlockFlags::CLIENTS);
+            ctx.set_block(pos, new, SetBlockFlags::RESET);
         }
     }
 

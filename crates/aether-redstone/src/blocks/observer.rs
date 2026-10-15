@@ -70,7 +70,7 @@ impl BlockBehaviour for Observer {
             && !ctx.has_scheduled_tick(pos)
         {
             let new = props::with(state, "powered", "false").unwrap_or(state);
-            ctx.set_block(pos, new, SetBlockFlags::CLIENTS);
+            ctx.set_block(pos, new, SetBlockFlags::RESET);
             diode::update_neighbors_in_front(ctx, pos, new);
         }
     }
