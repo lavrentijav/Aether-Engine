@@ -122,91 +122,119 @@ impl ItemTable {
     }
 }
 
+/// The item on the client's cursor, as the server models it: the real engine
+/// item and how many of it remain.
+///
+/// The count matters because a placement can consume only part of a stack (a
+/// right-click places one, and `Set Creative Mode Slot` cannot tell the server
+/// how many — the packet has no button), so the shadow must be spent a stack
+/// at a time, not cleared wholesale (N5).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Carried {
+    /// The real engine item on the cursor.
+    pub item: ItemTypeId,
+    /// How many of it are left on the cursor.
+    pub count: u8,
+}
+
 /// The outcome of resolving one creative slot report.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Resolution {
-    /// Write this item (or an empty slot) into the reported slot.
-    Apply(Option<ItemTypeId>),
+    /// Write this stack, `(item, count)`, or `None` for an empty slot, into the
+    /// reported slot.
+    Apply(Option<(ItemTypeId, u8)>),
 }
 
 impl ItemTable {
     /// Resolve one creative slot report against the window's state.
     ///
-    /// `report` is the item the client says the slot now holds (`None` for an
+    /// `report` is the stack the client says the slot now holds (`None` for an
     /// emptied slot), `previous` is what the server had in that slot, and
-    /// `carried` is the item shadowed from an earlier report — the server's
-    /// model of the single item on the client's cursor. Returns the resolution
-    /// and the carried item after the report.
+    /// `carried` is the cursor shadow — the server's model of the single stack
+    /// on the client's cursor. Returns the slot's new contents and the cursor
+    /// shadow after the report.
     ///
     /// The wire id alone cannot say whether a report of a stand-in *is* the
-    /// stand-in or the genuine item it hides. The server therefore:
+    /// stand-in or the genuine item it hides, and the server never sees the
+    /// client's cursor directly. It therefore:
     ///
-    /// * follows the **carried** item first — the one source taken off a slot
-    ///   by an earlier report. When the report names that stand-in the client
-    ///   *placed* it: the slot takes the real carried item and the cursor takes
-    ///   whatever the slot held (a swap), so the real item follows the move and
-    ///   the shadow is neither duplicated nor stranded;
-    /// * otherwise keeps the slot's **own** real item when the report names the
-    ///   same wire id (a re-send, or an echo), so a spear shown as a trident
-    ///   stays a spear even though the client can only say "trident";
-    /// * otherwise treats the report as **creation**: a creative client can
-    ///   conjure any item its version has, so the genuine item is written.
+    /// * if it is **carrying** a stack whose wire id matches the report, treats
+    ///   the report as that stack being **placed**: the slot takes the real
+    ///   carried item, the cursor takes whatever the slot held (a swap) or the
+    ///   part of the carried stack that did not fit (a merge), so the real item
+    ///   follows the move and the shadow is spent only by what was placed;
+    /// * otherwise treats the report as a **swap or creation** with a cursor the
+    ///   server does not know: the slot takes the reported item, and whatever
+    ///   the slot held moves to the cursor (N4) — or nothing, if it was empty.
     ///
-    /// The carried item is checked **before** the slot's own value on purpose
-    /// (N1): a stand-in placed onto a slot that already shows the same wire id
-    /// — a normal swap of a spear shown as a trident onto a genuine trident —
-    /// is a *move*, not an echo. Reading it as an echo left the slot holding
-    /// the genuine item and the spear only in the ephemeral cursor shadow, so
-    /// it became a trident on relog. A redundant re-send of an unchanged slot
-    /// while carrying is not something a client does; every `Set Creative Mode
-    /// Slot` follows a click that changed the slot.
-    ///
-    /// An earlier design instead scanned every occupied slot for a source and
-    /// refused a report with none. That both made ordinary creative picks of a
-    /// stand-in-target item vanish *and* let a single source feed many
-    /// placements (the source was never consumed), minting duplicates. The
-    /// source is now only ever the shadow, and only ever once.
+    /// A client can put a creative-menu item on its cursor with no packet, so
+    /// "carrying" is a guess and a non-matching report must still move the
+    /// replaced item to the cursor rather than drop it (N4). A prior design kept
+    /// the slot's own item on a same-wire report (an "echo"); that stranded a
+    /// genuine same-wire item the client had conjured and later converted a
+    /// stand-in, so the non-carrying branch is now an unconditional swap.
     pub fn resolve_change(
         &self,
-        report: Option<ItemTypeId>,
-        previous: Option<ItemTypeId>,
-        carried: Option<ItemTypeId>,
-    ) -> (Resolution, Option<ItemTypeId>) {
+        report: Option<(ItemTypeId, u8)>,
+        previous: Option<(ItemTypeId, u8)>,
+        carried: Option<Carried>,
+    ) -> (Resolution, Option<Carried>) {
         match report {
             None => {
-                // The slot emptied: the client picked up whatever was in it, so
-                // the cursor now holds that item — shadow it whether it is a
-                // stand-in *or* genuine. (A genuine item's wire id would usually
-                // be enough on its own, but once it displaces a stand-in the
-                // cursor is the only thing that can still tell the two apart.)
-                // An already-empty slot reports nothing about the cursor, so a
-                // duplicate empty report must **not** clear the shadow — that
-                // would destroy the item (F4).
-                let carried = if previous.is_some() {
-                    previous
-                } else {
-                    carried
-                };
-                (Resolution::Apply(None), carried)
+                // The slot emptied: the cursor now holds the whole slot. If it
+                // was already empty, a duplicate report says nothing about the
+                // cursor, so the shadow survives (F4).
+                let carry = previous
+                    .map(|(item, count)| Carried { item, count })
+                    .or(carried);
+                (Resolution::Apply(None), carry)
             }
-            Some(r) => {
-                // The client placed the item it was carrying. The slot takes
-                // the real carried item; the cursor takes whatever the slot
-                // held (a swap), or empties when the slot was empty. Checked
-                // before `previous` so a swap onto a same-wire slot is a move,
-                // not an echo (N1).
-                if let Some(c) = carried.filter(|c| self.same_wire(*c, r)) {
-                    return (Resolution::Apply(Some(c)), previous);
+            Some((r_item, r_count)) => {
+                if let Some(c) = carried.filter(|c| self.same_wire(c.item, r_item)) {
+                    // The client placed the carried stack into this slot.
+                    let (slot_item, carry) = match previous {
+                        // Merge onto its own kind: only what was *added* is
+                        // consumed from the cursor.
+                        Some((p_item, p_count)) if p_item == c.item => {
+                            let consumed = r_count.saturating_sub(p_count);
+                            let left = c.count.saturating_sub(consumed);
+                            (
+                                c.item,
+                                (left > 0).then_some(Carried {
+                                    item: c.item,
+                                    count: left,
+                                }),
+                            )
+                        }
+                        // Swap: the replaced item (a different real item) goes
+                        // to the cursor.
+                        Some((p_item, p_count)) => (
+                            c.item,
+                            Some(Carried {
+                                item: p_item,
+                                count: p_count,
+                            }),
+                        ),
+                        // Place into an empty slot: consume the placed count.
+                        None => {
+                            let left = c.count.saturating_sub(r_count);
+                            (
+                                c.item,
+                                (left > 0).then_some(Carried {
+                                    item: c.item,
+                                    count: left,
+                                }),
+                            )
+                        }
+                    };
+                    return (Resolution::Apply(Some((slot_item, r_count))), carry);
                 }
-                if let Some(p) = previous.filter(|p| self.same_wire(*p, r)) {
-                    // The client re-sent the slot's own contents: nothing moved.
-                    return (Resolution::Apply(Some(p)), carried);
-                }
-                // Creation: the client conjured (or replaced with) the genuine
-                // item the wire id names. A shadow for a *different* wire id is
-                // left alone — it is still on the cursor — and only a matching
-                // report could have spent it.
-                (Resolution::Apply(Some(r)), carried)
+                // The server does not know the client's cursor: `r` is a
+                // conjured genuine item (an empty slot) or a swap whose cursor
+                // item differs from the shadow. Either way the slot's old item
+                // leaves to the cursor, so shadow it rather than drop it (N4).
+                let carry = previous.map(|(item, count)| Carried { item, count });
+                (Resolution::Apply(Some((r_item, r_count))), carry)
             }
         }
     }
@@ -387,37 +415,44 @@ mod tests {
         x
     }
 
-    /// The multiset of real engine items across slots plus the cursor, so two
-    /// windows can be compared exactly (a loss shows up as a missing entry).
+    /// The multiset of real engine items across slots plus the cursor, counting
+    /// each instance by its stack count, so two windows compare exactly and a
+    /// loss shows up as a missing entry.
     fn multiset(
-        slots: &[Option<ItemTypeId>],
-        cursor: Option<ItemTypeId>,
-    ) -> std::collections::BTreeMap<ItemTypeId, usize> {
+        slots: &[Option<(ItemTypeId, u8)>],
+        cursor: Option<(ItemTypeId, u8)>,
+    ) -> std::collections::BTreeMap<ItemTypeId, u64> {
         let mut m = std::collections::BTreeMap::new();
-        for it in slots.iter().flatten().chain(cursor.iter()) {
-            *m.entry(*it).or_insert(0) += 1;
+        for (item, count) in slots.iter().flatten().chain(cursor.iter()) {
+            *m.entry(*item).or_insert(0) += *count as u64;
         }
         m
     }
 
-    /// Drive a random sequence of creative window reports against a faithful
-    /// client model and check the server's view never diverges from it.
+    /// Drive a random sequence of creative window actions against a faithful
+    /// client model and check the server never loses a real item or diverges on
+    /// a slot.
     ///
-    /// This is the property J10 must hold: the server's slots and its model of
-    /// the cursor stay equal to the client's, so the multiset of real items is
-    /// never changed except by an explicit creation of a genuine menu item. The
-    /// engine-only spear can only move, so its count is invariant. With
-    /// `allow_creation` false the whole multiset is conserved exactly.
+    /// The model makes every action a *real* client gesture: a pick-up empties
+    /// an occupied slot, a full placement fills an empty one, a single-item
+    /// placement (a right-click) moves one, a swap exchanges the cursor and an
+    /// occupied slot, and a **conjure onto the cursor** puts a genuine menu item
+    /// on the cursor with no packet (N4) — the case the old model could not
+    /// reach because its cursor was always shadowed. There is no "echo" op: a
+    /// client only reports a slot after a click that changed it.
     ///
-    /// The model makes every report a *real* client action: a pick-up empties
-    /// an occupied slot, a placement fills an empty one, a swap exchanges the
-    /// cursor and an occupied slot, and a conjure fills an empty slot from the
-    /// menu. There is no "echo" op — a client only sends a slot report after a
-    /// click that changed that slot — which is what N1 turned on.
+    /// Invariants after every server-visible action:
+    ///
+    /// * `server == client` — every slot holds the same real item and count;
+    /// * the server's slots plus its cursor shadow hold every *disguised* item
+    ///   the client does (a real item can never be lost to the disguise);
+    /// * a disguised item on the client's cursor is mirrored in the shadow;
+    /// * with no conjures, the whole multiset is conserved (N3, count included).
     fn run_reports(seed: u64, steps: usize, allow_creation: bool) {
         let t = &V1_21_1;
         let spear = id("minecraft:iron_spear");
-        if shown_as(t, spear).is_none() {
+        let pale = id("minecraft:pale_oak_planks");
+        if shown_as(t, spear).is_none() || shown_as(t, pale).is_none() {
             return;
         }
         // What the client actually receives for a real item (`engine()` of its
@@ -426,78 +461,130 @@ mod tests {
             t.engine(t.wire(it).expect("a version item").id)
                 .expect("a real item")
         };
+        // Menu items that are *not* the wire id of any stand-in, so a conjured
+        // item is never mistaken for a disguised one — the one ambiguity the
+        // server genuinely cannot resolve without seeing the cursor.
         let menu = [
-            id("minecraft:trident"),
             id("minecraft:diamond"),
-            id("minecraft:oak_planks"),
+            id("minecraft:stick"),
+            id("minecraft:cobblestone"),
+            id("minecraft:apple"),
         ];
+        for m in menu {
+            assert!(!t.stand_in_wire(t.wire(m).unwrap().id), "menu item {m:?}");
+        }
 
+        // Every engine item seeded has a wire id no *other* engine item shares
+        // (the spear's is trident, pale_oak_planks' is oak_planks, and no
+        // genuine trident or oak_planks is ever present), so two stacks that
+        // look the same to the client really are the same item and merges are
+        // unambiguous.
         let n = 9;
-        let mut client: Vec<Option<ItemTypeId>> = vec![None; n];
-        client[0] = Some(spear);
-        client[4] = Some(spear);
-        let mut cursor: Option<ItemTypeId> = None;
+        let mut client: Vec<Option<(ItemTypeId, u8)>> = vec![None; n];
+        client[0] = Some((spear, 1));
+        client[2] = Some((id("minecraft:diamond"), 10));
+        client[4] = Some((pale, 64));
+        let mut cursor: Option<(ItemTypeId, u8)> = None;
         let initial = multiset(&client, cursor);
+        // A spear is not stackable; everything else here stacks to 64.
+        let max_of = |item: ItemTypeId| if item == spear { 1 } else { 64 };
 
-        // The server's model: its slots and its shadow of the client's cursor.
-        let mut server: Vec<Option<ItemTypeId>> = client.clone();
-        let mut shadow: Option<ItemTypeId> = None;
+        let mut server = client.clone();
+        let mut shadow: Option<Carried> = None;
         let mut rng = seed | 1;
 
         for step in 0..steps {
             let s = (xorshift(&mut rng) as usize) % n;
-            let op = xorshift(&mut rng) % 8;
+            let op = xorshift(&mut rng) % 9;
+            let mut sent = false;
             match op {
                 // Pick up an occupied slot (cursor empty).
                 0..=2 if cursor.is_none() && client[s].is_some() => {
                     cursor = client[s].take();
+                    sent = true;
                 }
-                // Place the carried item into an empty slot.
-                3..=5 if cursor.is_some() && client[s].is_none() => {
+                // Place the whole carried stack into an empty slot.
+                3..=4 if cursor.is_some() && client[s].is_none() => {
                     client[s] = cursor.take();
+                    sent = true;
                 }
-                // Swap the cursor with an occupied slot.
-                6 if cursor.is_some() && client[s].is_some() => {
-                    let held = cursor.take();
-                    cursor = std::mem::replace(&mut client[s], held);
+                // Left-click an occupied slot with a non-empty cursor: merge
+                // onto the same kind (a real client merges, it does not swap
+                // two stacks of one item) or swap a different item.
+                5..=6 if cursor.is_some() && client[s].is_some() => {
+                    let (held_item, held_count) = cursor.take().unwrap();
+                    let (there_item, there_count) = client[s].unwrap();
+                    if held_item == there_item {
+                        let max = max_of(held_item);
+                        let sum = held_count.saturating_add(there_count);
+                        client[s] = Some((held_item, sum.min(max)));
+                        cursor = if sum > max {
+                            Some((held_item, sum - max))
+                        } else {
+                            None
+                        };
+                    } else {
+                        client[s] = Some((held_item, held_count));
+                        cursor = Some((there_item, there_count));
+                    }
+                    sent = true;
                 }
-                // Conjure a genuine menu item into an empty slot.
-                7 if allow_creation && cursor.is_none() && client[s].is_none() => {
-                    client[s] = Some(menu[(xorshift(&mut rng) as usize) % menu.len()]);
+                // Place a single item from the cursor into an empty slot (a
+                // right-click; the packet cannot say how many — N5).
+                7 if cursor.is_some_and(|(_, c)| c > 1) && client[s].is_none() => {
+                    let (item, count) = cursor.unwrap();
+                    client[s] = Some((item, 1));
+                    cursor = Some((item, count - 1));
+                    sent = true;
                 }
-                _ => continue,
+                // Conjure a genuine menu item onto the cursor (no packet): the
+                // client now carries something the server never shadowed (N4).
+                8 if allow_creation && cursor.is_none() => {
+                    cursor = Some((menu[(xorshift(&mut rng) as usize) % menu.len()], 64));
+                }
+                _ => {}
             }
-            // The client reports the slot's new value; fold the server's answer.
-            let (res, carry) = t.resolve_change(client[s].map(shown), server[s], shadow);
+            if !sent {
+                // A conjure (or a skipped op) sends no report: the slots must
+                // still agree, but the cursor is now the server's blind spot.
+                assert_eq!(server, client, "step {step}: server slots diverged");
+                continue;
+            }
+
+            let report = client[s].map(|(item, count)| (shown(item), count));
+            let (res, carry) = t.resolve_change(report, server[s], shadow);
             server[s] = match res {
-                Resolution::Apply(i) => i,
+                Resolution::Apply(stack) => stack,
             };
             shadow = carry;
 
-            // The server's whole view must match the client's: no slot, and no
-            // cursor item, may differ. This is what a loss or a wrong move
-            // shows up as (N3) — the old test only counted spears, so any bug
-            // that dropped an item passed.
             assert_eq!(server, client, "step {step}: server slots diverged");
-            assert_eq!(shadow, cursor, "step {step}: server cursor diverged");
 
-            // And the multiset of real items, count included, must never lose
-            // anything; a spear (engine-only) may never be created.
-            let now = multiset(&client, cursor);
-            for (item, count) in &initial {
-                assert!(
-                    now.get(item).copied().unwrap_or(0) >= *count,
-                    "step {step}: lost {item:?}"
+            // Every disguised (real, non-creative) item the client holds must
+            // be on the server too — in a slot or in the shadow. The spear and
+            // pale_oak_planks are engine-only for this client.
+            let server_side = multiset(&server, shadow.map(|c| (c.item, c.count)));
+            let client_side = multiset(&client, cursor);
+            for item in [spear, pale] {
+                assert_eq!(
+                    server_side.get(&item).copied().unwrap_or(0),
+                    client_side.get(&item).copied().unwrap_or(0),
+                    "step {step}: server lost a {item:?}"
                 );
             }
-            assert_eq!(
-                now.get(&spear).copied().unwrap_or(0),
-                initial[&spear],
-                "step {step}: the spear count changed"
-            );
+            // A disguised item on the cursor is mirrored in the shadow.
+            if let Some((item, count)) = cursor {
+                if t.wire(item).is_some_and(|w| w.disguised) {
+                    assert_eq!(
+                        shadow,
+                        Some(Carried { item, count }),
+                        "step {step}: shadow lost a cursor {item:?}"
+                    );
+                }
+            }
             if !allow_creation {
                 assert_eq!(
-                    now, initial,
+                    client_side, initial,
                     "step {step}: a pure move changed the multiset"
                 );
             }
@@ -506,11 +593,11 @@ mod tests {
 
     #[test]
     fn random_window_reports_never_mint_a_real_item() {
-        // The property J10 must hold: random creative window actions never
-        // change the multiset of *real* engine items except by an explicit
-        // creative action (a menu conjure of a genuine item), and the server's
-        // view never diverges from the client's. The comparison is the full
-        // multiset, count included, so a loss fails too (N3).
+        // The property J10 must hold: random creative window actions never lose
+        // or fabricate a *real* engine item. The server's slots always match
+        // the client's, a disguised item is always accounted for, and with no
+        // conjures the multiset is conserved exactly — count included, so a
+        // loss fails too (N3), and conjure-onto-cursor exercises N4.
         for seed in 0..64u64 {
             run_reports(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), 400, true);
         }
@@ -642,6 +729,11 @@ mod tests {
         t.wire(real).and_then(|w| t.engine(w.id))
     }
 
+    /// A cursor shadow of `item` × `count`.
+    fn held(item: ItemTypeId, count: u8) -> Option<Carried> {
+        Some(Carried { item, count })
+    }
+
     #[test]
     fn a_stand_in_survives_being_carried_through_the_cursor_between_slots() {
         // The flow KNOWN_ISSUES 15's second bullet asks for: a creative client
@@ -655,28 +747,28 @@ mod tests {
             return; // no spear rule: nothing to move
         };
         // 1. Pick up: slot 36 empties, and the spear is now on the cursor.
-        let (res, carried) = t.resolve_change(None, Some(spear), None);
+        let (res, carried) = t.resolve_change(None, Some((spear, 1)), None);
         assert_eq!(res, Resolution::Apply(None));
-        assert_eq!(carried, Some(spear));
+        assert_eq!(carried, held(spear, 1));
 
         // 2. Place into empty slot 10: the client reports the trident. The
         //    source slot is gone, so only the carried shadow identifies it.
-        let (res, carried) = t.resolve_change(Some(shown), None, carried);
-        assert_eq!(res, Resolution::Apply(Some(spear)));
+        let (res, carried) = t.resolve_change(Some((shown, 1)), None, carried);
+        assert_eq!(res, Resolution::Apply(Some((spear, 1))));
         assert_eq!(carried, None, "the one source is spent");
 
         // 3. Pick up and place again, into slot 11.
-        let (_, carried) = t.resolve_change(None, Some(spear), carried);
-        let (res, _) = t.resolve_change(Some(shown), None, carried);
-        assert_eq!(res, Resolution::Apply(Some(spear)));
+        let (_, carried) = t.resolve_change(None, Some((spear, 1)), carried);
+        let (res, _) = t.resolve_change(Some((shown, 1)), None, carried);
+        assert_eq!(res, Resolution::Apply(Some((spear, 1))));
 
         // 4. A trident with no source is a *creation*: a creative client can
         //    conjure one, so it is accepted as the genuine trident (F1).
-        let (res, _) = t.resolve_change(Some(shown), None, None);
-        assert_eq!(res, Resolution::Apply(Some(id("minecraft:trident"))));
+        let (res, _) = t.resolve_change(Some((shown, 1)), None, None);
+        assert_eq!(res, Resolution::Apply(Some((id("minecraft:trident"), 1))));
         // ...and a genuine item is always believed.
-        let (res, _) = t.resolve_change(Some(id("minecraft:diamond")), None, None);
-        assert_eq!(res, Resolution::Apply(Some(id("minecraft:diamond"))));
+        let (res, _) = t.resolve_change(Some((id("minecraft:diamond"), 1)), None, None);
+        assert_eq!(res, Resolution::Apply(Some((id("minecraft:diamond"), 1))));
     }
 
     #[test]
@@ -692,23 +784,23 @@ mod tests {
         let Some(shown) = shown_as(t, spear) else {
             return;
         };
-        let (res, carried) = t.resolve_change(Some(shown), None, None);
+        let (res, carried) = t.resolve_change(Some((shown, 1)), None, None);
         assert_eq!(
             res,
-            Resolution::Apply(Some(id("minecraft:trident"))),
+            Resolution::Apply(Some((id("minecraft:trident"), 1))),
             "no source at all: a creation"
         );
         assert_eq!(carried, None);
 
         // A real move: pick the spear up, place it, then try to place again.
-        let (_, carried) = t.resolve_change(None, Some(spear), None);
-        let (first, carried) = t.resolve_change(Some(shown), None, carried);
-        assert_eq!(first, Resolution::Apply(Some(spear)));
+        let (_, carried) = t.resolve_change(None, Some((spear, 1)), None);
+        let (first, carried) = t.resolve_change(Some((shown, 1)), None, carried);
+        assert_eq!(first, Resolution::Apply(Some((spear, 1))));
         assert_eq!(carried, None);
-        let (second, _) = t.resolve_change(Some(shown), None, carried);
+        let (second, _) = t.resolve_change(Some((shown, 1)), None, carried);
         assert_eq!(
             second,
-            Resolution::Apply(Some(id("minecraft:trident"))),
+            Resolution::Apply(Some((id("minecraft:trident"), 1))),
             "the source was spent, so the second report is a genuine creation"
         );
     }
@@ -724,16 +816,16 @@ mod tests {
             return;
         };
         // Pick the spear up: the shadow is now the spear.
-        let (_, carried) = t.resolve_change(None, Some(spear), None);
-        assert_eq!(carried, Some(spear));
+        let (_, carried) = t.resolve_change(None, Some((spear, 1)), None);
+        assert_eq!(carried, held(spear, 1));
         // An empty report for a slot that was *already* empty says nothing
         // about the cursor, so the shadow must survive.
         let (res, carried) = t.resolve_change(None, None, carried);
         assert_eq!(res, Resolution::Apply(None));
-        assert_eq!(carried, Some(spear), "the spear must not be lost");
+        assert_eq!(carried, held(spear, 1), "the spear must not be lost");
         // And it can still be placed as the real item.
-        let (res, _) = t.resolve_change(Some(shown), None, carried);
-        assert_eq!(res, Resolution::Apply(Some(spear)));
+        let (res, _) = t.resolve_change(Some((shown, 1)), None, carried);
+        assert_eq!(res, Resolution::Apply(Some((spear, 1))));
     }
 
     #[test]
@@ -749,16 +841,17 @@ mod tests {
             return;
         };
         // The shadow is what the client carried, not any other slot.
-        let (res, _) = t.resolve_change(Some(shown), None, Some(spear));
-        assert_eq!(res, Resolution::Apply(Some(spear)));
+        let (res, _) = t.resolve_change(Some((shown, 1)), None, held(spear, 1));
+        assert_eq!(res, Resolution::Apply(Some((spear, 1))));
         // A genuine item carried is preserved as itself, even with a spear
         // elsewhere in the window.
-        let (res, _) = t.resolve_change(Some(shown), None, Some(trident));
-        assert_eq!(res, Resolution::Apply(Some(trident)));
-        // No shadow + a genuine trident already in the destination slot is an
-        // echo of that slot, not the spear.
-        let (res, _) = t.resolve_change(Some(trident), Some(trident), None);
-        assert_eq!(res, Resolution::Apply(Some(trident)));
+        let (res, _) = t.resolve_change(Some((shown, 1)), None, held(trident, 1));
+        assert_eq!(res, Resolution::Apply(Some((trident, 1))));
+        // A genuine trident already in the destination slot, with nothing on the
+        // cursor, is a swap whose replaced item is the trident itself.
+        let (res, carry) = t.resolve_change(Some((trident, 1)), Some((trident, 1)), None);
+        assert_eq!(res, Resolution::Apply(Some((trident, 1))));
+        assert_eq!(carry, held(trident, 1));
     }
 
     #[test]
@@ -778,8 +871,8 @@ mod tests {
         assert_eq!(shown, trident, "the spear is shown as a trident");
 
         // 1. Slot 36 holds the spear, slot 10 a genuine trident.
-        let mut slot36 = Some(spear);
-        let mut slot10 = Some(trident);
+        let mut slot36 = Some((spear, 1));
+        let mut slot10 = Some((trident, 1));
         let mut carried = None;
 
         // 2. Left-click slot 36: pick the spear up.
@@ -787,27 +880,31 @@ mod tests {
         assert_eq!(res, Resolution::Apply(None));
         slot36 = None;
         carried = carry;
-        assert_eq!(carried, Some(spear));
+        assert_eq!(carried, held(spear, 1));
 
         // 3. Left-click slot 10: swap the spear onto the trident. The packet
         //    says "trident", which matches *both* slots.
-        let (res, carry) = t.resolve_change(Some(shown), slot10, carried);
+        let (res, carry) = t.resolve_change(Some((shown, 1)), slot10, carried);
         match res {
             Resolution::Apply(i) => slot10 = i,
         }
         carried = carry;
-        assert_eq!(slot10, Some(spear), "the spear must land in slot 10");
-        assert_eq!(carried, Some(trident), "the trident is now on the cursor");
+        assert_eq!(slot10, Some((spear, 1)), "the spear must land in slot 10");
+        assert_eq!(
+            carried,
+            held(trident, 1),
+            "the trident is now on the cursor"
+        );
 
         // No item is created or lost: exactly one spear and one trident.
-        let all = [slot36, slot10, carried];
-        assert_eq!(all.iter().filter(|i| **i == Some(spear)).count(), 1);
-        assert_eq!(all.iter().filter(|i| **i == Some(trident)).count(), 1);
+        let all = [slot36, slot10, carried.map(|c| (c.item, c.count))];
+        assert_eq!(all.iter().filter(|i| **i == Some((spear, 1))).count(), 1);
+        assert_eq!(all.iter().filter(|i| **i == Some((trident, 1))).count(), 1);
 
-        // A re-send of an *unrelated* slot while carrying is still an echo.
-        let (res, carry) = t.resolve_change(Some(trident), Some(trident), carried);
-        assert_eq!(res, Resolution::Apply(Some(trident)));
-        assert_eq!(carry, Some(trident), "an echo does not spend the shadow");
+        // A re-send matching the cursor's item merges rather than duplicates.
+        let (res, carry) = t.resolve_change(Some((trident, 1)), Some((trident, 1)), carried);
+        assert_eq!(res, Resolution::Apply(Some((trident, 1))));
+        assert_eq!(carry, held(trident, 1));
     }
 
     #[test]
@@ -831,10 +928,67 @@ mod tests {
                 t.stand_in_wire(w.id),
                 "{name} must be a stand-in wire id for this test to bite"
             );
-            let (res, carry) = t.resolve_change(Some(picked), None, None);
-            assert_eq!(res, Resolution::Apply(Some(picked)), "{name} vanished");
+            let (res, carry) = t.resolve_change(Some((picked, 1)), None, None);
+            assert_eq!(res, Resolution::Apply(Some((picked, 1))), "{name} vanished");
             assert_eq!(carry, None);
         }
+    }
+
+    #[test]
+    fn a_swap_of_an_unshadowed_cursor_item_onto_a_stand_in_keeps_the_stand_in() {
+        // N4: the client clicks a creative-menu item onto its cursor (which
+        // sends no packet) and then left-clicks a slot holding a spear shown as
+        // a trident. The server never shadowed the cursor, so the report has no
+        // source. The replaced spear must move to the cursor, not vanish and be
+        // re-created as a genuine trident on the next placement.
+        let spear = id("minecraft:iron_spear");
+        let diamond = id("minecraft:diamond");
+        let t = &V1_21_1;
+        let shown = shown_as(t, spear).expect("the spear has a stand-in");
+
+        // 1. Slot 9 holds the spear; the cursor is empty on the server.
+        let mut slot9 = Some((spear, 1));
+        // 2. Left-click slot 9: swap the conjured diamond onto the spear.
+        let (res, carry) = t.resolve_change(Some((diamond, 1)), slot9, None);
+        slot9 = match res {
+            Resolution::Apply(s) => s,
+        };
+        assert_eq!(slot9, Some((diamond, 1)), "the diamond lands in the slot");
+        assert_eq!(carry, held(spear, 1), "the spear goes to the cursor");
+
+        // 3. Place the cursor item into an empty slot: it is still the spear,
+        //    not a genuine trident.
+        let (res, carry) = t.resolve_change(Some((shown, 1)), None, carry);
+        assert_eq!(
+            res,
+            Resolution::Apply(Some((spear, 1))),
+            "the spear is deposited, not conjured"
+        );
+        assert_eq!(carry, None);
+    }
+
+    #[test]
+    fn a_partial_placement_spends_only_the_items_placed() {
+        // N5: the shadow tracks the count. A right-click places one item from a
+        // stackable stand-in — and `Set Creative Mode Slot` cannot say how many,
+        // the packet has no button — so the rest must stay on the cursor as the
+        // real item, not convert to the genuine stand-in.
+        let pale = id("minecraft:pale_oak_planks");
+        let t = &V1_21_1;
+        let shown = shown_as(t, pale).expect("pale_oak_planks has a stand-in");
+        assert_eq!(shown, id("minecraft:oak_planks"));
+
+        // Pick up a stack of 64.
+        let (_, carry) = t.resolve_change(None, Some((pale, 64)), None);
+        assert_eq!(carry, held(pale, 64));
+        // Place one into an empty slot.
+        let (res, carry) = t.resolve_change(Some((shown, 1)), None, carry);
+        assert_eq!(res, Resolution::Apply(Some((pale, 1))));
+        assert_eq!(carry, held(pale, 63), "63 left, still the real item");
+        // Place the rest.
+        let (res, carry) = t.resolve_change(Some((shown, 63)), None, carry);
+        assert_eq!(res, Resolution::Apply(Some((pale, 63))));
+        assert_eq!(carry, None);
     }
 
     #[test]

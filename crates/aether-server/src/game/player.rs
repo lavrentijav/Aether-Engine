@@ -88,8 +88,8 @@ pub struct PlayerState {
     pub cursor: Option<Stack>,
     /// The item a creative client is carrying between slots, shadowed from
     /// its slot reports so a substituted item moved through the cursor keeps
-    /// its real identity. See `session::record_slot_change`.
-    pub creative_carry: Option<aether_world::ItemTypeId>,
+    /// its real identity and count. See `session::record_slot_change`.
+    pub creative_carry: Option<crate::protocol::compat::items::Carried>,
     pub drag: Option<Drag>,
     pub xp_total: i32,
     /// Where they come back after dying.
@@ -408,7 +408,7 @@ mod tests {
         // respawn would resolve to the real item that no longer exists.
         // `combat::die`, `combat::respawn` and `game::window::close` all call
         // `clear_creative_shadow`, which is the step this test drives.
-        use crate::protocol::compat::items::{table_for, Resolution};
+        use crate::protocol::compat::items::{table_for, Carried, Resolution};
         let spear = aether_world::ItemTypeId::vanilla("minecraft:iron_spear").unwrap();
         let trident = aether_world::ItemTypeId::vanilla("minecraft:trident").unwrap();
         let table = table_for(767).unwrap(); // 1.21.1
@@ -417,15 +417,21 @@ mod tests {
 
         let mut p = PlayerState::new(GameMode::Creative);
         // Pick the spear up: the shadow is set.
-        let (_, carry) = table.resolve_change(None, Some(spear), p.creative_carry);
+        let (_, carry) = table.resolve_change(None, Some((spear, 1)), p.creative_carry);
         p.creative_carry = carry;
-        assert_eq!(p.creative_carry, Some(spear));
+        assert_eq!(
+            p.creative_carry,
+            Some(Carried {
+                item: spear,
+                count: 1
+            })
+        );
         // Die: the inventory is dropped and the shadow with it.
         p.clear_creative_shadow();
         assert_eq!(p.creative_carry, None);
         // Respawn, report a trident into an empty slot: a genuine creation,
         // not the spear conjured from the dropped one.
-        let (res, _) = table.resolve_change(Some(shown), None, p.creative_carry);
-        assert_eq!(res, Resolution::Apply(Some(trident)));
+        let (res, _) = table.resolve_change(Some((shown, 1)), None, p.creative_carry);
+        assert_eq!(res, Resolution::Apply(Some((trident, 1))));
     }
 }

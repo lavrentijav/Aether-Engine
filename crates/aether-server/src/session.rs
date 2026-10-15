@@ -1375,7 +1375,7 @@ fn record_slot_change(
     item: Option<aether_world::ItemTypeId>,
     count: u8,
 ) {
-    let item = resolve_creative_report(handle, slot, item);
+    let (item, count) = resolve_creative_report(handle, slot, item.map(|item| (item, count)));
     let change = handle.set_creative_slot(slot, item, count);
     if change.is_noop() {
         return;
@@ -1424,17 +1424,20 @@ fn record_slot_change(
 fn resolve_creative_report(
     handle: &crate::players::PlayerHandle,
     slot: i16,
-    reported: Option<aether_world::ItemTypeId>,
-) -> Option<aether_world::ItemTypeId> {
+    reported: Option<(aether_world::ItemTypeId, u8)>,
+) -> (Option<aether_world::ItemTypeId>, u8) {
     let table = protocol::compat::items::table_for(handle.codec.protocol_id());
     let Some(table) = table else {
-        return match (reported, slot) {
-            (Some(r), s) if s >= 0 => match handle.inventory().get(s as usize).map(|st| st.item) {
-                Some(real) => Some(handle.codec.resolve_reported_item(real, r)),
+        let item = match (reported, slot) {
+            (Some((r, _)), s) if s >= 0 => match handle.inventory().get(s as usize) {
+                Some(real) => Some(handle.codec.resolve_reported_item(real.item, r)),
                 None => Some(r),
             },
-            (other, _) => other,
+            (Some((r, _)), _) => Some(r),
+            (None, _) => None,
         };
+        let count = reported.map_or(0, |(_, c)| c);
+        return (item, count);
     };
 
     // Snapshot before the move: what the slot holds and the shadow the client
@@ -1446,7 +1449,7 @@ fn resolve_creative_report(
         let st = handle.game();
         let inv = handle.inventory();
         let previous = if slot >= 0 {
-            inv.get(slot as usize).map(|s| s.item)
+            inv.get(slot as usize).map(|s| (s.item, s.count))
         } else {
             None
         };
@@ -1456,7 +1459,8 @@ fn resolve_creative_report(
     let (resolution, carried) = table.resolve_change(reported, previous, carried);
     handle.game().creative_carry = carried;
     match resolution {
-        protocol::compat::items::Resolution::Apply(item) => item,
+        protocol::compat::items::Resolution::Apply(Some((item, count))) => (Some(item), count),
+        protocol::compat::items::Resolution::Apply(None) => (None, 0),
     }
 }
 
