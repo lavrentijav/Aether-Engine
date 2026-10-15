@@ -183,6 +183,9 @@ fn login_and_play(
                 ));
                 return protocol::kick_login(s, &reason);
             }
+            // The client left during the handshake; there is nothing to admit
+            // and no one to tell.
+            crate::auth::Admission::Ended => return Ok(()),
         };
     // Between Login Start and Login Success, and nowhere else: every version
     // this server speaks takes Set Compression at login id 0x03, so the switch

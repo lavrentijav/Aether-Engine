@@ -13,6 +13,7 @@
 use std::net::IpAddr;
 
 use crate::auth::api::{ApiError, LookupCache, Profile, ProfileApi};
+use crate::auth::bounce::BounceCache;
 use crate::auth::crypto::{self, ServerKey, TOKEN_LEN};
 use crate::auth::store::{self, Lock, MetaStore};
 use crate::config::{AuthConfig, AuthMode, LookupFailure};
@@ -34,22 +35,31 @@ pub enum Admission {
     Online(Profile),
     /// Refused, with the message to show.
     Refused(String),
+    /// The client left during authentication. Nothing to admit and nothing
+    /// to say: the connection is over.
+    Ended,
 }
 
 /// The result of the online handshake alone.
 enum OnlineOutcome {
+    /// The client proved the account.
     Ok(Profile),
-    /// The client failed to prove the account.
-    Refused,
-    /// Mojang could not be reached, so the claim is unverified.
+    /// The client answered the Encryption Request but Mojang would not
+    /// confirm the session — a cracked or modified client.
+    NoSession,
+    /// The client sent something that is not a valid Encryption Response.
+    BadResponse,
+    /// Mojang could not be reached, so the session is unverified.
     ApiDown,
+    /// The client went away before answering.
+    Dropped,
 }
 
 /// Resolve a login under the configured policy.
 ///
-/// `store` is the world's lock table; `key`, `api` and `cache` are the
-/// process-wide server key and HTTP client (see [`super`]). `name` is the
-/// client's claimed username.
+/// `store` is the world's lock table; `key`, `api`, `cache` and `bounce` are
+/// the process-wide server key, HTTP client and caches (see [`super`]).
+/// `name` is the client's claimed username.
 #[allow(clippy::too_many_arguments)]
 pub fn authenticate(
     s: &mut Conn,
@@ -59,6 +69,7 @@ pub fn authenticate(
     key: &ServerKey,
     api: &dyn ProfileApi,
     cache: &LookupCache,
+    bounce: &BounceCache,
     name: &str,
     ip: Option<IpAddr>,
 ) -> std::io::Result<Admission> {
@@ -66,19 +77,50 @@ pub fn authenticate(
         AuthMode::Offline => Ok(Admission::Offline),
         AuthMode::Online => {
             let outcome = online_login(s, codec, key, api, name, ip)?;
-            Ok(settle_online(store, name, outcome))
+            Ok(online_only(store, name, outcome))
         }
-        AuthMode::Hybrid => hybrid(s, codec, cfg, store, key, api, cache, name, ip),
+        AuthMode::Hybrid => hybrid(s, codec, cfg, store, key, api, cache, bounce, name, ip),
     }
 }
 
-/// The hybrid policy:
+/// Every login in `online` mode must authenticate; there is no offline
+/// fallback.
+fn online_only(store: &dyn MetaStore, name: &str, outcome: OnlineOutcome) -> Admission {
+    match outcome {
+        OnlineOutcome::Ok(profile) => lock_profile(store, name, profile),
+        OnlineOutcome::Dropped => {
+            log::info(&format!("[auth] {name} left during online auth"));
+            Admission::Ended
+        }
+        OnlineOutcome::ApiDown => {
+            log::warn(&format!(
+                "[auth] {name} refused: session server unreachable in online mode"
+            ));
+            Admission::Refused("The authentication service is unavailable; try again later.".into())
+        }
+        _ => {
+            log::info(&format!("[auth] {name} refused: online auth failed"));
+            Admission::Refused(
+                "Online-mode login failed. Log in with the official Minecraft launcher.".into(),
+            )
+        }
+    }
+}
+
+/// The hybrid policy, as revised by the owner:
 ///
-/// 1. a locked name must pass online auth;
-/// 2. an unlocked name is looked up; premium names must pass online auth (so
-///    they cannot be squatted offline first) and are then locked;
-/// 3. a non-premium name joins offline;
-/// 4. if the lookup fails, [`LookupFailure`] decides.
+/// 1. a **locked** name (one that has completed online auth on *this* server)
+///    must pass online auth; a locked name's owner arriving under a new name
+///    moves the lock (handled where the response's uuid is compared — the
+///    lock follows the uuid, see [`store::put`]);
+/// 2. offline play is open to everyone. An **unlocked** name is looked up: a
+///    premium name is *offered* encryption, and
+///    * if `hasJoined` succeeds → online and the name is locked;
+///    * if it fails → offline in the same connection;
+///    * if the client drops mid-handshake → offline next attempt from the
+///      same address and name within [`bounce::TTL`], with no offer;
+///    * a non-premium name → offline directly;
+/// 3. a lookup failure follows [`LookupFailure`].
 #[allow(clippy::too_many_arguments)]
 fn hybrid(
     s: &mut Conn,
@@ -88,23 +130,94 @@ fn hybrid(
     key: &ServerKey,
     api: &dyn ProfileApi,
     cache: &LookupCache,
+    bounce: &BounceCache,
     name: &str,
     ip: Option<IpAddr>,
 ) -> std::io::Result<Admission> {
     if let Some(lock) = store::get_by_name(store, name) {
+        // Locked: the owner must authenticate. This is the only place a name
+        // may be refused for auth reasons.
         log::info(&format!(
-            "[auth] {name} is locked to {} (premium): online auth required",
+            "[auth] {name} is locked to {} (completed online auth here before): online auth required",
             crate::auth::api::hyphenated_uuid(lock.uuid)
         ));
         let outcome = online_login(s, codec, key, api, name, ip)?;
-        return Ok(settle_online(store, name, outcome));
+        return Ok(match outcome {
+            OnlineOutcome::Ok(profile) => lock_profile(store, name, profile),
+            OnlineOutcome::Dropped => {
+                log::info(&format!("[auth] {name} left during online auth"));
+                Admission::Ended
+            }
+            OnlineOutcome::ApiDown => {
+                log::warn(&format!(
+                    "[auth] {name} refused: session server unreachable, cannot verify a locked name"
+                ));
+                Admission::Refused(
+                    "The authentication service is unavailable; this name is locked to an \
+                     account and cannot join offline."
+                        .into(),
+                )
+            }
+            _ => {
+                log::info(&format!(
+                    "[auth] {name} refused: an offline attempt on a locked name"
+                ));
+                Admission::Refused(premium_message(name))
+            }
+        });
+    }
+
+    // A client that dropped during a recent auth from this address is not
+    // offered encryption again for a while; admit it offline.
+    if bounce.bounced(ip, name) {
+        log::info(&format!(
+            "[auth] {name} dropped during a recent online auth from this address; \
+             offline without an encryption offer"
+        ));
+        return Ok(Admission::Offline);
     }
 
     match cache.get(api, name) {
         Ok(Some(_uuid)) => {
-            // A premium name we have not locked yet: verify, then lock.
-            let outcome = online_login(s, codec, key, api, name, ip)?;
-            Ok(settle_online(store, name, outcome))
+            // A premium name that has never authenticated here: offer to
+            // verify it. A failure is not a refusal — offline stays open.
+            match online_login(s, codec, key, api, name, ip)? {
+                OnlineOutcome::Ok(profile) => Ok(lock_profile(store, name, profile)),
+                OnlineOutcome::NoSession | OnlineOutcome::BadResponse => {
+                    log::info(&format!(
+                        "[auth] {name} is premium but did not complete online auth; \
+                         admitting offline"
+                    ));
+                    Ok(Admission::Offline)
+                }
+                OnlineOutcome::ApiDown => match cfg.on_lookup_failure {
+                    LookupFailure::Offline => {
+                        log::warn(&format!(
+                            "[auth] {name}: session server unreachable; admitting offline \
+                             (on_lookup_failure = offline)"
+                        ));
+                        Ok(Admission::Offline)
+                    }
+                    LookupFailure::Deny => {
+                        log::info(&format!(
+                            "[auth] {name} refused: session server unreachable \
+                             (on_lookup_failure = deny)"
+                        ));
+                        Ok(Admission::Refused(
+                            "The authentication service is unavailable; try again later.".into(),
+                        ))
+                    }
+                },
+                OnlineOutcome::Dropped => {
+                    bounce.record(ip, name);
+                    log::info(&format!(
+                        "[auth] {name} dropped during online auth; will admit offline from \
+                         this address for the next {}s",
+                        crate::auth::bounce::TTL.as_secs()
+                    ));
+                    Ok(Admission::Ended)
+                }
+            }
         }
         Ok(None) => {
             log::info(&format!("[auth] {name} is not premium: offline login"));
@@ -127,47 +240,31 @@ fn hybrid(
     }
 }
 
-/// Turn an online handshake outcome into an admission, locking on success.
-fn settle_online(store: &dyn MetaStore, name: &str, outcome: OnlineOutcome) -> Admission {
-    match outcome {
-        OnlineOutcome::Ok(profile) => {
-            let now = super::now_secs();
-            let first_seen = store::get_by_name(store, &profile.name)
-                .or_else(|| store::get_by_uuid(store, profile.uuid))
-                .map(|l| l.first_seen)
-                .unwrap_or(now);
-            let lock = Lock {
-                uuid: profile.uuid,
-                name: profile.name.to_ascii_lowercase(),
-                first_seen,
-                last_seen: now,
-            };
-            store::put(store, &lock);
-            log::info(&format!(
-                "[auth] {name} authenticated online as {} (uuid {}, locked)",
-                profile.name,
-                crate::auth::api::hyphenated_uuid(profile.uuid)
-            ));
-            Admission::Online(profile)
-        }
-        OnlineOutcome::Refused => {
-            log::info(&format!("[auth] {name} refused: online auth failed"));
-            Admission::Refused(premium_message(name))
-        }
-        OnlineOutcome::ApiDown => {
-            log::warn(&format!(
-                "[auth] {name} refused: session server unreachable, cannot verify a premium name"
-            ));
-            Admission::Refused(
-                "The authentication service is unavailable; this name is premium and cannot \
-                 join offline."
-                    .into(),
-            )
-        }
-    }
+/// Admit an authenticated player and lock the name to their uuid.
+fn lock_profile(store: &dyn MetaStore, name: &str, profile: Profile) -> Admission {
+    let now = super::now_secs();
+    // A name change at Mojang keeps the lock by uuid: the first-seen time
+    // carries over from whichever entry already exists.
+    let first_seen = store::get_by_name(store, &profile.name)
+        .or_else(|| store::get_by_uuid(store, profile.uuid))
+        .map(|l| l.first_seen)
+        .unwrap_or(now);
+    let lock = Lock {
+        uuid: profile.uuid,
+        name: profile.name.to_ascii_lowercase(),
+        first_seen,
+        last_seen: now,
+    };
+    store::put(store, &lock);
+    log::info(&format!(
+        "[auth] {name} authenticated online as {} (uuid {}, locked)",
+        profile.name,
+        crate::auth::api::hyphenated_uuid(profile.uuid)
+    ));
+    Admission::Online(profile)
 }
 
-/// The message shown to an offline client that claimed a premium name.
+/// The message shown to an offline client that claimed a locked name.
 fn premium_message(name: &str) -> String {
     format!("`{name}` is a premium name. Log in with the official Minecraft launcher to use it.")
 }
@@ -201,40 +298,44 @@ fn online_login(
         // returns the shared secret and verify token.
         req.bool(false);
     }
-    req.send(s)?;
+    if req.send(s).is_err() {
+        return Ok(OnlineOutcome::Dropped);
+    }
 
-    let Some(p) = read_packet(s)? else {
-        return Ok(OnlineOutcome::Refused);
+    let p = match read_packet(s) {
+        Ok(Some(p)) => p,
+        // EOF, a timeout or a socket error: the client is gone. A vanilla
+        // client with an invalid session does exactly this.
+        Ok(None) | Err(_) => return Ok(OnlineOutcome::Dropped),
     };
     if p.id != ENCRYPTION_RESPONSE {
-        return Ok(OnlineOutcome::Refused);
+        return Ok(OnlineOutcome::BadResponse);
     }
     let mut pin = PacketIn::new(&p.data);
-    let Ok(secret_enc) = read_byte_array(&mut pin) else {
-        return Ok(OnlineOutcome::Refused);
-    };
-    let Ok(token_enc) = read_byte_array(&mut pin) else {
-        return Ok(OnlineOutcome::Refused);
+    let (Ok(secret_enc), Ok(token_enc)) = (read_byte_array(&mut pin), read_byte_array(&mut pin))
+    else {
+        return Ok(OnlineOutcome::BadResponse);
     };
     let (Some(secret), Some(tok)) = (key.decrypt(&secret_enc), key.decrypt(&token_enc)) else {
-        return Ok(OnlineOutcome::Refused);
+        return Ok(OnlineOutcome::BadResponse);
     };
     if tok != token || secret.len() != crypto::SECRET_LEN {
-        return Ok(OnlineOutcome::Refused);
+        return Ok(OnlineOutcome::BadResponse);
     }
     let mut secret16 = [0u8; crypto::SECRET_LEN];
     secret16.copy_from_slice(&secret);
 
     // From here the client is already encrypting, so every byte we send must
-    // be encrypted too — including a refusal.
+    // be encrypted too — including a refusal, and including the rest of an
+    // offline login when `hasJoined` says no.
     s.enable_encryption(&secret16);
 
     let hash = crypto::server_id_hash(server_id, &secret16, public_key);
     match api.has_joined(name, &hash, ip) {
         Ok(Some(profile)) => Ok(OnlineOutcome::Ok(profile)),
-        Ok(None) => Ok(OnlineOutcome::Refused),
+        Ok(None) => Ok(OnlineOutcome::NoSession),
         Err(ApiError::Unreachable) => Ok(OnlineOutcome::ApiDown),
-        Err(_) => Ok(OnlineOutcome::Refused),
+        Err(_) => Ok(OnlineOutcome::NoSession),
     }
 }
 
@@ -314,9 +415,20 @@ mod tests {
         }
     }
 
+    /// What the test's "client" does when it gets the Encryption Request.
+    enum Answer {
+        /// Answer correctly with a matching verify token.
+        Good,
+        /// Answer with the wrong verify token.
+        BadToken,
+        /// Don't answer at all and disconnect — what a vanilla client with an
+        /// invalid session does.
+        Drop,
+    }
+
     /// A `Conn` pair over a socket, with the client side speaking enough of
     /// the handshake to let `online_login` proceed. The "client" thread reads
-    /// the Encryption Request and answers it.
+    /// the Encryption Request and answers it (or drops).
     fn handshake_pair(key: &ServerKey, answer: Answer) -> (Conn, std::net::TcpStream) {
         use std::io::Write;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -327,19 +439,27 @@ mod tests {
         let key_der = key.public_der().to_vec();
 
         std::thread::spawn(move || {
-            // Read the Encryption Request frame.
-            let req = read_client_frame(&mut peer);
+            // Read the Encryption Request frame; if there is none (the offer
+            // was skipped, so the server moved straight to login), just leave.
+            let Some(req) = read_client_frame(&mut peer) else {
+                return;
+            };
+            if matches!(answer, Answer::Drop) {
+                // Disconnect without answering. Shutting down both directions
+                // is what makes the server see EOF: dropping `peer` alone
+                // leaves the test's own clone of the socket open.
+                let _ = peer.shutdown(std::net::Shutdown::Both);
+                return;
+            }
             // Recover the verify token, encrypt a fresh secret and the token
             // with the server's public key.
             let token = req_token(&req);
-            let secret = match answer {
-                Answer::Good => [9u8; crypto::SECRET_LEN],
-                Answer::BadToken => [9u8; crypto::SECRET_LEN],
-            };
+            let secret = [9u8; crypto::SECRET_LEN];
             let enc_secret = rsa_encrypt(&key_der, &secret);
             let enc_token = match answer {
                 Answer::Good => rsa_encrypt(&key_der, &token),
                 Answer::BadToken => rsa_encrypt(&key_der, &[0u8; TOKEN_LEN]),
+                Answer::Drop => unreachable!(),
             };
             let mut body = Vec::new();
             write_varint(&mut body, enc_secret.len() as i32);
@@ -355,18 +475,16 @@ mod tests {
         (Conn::new(server), client)
     }
 
-    enum Answer {
-        Good,
-        BadToken,
-    }
-
-    fn read_client_frame(s: &mut std::net::TcpStream) -> Vec<u8> {
+    /// Read one frame, or `None` on EOF (the server sent nothing).
+    fn read_client_frame(s: &mut std::net::TcpStream) -> Option<Vec<u8>> {
         use std::io::Read;
         let mut len = 0usize;
         let mut shift = 0;
         loop {
             let mut b = [0u8; 1];
-            s.read_exact(&mut b).unwrap();
+            if s.read_exact(&mut b).is_err() {
+                return None;
+            }
             len |= ((b[0] & 0x7f) as usize) << shift;
             if b[0] & 0x80 == 0 {
                 break;
@@ -374,8 +492,10 @@ mod tests {
             shift += 7;
         }
         let mut buf = vec![0u8; len];
-        s.read_exact(&mut buf).unwrap();
-        buf
+        if s.read_exact(&mut buf).is_err() {
+            return None;
+        }
+        Some(buf)
     }
 
     /// Pull the verify token out of an Encryption Request body (id + server
@@ -433,6 +553,7 @@ mod tests {
             super::super::test_key(),
             &mock,
             &LookupCache::new(),
+            &BounceCache::new(),
             "Steve",
             None,
         )
@@ -455,6 +576,7 @@ mod tests {
             super::super::test_key(),
             &mock,
             &LookupCache::new(),
+            &BounceCache::new(),
             "Notch",
             None,
         )
@@ -479,6 +601,7 @@ mod tests {
             super::super::test_key(),
             &mock,
             &LookupCache::new(),
+            &BounceCache::new(),
             "x",
             None,
         )
@@ -504,6 +627,7 @@ mod tests {
             super::super::test_key(),
             &mock,
             &LookupCache::new(),
+            &BounceCache::new(),
             "_alpha_01",
             None,
         )
@@ -536,6 +660,7 @@ mod tests {
             super::super::test_key(),
             &mock,
             &LookupCache::new(),
+            &BounceCache::new(),
             "Notch",
             None,
         )
@@ -559,12 +684,116 @@ mod tests {
             super::super::test_key(),
             &mock,
             &LookupCache::new(),
+            &BounceCache::new(),
             "Notch",
             None,
         )
         .unwrap();
         assert!(matches!(a, Admission::Online(_)));
         assert_eq!(store::get_by_name(&store, "notch").unwrap().uuid, 0xAAAA);
+    }
+
+    #[test]
+    fn hybrid_admits_offline_when_hasjoined_fails_for_an_unlocked_premium_name() {
+        // A cracked client that answered the Encryption Request without a
+        // Mojang session: the name is premium but has never authenticated
+        // here, so offline stays open. Not a refusal.
+        let store = MapStore::default();
+        let mock = Mock::new(Ok(None), Ok(Some(0xAAAA)));
+        let (mut s, _c) = handshake_pair(super::super::test_key(), Answer::Good);
+        let a = authenticate(
+            &mut s,
+            crate::protocol::codec_for(47).unwrap(),
+            &cfg(AuthMode::Hybrid, LookupFailure::Offline),
+            &store,
+            super::super::test_key(),
+            &mock,
+            &LookupCache::new(),
+            &BounceCache::new(),
+            "Notch",
+            Some("10.0.0.7".parse().unwrap()),
+        )
+        .unwrap();
+        assert!(matches!(a, Admission::Offline));
+        assert!(
+            store::get_by_name(&store, "notch").is_none(),
+            "a failed hasJoined must not lock the name"
+        );
+    }
+
+    #[test]
+    fn hybrid_drop_during_auth_records_a_bounce_and_the_next_attempt_goes_offline() {
+        let store = MapStore::default();
+        let bounce = BounceCache::new();
+        let ip = Some("10.0.0.7".parse().unwrap());
+
+        // First attempt: the client drops without answering (a vanilla client
+        // with an invalid session).
+        let mock = Mock::new(Ok(Some(Mock::profile(0xAAAA, "Notch"))), Ok(Some(0xAAAA)));
+        let (mut s, _c) = handshake_pair(super::super::test_key(), Answer::Drop);
+        let a = authenticate(
+            &mut s,
+            crate::protocol::codec_for(47).unwrap(),
+            &cfg(AuthMode::Hybrid, LookupFailure::Offline),
+            &store,
+            super::super::test_key(),
+            &mock,
+            &LookupCache::new(),
+            &bounce,
+            "Notch",
+            ip,
+        )
+        .unwrap();
+        assert!(matches!(a, Admission::Ended));
+        assert!(bounce.bounced(ip, "Notch"), "the drop is remembered");
+
+        // The next attempt from the same address and name within the TTL is
+        // admitted offline, with no encryption offer and no API calls.
+        let mock2 = Mock::new(Ok(Some(Mock::profile(0xAAAA, "Notch"))), Ok(Some(0xAAAA)));
+        let (mut s, _c) = handshake_pair(super::super::test_key(), Answer::Good);
+        let a = authenticate(
+            &mut s,
+            crate::protocol::codec_for(47).unwrap(),
+            &cfg(AuthMode::Hybrid, LookupFailure::Offline),
+            &store,
+            super::super::test_key(),
+            &mock2,
+            &LookupCache::new(),
+            &bounce,
+            "Notch",
+            ip,
+        )
+        .unwrap();
+        assert!(matches!(a, Admission::Offline));
+        assert_eq!(*mock2.joined_calls.lock().unwrap(), 0, "no hasJoined offer");
+        assert_eq!(*mock2.lookup_calls.lock().unwrap(), 0, "no lookup either");
+    }
+
+    #[test]
+    fn hybrid_bounce_from_another_address_does_not_skip_the_offer() {
+        // The fallback is pinned to the same address, so a bounce at one
+        // address must not let another address skip verification.
+        let store = MapStore::default();
+        let bounce = BounceCache::new();
+        bounce.record(Some("10.0.0.1".parse().unwrap()), "Notch");
+
+        let mock = Mock::new(Ok(Some(Mock::profile(0xAAAA, "Notch"))), Ok(Some(0xAAAA)));
+        let (mut s, _c) = handshake_pair(super::super::test_key(), Answer::Good);
+        let a = authenticate(
+            &mut s,
+            crate::protocol::codec_for(47).unwrap(),
+            &cfg(AuthMode::Hybrid, LookupFailure::Offline),
+            &store,
+            super::super::test_key(),
+            &mock,
+            &LookupCache::new(),
+            &bounce,
+            "Notch",
+            Some("10.0.0.2".parse().unwrap()),
+        )
+        .unwrap();
+        assert!(matches!(a, Admission::Online(_)));
+        assert_eq!(*mock.joined_calls.lock().unwrap(), 1);
     }
 
     #[test]
@@ -581,6 +810,7 @@ mod tests {
             super::super::test_key(),
             &down,
             &LookupCache::new(),
+            &BounceCache::new(),
             "Alice",
             None,
         )
@@ -596,6 +826,7 @@ mod tests {
             super::super::test_key(),
             &down,
             &LookupCache::new(),
+            &BounceCache::new(),
             "Alice",
             None,
         )

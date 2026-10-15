@@ -5,6 +5,13 @@
 //! This module adds Mojang's encryption handshake and the hybrid policy that
 //! locks a name that has ever authenticated to its Mojang uuid.
 //!
+//! Only names that have **completed online auth on this server** are locked;
+//! offline play stays open to everyone, including names registered at Mojang.
+//! An unlocked premium name is only *offered* encryption — a client that
+//! fails `hasJoined` is admitted offline in the same connection, and a client
+//! that drops mid-handshake suppresses the offer for its next attempt. See
+//! [`policy::authenticate`].
+//!
 //! The pieces:
 //!
 //! * [`store`] — the durable premium-name lock table;
@@ -12,9 +19,11 @@
 //!   signed server-id hash;
 //! * `api` — the session server (`hasJoined`) and profile API (`name →
 //!   uuid`) clients, behind a trait so tests can mock them;
+//! * `bounce` — the same-address, same-name "dropped during auth" memory;
 //! * `policy` — the hybrid decision table.
 
 pub mod api;
+pub mod bounce;
 pub mod crypto;
 pub mod policy;
 pub mod store;
@@ -30,6 +39,8 @@ static SERVER_KEY: OnceLock<crypto::ServerKey> = OnceLock::new();
 static API: OnceLock<Box<dyn api::ProfileApi>> = OnceLock::new();
 /// The name-lookup cache, shared by every connection.
 static CACHE: OnceLock<api::LookupCache> = OnceLock::new();
+/// Clients that dropped during online auth, shared by every connection.
+static BOUNCE: OnceLock<bounce::BounceCache> = OnceLock::new();
 
 /// Build the key, HTTP client and cache for online or hybrid mode.
 ///
@@ -50,6 +61,7 @@ pub fn install(cfg: &crate::config::AuthConfig) -> Result<(), String> {
     let _ = SERVER_KEY.set(key);
     let _ = API.set(Box::new(api));
     let _ = CACHE.set(api::LookupCache::new());
+    let _ = BOUNCE.set(bounce::BounceCache::new());
     Ok(())
 }
 
@@ -68,14 +80,27 @@ pub fn authenticate(
     if cfg.mode == AuthMode::Offline {
         return Ok(Admission::Offline);
     }
-    let (Some(key), Some(api), Some(cache)) = (SERVER_KEY.get(), API.get(), CACHE.get()) else {
+    let (Some(key), Some(api), Some(cache), Some(bounce)) =
+        (SERVER_KEY.get(), API.get(), CACHE.get(), BOUNCE.get())
+    else {
         // Startup installs these; reaching here means a wiring bug, and
         // admitting anyone would silently drop the policy.
         return Ok(Admission::Refused(
             "Authentication is not initialised on this server.".into(),
         ));
     };
-    policy::authenticate(s, codec, cfg, store, key, api.as_ref(), cache, name, ip)
+    policy::authenticate(
+        s,
+        codec,
+        cfg,
+        store,
+        key,
+        api.as_ref(),
+        cache,
+        bounce,
+        name,
+        ip,
+    )
 }
 
 /// A shared RSA key for tests.
