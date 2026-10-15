@@ -16,7 +16,7 @@ Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`) and the core telep
 | `/back` | last death/warp/teleport | `essentials.back` |
 | `/top`, `/jump`, `/up [<n>]` | | `essentials.top`, … |
 | `/rtp [<radius>]` | safe random teleport | `essentials.rtp` |
-| `/spawn [<player>]`, `/setspawn` | overrides core `/spawn` | `essentials.spawn` |
+| `/setspawn` | sets the plugin's spawn (`/spawn` stays core) | `essentials.setspawn` |
 
 ## Capabilities / events
 `log`, `config`, `supports`, `storage.kv`, `players`, `scheduler`. Subscribes to `on-command`,

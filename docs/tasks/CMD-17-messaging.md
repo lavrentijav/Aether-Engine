@@ -3,6 +3,13 @@
 Status: 📋 task brief (CMD0) · size: L · core: yes
 Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
 
+## Split (CMD0 review)
+This L group is split into:
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-17a | `docs/tasks/CMD-17a-chat-tellraw.md` | `/say` `/me` `/msg` `/tell` `/w` `/tellraw` | M |
+| CMD-17b | `docs/tasks/CMD-17b-title-bossbar-dialog.md` | `/title` `/bossbar` `/dialog` | M |
+
 ## Goal
 The text/UI commands: chat, raw JSON components, titles/actionbar and bossbars. These are also the
 output primitives the plugin/API layer reuses.
@@ -24,6 +31,14 @@ output primitives the plugin/API layer reuses.
 Chat components: 1.20.3+ sends NBT components; 1.20.2 sends JSON (see KNOWN_ISSUES A.10). Use the
 existing text-component writer and keep the older-codec path. Messages must be sanitised: a player
 name in `/say`/`/me` is inserted as a literal, never re-parsed as a component.
+
+**Ownership rule (vanilla names stay core).** `/msg`, `/tell`, `/w`, `/say`, `/me`, `/tellraw`,
+`/title`, `/bossbar`, `/dialog` are owned by the core here, permanently. A plugin may **not**
+re-register any of them to change behaviour; it hooks them through an event instead. Concretely,
+`essentials-chat` (CMD-40) adds only the *new* names `/r`, `/mail`, `/ignore`, `/socialspy`,
+`/broadcast`, `/motd`, `/rules` and formats chat through a `before-chat`/`on-command` hook on the
+core `/msg` and `/me` — it never declares `/msg`/`/me` itself. The same rule applies to `/tp` vs an
+Essentials teleport plugin: the vanilla name stays core, the plugin adds new names only.
 
 ## Files
 - new `crates/aether-server/src/commands/text.rs` (say/me/msg/tellraw), `title.rs`, `bossbar.rs`,

@@ -10,4 +10,4 @@ capabilities = ["log", "config", "supports", "players", "storage.kv"]
 
 subscribe = ["before-chat", "on-command"]
 
-commands = ["msg", "r", "reply", "mail", "ignore", "socialspy", "broadcast", "motd", "rules", "me"]
+commands = ["r", "reply", "mail", "ignore", "socialspy", "broadcast", "motd", "rules"]
