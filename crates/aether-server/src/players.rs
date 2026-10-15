@@ -20,6 +20,7 @@ use crate::outbox::Outbox;
 use crate::proto::Conn;
 use std::collections::HashMap;
 use std::io;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::protocol::{BlockSource, ProtocolCodec, ServerEvent};
@@ -34,6 +35,15 @@ pub struct PosLook {
     pub pitch: f32,
     pub on_ground: bool,
 }
+
+/// No resource-pack status has arrived yet (also set for a codec that cannot
+/// report one). The plain compat stand-in is used.
+const PACK_UNKNOWN: u8 = 0;
+/// The client reported the compat pack `successfully_loaded`; carrier states
+/// may be sent.
+const PACK_LOADED: u8 = 1;
+/// The client declined the pack, or its download failed. Stand-ins stay.
+const PACK_NOT_LOADED: u8 = 2;
 
 /// One connected player, as seen by every other connection thread.
 pub struct PlayerHandle {
@@ -60,6 +70,10 @@ pub struct PlayerHandle {
     /// Anti-xray / visibility-culling bookkeeping for this client. See
     /// [`crate::visibility`].
     visibility: Mutex<crate::visibility::State>,
+    /// Did this client load the compat resource pack? `0` unknown, `1` loaded,
+    /// `2` not loaded (declined or failed). Read on every chunk render, so a
+    /// plain atomic rather than a lock. See `compat::pack`.
+    pack: AtomicU8,
 }
 
 impl PlayerHandle {
@@ -188,11 +202,24 @@ impl PlayerHandle {
 
     fn render(&self, ev: &ServerEvent, world: &dyn BlockSource) -> Vec<Vec<u8>> {
         let legacy = if self.full() { None } else { ev.legacy() };
+        let ev = legacy.as_ref().unwrap_or(ev);
+        // The compat pack's carrier remap, only for a client that loaded the
+        // pack. A disguised block renders as a carrier state the codec then
+        // translates to this release exactly as it would any other block.
+        let table = self.pack_table();
         let packets = match ev {
             // Every codec reads a column block by block; give it a view that
             // copies each section once instead of locking per block.
             ServerEvent::ChunkColumn { cx, cz } => {
-                let view = crate::protocol::ColumnView::new(world, *cx, *cz);
+                let carrier_view;
+                let base: &dyn BlockSource = match table {
+                    Some(t) => {
+                        carrier_view = crate::protocol::compat::pack::CarrierView::new(world, t);
+                        &carrier_view
+                    }
+                    None => world,
+                };
+                let view = crate::protocol::ColumnView::new(base, *cx, *cz);
                 // Anti-xray: mask the sections this player cannot see before
                 // the codec ever reads them, so every version's cheapest
                 // single-valued stone form falls out of the existing encoder.
@@ -208,12 +235,56 @@ impl PlayerHandle {
             }
             ServerEvent::UnloadColumn { cx, cz } => {
                 crate::visibility::forget_column(self, *cx, *cz);
-                self.codec.encode(legacy.as_ref().unwrap_or(ev), world)
+                self.codec.encode(ev, world)
             }
-            _ => self.codec.encode(legacy.as_ref().unwrap_or(ev), world),
+            // A single block change must be a carrier state too, or a placed
+            // or mined block would flip back to the stand-in.
+            ServerEvent::BlockChange { x, y, z, block } if table.is_some() => {
+                let t = table.expect("guarded by the match arm");
+                let remapped = ServerEvent::BlockChange {
+                    x: *x,
+                    y: *y,
+                    z: *z,
+                    block: t.carrier(*block).unwrap_or(*block),
+                };
+                self.codec.encode(&remapped, world)
+            }
+            _ => self.codec.encode(ev, world),
         };
         let threshold = self.outbox.threshold();
         packets.iter().map(|p| p.frame(threshold)).collect()
+    }
+
+    /// Record the client's resource-pack status and report whether this
+    /// *newly* turned carriers on (so the caller can re-send the view once).
+    ///
+    /// `result` is the protocol's own enum (0 loaded, 1 declined, 2 failed,
+    /// 3/4 in progress, 5 invalid URL). Being `accepted`/`downloaded` is not
+    /// enough: only a `successfully_loaded` client can render a carrier state,
+    /// so anything but `0` keeps — or marks — the player on the plain stand-in.
+    pub fn set_pack_status(&self, result: u8) -> bool {
+        if result == 0 {
+            self.pack.swap(PACK_LOADED, Ordering::Relaxed) == PACK_UNKNOWN
+        } else if matches!(result, 1 | 2 | 5) {
+            self.pack.store(PACK_NOT_LOADED, Ordering::Relaxed);
+            false
+        } else {
+            false
+        }
+    }
+
+    /// Whether this client has the compat pack loaded, so carrier block states
+    /// are safe to send.
+    pub fn pack_loaded(&self) -> bool {
+        self.pack.load(Ordering::Relaxed) == PACK_LOADED
+    }
+
+    /// This client's carrier table, if it loaded the pack and its release has
+    /// one. `None` is the common case and means "render the plain stand-in".
+    fn pack_table(&self) -> Option<&'static crate::protocol::compat::pack::PackTable> {
+        self.pack_loaded()
+            .then(|| crate::protocol::compat::pack::table_for(self.codec.protocol_id()))
+            .flatten()
     }
 
     /// Disconnect this player: their socket is shut down and their own thread
@@ -273,6 +344,7 @@ impl Registry {
             )),
             tracked: Mutex::new(std::collections::HashSet::new()),
             visibility: Mutex::new(crate::visibility::State::default()),
+            pack: AtomicU8::new(PACK_UNKNOWN),
         });
         self.players
             .write()
@@ -358,5 +430,107 @@ impl Registry {
                 handle.emit(ev, world);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::read_packet_from;
+    use crate::protocol::{codec_for, BlockSource};
+    use aether_world::registry::blocks::default_state;
+    use aether_world::BlockStateId;
+    use std::net::{TcpListener, TcpStream};
+
+    /// A `BlockSource` with nothing in it; the render test only uses
+    /// `BlockChange`, which carries its own block.
+    struct Empty;
+    impl BlockSource for Empty {
+        fn block_at(&self, _: i32, _: i32, _: i32) -> BlockStateId {
+            aether_api::block_ids::AIR
+        }
+    }
+
+    fn handle(codec: &'static dyn ProtocolCodec) -> Arc<PlayerHandle> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = Conn::new(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        let _peer = listener.accept().unwrap();
+        Registry::default()
+            .join(
+                1,
+                0,
+                "tester".into(),
+                None,
+                codec,
+                &client,
+                PosLook {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    on_ground: true,
+                },
+            )
+            .unwrap()
+    }
+
+    /// The block-state VarInt of the first framed packet, which for a
+    /// `BlockChange` is `id` then `i64 position` then the state.
+    fn block_change_state(handle: &PlayerHandle) -> i32 {
+        let block = default_state("minecraft:pale_oak_planks").unwrap();
+        let ev = ServerEvent::BlockChange {
+            x: 0,
+            y: 0,
+            z: 0,
+            block,
+        };
+        let frames = handle.render(&ev, &Empty);
+        let mut cur = frames[0].as_slice();
+        let pkt = read_packet_from(&mut cur, None).unwrap().unwrap();
+        let mut pin = crate::proto::PacketIn::new(&pkt.data);
+        let _pos = pin.i64().unwrap();
+        pin.var_int().unwrap()
+    }
+
+    #[test]
+    fn a_pack_bearing_client_sees_the_carrier_and_others_the_stand_in() {
+        let codec = codec_for(763).unwrap();
+        let table = crate::protocol::compat::pack::table_for(763).unwrap();
+        let block = default_state("minecraft:pale_oak_planks").unwrap();
+        let carrier_wire = crate::protocol::compat::V1_20_1.state(table.carrier(block).unwrap());
+
+        // Before the pack is loaded: the plain stand-in, never the carrier.
+        let early = handle(codec);
+        assert!(!early.pack_loaded());
+        assert_ne!(block_change_state(&early), carrier_wire as i32);
+
+        // After `successfully_loaded`: the carrier state this release draws the
+        // real block on.
+        let loaded = handle(codec);
+        assert!(loaded.set_pack_status(0), "the first load is a transition");
+        assert!(!loaded.set_pack_status(0), "a repeat load is not");
+        assert!(loaded.pack_loaded());
+        assert_eq!(block_change_state(&loaded), carrier_wire as i32);
+
+        // Accepted-but-not-loaded, and declined, both stay on the stand-in.
+        for result in [3u8, 4, 1, 2] {
+            let h = handle(codec);
+            h.set_pack_status(result);
+            assert!(
+                !h.pack_loaded(),
+                "result {result} is not successfully_loaded"
+            );
+            assert_ne!(block_change_state(&h), carrier_wire as i32);
+        }
+    }
+
+    #[test]
+    fn a_release_with_no_generated_pack_is_never_remapped() {
+        // 1.8.9 has no carrier table, so even a loaded pack changes nothing.
+        let h = handle(codec_for(47).unwrap());
+        h.set_pack_status(0);
+        assert!(h.pack_loaded());
+        assert!(h.pack_table().is_none());
     }
 }

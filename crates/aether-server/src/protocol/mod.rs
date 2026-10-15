@@ -621,6 +621,14 @@ pub enum ClientEvent {
     ChangeGameMode(GameMode),
     /// Middle-click on a block (creative pick).
     PickBlock { x: i32, y: i32, z: i32 },
+    /// Where the client got to with the resource pack it was offered.
+    ///
+    /// The value is the protocol's own enum: `0` successfully loaded, `1`
+    /// declined, `2` failed download, `3` accepted, `4` downloaded, `5`
+    /// invalid URL. Only `0` means the compat pack's carrier blocks are safe
+    /// to send; anything else — including never reporting at all — leaves the
+    /// plain stand-in in place. See `compat::pack`.
+    ResourcePackStatus(u8),
     /// Anything this server does not act on (keep-alive replies, animations,
     /// ...).
     Ignored,
@@ -743,9 +751,12 @@ pub(crate) fn legacy_item_table(protocol: i32) -> Option<&'static compat::items:
 ///   the placement packet names only the hand, so the server must already know
 ///   what is in it;
 /// * [`ProtocolCodec::resolve_reported_item`] keeps the real engine item when a
-///   client echoes a stand-in back, exactly as the wired codecs do per slot.
+///   client echoes a stand-in back, exactly as the wired codecs do per slot;
+/// * [`ProtocolCodec::resource_pack_status_id`] names the play-state packet
+///   that reports the pack status, so the session can turn the compat pack's
+///   carriers on for a client that loaded it.
 macro_rules! legacy_codec_item_hooks {
-    ($proto:expr) => {
+    ($proto:expr, $status:expr) => {
         fn initial_hotbar(&self) -> Vec<(String, u8)> {
             super::STARTER_HOTBAR
                 .iter()
@@ -760,6 +771,10 @@ macro_rules! legacy_codec_item_hooks {
         fn resolve_reported_item(&self, server: ItemTypeId, reported: ItemTypeId) -> ItemTypeId {
             super::legacy_item_table($proto)
                 .map_or(reported, |t| t.resolve_reported(server, reported))
+        }
+
+        fn resource_pack_status_id(&self) -> Option<i32> {
+            Some($status)
         }
     };
 }
@@ -856,6 +871,19 @@ pub trait ProtocolCodec: Sync + Send {
     /// report, which is right for a version whose ids the engine itself uses.
     fn resolve_reported_item(&self, _server: ItemTypeId, reported: ItemTypeId) -> ItemTypeId {
         reported
+    }
+
+    /// The packet id of the client's resource-pack status reply **in the play
+    /// state**, when this codec reads it there.
+    ///
+    /// The reply says whether the client loaded the pack a `[compat.pack]`
+    /// offered; the server shows carrier block states only to a client whose
+    /// status is `successfully_loaded` (see `compat::pack`). The default is
+    /// `None`: the server never learns the status, so that client keeps the
+    /// plain stand-in. This is the safe default — 1.20.2 and later answer in
+    /// the configuration phase, which this server does not decode.
+    fn resource_pack_status_id(&self) -> Option<i32> {
+        None
     }
 }
 
@@ -1027,6 +1055,38 @@ mod tests {
         let spear = crate::inventory::item("minecraft:iron_spear");
         let trident = crate::inventory::item("minecraft:trident");
         assert_eq!(c.resolve_reported_item(spear, trident), spear);
+    }
+
+    #[test]
+    fn the_pre_1_20_2_codecs_report_their_play_state_pack_status_id() {
+        // Every old codec decodes the pack status; 1.20.2+ answer in the
+        // configuration phase and report `None`, so their clients keep the
+        // plain stand-in rather than waiting on a status this server never
+        // reads.
+        for proto in [47, 755, 756, 757, 758, 759, 760, 761, 762, 763] {
+            assert!(
+                codec_for(proto)
+                    .unwrap()
+                    .resource_pack_status_id()
+                    .is_some(),
+                "{proto} must report a status id"
+            );
+        }
+        for proto in [764, 767, 773, 774] {
+            assert!(
+                codec_for(proto)
+                    .unwrap()
+                    .resource_pack_status_id()
+                    .is_none(),
+                "{proto} answers in config, not play"
+            );
+        }
+        // The ids are the release's own `resource_pack_receive`.
+        assert_eq!(codec_for(47).unwrap().resource_pack_status_id(), Some(0x19));
+        assert_eq!(
+            codec_for(763).unwrap().resource_pack_status_id(),
+            Some(0x24)
+        );
     }
 
     #[test]

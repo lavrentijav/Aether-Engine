@@ -93,6 +93,22 @@ pub mod behaviour;
 /// The item half of the layer: per-release item tables and substitution.
 pub mod items;
 
+/// The resource-pack half: carrier assignment and the per-player render remap
+/// (task RP1, Part B).
+pub mod pack;
+
+#[allow(clippy::all)]
+#[rustfmt::skip]
+pub mod pack_gen {
+    //! Generated per-release carrier tables; see `tools/gen/compat/gen_pack.js`.
+    //!
+    //! Only the releases that have a generated compat pack appear here; the
+    //! checked-in assignment file (`tools/gen/compat/pack.json`) decides which.
+    #![allow(dead_code)]
+
+    pub mod v1_20_1;
+}
+
 pub use blocks::{
     BlockTable, V1_17, V1_17_1, V1_18, V1_18_2, V1_19, V1_19_2, V1_19_3, V1_19_4, V1_20_1, V1_20_2,
     V1_20_4, V1_20_5, V1_21_1, V1_21_3, V1_21_4, V1_21_5, V1_21_6, V1_21_8, V1_21_9, V1_8,

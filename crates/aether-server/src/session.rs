@@ -16,7 +16,7 @@ use aether_world::BlockStateId;
 
 use crate::config::Config;
 use crate::players::{PosLook, SharedRegistry};
-use crate::proto::{read_packet, Conn};
+use crate::proto::{read_packet, Conn, PacketIn};
 use crate::protocol::{self, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::stored::{self, Stored};
 
@@ -270,7 +270,10 @@ fn login_and_play(
         pitch: player.pitch,
         max_players: cfg.server.max_players,
         view_radius: cfg.server.clamped_view_radius(),
-        resource_pack: cfg.resource_pack.clone(),
+        // A release with a generated compat pack gets *that* pack; everyone
+        // else keeps whatever `[resource_pack]` offers. The compat layer only
+        // sends carrier states once this client says it loaded the pack.
+        resource_pack: resource_pack_for(cfg, codec),
     };
 
     codec.complete_login(s, &params)?;
@@ -468,6 +471,24 @@ fn login_and_play(
     result
 }
 
+/// The resource pack to offer a client of `codec`'s release.
+///
+/// `[compat.pack]` wins for a release the compat layer generated a pack for —
+/// its carrier blocks need exactly that pack — and only then. Every other
+/// release, and every server with the compat packs off, keeps whatever
+/// `[resource_pack]` offers. The compat layer still shows carriers only once
+/// the client reports the pack loaded, so offering it changes nothing for a
+/// client that declines it.
+fn resource_pack_for(cfg: &Config, codec: &dyn ProtocolCodec) -> crate::config::ResourcePackConfig {
+    if cfg.compat.pack.active()
+        && crate::protocol::compat::pack::table_for(codec.protocol_id()).is_some()
+    {
+        cfg.compat.pack.offer()
+    } else {
+        cfg.resource_pack.clone()
+    }
+}
+
 /// Whether handling `event` can move, make or use up items. Movement and the
 /// like are the bulk of all packets and cannot, so they skip the capture; a
 /// creative slot set journals itself.
@@ -575,6 +596,17 @@ fn play_loop(
             }
         };
         last_heard = Instant::now();
+        // The client's resource-pack status, if its codec reports one. Only a
+        // `successfully_loaded` client may be shown carrier states, so the
+        // moment it loads the pack the whole view is re-sent with carriers —
+        // and until then (or after a decline) the plain stand-in stands.
+        if handle.codec.resource_pack_status_id() == Some(pkt.id) {
+            let result = PacketIn::new(&pkt.data).var_int().unwrap_or(3) as u8;
+            if handle.set_pack_status(result) {
+                streamer.center(last_chunk, true);
+            }
+            continue;
+        }
         let full = handle.full();
         let dead = full && handle.game().dead;
         let event = handle.codec.decode(&pkt, handle.pos());
@@ -932,6 +964,10 @@ fn play_loop(
                     handle.emit(&ServerEvent::Chat("You are not an operator.".into()), world);
                 }
             }
+            // Handled in the read loop, before this dispatch: it decides
+            // whether the compat pack's carriers may be shown, and re-sends
+            // the view when they may.
+            ClientEvent::ResourcePackStatus(_) => {}
             ClientEvent::Ignored => {}
         }
     }
