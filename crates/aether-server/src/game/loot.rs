@@ -53,7 +53,7 @@ impl NumberProvider {
     /// bounds, as vanilla's `getInt`).
     pub fn get_i32(&self, rng: &mut Rng) -> i32 {
         match *self {
-            Self::Constant(v) => v.round() as i32,
+            Self::Constant(v) => v.floor() as i32,
             Self::Uniform { min, max } => {
                 let (lo, hi) = (min.floor() as i32, max.floor() as i32);
                 if hi <= lo {
@@ -71,6 +71,15 @@ impl NumberProvider {
                 }
                 k
             }
+        }
+    }
+
+    /// A float draw (vanilla's `getFloat`).
+    pub fn get_f32(&self, rng: &mut Rng) -> f32 {
+        match *self {
+            Self::Constant(v) => v,
+            Self::Uniform { min, max } => min + rng.f32() * (max - min),
+            Self::Binomial { .. } => self.get_i32(rng) as f32,
         }
     }
 }
@@ -214,7 +223,7 @@ pub enum EntryKind {
         expand: bool,
     },
     /// A reference to another table, resolved at load time.
-    Nested(Box<LootTable>),
+    Nested(Arc<LootTable>),
     /// A reference that could not be resolved.
     LootTable(String),
     Alternatives(Vec<Entry>),
@@ -257,6 +266,8 @@ pub struct LootContext {
     pub entity_on_fire: bool,
     pub entity_is_baby: bool,
     pub attacker_kind: Option<String>,
+    /// Luck, scaling `bonus_rolls` and `quality`; zero in this engine.
+    pub luck: f32,
 }
 
 impl LootContext {
@@ -282,21 +293,31 @@ impl LootContext {
 
 impl LootTable {
     /// Roll every pool of the table.
+    ///
+    /// Vanilla expands a pool's entries into singleton candidates first, drops
+    /// the ones whose conditions fail — each condition evaluated exactly once
+    /// — and only then draws one candidate by weight. Reproducing that order
+    /// matters: a `random_chance` on an `alternatives` child or a
+    /// `table_bonus` must consume the RNG once, not once to select the child
+    /// and again to run it.
     pub fn roll(&self, ctx: &LootContext, rng: &mut Rng) -> Vec<LootStack> {
         let mut out = Vec::new();
         for pool in &self.pools {
             if !matches_all(&pool.conditions, ctx, rng) {
                 continue;
             }
-            let mut rolls = pool.rolls.get_i32(rng);
-            // `bonus_rolls` is scaled by luck in vanilla; with no luck source
-            // on the context a constant 0 (what every table here carries) is
-            // added as-is.
-            rolls += pool.bonus_rolls.get_i32(rng);
-            for _ in 0..rolls.max(0) {
+            let rolls = pool.rolls.get_i32(rng);
+            // `bonus_rolls` is "per level of luck", floored after the
+            // multiplication, so without a luck source it adds nothing.
+            let bonus = (ctx.luck * pool.bonus_rolls.get_f32(rng)).floor() as i32;
+            for _ in 0..(rolls + bonus).max(0) {
+                let mut candidates = Vec::new();
+                for entry in &pool.entries {
+                    expand_entry(entry, ctx, rng, &[], &mut candidates);
+                }
                 let mut produced = Vec::new();
-                if let Some(entry) = pick(&pool.entries, rng) {
-                    run_entry(entry, ctx, rng, &mut produced, 0);
+                if let Some(c) = pick_candidate(&candidates, rng) {
+                    produce(c, ctx, rng, &mut produced);
                 }
                 for f in &pool.functions {
                     for st in produced.iter_mut() {
@@ -310,92 +331,150 @@ impl LootTable {
     }
 }
 
-/// The recursive depth guard, so a table that references itself cannot loop
-/// forever.
-const MAX_DEPTH: usize = 8;
+/// A singleton entry after composite expansion: one weighted candidate the
+/// pool draws from.
+struct Candidate {
+    weight: i32,
+    produce: Produce,
+    functions: Vec<Function>,
+}
 
-fn run_entry(
+/// What a selected candidate makes.
+enum Produce {
+    /// One stack per item name (an item, or every member of an unexpanded tag).
+    Items(Vec<String>),
+    /// The loot of another table.
+    Table(Arc<LootTable>),
+}
+
+/// Expand `entry` into singleton candidates, testing its conditions first.
+fn expand_entry(
     entry: &Entry,
     ctx: &LootContext,
     rng: &mut Rng,
-    out: &mut Vec<LootStack>,
-    depth: usize,
+    inherited: &[Function],
+    out: &mut Vec<Candidate>,
 ) {
-    if depth > MAX_DEPTH || !matches_all(&entry.conditions, ctx, rng) {
+    if !matches_all(&entry.conditions, ctx, rng) {
         return;
     }
-    let mut produced: Vec<LootStack> = Vec::new();
+    expand_entry_unchecked(entry, ctx, rng, inherited, out);
+}
+
+/// Expand an entry whose own conditions have already passed, so they are not
+/// evaluated a second time — which for an RNG-driven condition would burn an
+/// extra draw.
+fn expand_entry_unchecked(
+    entry: &Entry,
+    ctx: &LootContext,
+    rng: &mut Rng,
+    inherited: &[Function],
+    out: &mut Vec<Candidate>,
+) {
+    // Innermost functions run first; `inherited` is everything the enclosing
+    // composites carry, already ordered parent-first.
+    let mut functions = entry.functions.clone();
+    functions.extend(inherited.iter().cloned());
     match &entry.kind {
-        EntryKind::Item(name) => produced.push(LootStack {
-            item: name.clone(),
-            count: 1,
+        EntryKind::Item(name) => out.push(Candidate {
+            weight: entry.weight,
+            produce: Produce::Items(vec![name.clone()]),
+            functions,
+        }),
+        EntryKind::Empty => out.push(Candidate {
+            weight: entry.weight,
+            produce: Produce::Items(Vec::new()),
+            functions,
         }),
         EntryKind::Tag { items, expand } => {
-            if items.is_empty() {
-                return;
-            }
             if *expand {
+                // Composite: one candidate per member. Vanilla drops the tag
+                // entry's own modifiers here (MC-212671); the pack's only
+                // expanded tag carries none.
                 for it in items {
-                    produced.push(LootStack {
-                        item: it.clone(),
-                        count: 1,
+                    out.push(Candidate {
+                        weight: entry.weight,
+                        produce: Produce::Items(vec![it.clone()]),
+                        functions: inherited.to_vec(),
                     });
                 }
             } else {
-                let i = rng.range(0, items.len() as i32 - 1) as usize;
-                produced.push(LootStack {
-                    item: items[i].clone(),
+                // Singleton: every member drops together.
+                out.push(Candidate {
+                    weight: entry.weight,
+                    produce: Produce::Items(items.clone()),
+                    functions,
+                });
+            }
+        }
+        EntryKind::Nested(table) => out.push(Candidate {
+            weight: entry.weight,
+            produce: Produce::Table(Arc::clone(table)),
+            functions,
+        }),
+        EntryKind::LootTable(_) => {}
+        EntryKind::Alternatives(children) => {
+            for c in children {
+                if matches_all(&c.conditions, ctx, rng) {
+                    expand_entry_unchecked(c, ctx, rng, &functions, out);
+                    break;
+                }
+            }
+        }
+        EntryKind::Sequence(children) => {
+            for c in children {
+                if matches_all(&c.conditions, ctx, rng) {
+                    expand_entry_unchecked(c, ctx, rng, &functions, out);
+                } else {
+                    break;
+                }
+            }
+        }
+        EntryKind::Group(children) => {
+            for c in children {
+                expand_entry(c, ctx, rng, &functions, out);
+            }
+        }
+    }
+}
+
+/// Make the stacks a selected candidate produces, then run its functions.
+fn produce(c: &Candidate, ctx: &LootContext, rng: &mut Rng, out: &mut Vec<LootStack>) {
+    match &c.produce {
+        Produce::Items(names) => {
+            for n in names {
+                out.push(LootStack {
+                    item: n.clone(),
                     count: 1,
                 });
             }
         }
-        EntryKind::Nested(table) => {
-            produced.extend(table.roll(ctx, rng));
-        }
-        EntryKind::LootTable(_) => return,
-        EntryKind::Alternatives(children) => {
-            if let Some(child) = children
-                .iter()
-                .find(|c| matches_all(&c.conditions, ctx, rng))
-            {
-                // The chosen child's own functions run, then the parent's.
-                run_entry(child, ctx, rng, &mut produced, depth + 1);
-            }
-        }
-        EntryKind::Group(children) => {
-            if let Some(child) = pick(children, rng) {
-                run_entry(child, ctx, rng, &mut produced, depth + 1);
-            }
-        }
-        EntryKind::Sequence(children) => {
-            for child in children {
-                run_entry(child, ctx, rng, &mut produced, depth + 1);
-            }
-        }
-        EntryKind::Empty => return,
+        Produce::Table(t) => out.extend(t.roll(ctx, rng)),
     }
-    for f in &entry.functions {
-        for st in produced.iter_mut() {
+    for f in &c.functions {
+        for st in out.iter_mut() {
             apply_function(f, st, ctx, rng);
         }
     }
-    out.extend(produced);
 }
 
-/// Choose one entry by weight, or `None` for an empty list.
-fn pick<'a>(entries: &'a [Entry], rng: &mut Rng) -> Option<&'a Entry> {
-    let total: i32 = entries.iter().map(|e| e.weight.max(0)).sum();
-    if total <= 0 || entries.is_empty() {
-        return entries.first();
+/// Draw one candidate by weight; `None` for an empty pool.
+fn pick_candidate<'a>(candidates: &'a [Candidate], rng: &mut Rng) -> Option<&'a Candidate> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let total: i32 = candidates.iter().map(|c| c.weight.max(0)).sum();
+    if total <= 0 {
+        return candidates.first();
     }
     let mut n = rng.range(1, total);
-    for e in entries {
-        n -= e.weight.max(0);
+    for c in candidates {
+        n -= c.weight.max(0);
         if n <= 0 {
-            return Some(e);
+            return Some(c);
         }
     }
-    entries.last()
+    candidates.last()
 }
 
 fn matches_all(conditions: &[Condition], ctx: &LootContext, rng: &mut Rng) -> bool {
@@ -786,7 +865,7 @@ fn resolve_entry_nested(entry: &mut Entry, tables: &LootTables, depth: usize) {
     match &mut entry.kind {
         EntryKind::LootTable(id) => {
             if let Some(t) = tables.table(id) {
-                entry.kind = EntryKind::Nested(Box::new((*t).clone()));
+                entry.kind = EntryKind::Nested(t);
             }
         }
         EntryKind::Alternatives(c) | EntryKind::Group(c) | EntryKind::Sequence(c) => {
@@ -1402,6 +1481,50 @@ mod tests {
     }
 
     #[test]
+    fn alternatives_evaluate_a_conditions_once() {
+        // Vanilla `alternatives` tests each child's conditions once, then runs
+        // the chosen child. Re-testing the `random_chance` child squares its
+        // rate (0.125 → 0.015625).
+        let t = table_from(
+            r#"{"pools":[{"rolls":1,"entries":[{"type":"minecraft:alternatives","children":[
+                {"type":"minecraft:item","name":"minecraft:shears_item",
+                 "conditions":[{"condition":"minecraft:match_tool","predicate":{"items":"minecraft:shears"}}]},
+                {"type":"minecraft:item","name":"minecraft:seed",
+                 "conditions":[{"condition":"minecraft:random_chance","chance":0.125}]}]}]}]}"#,
+        );
+        let mut rng = Rng::new(123);
+        let mut seeds = 0u32;
+        for _ in 0..200_000 {
+            if t.roll(&LootContext::default(), &mut rng)
+                .iter()
+                .any(|s| s.item == "minecraft:seed")
+            {
+                seeds += 1;
+            }
+        }
+        let rate = seeds as f64 / 200_000.0;
+        assert!((rate - 0.125).abs() < 0.005, "seed rate was {rate}");
+    }
+
+    #[test]
+    fn a_failing_entry_is_excluded_before_weighting() {
+        // An entry whose condition cannot pass must not consume a slot in the
+        // weighted draw, or the roll silently yields nothing.
+        let t = table_from(
+            r#"{"pools":[{"rolls":1,"entries":[
+                {"type":"minecraft:item","name":"minecraft:never","weight":1,
+                 "conditions":[{"condition":"minecraft:random_chance","chance":0.0}]},
+                {"type":"minecraft:item","name":"minecraft:always","weight":1}]}]}"#,
+        );
+        let mut rng = Rng::new(1);
+        for _ in 0..1000 {
+            let out = t.roll(&LootContext::default(), &mut rng);
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].item, "minecraft:always");
+        }
+    }
+
+    #[test]
     fn weighted_pools_and_conditions() {
         // Two pools: always one of a weighted pair, plus a gated rare pool.
         let t = table_from(
@@ -1613,6 +1736,32 @@ mod tests {
         );
         assert_eq!(a, b);
         assert!(a.is_some_and(|v| !v.is_empty()));
+    }
+
+    /// Vanilla's short-grass seed rate is one draw of `random_chance 0.125`,
+    /// on the `alternatives` child — not the condition tested twice.
+    #[test]
+    fn real_short_grass_seed_rate_is_vanilla() {
+        let Ok(root) = std::env::var("AETHER_VANILLA_PACK") else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let tables = LootTables::open(&root);
+        let t = tables
+            .block_table("minecraft:short_grass")
+            .expect("short_grass table");
+        let mut rng = Rng::new(5);
+        let mut seeds = 0u32;
+        for _ in 0..200_000 {
+            if t.roll(&LootContext::default(), &mut rng)
+                .iter()
+                .any(|s| s.item == "minecraft:wheat_seeds")
+            {
+                seeds += 1;
+            }
+        }
+        let rate = seeds as f64 / 200_000.0;
+        assert!((rate - 0.125).abs() < 0.005, "seed rate was {rate}");
     }
 
     /// Every table in the pack must parse; the ones that do not are printed.
