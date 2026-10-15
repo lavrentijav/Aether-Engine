@@ -11,6 +11,7 @@ members = [
     "crates/aether-worldgen",
     "crates/aether-baseproxy",
     "crates/aether-api",
+    "crates/aether-ops",
     "crates/aether-plugin",
     "crates/aether-plugin-sdk",
     "crates/aether-demo",
@@ -19,6 +20,9 @@ members = [
     # plugins call. Native plugins are compiled into the server, so this one is
     # a workspace member unlike the WASM examples.
     "plugins/sdk",
+    # The web admin, as a native plugin (tier N): a read-only HTTP server over
+    # the server's live-ops service.
+    "plugins/webadmin",
 ]
 
 # The example plugins are separate WebAssembly components: they target
@@ -54,6 +58,7 @@ aether-physics = { path = "crates/aether-physics", version = "0.1.0" }
 aether-worldgen = { path = "crates/aether-worldgen", version = "0.1.0" }
 aether-baseproxy = { path = "crates/aether-baseproxy", version = "0.1.0" }
 aether-api = { path = "crates/aether-api", version = "0.1.0", default-features = false }
+aether-ops = { path = "crates/aether-ops", version = "0.1.0" }
 aether-plugin = { path = "crates/aether-plugin", version = "0.1.0" }
 # Third-party
 # The Wasmtime component model runtime. Kept to the features the plugin host
@@ -73,6 +78,7 @@ miniz_oxide = "0.8"
 criterion = "0.5"
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # The whole engine is a hot path; optimise dependencies even in dev builds so
 # benchmarks and stress fixtures behave close to release.

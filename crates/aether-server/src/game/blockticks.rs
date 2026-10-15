@@ -85,6 +85,18 @@ fn queue() -> &'static Mutex<Scheduler<Pos>> {
     Q.get_or_init(|| Mutex::new(Scheduler::new()))
 }
 
+/// Positions with a scheduled block tick still pending, for the live-ops
+/// sampler. Read at most once a second.
+pub fn pending_positions() -> Vec<Pos> {
+    queue()
+        .lock()
+        .unwrap()
+        .entries()
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect()
+}
+
 fn schedule(pos: Pos, delay: u64) {
     queue().lock().unwrap().schedule(pos, super::now() + delay);
 }

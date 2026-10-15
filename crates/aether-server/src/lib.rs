@@ -36,6 +36,7 @@ pub mod session;
 pub mod stash;
 pub mod stored;
 pub mod visibility;
+pub mod web;
 pub mod worldgen;
 
 use std::io;

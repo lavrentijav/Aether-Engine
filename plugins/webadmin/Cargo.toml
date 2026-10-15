@@ -1,0 +1,23 @@
+[package]
+name = "aether-webadmin-plugin"
+description = "Aether web admin: a native plugin that serves a read-only live-ops dashboard, heaviest regions, player profiles and inventories over plain HTTP on the local interface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "aether_webadmin_plugin"
+
+[dependencies]
+# The native-plugin trait, manifest and service registry, and the shared
+# `NativeContext` this plugin is initialised with.
+aether-plugin = { workspace = true }
+# The live-ops shape the server publishes as `ops@0.1`.
+aether-ops = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

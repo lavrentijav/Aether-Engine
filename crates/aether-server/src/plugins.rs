@@ -228,6 +228,20 @@ mod imp {
         // before it loads. The SDK is the only one today; it is a plugin like
         // any other, disabled by `[plugins.sdk] enabled = false`, and a
         // dependent that needs it then refuses to load with a clear error.
+        //
+        // The live-ops service the web admin reads is published before the
+        // native plugins, so `webadmin`'s `requires = ["ops@0.1"]` resolves.
+        let ops = Arc::new(aether_ops::OpsHandle(Arc::new(crate::web::ServerOps::new(
+            Arc::clone(world),
+            Arc::clone(registry),
+            Arc::clone(cfg),
+        ))));
+        if let Err(e) = host
+            .services()
+            .register(aether_ops::SERVICE, aether_ops::VERSION, ops)
+        {
+            crate::log::warn(&format!("ops service not registered: {e}"));
+        }
         install_native(&mut host, cfg, &grant_sink);
         for file in discover(Path::new(&cfg.plugins.dir)) {
             let id = file.manifest.id.clone();
@@ -292,30 +306,52 @@ mod imp {
     /// rather than a `.wasm` file. Loading it before the on-disk discovery is
     /// what lets a WASM dependent's `requires` be satisfied.
     fn install_native(host: &mut PluginHost, cfg: &Arc<Config>, grant_sink: &Arc<ServerBackend>) {
+        // The SDK is a service provider; it asks the operator for no host
+        // capabilities of its own, but a service method still checks its
+        // *caller's* capabilities.
         let registration = aether_sdk_plugin::registration();
+        let id = registration.manifest.id.clone();
+        let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
+        if !entry.enabled() {
+            crate::log::info(&format!("plugin `{id}` disabled by config"));
+        } else {
+            let caps =
+                effective_capabilities(&registration.manifest.capabilities, &entry.capabilities);
+            let file = ManifestFile {
+                // Native plugins are compiled in; there is no directory.
+                dir: std::path::PathBuf::new(),
+                manifest: registration.manifest,
+            };
+            match host.add_native(&file, &caps, &entry.config, (registration.new)()) {
+                Ok(()) => {
+                    grant_sink
+                        .granted
+                        .lock()
+                        .unwrap()
+                        .insert(id.clone(), caps.clone());
+                    crate::log::info(&format!("plugin     : {id} (native SDK)"));
+                }
+                Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
+            }
+        }
+
+        // The web admin `requires` the live-ops service, which `install`
+        // publishes before this runs, so it can come after the SDK or without
+        // it.
+        let registration = aether_webadmin_plugin::registration();
         let id = registration.manifest.id.clone();
         let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
         if !entry.enabled() {
             crate::log::info(&format!("plugin `{id}` disabled by config"));
             return;
         }
+        let caps = effective_capabilities(&registration.manifest.capabilities, &entry.capabilities);
         let file = ManifestFile {
-            // Native plugins are compiled in; there is no directory.
             dir: std::path::PathBuf::new(),
             manifest: registration.manifest,
         };
-        // The SDK asks the operator for no host capabilities of its own; a
-        // service method still checks its *caller's* capabilities.
-        let caps = effective_capabilities(&file.manifest.capabilities, &entry.capabilities);
         match host.add_native(&file, &caps, &entry.config, (registration.new)()) {
-            Ok(()) => {
-                grant_sink
-                    .granted
-                    .lock()
-                    .unwrap()
-                    .insert(id.clone(), caps.clone());
-                crate::log::info(&format!("plugin     : {id} (native SDK)"));
-            }
+            Ok(()) => crate::log::info(&format!("plugin     : {id} (native web admin)")),
             Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
         }
     }

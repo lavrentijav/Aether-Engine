@@ -203,6 +203,12 @@ fn entities() -> &'static Mutex<Vec<Entity>> {
     E.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// Every non-player entity's position, for the live-ops sampler. A snapshot
+/// copy, taken at most once a second, never on the tick's hot path.
+pub fn positions() -> Vec<Vector3> {
+    entities().lock().unwrap().iter().map(|e| e.pos()).collect()
+}
+
 /// Entity ids for everything that is not a player.
 ///
 /// Counted up from a long way above the player range, which counts up from

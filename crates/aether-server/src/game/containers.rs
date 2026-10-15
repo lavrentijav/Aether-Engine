@@ -118,6 +118,11 @@ fn active() -> &'static Mutex<HashSet<Pos>> {
     M.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Every block position with a loaded container, for the live-ops sampler.
+pub fn loaded_positions() -> Vec<Pos> {
+    all().lock().unwrap().keys().copied().collect()
+}
+
 /// Key for the container at a block position.
 ///
 /// Thirteen bytes (three `i32`s) under the reserved `O` prefix (see

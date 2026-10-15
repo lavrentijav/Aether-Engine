@@ -77,6 +77,9 @@ pub const BLOCK_CONTAINER: &[u8] = b"O";
 /// Premium-name locks: which Mojang uuid a name that completed online auth
 /// belongs to. Sub-keys `AUTHn`/`AUTHu`.
 pub const AUTH_LOCK: &[u8] = b"AUTH";
+/// Per-player web-admin profile: first/last seen and playtime, keyed by the
+/// player's 16-byte uuid (see `aether_server::web`).
+pub const WEB_PROFILE: &[u8] = b"WB";
 
 /// Every top-level key prefix in a world's KV store, and its owner.
 ///
@@ -155,6 +158,10 @@ pub const KEY_PREFIXES: &[KeyClaim] = &[
     KeyClaim {
         owner: "premium name lock",
         prefix: AUTH_LOCK,
+    },
+    KeyClaim {
+        owner: "web-admin player profile",
+        prefix: WEB_PROFILE,
     },
 ];
 

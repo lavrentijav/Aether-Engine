@@ -20,6 +20,10 @@ aether-api = { workspace = true, default-features = false, features = ["fjall", 
 aether-worldgen = { workspace = true }
 toml = { workspace = true }
 serde = { workspace = true }
+# The live-ops shape shared with the web admin plugin: the server implements
+# the trait, the plugin reads it. Neither names the other.
+aether-ops = { workspace = true }
+serde_json = { workspace = true }
 # Protocol frame compression (zlib), pure Rust so the server keeps building
 # without a C toolchain.
 miniz_oxide = { workspace = true }
@@ -39,6 +43,7 @@ aether-plugin = { workspace = true, optional = true }
 # it registers its services at load, and dependents that require them refuse to
 # load when it is disabled. Core code never names it.
 aether-sdk-plugin = { path = "../../plugins/sdk", optional = true }
+aether-webadmin-plugin = { path = "../../plugins/webadmin", optional = true }
 postgres = { version = "0.19.10", optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -72,5 +77,5 @@ workspace = true
 # build that does not need Wasmtime (tests, a minimal deployment) can drop it
 # with `--no-default-features`.
 default = ["plugins"]
-plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin"]
+plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-webadmin-plugin"]
 postgres = ["dep:postgres"]
