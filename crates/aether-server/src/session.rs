@@ -1403,6 +1403,7 @@ fn record_slot_change(
             aether_world::journal::EventBody::ItemDestroy {
                 uid: gone.uid,
                 from: where_,
+                reason: aether_world::journal::DestroyReason::CreativeReplace,
             },
         );
     }

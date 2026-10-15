@@ -1095,7 +1095,12 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                 // up or merged — it expired or fell out of the world.
                 if let Kind::Item(it) = &e.kind {
                     if it.stack.count > 0 {
-                        provenance::ground_changed(world, it.stack.uid, it.ground, 0);
+                        provenance::ground_destroyed(
+                            world,
+                            it.stack.uid,
+                            it.ground,
+                            aether_world::journal::DestroyReason::Despawn,
+                        );
                     }
                 }
             }
@@ -1148,8 +1153,10 @@ fn merge_items(all: &mut [Entity], actions: &mut Vec<Action>) {
             a.stack.count += n;
             b.stack.count -= n;
             if let Some(world) = super::world() {
-                provenance::ground_changed(world, a.stack.uid, a.ground, a.stack.count);
-                provenance::ground_changed(world, b.stack.uid, b.ground, b.stack.count);
+                // The merge of two ground stacks is one transfer, not two
+                // count changes: the units leave b for a, and b ceases when
+                // it is empty.
+                provenance::ground_merged(world, a.stack.uid, b.stack.uid, n);
             }
             let id_a = left[i].id;
             actions.push(Action::Tracked(

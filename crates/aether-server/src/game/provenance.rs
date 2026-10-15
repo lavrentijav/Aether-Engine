@@ -11,12 +11,23 @@
 //! where each uid the player can reach lies before the action and after it,
 //! and journals the difference:
 //!
-//! * a uid that changed place or count: [`EventBody::ItemMove`];
-//! * a uid that appeared: [`EventBody::ItemDerive`] from the uids that
-//!   disappeared or shrank in the same action (a craft's inputs, the stack a
-//!   split came off), or [`EventBody::ItemMint`] when nothing did;
-//! * a uid that disappeared: [`EventBody::ItemDestroy`] (eaten, merged into
-//!   another stack, used up).
+//! * a uid that changed place: [`EventBody::ItemMove`];
+//! * a stack at the same place whose count grew because same-item units it
+//!   did not mint joined it: [`EventBody::ItemMerge`] from those uids. This
+//!   is what distinguishes topping up a stack from a move to the same slot;
+//! * a new uid that is units already accounted for, split off a stack:
+//!   [`EventBody::ItemMint`], with the source stack moving the other way;
+//! * a new uid that is the output of a real transformation (a craft, smelt or
+//!   brew): [`EventBody::ItemDerive`] from the ingredient uids that shrank or
+//!   vanished in the same action;
+//! * a uid that disappeared: [`EventBody::ItemDestroy`], carrying the
+//!   [`DestroyReason`] set while the action ran ([`note_destroy_reason`]) —
+//!   `consumed` for eating, `crafted` for an ingredient, `other` otherwise.
+//!
+//! Nothing is invented here but identity: a source that creates units from
+//! outside the reachable world (`/give`, a furnaces's output when a stack is
+//! merged into) mints them itself (see [`give_events`]) and this layer only
+//! records where they went.
 //!
 //! The difference is journalled when the scope is dropped, so an action that
 //! returns early is covered too.
@@ -29,13 +40,14 @@
 //! being on the ground — a broken block's drops, mob loot — are minted there
 //! directly by [`mint_on_ground`], with the event that produced them as cause.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use aether_world::journal::{ActorId, EventBody, ItemUid, Place};
+use aether_world::journal::{ActorId, DestroyReason, EventBody, ItemUid, Place};
+use aether_world::ItemTypeId;
 
 use super::player::WindowKind;
-use crate::inventory::Stack;
+use crate::inventory::{GiveStep, Stack};
 use crate::players::PlayerHandle;
 use crate::session::DemoWorld;
 
@@ -160,6 +172,64 @@ fn capture(handle: &PlayerHandle, world: &DemoWorld) -> Seen {
 thread_local! {
     /// Stacks thrown to the ground while a scope is open on this thread.
     static THROWN: RefCell<Option<Vec<(Stack, Place)>>> = const { RefCell::new(None) };
+    /// Why a destroy inside the running action happened. Set by whatever
+    /// consumes the item (eating, a craft) and read once when the scope's
+    /// difference is journalled.
+    static REASON: Cell<DestroyReason> = const { Cell::new(DestroyReason::Other) };
+}
+
+/// Record that an item this action uses up is destroyed for `reason` —
+/// `consumed` for eating, `crafted` for a crafting ingredient. The next
+/// [`Scope`] to end reads it, so it must be set before the action returns.
+pub fn note_destroy_reason(reason: DestroyReason) {
+    REASON.with(|r| r.set(reason));
+}
+
+fn take_destroy_reason() -> DestroyReason {
+    REASON.with(|r| r.replace(DestroyReason::Other))
+}
+
+/// The events a [`give`](crate::inventory::Inventory::give_many_report)
+/// produced: a mint and, when it topped up an existing stack, the merge that
+/// moved the fresh units in. `owner` is the player they were given to.
+pub fn give_events(owner: ActorId, item: ItemTypeId, steps: &[GiveStep]) -> Vec<EventBody> {
+    let mut out = Vec::new();
+    for step in steps {
+        match step {
+            GiveStep::Placed { slot, stack } => out.push(EventBody::ItemMint {
+                uid: stack.uid,
+                item: stack.item,
+                count: stack.count,
+                to: Place::Inventory {
+                    owner,
+                    slot: *slot as i16,
+                },
+            }),
+            GiveStep::Merged {
+                slot,
+                into,
+                mint,
+                count,
+            } => {
+                let place = Place::Inventory {
+                    owner,
+                    slot: *slot as i16,
+                };
+                out.push(EventBody::ItemMint {
+                    uid: *mint,
+                    item,
+                    count: *count,
+                    to: place,
+                });
+                out.push(EventBody::ItemMerge {
+                    into: *into,
+                    from: *mint,
+                    count: *count,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// A stack is leaving a player for the ground at `at` (see [`ground_place`]).
@@ -208,20 +278,25 @@ pub fn mint_on_ground(
     );
 }
 
-/// A stack on the ground changed: merged into a neighbour, or gone (picked up
-/// whole, burnt, expired). `count` is what is left, `0` for gone.
-pub fn ground_changed(world: &DemoWorld, uid: ItemUid, at: Place, count: u8) {
-    let body = if count == 0 {
-        EventBody::ItemDestroy { uid, from: at }
-    } else {
-        EventBody::ItemMove {
+/// `count` units of ground stack `from` joined ground stack `into`. `from` is
+/// gone if the merge took all of it; there is no separate destroy for it.
+pub fn ground_merged(world: &DemoWorld, into: ItemUid, from: ItemUid, count: u8) {
+    let _ = world
+        .journal()
+        .append(ActorId::SERVER, EventBody::ItemMerge { into, from, count });
+}
+
+/// A ground stack left the world on its own — its five minutes ran out, or it
+/// fell out of the bottom. `reason` is despawn or void.
+pub fn ground_destroyed(world: &DemoWorld, uid: ItemUid, at: Place, reason: DestroyReason) {
+    let _ = world.journal().append(
+        ActorId::SERVER,
+        EventBody::ItemDestroy {
             uid,
             from: at,
-            to: at,
-            count,
-        }
-    };
-    let _ = world.journal().append(ActorId::SERVER, body);
+            reason,
+        },
+    );
 }
 
 /// A container changed on its own — a furnace burning fuel and smelting —
@@ -253,7 +328,7 @@ pub fn container_changed(
         }
         seen
     };
-    for body in diff(&seen(before), &seen(after)) {
+    for body in diff(&seen(before), &seen(after), DestroyReason::Other) {
         let _ = world.journal().append(ActorId::SERVER, body);
     }
 }
@@ -320,67 +395,165 @@ impl Drop for Scope<'_> {
             return;
         }
         let thrown = THROWN.with(|t| t.borrow_mut().take()).unwrap_or_default();
+        let reason = take_destroy_reason();
         let mut after = capture(self.handle, self.world);
         for (s, at) in &thrown {
             add(&mut after, s, *at);
         }
-        for body in diff(&self.before, &after) {
+        for body in diff(&self.before, &after, reason) {
             let _ = self.world.journal().append(self.actor, body);
         }
     }
 }
 
-/// The events that turn `before` into `after`: moves first, then what was
+/// The events that turn `before` into `after`: transfers first, then what was
 /// made, then what is gone — the order a reader of the ledger expects.
-fn diff(before: &Seen, after: &Seen) -> Vec<EventBody> {
+///
+/// `reason` is the destroy reason set while the action ran; it applies to
+/// every destroy the action leaves behind.
+fn diff(before: &Seen, after: &Seen, reason: DestroyReason) -> Vec<EventBody> {
     let mut moves = Vec::new();
     let mut made = Vec::new();
     let mut gone = Vec::new();
-    // What shrank or vanished in this action is what anything new was made of.
-    let mut sources: Vec<ItemUid> = before
-        .iter()
-        .filter(|(uid, b)| after.get(uid).map_or(true, |a| a.count < b.count))
-        .map(|(uid, _)| *uid)
-        .collect();
+    // Units each stack lost this action, by uid. A stack that shrank or
+    // vanished is a merge source; it is also what anything new was made of.
+    let mut lost: HashMap<ItemUid, u32> = HashMap::new();
+    for (uid, b) in before {
+        let now = after.get(uid).map_or(0, |a| a.count) as u32;
+        if now < b.count as u32 {
+            lost.insert(*uid, b.count as u32 - now);
+        }
+    }
+    let mut sources: Vec<ItemUid> = lost.keys().copied().collect();
     sources.sort();
-    let mut uids: Vec<&ItemUid> = after.keys().collect();
+
+    let mut uids: Vec<ItemUid> = after.keys().copied().collect();
     uids.sort();
-    for uid in uids {
+
+    // A stack at the same place whose count grew was topped up. Find the
+    // same-item sources that fed it and say so with a merge, rather than a
+    // move to the same slot that hid where the units came from.
+    let mut merged_from: HashMap<ItemUid, u32> = HashMap::new();
+    for uid in &uids {
         let a = &after[uid];
-        match before.get(uid) {
-            Some(b) if b.place == a.place && b.count == a.count => {}
-            Some(b) => moves.push(EventBody::ItemMove {
-                uid: *uid,
-                from: b.place,
-                to: a.place,
-                count: a.count,
-            }),
-            None if sources.is_empty() => made.push(EventBody::ItemMint {
+        let Some(b) = before.get(uid) else { continue };
+        if b.place != a.place || a.count <= b.count {
+            continue;
+        }
+        let mut need = (a.count - b.count) as u32;
+        let mut cands: Vec<ItemUid> = sources
+            .iter()
+            .copied()
+            .filter(|s| before[s].item == a.item && lost[s] > *merged_from.get(s).unwrap_or(&0))
+            .collect();
+        cands.sort();
+        for s in cands {
+            if need == 0 {
+                break;
+            }
+            let avail = lost[&s] - merged_from.get(&s).copied().unwrap_or(0);
+            let take = need.min(avail);
+            if take == 0 {
+                continue;
+            }
+            moves.push(EventBody::ItemMerge {
+                into: *uid,
+                from: s,
+                count: take as u8,
+            });
+            *merged_from.entry(s).or_insert(0) += take;
+            need -= take;
+        }
+        if need > 0 {
+            if sources.is_empty() {
+                // Nothing fed it: the best a pure difference can say is that
+                // its count moved.
+                moves.push(EventBody::ItemMove {
+                    uid: *uid,
+                    from: b.place,
+                    to: a.place,
+                    count: a.count,
+                });
+            } else {
+                // It grew from a transformation, not from like stacks (a
+                // furnace output joining an existing output stack, say): the
+                // fresh units are derived from the ingredients and then
+                // merged in, so the count did not grow from nowhere.
+                let fresh = aether_world::journal::ledger::mint_uid();
+                moves.push(EventBody::ItemDerive {
+                    uid: fresh,
+                    item: a.item,
+                    count: need as u8,
+                    to: a.place,
+                    from: sources.clone(),
+                });
+                moves.push(EventBody::ItemMerge {
+                    into: *uid,
+                    from: fresh,
+                    count: need as u8,
+                });
+            }
+        }
+    }
+
+    // New instances: a split if the item matches a source that lost units
+    // (units that already existed and got a new identity), a derive if a real
+    // transformation consumed other items, a mint from nothing otherwise.
+    for uid in &uids {
+        if before.contains_key(uid) {
+            continue;
+        }
+        let a = &after[uid];
+        let split = sources.iter().any(|s| before[s].item == a.item);
+        if split || sources.is_empty() {
+            made.push(EventBody::ItemMint {
                 uid: *uid,
                 item: a.item,
                 count: a.count,
                 to: a.place,
-            }),
-            None => made.push(EventBody::ItemDerive {
+            });
+        } else {
+            made.push(EventBody::ItemDerive {
                 uid: *uid,
                 item: a.item,
                 count: a.count,
                 to: a.place,
                 from: sources.clone(),
-            }),
+            });
         }
     }
-    let mut lost: Vec<(&ItemUid, &Entry)> = before
-        .iter()
-        .filter(|(u, _)| !after.contains_key(u))
-        .collect();
-    lost.sort_by_key(|(u, _)| **u);
-    for (uid, b) in lost {
-        gone.push(EventBody::ItemDestroy {
-            uid: *uid,
-            from: b.place,
-        });
+
+    let mut old: Vec<&ItemUid> = before.keys().collect();
+    old.sort();
+    for uid in old {
+        let b = &before[uid];
+        let used = merged_from.get(uid).copied().unwrap_or(0);
+        match after.get(uid) {
+            None => {
+                let gone_units = lost.get(uid).copied().unwrap_or(0);
+                if used == 0 || used < gone_units {
+                    // Not (all) merged away: it was destroyed after all.
+                    gone.push(EventBody::ItemDestroy {
+                        uid: *uid,
+                        from: b.place,
+                        reason,
+                    });
+                }
+            }
+            Some(a) => {
+                let residual = lost.get(uid).copied().unwrap_or(0).saturating_sub(used);
+                if a.place != b.place || residual > 0 {
+                    moves.push(EventBody::ItemMove {
+                        uid: *uid,
+                        from: b.place,
+                        to: a.place,
+                        count: a.count,
+                    });
+                }
+            }
+        }
     }
+
     moves.extend(made);
     moves.extend(gone);
     moves
@@ -407,12 +580,14 @@ mod tests {
         }
     }
 
+    const OTHER: DestroyReason = DestroyReason::Other;
+
     #[test]
     fn a_stack_moved_between_slots_is_a_move() {
         let before = Seen::from([(ItemUid(1), e(inv(36), 5, "minecraft:dirt"))]);
         let after = Seen::from([(ItemUid(1), e(inv(9), 5, "minecraft:dirt"))]);
         assert_eq!(
-            diff(&before, &after),
+            diff(&before, &after, OTHER),
             vec![EventBody::ItemMove {
                 uid: ItemUid(1),
                 from: inv(36),
@@ -430,7 +605,7 @@ mod tests {
             (ItemUid(1), e(inv(1), 1, "minecraft:oak_log")),
             (ItemUid(2), e(inv(CURSOR_SLOT), 4, "minecraft:oak_planks")),
         ]);
-        let ev = diff(&before, &after);
+        let ev = diff(&before, &after, DestroyReason::Crafted);
         assert_eq!(
             ev[0],
             EventBody::ItemMove {
@@ -453,43 +628,403 @@ mod tests {
     }
 
     #[test]
-    fn eating_the_last_one_destroys_it() {
+    fn a_split_is_a_mint_with_the_source_moving_not_a_derive() {
+        // Moving a diamond through the crafting grid and halving it used to be
+        // journalled as a diamond "derived" from another diamond — a
+        // transformation that never happened. A split mints a new identity for
+        // units that already existed and reduces the source.
+        let before = Seen::from([(ItemUid(1), e(inv(1), 8, "minecraft:diamond"))]);
+        let after = Seen::from([
+            (ItemUid(1), e(inv(1), 4, "minecraft:diamond")),
+            (ItemUid(2), e(inv(2), 4, "minecraft:diamond")),
+        ]);
+        let ev = diff(&before, &after, OTHER);
+        assert!(
+            ev.iter()
+                .all(|b| !matches!(b, EventBody::ItemDerive { .. })),
+            "a split must not derive: {ev:?}"
+        );
+        assert!(ev.contains(&EventBody::ItemMint {
+            uid: ItemUid(2),
+            item: crate::inventory::item("minecraft:diamond"),
+            count: 4,
+            to: inv(2),
+        }));
+        assert!(ev.contains(&EventBody::ItemMove {
+            uid: ItemUid(1),
+            from: inv(1),
+            to: inv(1),
+            count: 4,
+        }));
+    }
+
+    #[test]
+    fn eating_the_last_one_destroys_it_as_consumed() {
         let before = Seen::from([(ItemUid(3), e(inv(36), 1, "minecraft:bread"))]);
         assert_eq!(
-            diff(&before, &Seen::new()),
+            diff(&before, &Seen::new(), DestroyReason::Consumed),
             vec![EventBody::ItemDestroy {
                 uid: ItemUid(3),
-                from: inv(36)
+                from: inv(36),
+                reason: DestroyReason::Consumed,
             }]
         );
     }
 
     #[test]
-    fn a_pickup_derives_the_slot_stack_from_the_ground_stack() {
+    fn a_pickup_onto_a_stack_merges_from_the_ground_stack_with_no_orphan() {
+        // A ground stack of three diamonds topping up an existing stack of
+        // five: the three units join the slot stack and the ground uid ceases.
+        // There is no separate destroy, and no move to the same slot that hid
+        // where the units came from.
+        let ground = Place::Ground { x: 1, y: 64, z: 1 };
+        let before = Seen::from([
+            (ItemUid(5), e(ground, 3, "minecraft:diamond")),
+            (ItemUid(6), e(inv(36), 5, "minecraft:diamond")),
+        ]);
+        let after = Seen::from([(ItemUid(6), e(inv(36), 8, "minecraft:diamond"))]);
+        assert_eq!(
+            diff(&before, &after, OTHER),
+            vec![EventBody::ItemMerge {
+                into: ItemUid(6),
+                from: ItemUid(5),
+                count: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_pickup_into_an_empty_slot_is_a_move() {
+        // The stack keeps its identity as it leaves the ground; only the place
+        // changes.
         let ground = Place::Ground { x: 1, y: 64, z: 1 };
         let before = Seen::from([(ItemUid(5), e(ground, 3, "minecraft:diamond"))]);
-        let after = Seen::from([(ItemUid(6), e(inv(36), 3, "minecraft:diamond"))]);
+        let after = Seen::from([(ItemUid(5), e(inv(36), 3, "minecraft:diamond"))]);
         assert_eq!(
-            diff(&before, &after),
-            vec![
-                EventBody::ItemDerive {
-                    uid: ItemUid(6),
-                    item: crate::inventory::item("minecraft:diamond"),
-                    count: 3,
-                    to: inv(36),
-                    from: vec![ItemUid(5)]
-                },
-                EventBody::ItemDestroy {
-                    uid: ItemUid(5),
-                    from: ground
-                }
-            ]
+            diff(&before, &after, OTHER),
+            vec![EventBody::ItemMove {
+                uid: ItemUid(5),
+                from: ground,
+                to: inv(36),
+                count: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_partial_pickup_merges_what_fits_and_moves_the_rest() {
+        let ground = Place::Ground { x: 1, y: 64, z: 1 };
+        let before = Seen::from([
+            (ItemUid(5), e(ground, 5, "minecraft:diamond")),
+            (ItemUid(6), e(inv(36), 60, "minecraft:diamond")),
+        ]);
+        // Four fit into the slot stack; the fifth moves to an empty slot and
+        // keeps the ground uid.
+        let after = Seen::from([
+            (ItemUid(6), e(inv(36), 64, "minecraft:diamond")),
+            (ItemUid(5), e(inv(9), 1, "minecraft:diamond")),
+        ]);
+        let ev = diff(&before, &after, OTHER);
+        assert!(ev.contains(&EventBody::ItemMerge {
+            into: ItemUid(6),
+            from: ItemUid(5),
+            count: 4,
+        }));
+        assert!(ev.contains(&EventBody::ItemMove {
+            uid: ItemUid(5),
+            from: ground,
+            to: inv(9),
+            count: 1,
+        }));
+        assert!(
+            !ev.iter()
+                .any(|b| matches!(b, EventBody::ItemDestroy { .. })),
+            "no units were destroyed: {ev:?}"
         );
     }
 
     #[test]
     fn nothing_changed_is_nothing_journalled() {
         let s = Seen::from([(ItemUid(1), e(inv(36), 5, "minecraft:dirt"))]);
-        assert!(diff(&s, &s.clone()).is_empty());
+        assert!(diff(&s, &s.clone(), OTHER).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // `/give` and the ledger balance.
+    // -----------------------------------------------------------------------
+
+    use crate::inventory::Inventory;
+    use aether_world::journal::{Event, Ledger};
+
+    fn ev(seq: u64, body: EventBody) -> Event {
+        Event {
+            seq,
+            at_ms: seq,
+            actor: owner(),
+            cause: None,
+            body,
+        }
+    }
+
+    /// Reproduce the live bug: a `/give` of golden apples onto an existing
+    /// stack must be a mint of the new units plus a merge into the stack, not
+    /// a move `inv:39 → inv:39` whose count grew from nowhere. The ledger must
+    /// balance.
+    #[test]
+    fn giving_onto_an_existing_stack_mints_then_merges_and_balances() {
+        let item = crate::inventory::item("minecraft:golden_apple");
+        let mut inv = Inventory::new();
+        inv.put_slot(39, Some(Stack::named("minecraft:golden_apple", 5)));
+        let existing = inv.slot(39).unwrap().uid;
+
+        let (steps, left) = inv.give_many_report(item, 3);
+        assert_eq!(left, 0, "it all fitted");
+        assert_eq!(inv.slot(39).unwrap().count, 8, "topped up in place");
+
+        let mut events = vec![ev(
+            1,
+            EventBody::ItemMint {
+                uid: existing,
+                item,
+                count: 5,
+                to: Place::Inventory {
+                    owner: owner(),
+                    slot: 39,
+                },
+            },
+        )];
+        for (i, body) in give_events(owner(), item, &steps).into_iter().enumerate() {
+            events.push(ev(i as u64 + 2, body));
+        }
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(&e.body, EventBody::ItemMerge { into, count: 3, .. } if *into == existing)),
+            "no merge into the existing stack: {:?}",
+            events.iter().map(|e| &e.body).collect::<Vec<_>>()
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(&e.body, EventBody::ItemMint { count: 3, .. })),
+            "the three added units were never minted"
+        );
+
+        let ledger = Ledger::replay(&events);
+        assert!(ledger.anomalies().is_empty(), "{:?}", ledger.anomalies());
+        let bal = ledger.balance();
+        assert!(bal.is_balanced(), "{bal:?}");
+        assert_eq!(
+            (bal.created, bal.alive, bal.destroyed, bal.merged_away),
+            (2, 1, 0, 1)
+        );
+        assert_eq!(ledger.get(existing).unwrap().count, 8);
+    }
+
+    /// A tiny deterministic PRNG, so the property test fails the same way for
+    /// everyone.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n.max(1)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Loc {
+        Inv(i16),
+        Ground(i32, i32, i32),
+    }
+    impl Loc {
+        fn place(self) -> Place {
+            match self {
+                Loc::Inv(slot) => inv(slot),
+                Loc::Ground(x, y, z) => Place::Ground { x, y, z },
+            }
+        }
+    }
+
+    struct Cell {
+        uid: ItemUid,
+        item: &'static str,
+        count: u8,
+        loc: Loc,
+    }
+
+    fn seen_of(cells: &[Cell]) -> Seen {
+        let mut seen = Seen::new();
+        for c in cells {
+            if c.count > 0 {
+                seen.insert(
+                    c.uid,
+                    Entry {
+                        place: c.loc.place(),
+                        count: c.count,
+                        item: crate::inventory::item(c.item),
+                    },
+                );
+            }
+        }
+        seen
+    }
+
+    /// A random walk over the operations the live server performs — moving in
+    /// a window, giving, picking up, eating — fed through the same `diff` and
+    /// ledger the server uses. At no point may an item appear from nowhere or
+    /// vanish untracked.
+    #[test]
+    fn the_ledger_balances_over_random_window_give_pickup_and_eat_sequences() {
+        let items = ["minecraft:dirt", "minecraft:diamond", "minecraft:bread"];
+        let mut rng = Rng(0xC0FFEE);
+        let mut next_uid = 1u64;
+        let mut cells: Vec<Cell> = Vec::new();
+        let mut seq = 0u64;
+        let mut ledger = Ledger::default();
+
+        for _ in 0..3_000 {
+            let op = rng.below(9);
+            let before = seen_of(&cells);
+            let mut reason = DestroyReason::Other;
+            let mut explicit: Vec<EventBody> = Vec::new();
+            match op {
+                // Move a stack to another place.
+                0 | 1 => {
+                    if !cells.is_empty() {
+                        let i = rng.below(cells.len() as u64) as usize;
+                        cells[i].loc = random_loc(&mut rng);
+                    }
+                }
+                // Split a stack: a new identity for units that already exist.
+                2 => {
+                    let eligible: Vec<usize> =
+                        (0..cells.len()).filter(|i| cells[*i].count >= 2).collect();
+                    if !eligible.is_empty() {
+                        let i = eligible[rng.below(eligible.len() as u64) as usize];
+                        let take = 1 + rng.below((cells[i].count - 1) as u64) as u8;
+                        cells[i].count -= take;
+                        cells.push(Cell {
+                            uid: ItemUid(next_uid),
+                            item: cells[i].item,
+                            count: take,
+                            loc: random_loc(&mut rng),
+                        });
+                        next_uid += 1;
+                    }
+                }
+                // `/give` a fresh stack into some free place: a plain mint.
+                3 => {
+                    let item = items[rng.below(items.len() as u64) as usize];
+                    let count = 1 + rng.below(8) as u8;
+                    cells.push(Cell {
+                        uid: ItemUid(next_uid),
+                        item,
+                        count,
+                        loc: random_loc(&mut rng),
+                    });
+                    next_uid += 1;
+                }
+                // `/give` onto an existing stack: mint the fresh units, then
+                // merge them in (the path the server now takes explicitly).
+                4 => {
+                    let stackable: Vec<usize> =
+                        (0..cells.len()).filter(|i| cells[*i].count < 64).collect();
+                    if !stackable.is_empty() {
+                        let i = stackable[rng.below(stackable.len() as u64) as usize];
+                        let room = 64 - cells[i].count;
+                        let n = 1 + rng.below(room as u64) as u8;
+                        let mint = ItemUid(next_uid);
+                        next_uid += 1;
+                        explicit.push(EventBody::ItemMint {
+                            uid: mint,
+                            item: crate::inventory::item(cells[i].item),
+                            count: n,
+                            to: cells[i].loc.place(),
+                        });
+                        explicit.push(EventBody::ItemMerge {
+                            into: cells[i].uid,
+                            from: mint,
+                            count: n,
+                        });
+                        cells[i].count += n;
+                    }
+                }
+                // Pick a ground stack up onto a same-item slot stack: a merge
+                // from the ground uid. What does not fit stays on the ground.
+                5 | 6 => {
+                    let ground: Vec<usize> = (0..cells.len())
+                        .filter(|i| matches!(cells[*i].loc, Loc::Ground(..)))
+                        .collect();
+                    if !ground.is_empty() {
+                        let g = ground[rng.below(ground.len() as u64) as usize];
+                        let candidate = (0..cells.len()).find(|i| {
+                            *i != g
+                                && cells[*i].item == cells[g].item
+                                && matches!(cells[*i].loc, Loc::Inv(_))
+                                && cells[*i].count < 64
+                        });
+                        if let Some(t) = candidate {
+                            let room = 64 - cells[t].count;
+                            let n = room.min(cells[g].count);
+                            cells[t].count += n;
+                            cells[g].count -= n;
+                        }
+                    }
+                }
+                // Pick a ground stack into a free slot: the same instance moves.
+                7 => {
+                    let ground: Vec<usize> = (0..cells.len())
+                        .filter(|i| matches!(cells[*i].loc, Loc::Ground(..)))
+                        .collect();
+                    if !ground.is_empty() {
+                        let g = ground[rng.below(ground.len() as u64) as usize];
+                        cells[g].loc = Loc::Inv(rng.below(46) as i16);
+                    }
+                }
+                // Eat one: a consumed destroy when the last one goes.
+                _ => {
+                    if !cells.is_empty() {
+                        let i = rng.below(cells.len() as u64) as usize;
+                        if cells[i].count > 1 {
+                            cells[i].count -= 1;
+                        } else {
+                            cells.remove(i);
+                        }
+                        reason = DestroyReason::Consumed;
+                    }
+                }
+            }
+            cells.retain(|c| c.count > 0);
+            let after = seen_of(&cells);
+            let mut bodies = diff(&before, &after, reason);
+            bodies.extend(explicit);
+            for body in bodies {
+                seq += 1;
+                ledger.apply(&ev(seq, body));
+            }
+        }
+
+        assert!(
+            ledger.anomalies().is_empty(),
+            "the random walk produced anomalies: {:?}",
+            ledger.anomalies()
+        );
+        let bal = ledger.balance();
+        assert!(bal.is_balanced(), "{bal:?}");
+    }
+
+    fn random_loc(rng: &mut Rng) -> Loc {
+        if rng.below(2) == 0 {
+            Loc::Inv(rng.below(46) as i16)
+        } else {
+            Loc::Ground(rng.below(16) as i32, 64, rng.below(16) as i32)
+        }
     }
 }
