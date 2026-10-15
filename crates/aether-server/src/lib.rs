@@ -13,6 +13,7 @@
 //! [`protocol`] for the neutral vocabulary and [`session`] for the per-client
 //! logic every version shares.
 
+pub mod auth;
 pub mod commands;
 pub mod config;
 pub mod connections;

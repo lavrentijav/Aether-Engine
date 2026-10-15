@@ -634,6 +634,11 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         self.storage.backend().get(key)
     }
 
+    /// Remove a server-level blob written by [`World::put_meta`].
+    pub fn delete_meta(&self, key: &[u8]) -> Result<(), StorageError> {
+        self.storage.backend().delete(key)
+    }
+
     /// Persist every sub-chunk modified since the last flush.
     pub fn flush(&self) -> Result<(), StorageError> {
         // Read before anything is copied: an edit writes the cache before its
