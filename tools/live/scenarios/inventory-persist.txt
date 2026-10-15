@@ -1,0 +1,17 @@
+# 4. inventory-persist — give items, reconnect, inventory still there.
+wait 22
+send /gamemode creative
+wait 2
+send /inventory creativedelete 36
+wait 1
+send /inventory creativegive 36 Stone 5
+wait 2
+send /inv
+wait 3
+expect 5x minecraft:stone
+send /reco
+wait 25
+send /inv
+wait 3
+expect 5x minecraft:stone
+reject unreadable

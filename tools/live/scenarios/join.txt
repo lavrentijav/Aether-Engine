@@ -1,0 +1,11 @@
+# 1. join — connect, player list contains us, no kick within 20 s.
+wait 22
+send /list
+wait 4
+expect Server was successfully joined
+expect PlayerList: .*_alpha_01
+reject kicked
+reject Disconnected
+reject Connection lost
+reject Cannot connect
+reject not supported

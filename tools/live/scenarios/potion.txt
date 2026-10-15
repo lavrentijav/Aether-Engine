@@ -1,0 +1,30 @@
+# 7. potion — drink a potion, throw a splash potion, no disconnect.
+wait 22
+send /gamemode creative
+wait 2
+send /inventory creativegive 36 Potion 1
+wait 1
+send /inventory creativegive 37 SplashPotion 1
+wait 2
+send /changeslot 1
+wait 1
+send /tp 0 200 0
+wait 1
+send /look up
+wait 1
+send /useitem
+wait 5
+send /effects
+wait 2
+send /changeslot 2
+wait 1
+send /tp 0 200 0
+wait 1
+send /look up
+wait 1
+send /useitem
+wait 5
+expect Used an item
+reject kicked
+reject Disconnected
+reject Unsupported

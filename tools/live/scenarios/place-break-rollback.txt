@@ -1,0 +1,35 @@
+# 3. place-break-rollback — place stone, break it, inspect the events, roll back.
+wait 22
+send /gamemode creative
+wait 2
+send /spawn
+wait 2
+send /inventory creativedelete 36
+wait 1
+send /give minecraft:stone 64
+wait 2
+send /changeslot 1
+wait 1
+send /useblock -6 70 8
+wait 2
+send /block -6 70 8
+wait 2
+expect -6 70 8: minecraft:stone
+send /inspect
+wait 2
+expect Inspect mode ON
+send /dig -6 70 8
+wait 5
+expect placed minecraft:
+expect now minecraft:
+reject unsupported journal format
+reject journal format
+send /inspect
+wait 2
+send /dig -6 70 8
+wait 5
+send /rollback player:_alpha_01 radius:8
+wait 6
+expect rolled back
+reject unsupported journal format
+reject incompat

@@ -1,0 +1,19 @@
+# 8. commands — operator commands answer.
+wait 22
+send /time set day
+wait 3
+expect Time set
+send /gamemode creative
+wait 3
+expect Creative mode
+send /tp 0 100 0
+wait 3
+expect Teleported
+send /spawn
+wait 3
+expect Teleported to spawn|Teleported
+send /send /help
+wait 4
+expect Inspect mode|/inspect|History commands|/rollback
+reject Unknown command
+reject insufficient permissions

@@ -1,0 +1,20 @@
+# 2. inspect — /inspect on, hit a block, read history, /inspect off.
+wait 22
+send /gamemode creative
+wait 3
+send /inspect
+wait 3
+expect Inspect mode ON
+send /look down
+wait 2
+send /dig
+wait 5
+expect Attempting to dig block
+expect page 1 of
+reject unsupported journal format
+reject journal format
+reject incompatible
+reject Unsupported
+send /inspect
+wait 3
+expect Inspect mode OFF
