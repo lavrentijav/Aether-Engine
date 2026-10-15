@@ -172,13 +172,23 @@ fn main() -> std::process::ExitCode {
     // connected: time, mobs, items on the floor, furnaces.
     game::tick::start(Arc::clone(&registry), Arc::clone(&world));
 
-    // Loot tables are read lazily from the same pack; report what the parser
-    // did not understand once, so a silent gap in the drop path is visible.
-    let skipped = game::loot::LootTables::global().unsupported();
+    // Loot tables are read from the same pack. Parse them once now so the
+    // report of what the parser skipped is complete before it is logged.
+    let loot = game::loot::LootTables::global();
+    loot.warm();
+    let mut skipped = loot.unsupported();
     if !skipped.is_empty() {
+        skipped.sort();
         log::info(&format!(
-            "loot tables : {} unsupported construct(s) in skipped tables",
-            skipped.len()
+            "loot tables : {} construct(s) parsed as no-op or skipped: {}{}",
+            skipped.len(),
+            skipped
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            if skipped.len() > 8 { ", …" } else { "" }
         ));
     }
 

@@ -267,6 +267,8 @@ pub struct Pool {
 /// A parsed loot table.
 #[derive(Debug, Clone)]
 pub struct LootTable {
+    /// Table-level functions, applied to every stack the table produces.
+    pub functions: Vec<Function>,
     pub pools: Vec<Pool>,
 }
 
@@ -355,6 +357,13 @@ impl LootTable {
                 out.extend(produced.into_iter().filter(|s| s.count > 0));
             }
         }
+        // Table-level functions run last, over everything the table produced.
+        for f in &self.functions {
+            for st in out.iter_mut() {
+                apply_function(f, st, ctx, rng);
+            }
+        }
+        out.retain(|s| s.count > 0);
         out
     }
 }
@@ -859,6 +868,19 @@ impl LootTables {
         self.unsupported.lock().unwrap().iter().cloned().collect()
     }
 
+    /// Parse every table in the pack, so [`Self::unsupported`] is populated
+    /// before the server logs it. A no-op without a pack.
+    pub fn warm(&self) {
+        let Some(root) = &self.root else {
+            return;
+        };
+        let mut ids = Vec::new();
+        collect_ids(&root.join("loot_table"), "", &mut ids);
+        for id in ids {
+            let _ = self.table(&id);
+        }
+    }
+
     /// The table for a block (`minecraft:blocks/<short name>`).
     pub fn block_table(&self, block: &str) -> Option<Arc<LootTable>> {
         let short = block.strip_prefix("minecraft:").unwrap_or(block);
@@ -893,9 +915,13 @@ impl LootTables {
         let text = std::fs::read_to_string(&path).ok()?;
         let json = Json::parse(&text).ok()?;
         let tags = self.tags.as_ref();
-        match parse_table(id, &json, tags) {
+        let mut warn = BTreeSet::new();
+        match parse_table(id, &json, tags, &mut warn) {
             Ok(mut t) => {
                 self.resolve_nested(&mut t, 0);
+                if !warn.is_empty() {
+                    self.unsupported.lock().unwrap().extend(warn);
+                }
                 Some(t)
             }
             Err(e) => {
@@ -987,6 +1013,22 @@ fn pack_data_dir(worldgen_data: &str) -> Option<PathBuf> {
         return Some(p.to_path_buf());
     }
     None
+}
+
+/// Every table id (`minecraft:<path>`) under `dir`, recursively.
+fn collect_ids(dir: &Path, prefix: &str, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        if p.is_dir() {
+            collect_ids(&p, &format!("{prefix}{name}/"), out);
+        } else if let Some(stem) = name.strip_suffix(".json") {
+            out.push(format!("minecraft:{prefix}{stem}"));
+        }
+    }
 }
 
 // --- structure chests ------------------------------------------------------
@@ -1090,17 +1132,33 @@ pub fn seed_generated_chest(
 }
 
 // --- parsing ---------------------------------------------------------------
-fn parse_table(_id: &str, j: &Json, tags: Option<&TagLoader>) -> Result<LootTable, String> {
+
+/// Record a construct the parser skipped, once per unique `kind:type`.
+fn note(warn: &mut BTreeSet<String>, kind: &str, ty: &str) {
+    warn.insert(format!("{kind}:{ty}"));
+}
+
+fn parse_table(
+    _id: &str,
+    j: &Json,
+    tags: Option<&TagLoader>,
+    warn: &mut BTreeSet<String>,
+) -> Result<LootTable, String> {
+    let functions = parse_functions(j.get("functions"), tags, warn);
     let mut pools = Vec::new();
     if let Some(arr) = j.get("pools").and_then(Json::as_arr) {
         for (i, p) in arr.iter().enumerate() {
-            pools.push(parse_pool(p, tags).map_err(|e| format!("pool {i}: {e}"))?);
+            pools.push(parse_pool(p, tags, warn).map_err(|e| format!("pool {i}: {e}"))?);
         }
     }
-    Ok(LootTable { pools })
+    Ok(LootTable { functions, pools })
 }
 
-fn parse_pool(j: &Json, tags: Option<&TagLoader>) -> Result<Pool, String> {
+fn parse_pool(
+    j: &Json,
+    tags: Option<&TagLoader>,
+    warn: &mut BTreeSet<String>,
+) -> Result<Pool, String> {
     let rolls = j
         .get("rolls")
         .map(parse_number)
@@ -1109,12 +1167,12 @@ fn parse_pool(j: &Json, tags: Option<&TagLoader>) -> Result<Pool, String> {
         .get("bonus_rolls")
         .map(parse_number)
         .unwrap_or(NumberProvider::Constant(0.0));
-    let conditions = parse_conditions(j.get("conditions"), tags);
-    let functions = parse_functions(j.get("functions"), tags);
+    let conditions = parse_conditions(j.get("conditions"), tags, warn);
+    let functions = parse_functions(j.get("functions"), tags, warn);
     let mut entries = Vec::new();
     if let Some(arr) = j.get("entries").and_then(Json::as_arr) {
         for e in arr {
-            entries.push(parse_entry(e, tags)?);
+            entries.push(parse_entry(e, tags, warn)?);
         }
     }
     Ok(Pool {
@@ -1126,10 +1184,14 @@ fn parse_pool(j: &Json, tags: Option<&TagLoader>) -> Result<Pool, String> {
     })
 }
 
-fn parse_entry(j: &Json, tags: Option<&TagLoader>) -> Result<Entry, String> {
+fn parse_entry(
+    j: &Json,
+    tags: Option<&TagLoader>,
+    warn: &mut BTreeSet<String>,
+) -> Result<Entry, String> {
     let weight = j.i32_or("weight", 1);
-    let conditions = parse_conditions(j.get("conditions"), tags);
-    let functions = parse_functions(j.get("functions"), tags);
+    let conditions = parse_conditions(j.get("conditions"), tags, warn);
+    let functions = parse_functions(j.get("functions"), tags, warn);
     let ty = j.str_of("type").unwrap_or("minecraft:item");
     let kind = match ty {
         "minecraft:item" => EntryKind::Item(
@@ -1151,13 +1213,16 @@ fn parse_entry(j: &Json, tags: Option<&TagLoader>) -> Result<Entry, String> {
                 .unwrap_or("")
                 .to_owned(),
         ),
-        "minecraft:alternatives" => EntryKind::Alternatives(parse_children(j, tags)?),
-        "minecraft:group" => EntryKind::Group(parse_children(j, tags)?),
-        "minecraft:sequence" => EntryKind::Sequence(parse_children(j, tags)?),
+        "minecraft:alternatives" => EntryKind::Alternatives(parse_children(j, tags, warn)?),
+        "minecraft:group" => EntryKind::Group(parse_children(j, tags, warn)?),
+        "minecraft:sequence" => EntryKind::Sequence(parse_children(j, tags, warn)?),
         "minecraft:empty" => EntryKind::Empty,
         // `dynamic` (decorated pot sherds, shulker boxes, …) reads the block
         // entity; the engine keeps none, so it produces nothing.
-        "minecraft:dynamic" => EntryKind::Empty,
+        "minecraft:dynamic" | "minecraft:slots" => {
+            note(warn, "entry", ty);
+            EntryKind::Empty
+        }
         other => return Err(format!("entry type `{other}`")),
     };
     Ok(Entry {
@@ -1168,12 +1233,16 @@ fn parse_entry(j: &Json, tags: Option<&TagLoader>) -> Result<Entry, String> {
     })
 }
 
-fn parse_children(j: &Json, tags: Option<&TagLoader>) -> Result<Vec<Entry>, String> {
+fn parse_children(
+    j: &Json,
+    tags: Option<&TagLoader>,
+    warn: &mut BTreeSet<String>,
+) -> Result<Vec<Entry>, String> {
     let arr = j
         .get("children")
         .and_then(Json::as_arr)
         .ok_or("composite entry without children")?;
-    arr.iter().map(|c| parse_entry(c, tags)).collect()
+    arr.iter().map(|c| parse_entry(c, tags, warn)).collect()
 }
 
 fn parse_number(j: &Json) -> NumberProvider {
@@ -1204,19 +1273,27 @@ fn field_or(j: &Json, a: &str, b: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-fn parse_conditions(j: Option<&Json>, tags: Option<&TagLoader>) -> Vec<Condition> {
+fn parse_conditions(
+    j: Option<&Json>,
+    tags: Option<&TagLoader>,
+    warn: &mut BTreeSet<String>,
+) -> Vec<Condition> {
     j.and_then(Json::as_arr)
         .map(|arr| {
             arr.iter()
                 // An unparsed condition fails closed: better no drop than the
-                // wrong one.
-                .map(|c| parse_condition(c, tags).unwrap_or(Condition::Impossible))
+                // wrong one. It is recorded so the gap is visible.
+                .map(|c| parse_condition(c, tags, warn).unwrap_or(Condition::Impossible))
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn parse_condition(j: &Json, tags: Option<&TagLoader>) -> Option<Condition> {
+fn parse_condition(
+    j: &Json,
+    tags: Option<&TagLoader>,
+    warn: &mut BTreeSet<String>,
+) -> Option<Condition> {
     let ty = j.str_of("condition")?;
     Some(match ty {
         "minecraft:random_chance" => Condition::RandomChance(j.f64_or("chance", 0.0) as f32),
@@ -1422,16 +1499,19 @@ fn parse_condition(j: &Json, tags: Option<&TagLoader>) -> Option<Condition> {
                 type_specific,
             }
         }
-        "minecraft:any_of" => Condition::AnyOf(parse_conditions(j.get("terms"), tags)),
-        "minecraft:all_of" => Condition::AllOf(parse_conditions(j.get("terms"), tags)),
+        "minecraft:any_of" => Condition::AnyOf(parse_conditions(j.get("terms"), tags, warn)),
+        "minecraft:all_of" => Condition::AllOf(parse_conditions(j.get("terms"), tags, warn)),
         "minecraft:inverted" => Condition::Inverted(Box::new(
-            j.get("term").and_then(|t| parse_condition(t, tags))?,
+            j.get("term").and_then(|t| parse_condition(t, tags, warn))?,
         )),
         // `location_check`, `weather_check`, `value_check`, `time_check`,
         // `reference`, `damage_source_properties`, … — not modelled; the
         // condition is treated as failing so a table that needs one does not
         // produce the wrong drop.
-        _ => return None,
+        _ => {
+            note(warn, "condition", ty);
+            return None;
+        }
     })
 }
 
@@ -1445,15 +1525,27 @@ fn parse_level_value(j: &Json) -> LevelBasedValue {
     }
 }
 
-fn parse_functions(j: Option<&Json>, tags: Option<&TagLoader>) -> Vec<Function> {
+fn parse_functions(
+    j: Option<&Json>,
+    tags: Option<&TagLoader>,
+    warn: &mut BTreeSet<String>,
+) -> Vec<Function> {
     j.and_then(Json::as_arr)
-        .map(|arr| arr.iter().filter_map(|f| parse_function(f, tags)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|f| parse_function(f, tags, warn))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
-fn parse_function(j: &Json, tags: Option<&TagLoader>) -> Option<Function> {
-    let inner = parse_function_inner(j, tags)?;
-    let conditions = parse_conditions(j.get("conditions"), tags);
+fn parse_function(
+    j: &Json,
+    tags: Option<&TagLoader>,
+    warn: &mut BTreeSet<String>,
+) -> Option<Function> {
+    let inner = parse_function_inner(j, tags, warn)?;
+    let conditions = parse_conditions(j.get("conditions"), tags, warn);
     if conditions.is_empty() {
         Some(inner)
     } else {
@@ -1464,7 +1556,11 @@ fn parse_function(j: &Json, tags: Option<&TagLoader>) -> Option<Function> {
     }
 }
 
-fn parse_function_inner(j: &Json, _tags: Option<&TagLoader>) -> Option<Function> {
+fn parse_function_inner(
+    j: &Json,
+    _tags: Option<&TagLoader>,
+    warn: &mut BTreeSet<String>,
+) -> Option<Function> {
     let ty = j.str_of("function")?;
     Some(match ty {
         "minecraft:set_count" => Function::SetCount {
@@ -1527,15 +1623,29 @@ fn parse_function_inner(j: &Json, _tags: Option<&TagLoader>) -> Option<Function>
                 limit: limit.max(0) as u32,
             }
         }
-        "minecraft:enchant_randomly" => Function::EnchantRandomly,
-        "minecraft:enchant_with_levels" => Function::EnchantWithLevels,
-        "minecraft:set_damage" => Function::SetDamage,
+        "minecraft:enchant_randomly" => {
+            note(warn, "noop-function", ty);
+            Function::EnchantRandomly
+        }
+        "minecraft:enchant_with_levels" => {
+            note(warn, "noop-function", ty);
+            Function::EnchantWithLevels
+        }
+        "minecraft:set_damage" => {
+            note(warn, "noop-function", ty);
+            Function::SetDamage
+        }
         "minecraft:set_components" | "minecraft:set_name" | "minecraft:set_lore" => {
+            note(warn, "noop-function", ty);
             Function::SetComponents
         }
         // `set_potion`, `set_stew_effect`, `set_banner_pattern`, `copy_name`,
-        // `set_instrument`, … — not modelled; skipped.
-        _ => return None,
+        // `copy_components`, `set_enchantments`, `set_instrument`, … — not
+        // modelled; skipped, and recorded so the gap is visible.
+        _ => {
+            note(warn, "function", ty);
+            return None;
+        }
     })
 }
 
@@ -1545,7 +1655,19 @@ mod tests {
 
     fn table_from(json: &str) -> LootTable {
         let j = Json::parse(json).unwrap();
-        parse_table("minecraft:test", &j, None).unwrap()
+        parse_table("minecraft:test", &j, None, &mut BTreeSet::new()).unwrap()
+    }
+
+    #[test]
+    fn root_level_functions_apply() {
+        // A root-level function runs over everything the table produced.
+        let t = table_from(
+            r#"{"functions":[{"function":"minecraft:limit_count","limit":{"max":0}}],
+                "pools":[{"rolls":1,"entries":[
+                    {"type":"minecraft:item","name":"minecraft:apple"}]}]}"#,
+        );
+        let mut rng = Rng::new(1);
+        assert!(t.roll(&LootContext::default(), &mut rng).is_empty());
     }
 
     #[test]
@@ -1960,6 +2082,7 @@ mod tests {
     fn tag_expand_false_emits_every_member() {
         // `expand:false` is a singleton that drops the whole tag at once.
         let table = LootTable {
+            functions: Vec::new(),
             pools: vec![Pool {
                 rolls: NumberProvider::Constant(1.0),
                 bonus_rolls: NumberProvider::Constant(0.0),
@@ -2185,6 +2308,30 @@ mod tests {
                 "bamboo's location_check cannot pass"
             );
         }
+    }
+
+    /// The parser records what it skipped, and the real wheat table carries
+    /// its root-level `explosion_decay`.
+    #[test]
+    fn unsupported_constructs_are_recorded() {
+        let Ok(root) = std::env::var("AETHER_VANILLA_PACK") else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let tables = LootTables::open(&root);
+        tables.warm();
+        let skipped = tables.unsupported();
+        assert!(!skipped.is_empty(), "the pack has unmodelled constructs");
+        assert!(
+            skipped.iter().any(|s| s.contains("set_potion")),
+            "set_potion should be recorded: {skipped:?}"
+        );
+        assert!(
+            skipped.iter().any(|s| s.starts_with("condition:")),
+            "an unmodelled condition should be recorded"
+        );
+        let wheat = tables.block_table("minecraft:wheat").expect("wheat table");
+        assert_eq!(wheat.functions.len(), 1, "root explosion_decay");
     }
 
     /// Every table in the pack must parse; the ones that do not are printed.
