@@ -260,6 +260,11 @@ fn login_and_play(
         .map(|s| s.mode)
         .unwrap_or(cfg.server.game_mode);
 
+    // A release with a generated compat pack gets *that* pack; everyone else
+    // keeps whatever `[resource_pack]` offers. `compat_offered` says which this
+    // client got, so the status gate can tell the compat pack apart from the
+    // operator's plain one.
+    let (pack, compat_offered) = select_resource_pack(cfg, codec);
     let params = JoinParams {
         game_mode,
         entity_id: eid,
@@ -270,10 +275,7 @@ fn login_and_play(
         pitch: player.pitch,
         max_players: cfg.server.max_players,
         view_radius: cfg.server.clamped_view_radius(),
-        // A release with a generated compat pack gets *that* pack; everyone
-        // else keeps whatever `[resource_pack]` offers. The compat layer only
-        // sends carrier states once this client says it loaded the pack.
-        resource_pack: resource_pack_for(cfg, codec),
+        resource_pack: pack,
     };
 
     codec.complete_login(s, &params)?;
@@ -370,6 +372,11 @@ fn login_and_play(
         on_ground: false,
     };
     let handle = registry.join(eid, player.uuid, player.name.clone(), ip, codec, &*s, pos)?;
+    // Remember which pack this client was offered: only the compat one may
+    // turn carrier states on (see `PlayerHandle::pack_table`).
+    if compat_offered {
+        handle.set_compat_pack_offered();
+    }
     // Seed the visibility bookkeeping with the masked first burst: what the
     // client holds, and the reachable set those masks came from, so the reveal
     // planner never re-sends a column it already sent and never forgets one it
@@ -471,21 +478,25 @@ fn login_and_play(
     result
 }
 
-/// The resource pack to offer a client of `codec`'s release.
+/// The resource pack to offer a client of `codec`'s release, and whether it is
+/// the compat pack.
 ///
 /// `[compat.pack]` wins for a release the compat layer generated a pack for —
 /// its carrier blocks need exactly that pack — and only then. Every other
 /// release, and every server with the compat packs off, keeps whatever
-/// `[resource_pack]` offers. The compat layer still shows carriers only once
-/// the client reports the pack loaded, so offering it changes nothing for a
-/// client that declines it.
-fn resource_pack_for(cfg: &Config, codec: &dyn ProtocolCodec) -> crate::config::ResourcePackConfig {
+/// `[resource_pack]` offers and gets `false`. The caller remembers which was
+/// offered, so only a client that loaded the *compat* pack can be shown
+/// carriers; the operator's plain pack must not enable them.
+fn select_resource_pack(
+    cfg: &Config,
+    codec: &dyn ProtocolCodec,
+) -> (crate::config::ResourcePackConfig, bool) {
     if cfg.compat.pack.active()
         && crate::protocol::compat::pack::table_for(codec.protocol_id()).is_some()
     {
-        cfg.compat.pack.offer()
+        (cfg.compat.pack.offer(), true)
     } else {
-        cfg.resource_pack.clone()
+        (cfg.resource_pack.clone(), false)
     }
 }
 
@@ -1791,5 +1802,43 @@ mod placement_tests {
         let p = at(0.5, 64.0, 0.5);
         assert!(!stands_in_block(p, 5, 64, 5));
         assert!(!stands_in_block(p, 0, 60, 0), "well below them");
+    }
+
+    #[test]
+    fn the_plain_resource_pack_never_counts_as_the_compat_pack() {
+        // Review 1 blocker: with `[compat.pack]` off but `[resource_pack]` set,
+        // a 1.20.1 client is offered the operator's pack and gets `false`, so
+        // its `successfully_loaded` reply cannot turn carriers on.
+        let cfg: Config =
+            toml::from_str("[resource_pack]\nurl = \"https://example/plain.zip\"\n").unwrap();
+        let codec = crate::protocol::codec_for(763).unwrap();
+        let (pack, compat) = select_resource_pack(&cfg, codec);
+        assert_eq!(pack.url, "https://example/plain.zip");
+        assert!(!compat, "the plain pack is not the compat pack");
+
+        // And a release with no generated table gets the plain pack too, even
+        // with the compat packs on.
+        let cfg: Config = toml::from_str(
+            "[resource_pack]\nurl = \"https://example/plain.zip\"\n\
+             [compat.pack]\nenabled = true\nurl = \"https://example/compat.zip\"\n",
+        )
+        .unwrap();
+        let (pack, compat) = select_resource_pack(&cfg, crate::protocol::codec_for(47).unwrap());
+        assert_eq!(
+            pack.url, "https://example/plain.zip",
+            "1.8 has no compat pack"
+        );
+        assert!(!compat);
+    }
+
+    #[test]
+    fn the_compat_pack_is_offered_for_a_release_it_was_generated_for() {
+        let cfg: Config = toml::from_str(
+            "[compat.pack]\nenabled = true\nurl = \"https://example/compat.zip\"\nhash = \"abc\"\n",
+        )
+        .unwrap();
+        let (pack, compat) = select_resource_pack(&cfg, crate::protocol::codec_for(763).unwrap());
+        assert_eq!(pack.url, "https://example/compat.zip");
+        assert!(compat, "the compat pack is the offered one");
     }
 }

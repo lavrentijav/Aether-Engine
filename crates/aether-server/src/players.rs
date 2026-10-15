@@ -20,7 +20,7 @@ use crate::outbox::Outbox;
 use crate::proto::Conn;
 use std::collections::HashMap;
 use std::io;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::protocol::{BlockSource, ProtocolCodec, ServerEvent};
@@ -74,6 +74,12 @@ pub struct PlayerHandle {
     /// loaded (declined or failed). Read on every chunk render, so a plain
     /// atomic rather than a lock. See `compat::pack`.
     pack: AtomicU8,
+    /// Whether the pack this client was offered was *the compat pack*. The
+    /// status reply says a pack loaded, not which one, and the operator's plain
+    /// `[resource_pack]` would otherwise satisfy the gate and turn carriers on
+    /// without the carrier textures — so carriers require both this and the
+    /// loaded status. Set once, at join, from the offer the codec was handed.
+    compat_pack: AtomicBool,
 }
 
 impl PlayerHandle {
@@ -255,6 +261,18 @@ impl PlayerHandle {
         packets.iter().map(|p| p.frame(threshold)).collect()
     }
 
+    /// Record that the pack this client was offered is the compat pack, so a
+    /// later `successfully_loaded` status may turn carriers on. Called once, at
+    /// join, from the offer the codec was handed.
+    pub fn set_compat_pack_offered(&self) {
+        self.compat_pack.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the compat pack was the pack offered to this client.
+    pub fn compat_pack_offered(&self) -> bool {
+        self.compat_pack.load(Ordering::Relaxed)
+    }
+
     /// Record the client's resource-pack status and report whether this
     /// *newly* turned carriers on (so the caller can re-send the view once).
     ///
@@ -282,10 +300,15 @@ impl PlayerHandle {
         self.pack.load(Ordering::Relaxed) == PACK_LOADED
     }
 
-    /// This client's carrier table, if it loaded the pack and its release has
-    /// one. `None` is the common case and means "render the plain stand-in".
+    /// This client's carrier table, if the **compat** pack was offered to it,
+    /// it loaded it, and its release has a table. `None` — the common case —
+    /// means "render the plain stand-in".
+    ///
+    /// Requiring [`Self::compat_pack_offered`] and not only [`Self::pack_loaded`]
+    /// is the point: the operator's plain `[resource_pack]` also reports loaded,
+    /// and its client has none of the carrier textures.
     fn pack_table(&self) -> Option<&'static crate::protocol::compat::pack::PackTable> {
-        self.pack_loaded()
+        (self.compat_pack_offered() && self.pack_loaded())
             .then(|| crate::protocol::compat::pack::table_for(self.codec.protocol_id()))
             .flatten()
     }
@@ -348,6 +371,7 @@ impl Registry {
             tracked: Mutex::new(std::collections::HashSet::new()),
             visibility: Mutex::new(crate::visibility::State::default()),
             pack: AtomicU8::new(PACK_UNKNOWN),
+            compat_pack: AtomicBool::new(false),
         });
         self.players
             .write()
@@ -508,10 +532,11 @@ mod tests {
         assert!(!early.pack_loaded());
         assert_ne!(block_change_state(&early), carrier_wire as i32);
 
-        // After `successfully_loaded`: the carrier state this release draws the
-        // real block on.
+        // The compat pack was offered and loaded: the carrier state this
+        // release draws the real block on.
         use crate::protocol::PackStatus;
         let loaded = handle(codec);
+        loaded.set_compat_pack_offered();
         assert!(
             loaded.set_pack_status(PackStatus::Loaded),
             "the first load is a transition"
@@ -540,11 +565,32 @@ mod tests {
     }
 
     #[test]
-    fn a_release_with_no_generated_pack_is_never_remapped() {
-        // 1.8.9 has no carrier table, so even a loaded pack changes nothing.
-        let h = handle(codec_for(47).unwrap());
+    fn a_client_that_loaded_a_different_pack_never_sees_carriers() {
+        // Review 1 blocker: the operator's plain `[resource_pack]` also reports
+        // loaded, but its client has none of the carrier textures. Only a
+        // client the *compat* pack was offered may be remapped, even when its
+        // status says a pack loaded.
+        let codec = codec_for(763).unwrap();
+        let table = crate::protocol::compat::pack::table_for(763).unwrap();
+        let block = default_state("minecraft:pale_oak_planks").unwrap();
+        let carrier_wire = crate::protocol::compat::V1_20_1.state(table.carrier(block).unwrap());
+
+        let h = handle(codec);
+        assert!(!h.compat_pack_offered(), "the plain pack was offered");
         h.set_pack_status(crate::protocol::PackStatus::Loaded);
-        assert!(h.pack_loaded());
+        assert!(h.pack_loaded(), "the plain pack loaded");
+        assert!(h.pack_table().is_none(), "but carriers stay off");
+        assert_ne!(block_change_state(&h), carrier_wire as i32);
+    }
+
+    #[test]
+    fn a_release_with_no_generated_pack_is_never_remapped() {
+        // 1.8.9 has no carrier table, so even a loaded compat pack changes
+        // nothing.
+        let h = handle(codec_for(47).unwrap());
+        h.set_compat_pack_offered();
+        h.set_pack_status(crate::protocol::PackStatus::Loaded);
+        assert!(h.pack_loaded() && h.compat_pack_offered());
         assert!(h.pack_table().is_none());
     }
 }
