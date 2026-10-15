@@ -64,10 +64,10 @@ impl BlockBehaviour for Observer {
 
     fn on_place(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos, old: BlockStateId) {
         // Vanilla clears a stale `powered` when the block changes, unless a tick
-        // is already pending.
+        // is already pending (`hasScheduledTick`).
         if crate::behaviour::block_id_of(old) != crate::behaviour::block_id_of(state)
             && props::powered(state)
-            && !ctx.will_tick_this_tick(pos)
+            && !ctx.has_scheduled_tick(pos)
         {
             let new = props::with(state, "powered", "false").unwrap_or(state);
             ctx.set_block(pos, new, SetBlockFlags::CLIENTS);
@@ -108,9 +108,9 @@ impl BlockBehaviour for Observer {
 }
 
 /// `ObserverBlock.startSignal`: schedule the two-tick pulse unless one is
-/// already pending.
+/// already pending (`hasScheduledTick`).
 fn start_signal(ctx: &mut Context, pos: BlockPos) {
-    if !ctx.will_tick_this_tick(pos) {
+    if !ctx.has_scheduled_tick(pos) {
         ctx.schedule_tick(pos, 2, TickPriority::Normal);
     }
 }

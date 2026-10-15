@@ -183,6 +183,14 @@ pub trait RedstoneView {
         false
     }
 
+    /// Whether a tick for `(block, pos)` is pending at all — vanilla's
+    /// `LevelTicks.hasScheduledTick`, which a target or observer checks before
+    /// starting a new timer (as opposed to [`Self::will_tick_this_tick`], which
+    /// is only true within the current tick). Defaults to `false`.
+    fn has_scheduled_tick(&self, _block: u16, _pos: BlockPos) -> bool {
+        false
+    }
+
     /// The current game time in ticks. Redstone torches need it to burn out.
     fn game_time(&self) -> u64 {
         0
@@ -413,6 +421,10 @@ impl RedstoneView for MemWorld {
         self.pending.get(&(block, pos)) == Some(&self.game_time)
     }
 
+    fn has_scheduled_tick(&self, block: u16, pos: BlockPos) -> bool {
+        self.pending.contains_key(&(block, pos))
+    }
+
     fn game_time(&self) -> u64 {
         self.game_time
     }
@@ -520,6 +532,10 @@ impl RedstoneView for TraceWorld {
 
     fn will_tick_this_tick(&self, block: u16, pos: BlockPos) -> bool {
         self.inner.will_tick_this_tick(block, pos)
+    }
+
+    fn has_scheduled_tick(&self, block: u16, pos: BlockPos) -> bool {
+        self.inner.has_scheduled_tick(block, pos)
     }
 
     fn game_time(&self) -> u64 {

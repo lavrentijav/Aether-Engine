@@ -70,6 +70,34 @@ fn a_non_arrow_resets_after_eight_ticks() {
 }
 
 #[test]
+fn a_second_hit_does_not_restart_the_reset_timer() {
+    // F2: `TargetBlock.updateRedstoneOutput` guards with `hasScheduledTick`
+    // (any pending tick), not `willTickThisTick`. A hit while the reset tick is
+    // still pending is ignored, so the power and the timer are left alone.
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    let target = p(0, 0, 0);
+    w.put(target, "minecraft:target");
+    engine.on_placed(&mut w, target);
+
+    engine.on_projectile_hit(&mut w, target, Direction::North, [0.5, 0.5, 0.5], true);
+    assert_eq!(power(&w, target), 15);
+
+    // Advance one tick, then hit near the edge (would be power 1).
+    w.run(&engine, 1);
+    engine.on_projectile_hit(&mut w, target, Direction::North, [0.1, 0.5, 0.5], true);
+    assert_eq!(
+        power(&w, target),
+        15,
+        "a hit while the reset tick is pending must be ignored"
+    );
+
+    // The original 20-tick timer still fires exactly on time.
+    w.run(&engine, 19);
+    assert_eq!(power(&w, target), 0, "reset on the original schedule");
+}
+
+#[test]
 fn a_target_powers_a_lamp() {
     let engine = Redstone::new();
     let mut w = MemWorld::new();

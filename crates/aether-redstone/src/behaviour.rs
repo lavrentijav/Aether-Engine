@@ -336,6 +336,15 @@ impl<'a> Context<'a> {
         }
     }
 
+    /// Whether a tick for the block currently at `pos` is pending at all
+    /// (vanilla's `hasScheduledTick`).
+    pub fn has_scheduled_tick(&self, pos: BlockPos) -> bool {
+        match block_id_of(self.get_block(pos)) {
+            Some(block) => self.view.has_scheduled_tick(block, pos),
+            None => false,
+        }
+    }
+
     /// Record a redstone-torch toggle on the world's burnout log.
     pub fn push_toggle(&mut self, pos: BlockPos, when: u64) {
         self.view.record_toggle(pos, when);

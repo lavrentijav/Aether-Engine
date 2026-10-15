@@ -33,10 +33,11 @@ impl BlockBehaviour for Target {
     }
 
     fn on_place(&self, ctx: &mut Context, state: BlockStateId, pos: BlockPos, old: BlockStateId) {
-        // Vanilla clears a stale power on the block changing.
+        // Vanilla clears a stale power on the block changing, guarded with
+        // `hasScheduledTick` (any pending tick), not `willTickThisTick`.
         if crate::behaviour::block_id_of(old) != crate::behaviour::block_id_of(state)
             && props::power(state) > 0
-            && !ctx.will_tick_this_tick(pos)
+            && !ctx.has_scheduled_tick(pos)
         {
             let new = props::with(state, "power", "0").unwrap_or(state);
             ctx.set_block(pos, new, SetBlockFlags::CLIENTS);
@@ -59,7 +60,9 @@ impl BlockBehaviour for Target {
         position: [f32; 3],
         arrow: bool,
     ) {
-        if ctx.will_tick_this_tick(pos) {
+        // `TargetBlock.updateRedstoneOutput`: a hit is ignored while a reset tick
+        // is already pending, so a rapid second hit does not restart the timer.
+        if ctx.has_scheduled_tick(pos) {
             return;
         }
         let strength = redstone_strength(face, position);
