@@ -1,7 +1,9 @@
 # Compat resource pack — re-skinning only the stand-ins
 
-Status: **design, for review. No code.** Follows `docs/tasks/QUEUE-RP-compat-pack.md`
-Part B and the audit in `docs/tasks/RP1-notes.md`.
+Status: **approved; prototype implemented (DP1, commit `RP1-d`).** The
+architecture and answers below are settled; §11's one-block prototype is in
+tree. Follows `docs/tasks/QUEUE-RP-compat-pack.md` Part B and the audit in
+`docs/tasks/RP1-notes.md`.
 
 ## 1. The problem
 
@@ -256,15 +258,39 @@ One 1.21 block on 1.20.1 via `note_block`. Steps:
 4. verify in-game: the disguised block looks like the 1.21 block, a real note
    block still looks and sounds vanilla, and the server holds the 1.21 block.
 
-## 12. Open questions for review
+## 12. Decisions (from the review)
 
-* Pack for **every** supported release, or only the ones with a real gap
-  (1.17+ where light/transparency bites, and 1.8 where the budget is tiny)?
-* `required` default: the task says `false`; correctness argues `true`. Default
-  `false` with a documented raw-carrier window, or refuse to enable unless the
-  status handshake is available?
-* Do we need the carrier mapping in the same generated modules as the block
-  tables, or a separate `compat/pack/*` set selected at run time? (Separate keeps
-  `compat/gen/*` byte-stable and the pack fully optional.)
-* Hash-based state assignment vs a checked-in assignment file (reproducibility
-  across machines).
+* **Every release with at least one gap** gets a pack; the generator loops
+  releases rather than naming them (§8). A release with no assignments has an
+  empty table and `table_for` returns `None`, so it keeps the plain stand-in.
+* **`required = false` by default.** A carrier state is sent only to a player
+  whose status is `successfully_loaded`; until then, on a decline, or when the
+  release has no status handshake, the plain stand-in is used, and the view is
+  re-sent on acceptance (§7, §10).
+* **Separate `compat/pack_gen/*`, selected at run time.** `compat/gen/*` stays
+  byte-identical; the pack is fully optional.
+* **Checked-in assignment file** (`tools/gen/compat/pack.json`): stable,
+  reviewable; the generator appends assignments and never reshuffles existing
+  carrier states, so a state a client cached keeps its meaning.
+
+## 13. Prototype in tree (commit `RP1-d`)
+
+One block, `minecraft:pale_oak_planks`, disguised on **1.20.1** via
+`note_block[instrument=harp,note=1,powered=false]` (pack_format 15):
+
+* `compat::pack` — `PackTable`, `table_for(protocol)`, `CarrierView`; the
+  carrier is an engine state (584) the codec's own `V1_20_1` table maps to the
+  wire state (541) the pack retextures.
+* `PlayerHandle` pack status + `render` remap, gated on `successfully_loaded`;
+  every pre-1.20.2 codec reports its play-state `resource_pack_receive` id and
+  the session re-sends the view on load.
+* `[compat.pack]` config; `tools/gen/compat/gen_pack.js` → `pack_gen/v1_20_1.rs`;
+  `tools/pack/build.js` builds the pack (merged blockstates, model, texture)
+  from a client jar or a supplied texture.
+
+Left for follow-ups (not in the prototype): auto-assignment of the full
+per-release gap set; configuration-phase status for 1.20.2+; pre-flattening
+(1.8–1.12) packs; item re-skinning (`item_model` / CustomModelData); and the
+in-game verification, which needs a live client this environment does not have
+(checked instead by tests that the wire state and the pack's variant key
+agree).

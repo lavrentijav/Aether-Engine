@@ -127,7 +127,40 @@ These match J10's published count (1.21.9 is 6) and are the items whose
 stand-in would need a new `items.json` rule; they are display-only until the
 gameplay path reaches those codecs.
 
-## Part B — server resource pack (design only)
+## Part B — server resource pack (design + one-block prototype)
 
-See `docs/design/compat-resource-pack.md`. Designed, **not implemented**;
-prototype waits on review.
+Design: `docs/design/compat-resource-pack.md`. Approved, and the §11 prototype
+is implemented in commit `RP1-d`:
+
+* **Runtime.** `compat::pack` holds a `PackTable` (engine block state → carrier
+  engine state) and `table_for(protocol)`; `CarrierView` is a `BlockSource`
+  that swaps disguised states before the codec translates them. Because the
+  carrier is an *engine* state chosen so the codec's own per-version block
+  table lands on the matching wire state, no codec changed and `compat/gen/*`
+  regenerates byte-identical.
+* **Gating.** `PlayerHandle` records the client's resource-pack status; a
+  carrier is sent only once the status is `successfully_loaded`. Every
+  pre-1.20.2 codec reports its play-state `resource_pack_receive` id
+  (`resource_pack_status_id`), the session decodes it, and on the load
+  transition re-sends the view (`streamer.center(chunk, true)`). Accepted,
+  declined, failed, and "never reported" all keep the plain stand-in.
+* **Config.** `[compat.pack]` (`enabled`, `url`, `hash`, `required` default
+  `false`, `dir`, `client_jar`). It wins over `[resource_pack]` for a release
+  that has a generated pack.
+* **Generator.** `tools/gen/compat/pack.json` is the checked-in, stable
+  assignment file; `gen_pack.js` expands it to `compat/pack_gen/<release>.rs`
+  (appends, never reshuffles). `tools/pack/build.js` builds the actual pack —
+  it merges the release's own `blockstates` file with the disguised variants
+  and adds a `cube_all` model plus the texture read from the operator's client
+  jar (or `--texture`/`--stub-texture`); no vanilla asset is committed and
+  `/packs/` is gitignored.
+* **Prototype block.** `minecraft:pale_oak_planks` on 1.20.1 via
+  `note_block[instrument=harp,note=1,powered=false]` (pack_format 15). Tests:
+  `compat::pack::tests::*`, `players::tests::a_pack_bearing_client_sees_*`,
+  `config::tests::the_compat_pack_*`,
+  `protocol::tests::the_pre_1_20_2_codecs_report_*`.
+
+Not done (documented in the design §13): auto-assigning the whole per-release
+gap set; configuration-phase status for 1.20.2+; 1.8–1.12 packs; item
+re-skinning; and live in-game verification (no client here — the tests assert
+the carrier's wire state and the pack's variant key agree instead).
