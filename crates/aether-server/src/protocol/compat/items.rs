@@ -261,6 +261,8 @@ pub fn table_for(protocol: i32) -> Option<&'static ItemTable> {
         761 => &V1_19_3,
         762 => &V1_19_4,
         763 => &V1_20_1,
+        764 => &V1_20_2, // 1.20.2
+        765 => &V1_20_4, // 1.20.3 / 1.20.4
         766 => &V1_20_5,
         767 => &V1_21_1,
         768 => &V1_21_3,
@@ -589,6 +591,8 @@ mod tests {
             ("1.17", item_gen::v1_17::ITEM_FALLBACKS),
             ("1.19", item_gen::v1_19::ITEM_FALLBACKS),
             ("1.20.1", item_gen::v1_20_1::ITEM_FALLBACKS),
+            ("1.20.2", item_gen::v1_20_2::ITEM_FALLBACKS),
+            ("1.20.4", item_gen::v1_20_4::ITEM_FALLBACKS),
             ("1.21.1", item_gen::v1_21_1::ITEM_FALLBACKS),
             ("1.21.9", item_gen::v1_21_9::ITEM_FALLBACKS),
         ] {
@@ -805,6 +809,9 @@ mod tests {
     fn the_item_table_is_found_by_protocol_and_absent_for_the_engine_version() {
         assert!(table_for(767).is_some());
         assert!(table_for(47).is_some());
+        // 1.20.2/1.20.4 ship their own codecs and item tables (N2).
+        assert!(table_for(764).is_some());
+        assert!(table_for(765).is_some());
         // 1.21.11 uses the engine's own ids, so there is nothing to translate.
         assert!(table_for(774).is_none());
         assert!(table_for(999).is_none());
