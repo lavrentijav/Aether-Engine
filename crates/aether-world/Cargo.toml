@@ -38,5 +38,10 @@ name = "storage"
 harness = false
 test = false
 
+[[bench]]
+name = "visibility"
+harness = false
+test = false
+
 [lints]
 workspace = true

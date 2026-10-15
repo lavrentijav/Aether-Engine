@@ -209,6 +209,45 @@ pub fn dispatch(
             st.saturation = 5.0;
             vec!["Healed".into()]
         }
+        "visibility" => {
+            if !op {
+                return deny();
+            }
+            let action = args.first().copied();
+            let (bypass, reply) = {
+                let mut st = handle.visibility();
+                match action {
+                    Some("on") => {
+                        st.bypass = false;
+                        // A bypassed player is skipped on the tick, so force
+                        // the next search when culling comes back.
+                        st.mark_dirty();
+                        (false, "Visibility culling on".to_string())
+                    }
+                    Some("off") => {
+                        st.bypass = true;
+                        (
+                            true,
+                            "Visibility culling off: you are sent every section".to_string(),
+                        )
+                    }
+                    _ => (
+                        st.bypass,
+                        format!(
+                            "Visibility culling is {}",
+                            if st.bypass { "off" } else { "on" }
+                        ),
+                    ),
+                }
+            };
+            // Turning culling off must reveal the columns already sent as
+            // stone, not wait for them to re-stream. Done with the visibility
+            // lock released: re-encoding a column takes it again.
+            if bypass {
+                crate::visibility::reveal_all(handle, world);
+            }
+            vec![reply]
+        }
         _ => return None,
     })
 }

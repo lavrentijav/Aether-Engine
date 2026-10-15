@@ -72,6 +72,7 @@ pub const COMMANDS: &[Command] = &[
     c("block", true),
     c("food", true),
     c("heal", false),
+    c("visibility", true),
 ];
 
 /// `brigadier:string`'s id in the parser registry.
