@@ -1,0 +1,16 @@
+# Manifest for the SDK-backed example plugin. See crates/aether-plugin/src/manifest.rs.
+id = "greet"
+name = "Greet"
+version = "0.1.0"
+api = "0.1"
+entry = "greet.wasm"
+priority = 10
+
+# What the plugin asks the operator to grant.
+capabilities = ["log", "messages.send"]
+
+# Services this plugin needs; the host refuses to load it if the SDK is absent.
+requires = ["sdk.commands@0.1", "sdk.messages@0.1"]
+
+subscribe = ["on-command"]
+commands = ["greet"]

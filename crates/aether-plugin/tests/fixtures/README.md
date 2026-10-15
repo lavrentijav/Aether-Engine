@@ -6,6 +6,9 @@ so `cargo test` needs no WebAssembly target and no network.
 - `hello.wasm` — a copy of the reference plugin built from
   `plugins/examples/hello`. Regenerate with `make` in that directory, then copy
   the result over `hello/hello.wasm`.
+- `greet/greet.wasm` — the SDK-backed dependent built from
+  `plugins/examples/greet`, used by `tests/sdk_bridge.rs`. Regenerate with
+  `make` in that directory, then copy the result over `greet/greet.wasm`.
 - `recorder.wasm` — built from `tests/guests/recorder`, a plugin whose
   behaviour (cancel / trap / spin) is chosen by its config. Regenerate with:
 

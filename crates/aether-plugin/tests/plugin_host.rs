@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use aether_plugin::manifest::{CommandDecl, Manifest};
 use aether_plugin::{
-    Decision, HostBackend, HostConfig, LogLevel, ManifestFile, Player, PluginHost,
+    Decision, HostBackend, HostConfig, LogLevel, ManifestFile, Player, PluginHost, PluginTier,
 };
 
 fn fixtures() -> PathBuf {
@@ -115,6 +115,8 @@ fn recorder(
             .collect(),
         tick_period: 1,
         deny_on_fault: false,
+        tier: PluginTier::Wasm,
+        requires: Vec::new(),
     };
     let mut cfg = std::collections::BTreeMap::new();
     // Every recorder acknowledges under the id the test gave it, so two
@@ -513,4 +515,188 @@ fn a_plugin_that_overruns_its_budget_is_interrupted() {
         "the overrun must be recorded as a fault: {:?}",
         backend.messages()
     );
+}
+
+// --- native tier -------------------------------------------------------
+
+use aether_plugin::{CommandResult, NativeContext, NativePlugin, ServiceRegistry};
+
+/// A native plugin that records every call and cancels breaking bedrock, so a
+/// test can see it go through the same bus as a WASM one.
+struct TestNative {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl NativePlugin for TestNative {
+    fn init(&mut self, ctx: &mut NativeContext) -> Result<(), String> {
+        // Publish a service named after this plugin, the way the SDK does.
+        ctx.services
+            .register(&format!("{}.svc", ctx.id), "0.1", Arc::new(41u32))?;
+        self.calls.lock().unwrap().push(format!("init:{}", ctx.id));
+        Ok(())
+    }
+
+    fn shutdown(&mut self, ctx: &mut NativeContext) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("shutdown:{}", ctx.id));
+    }
+
+    fn before_block_break(
+        &mut self,
+        ctx: &mut NativeContext,
+        _p: &Player,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        block: &str,
+    ) -> Decision {
+        self.calls.lock().unwrap().push(format!("break:{}", ctx.id));
+        if block.ends_with("bedrock") {
+            Decision::Cancel("Bedrock is indestructible.".to_string())
+        } else {
+            Decision::Allow
+        }
+    }
+
+    fn on_command(
+        &mut self,
+        _ctx: &mut NativeContext,
+        p: &Player,
+        name: &str,
+        _args: &[String],
+    ) -> Option<CommandResult> {
+        if name != "native" {
+            return None;
+        }
+        Some(CommandResult {
+            handled: true,
+            lines: vec![format!("native hello, {}", p.name)],
+        })
+    }
+}
+
+fn native_manifest(id: &str, priority: i32, subscribe: &[&str], requires: &[&str]) -> ManifestFile {
+    ManifestFile {
+        dir: fixtures(),
+        manifest: Manifest {
+            id: id.to_string(),
+            version: "0.0.0".to_string(),
+            api: "0.1".to_string(),
+            entry: String::new(),
+            name: String::new(),
+            priority,
+            capabilities: vec![],
+            subscribe: subscribe.iter().map(|s| s.to_string()).collect(),
+            commands: vec![CommandDecl::Plain("native".to_string())],
+            tick_period: 1,
+            deny_on_fault: false,
+            tier: PluginTier::Native,
+            requires: requires.iter().map(|s| s.to_string()).collect(),
+        },
+    }
+}
+
+fn native(calls: Arc<Mutex<Vec<String>>>) -> Box<dyn NativePlugin> {
+    Box::new(TestNative { calls })
+}
+
+#[test]
+fn a_native_plugin_loads_runs_and_registers_a_service() {
+    let (mut h, backend) = host();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let m = native_manifest("native-test", 0, &["before-block-break", "on-command"], &[]);
+    h.add_native(&m, &[], &Default::default(), native(Arc::clone(&calls)))
+        .unwrap();
+    assert_eq!(h.ids(), vec!["native-test".to_string()]);
+    assert_eq!(calls.lock().unwrap().as_slice(), ["init:native-test"]);
+    // The service it published is resolvable.
+    assert_eq!(
+        *h.services().get::<u32>("native-test.svc", "0.1").unwrap(),
+        41
+    );
+
+    // It goes through the same event bus as a WASM plugin.
+    let decision = h.before_block_break(&player(), 0, 64, 0, "minecraft:bedrock");
+    assert!(matches!(decision, Decision::Cancel(_)));
+    let decision = h.before_block_break(&player(), 0, 64, 0, "minecraft:stone");
+    assert!(matches!(decision, Decision::Allow));
+
+    let result = h.on_command(&player(), "native", &[]).unwrap();
+    assert_eq!(result.lines, vec!["native hello, Steve".to_string()]);
+
+    h.shutdown();
+    let _ = backend;
+}
+
+#[test]
+fn a_native_dependency_on_a_missing_service_is_refused_clearly() {
+    let (mut h, _backend) = host();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let m = native_manifest("needs-sdk", 0, &[], &["sdk.permissions@0.1"]);
+    let err = h
+        .add_native(&m, &[], &Default::default(), native(calls))
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("sdk.permissions@0.1"), "{text}");
+    assert!(text.contains("not registered"), "{text}");
+    assert!(
+        h.ids().is_empty(),
+        "a dependent with no provider must not load"
+    );
+}
+
+#[test]
+fn a_dependency_loads_once_its_provider_is_present() {
+    let (mut h, _backend) = host();
+    // The provider registers `provider.svc@0.1`; a dependent requiring it
+    // loads only after the provider does.
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let provider = native_manifest("provider", 10, &[], &[]);
+    h.add_native(
+        &provider,
+        &[],
+        &Default::default(),
+        native(Arc::clone(&calls)),
+    )
+    .unwrap();
+
+    let dependent = native_manifest("dependent", 0, &[], &["provider.svc@0.1"]);
+    h.add_native(
+        &dependent,
+        &[],
+        &Default::default(),
+        native(Arc::clone(&calls)),
+    )
+    .unwrap();
+    assert_eq!(
+        h.ids(),
+        vec!["provider".to_string(), "dependent".to_string()]
+    );
+}
+
+#[test]
+fn a_wasm_plugin_may_not_be_added_as_native_and_vice_versa() {
+    let (mut h, _backend) = host();
+    let m = aether_plugin::manifest::load(&fixtures().join("hello/plugin.toml")).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let err = h
+        .add_native(&m, &["log".to_string()], &Default::default(), native(calls))
+        .unwrap_err();
+    assert!(err.to_string().contains("not a native plugin"), "{err}");
+
+    // And a native manifest through the WASM path is refused too.
+    let native = native_manifest("n", 0, &[], &[]);
+    let err = h.add(&native, &[], &Default::default()).unwrap_err();
+    assert!(err.to_string().contains("not a WASM component"), "{err}");
+}
+
+#[test]
+fn the_service_registry_is_shared_with_the_host() {
+    let (h, _backend) = host();
+    let reg: &Arc<ServiceRegistry> = h.services();
+    reg.register("shared", "0.1", Arc::new("value".to_string()))
+        .unwrap();
+    assert_eq!(*reg.get::<String>("shared", "0.1").unwrap(), "value");
 }

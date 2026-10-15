@@ -16,12 +16,13 @@ mod imp {
     use std::sync::{Arc, Mutex, OnceLock};
 
     use aether_plugin::{
-        discover, Decision, HostBackend, HostConfig, LogLevel, Player, PluginHost,
+        discover, Decision, HostBackend, HostConfig, LogLevel, ManifestFile, Player, PluginHost,
     };
     use aether_world::KvBackend;
 
     use crate::config::Config;
-    use crate::players::PlayerHandle;
+    use crate::players::{PlayerHandle, SharedRegistry};
+    use crate::protocol::ServerEvent;
     use crate::session::DemoWorld;
 
     /// Features `supports()` reports. Versioned names, as the design asks, so
@@ -56,10 +57,27 @@ mod imp {
         out
     }
 
-    /// The world and operator config behind the host imports.
+    /// The world, operator config and player registry behind the host imports.
     struct ServerBackend {
         world: Arc<DemoWorld>,
         config: Arc<Config>,
+        registry: SharedRegistry,
+        /// Effective capabilities per loaded plugin, filled at load. The SDK's
+        /// service layer reads these to gate its privileged helpers once,
+        /// keyed by caller id, so the gate applies to native and WASM
+        /// dependents alike.
+        granted: Mutex<std::collections::BTreeMap<String, Vec<String>>>,
+    }
+
+    impl ServerBackend {
+        /// The plugin-visible view of an online player.
+        fn player(&self, handle: &PlayerHandle) -> Player {
+            Player {
+                id: handle.entity_id as u64,
+                name: handle.name.clone(),
+                operator: crate::is_operator(handle),
+            }
+        }
     }
 
     impl HostBackend for ServerBackend {
@@ -125,19 +143,69 @@ mod imp {
         fn supports(&self, _plugin: &str, feature: &str) -> bool {
             SUPPORTED.contains(&feature)
         }
+
+        fn send_message(&self, _plugin: &str, player: u64, text: &str) {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return;
+            };
+            handle.emit(&ServerEvent::Chat(text.to_string()), &*self.world);
+        }
+
+        fn broadcast(&self, _plugin: &str, text: &str) {
+            self.registry
+                .broadcast(&ServerEvent::Chat(text.to_string()), &*self.world);
+        }
+
+        fn online_players(&self, _plugin: &str) -> Vec<Player> {
+            self.registry
+                .snapshot()
+                .iter()
+                .map(|h| self.player(h))
+                .collect()
+        }
+
+        /// The core command registry, so a command registered through the SDK's
+        /// builder is dispatched and permission-checked like a core one. The
+        /// ownership and duplicate rules live in the registry.
+        fn register_command(
+            &self,
+            plugin: &str,
+            name: &str,
+            node: &str,
+            op: u8,
+        ) -> Result<(), String> {
+            crate::commands::registry::register_plugin(name, plugin, node, op)
+        }
+
+        /// The effective capabilities the host granted `plugin`, recorded at
+        /// load. The SDK's service layer uses this as its single capability
+        /// gate.
+        fn capabilities(&self, plugin: &str) -> Vec<String> {
+            self.granted
+                .lock()
+                .unwrap()
+                .get(plugin)
+                .cloned()
+                .unwrap_or_default()
+        }
     }
 
     static HOST: OnceLock<Mutex<PluginHost>> = OnceLock::new();
 
     /// Load every plugin the operator configured. Called once at startup.
-    pub fn install(cfg: &Arc<Config>, world: &Arc<DemoWorld>) {
+    pub fn install(cfg: &Arc<Config>, world: &Arc<DemoWorld>, registry: &SharedRegistry) {
         if cfg.plugins.dir.trim().is_empty() {
             return;
         }
         let backend = Arc::new(ServerBackend {
             world: Arc::clone(world),
             config: Arc::clone(cfg),
+            registry: Arc::clone(registry),
+            granted: Mutex::new(std::collections::BTreeMap::new()),
         });
+        // Kept so each plugin's effective grant can be recorded for the SDK's
+        // capability gate; `host` takes ownership of the other handle.
+        let grant_sink = Arc::clone(&backend);
         let host_config = HostConfig {
             budget_ms: cfg.plugins.budget_ms.max(1),
             tick_budget_ms: cfg.plugins.tick_budget_ms.max(1),
@@ -156,6 +224,11 @@ mod imp {
                 return;
             }
         };
+        // Native plugins first, so a dependent's `requires` are satisfied
+        // before it loads. The SDK is the only one today; it is a plugin like
+        // any other, disabled by `[plugins.sdk] enabled = false`, and a
+        // dependent that needs it then refuses to load with a clear error.
+        install_native(&mut host, cfg, &grant_sink);
         for file in discover(Path::new(&cfg.plugins.dir)) {
             let id = file.manifest.id.clone();
             let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
@@ -166,6 +239,11 @@ mod imp {
             let caps = effective_capabilities(&file.manifest.capabilities, &entry.capabilities);
             match host.add(&file, &caps, &entry.config) {
                 Ok(()) => {
+                    grant_sink
+                        .granted
+                        .lock()
+                        .unwrap()
+                        .insert(id.clone(), caps.clone());
                     // Register the plugin's commands through the command
                     // registry, with the ownership and permission model the
                     // core uses; a core name is refused here, not shadowed.
@@ -204,6 +282,42 @@ mod imp {
             .filter(|c| granted.iter().any(|g| g == *c))
             .cloned()
             .collect()
+    }
+
+    /// Add the compiled-in native plugins. Today just the SDK.
+    ///
+    /// A native plugin is a plugin like any other — same manifest, enable
+    /// flag and load error handling — except that it is compiled in and
+    /// reaches the host through the in-process [`PluginHost::add_native`]
+    /// rather than a `.wasm` file. Loading it before the on-disk discovery is
+    /// what lets a WASM dependent's `requires` be satisfied.
+    fn install_native(host: &mut PluginHost, cfg: &Arc<Config>, grant_sink: &Arc<ServerBackend>) {
+        let registration = aether_sdk_plugin::registration();
+        let id = registration.manifest.id.clone();
+        let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
+        if !entry.enabled() {
+            crate::log::info(&format!("plugin `{id}` disabled by config"));
+            return;
+        }
+        let file = ManifestFile {
+            // Native plugins are compiled in; there is no directory.
+            dir: std::path::PathBuf::new(),
+            manifest: registration.manifest,
+        };
+        // The SDK asks the operator for no host capabilities of its own; a
+        // service method still checks its *caller's* capabilities.
+        let caps = effective_capabilities(&file.manifest.capabilities, &entry.capabilities);
+        match host.add_native(&file, &caps, &entry.config, (registration.new)()) {
+            Ok(()) => {
+                grant_sink
+                    .granted
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), caps.clone());
+                crate::log::info(&format!("plugin     : {id} (native SDK)"));
+            }
+            Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
+        }
     }
 
     /// Register a loaded plugin's commands in the command registry, so they are
@@ -398,17 +512,19 @@ mod imp {
 
         #[test]
         fn a_plugin_command_is_registered_unless_the_core_owns_the_name() {
-            use aether_plugin::manifest::{CommandDecl, Manifest};
+            use aether_plugin::manifest::{CommandDecl, Manifest, PluginTier};
             let base = |commands: Vec<CommandDecl>| Manifest {
                 id: "registers_test_plugin".to_string(),
                 version: String::new(),
                 api: "0.1".to_string(),
                 entry: "x.wasm".to_string(),
+                tier: PluginTier::Wasm,
                 name: String::new(),
                 priority: 0,
                 capabilities: vec![],
                 subscribe: vec![],
                 commands,
+                requires: Vec::new(),
                 tick_period: 1,
                 deny_on_fault: false,
             };
@@ -431,12 +547,13 @@ mod imp {
 
 #[cfg(not(feature = "plugins"))]
 mod imp {
-    use crate::players::PlayerHandle;
+    use crate::players::{PlayerHandle, SharedRegistry};
 
     /// No-op: the server has no plugin host compiled in.
     pub fn install(
         _cfg: &std::sync::Arc<crate::config::Config>,
         _world: &std::sync::Arc<crate::session::DemoWorld>,
+        _registry: &SharedRegistry,
     ) {
     }
     pub fn on_tick(_n: u64) {}

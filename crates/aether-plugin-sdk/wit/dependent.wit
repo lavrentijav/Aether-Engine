@@ -1,0 +1,24 @@
+/// The world a dependent plugin exports: the frozen `aether:plugin@0.1.0`
+/// plugin world, plus imports of the SDK service interfaces.
+///
+/// A component built against this world still provides exactly the frozen
+/// export set (so the host accepts it), and gains the SDK calls. Importing an
+/// interface a component does not use costs nothing; a non-dependent keeps
+/// using the plain `plugin` world and is unaffected.
+package aether:sdk-client@0.1.0;
+
+world dependent {
+    /// The frozen plugin world: lifecycle, events, `on-tick`, `on-command`.
+    include aether:plugin/plugin@0.1.0;
+
+    /// The SDK services. Import only what the plugin uses; each adds one host
+    /// forwarding call to the native SDK plugin.
+    import aether:sdk/permissions@0.1.0;
+    import aether:sdk/commands@0.1.0;
+    import aether:sdk/messages@0.1.0;
+    import aether:sdk/players@0.1.0;
+    import aether:sdk/config@0.1.0;
+    import aether:sdk/scheduler@0.1.0;
+    import aether:sdk/cooldowns@0.1.0;
+    import aether:sdk/confirm@0.1.0;
+}

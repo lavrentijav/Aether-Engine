@@ -35,6 +35,10 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # The WebAssembly plugin host. Optional so `--no-default-features` builds the
 # server without Wasmtime's compile cost and dependency tree.
 aether-plugin = { workspace = true, optional = true }
+# The SDK native plugin (tier N). Compiled into the server behind `plugins`;
+# it registers its services at load, and dependents that require them refuse to
+# load when it is disabled. Core code never names it.
+aether-sdk-plugin = { path = "../../plugins/sdk", optional = true }
 postgres = { version = "0.19.10", optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -68,5 +72,5 @@ workspace = true
 # build that does not need Wasmtime (tests, a minimal deployment) can drop it
 # with `--no-default-features`.
 default = ["plugins"]
-plugins = ["dep:aether-plugin"]
+plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin"]
 postgres = ["dep:postgres"]

@@ -1,0 +1,227 @@
+/// The Aether SDK service interfaces, package `aether:sdk@0.1`.
+///
+/// These are the helpers the **native** SDK plugin (`plugins/sdk`) provides:
+/// a dependent plugin — native or WASM — imports only the interfaces it uses
+/// and calls them; the host forwards each call to the registered provider.
+///
+/// The package is versioned independently of the frozen `aether:plugin@0.1.0`
+/// world, and a breaking change bumps it (`aether:sdk@0.2`); a host may keep
+/// several versions registered at once. Adding an interface or a function is
+/// additive: a component that does not import it is unaffected.
+package aether:sdk@0.1.0;
+
+/// Permission checks and administration (the owner's motivating example).
+///
+/// The permission *model* is core (CMD-01/02); this interface is only the
+/// facade the SDK fronts it with. Until the core lands the provider fails
+/// closed, so a dependent sees deny/`0` rather than a wrong answer.
+interface permissions {
+    use aether:plugin/types@0.1.0.{player};
+
+    /// Whether `p` holds `node`.
+    check: func(p: player, node: string) -> bool;
+    /// `check`, plus the host's standard "no permission" reply on denial.
+    require: func(p: player, node: string) -> bool;
+    /// `p`'s op level, `0..=4`.
+    level: func(p: player) -> u8;
+    /// Whether `p`'s level is at least `level`.
+    has-level: func(p: player, level: u8) -> bool;
+    /// The groups `p` belongs to.
+    groups: func(p: player) -> list<string>;
+    /// Whether `p` is in `group`.
+    in-group: func(p: player, group: string) -> bool;
+    /// A meta value (`prefix`, `suffix`, `weight`, …), if set.
+    meta: func(p: player, key: string) -> option<string>;
+    /// Grant or deny `node` to `subject` (a player name or `group:<name>`).
+    /// Requires the `permissions.admin` capability.
+    grant: func(subject: string, node: string, value: bool) -> result<_, string>;
+    /// Remove an explicit `node` from `subject`. Requires `permissions.admin`.
+    revoke: func(subject: string, node: string) -> result<_, string>;
+}
+
+/// Command registration and argument parsing.
+interface commands {
+    /// The kind of a declared argument, which fixes its parsing and any
+    /// default suggestions.
+    enum arg-kind {
+        word,
+        integer,
+        player,
+        item,
+        text,
+    }
+
+    /// One declared argument.
+    record arg {
+        name: string,
+        kind: arg-kind,
+        required: bool,
+        /// Static completions offered for this argument (may be empty).
+        choices: list<string>,
+        help: string,
+    }
+
+    /// A command the SDK should register and dispatch. Subcommands are
+    /// separate specs naming their `parent`, so the shape stays a flat list.
+    ///
+    /// `permission` is the node the core command registry checks before the
+    /// command runs (empty derives `plugin.<id>.<name>`); `op` is the vanilla
+    /// op level it requires. Registration goes through the core registry, so a
+    /// command declared here is dispatched and permission-checked like any
+    /// core command, never as a side path around the gate.
+    record command-spec {
+        name: string,
+        parent: option<string>,
+        permission: option<string>,
+        /// Vanilla op level (0 everyone … 4 owner).
+        op: u8,
+        usage: string,
+        description: string,
+        args: list<arg>,
+    }
+
+    /// Resolve `name` and `args` to the effective spec, honouring
+    /// subcommands, so an `on-command` handler can dispatch.
+    record resolution {
+        /// The subcommand name when `args[0]` matched one, else empty.
+        subcommand: string,
+        /// The arguments after any subcommand word.
+        rest: list<string>,
+        /// Parsed `(name, value)` pairs for `rest`.
+        args: list<tuple<string, string>>,
+        /// The effective spec's usage line.
+        usage: string,
+    }
+
+    /// Register a command spec. Refused on a name clash or a bad spec. A spec
+    /// with `parent` set is a subcommand: it is stored under its parent and is
+    /// **not** registered as a top-level command — the parent routes to it.
+    register: func(spec: command-spec) -> result<_, string>;
+    /// The usage line for a registered command (empty if unknown).
+    usage: func(name: string) -> string;
+    /// Parse `args` against the registered spec, returning `(name, value)`
+    /// pairs for the arguments that were supplied. A first argument that names
+    /// a subcommand is consumed and the rest parsed against that subcommand.
+    parse: func(name: string, args: list<string>) -> list<tuple<string, string>>;
+    /// Resolve `name`/`args`, selecting a subcommand when the first argument
+    /// matches one registered under `name`.
+    resolve: func(name: string, args: list<string>) -> resolution;
+}
+
+/// Messages: chat, action bar, title, broadcast and translation, with colour
+/// codes handled once.
+interface messages {
+    use aether:plugin/types@0.1.0.{player};
+
+    /// Times for a title: fade-in, stay and fade-out, in ticks.
+    record title-times {
+        fade-in: u32,
+        stay: u32,
+        fade-out: u32,
+    }
+
+    /// Send a chat line, with `&`-style colour codes translated.
+    send: func(p: player, text: string);
+    /// Send a translatable message chosen by key, with `(name, value)` args.
+    send-key: func(p: player, key: string, args: list<tuple<string, string>>);
+    /// Send an action-bar line.
+    actionbar: func(p: player, text: string);
+    /// Show a title and optional subtitle.
+    title: func(p: player, title: string, subtitle: option<string>, times: title-times);
+    /// Broadcast a chat line to everyone.
+    broadcast: func(text: string);
+    /// The player's permission meta prefix, colour-formatted (empty if none).
+    prefix: func(p: player) -> string;
+}
+
+/// Player lookup and direct manipulation.
+interface players {
+    use aether:plugin/types@0.1.0.{player};
+
+    /// A world position.
+    record pos {
+        x: f64,
+        y: f64,
+        z: f64,
+    }
+
+    /// Why a teleport happened, so regions/events can treat it differently.
+    enum teleport-cause {
+        command,
+        plugin,
+        portal,
+    }
+
+    /// Everyone online.
+    online: func() -> list<player>;
+    /// The online player called `name`, case-insensitively.
+    by-name: func(name: string) -> option<player>;
+    /// An online player by session entity id.
+    by-id: func(id: u64) -> option<player>;
+    /// The last known name of a possibly-offline player.
+    offline-name: func(uuid-low: u64, uuid-high: u64) -> option<string>;
+    /// Move a player, searching for a safe spot; error reason on failure.
+    teleport: func(p: player, to: pos, cause: teleport-cause) -> result<_, string>;
+    /// Give `count` of `item`, returning how many could not fit.
+    give: func(p: player, item: string, count: u32) -> u64;
+}
+
+/// Typed, reloadable config, backed by `[plugins.<id>]` in the operator config.
+interface config {
+    /// A raw value by key.
+    value: func(key: string) -> option<string>;
+    /// A change counter; compare across calls to detect a reload cheaply.
+    revision: func() -> u64;
+}
+
+/// Timers, driven by the dependent's own `on-tick`.
+///
+/// The SDK owns the timer wheel but cannot call back into a component (the
+/// world's exports are frozen), so a timer is *polled*: the dependent calls
+/// `poll()` each tick and runs the handlers for the ids it gets back.
+interface scheduler {
+    /// A one-shot timer `ticks` from now; returns its id.
+    after: func(ticks: u64) -> u64;
+    /// A repeating timer every `period` ticks; returns its id.
+    every: func(period: u64) -> u64;
+    /// Cancel a timer; `true` if it existed.
+    cancel: func(id: u64) -> bool;
+    /// Take the ids due since the last poll, for this caller.
+    poll: func() -> list<u64>;
+}
+
+/// Per-caller, per-key cooldowns.
+interface cooldowns {
+    /// Whether `key` is off cooldown; arms it for `ticks` when it is.
+    ready: func(key: string, ticks: u64) -> bool;
+    /// Ticks left on `key`, `0` when ready.
+    remaining: func(key: string) -> u64;
+}
+
+/// "Type again to confirm" prompts.
+interface confirm {
+    use aether:plugin/types@0.1.0.{player};
+
+    /// Record a pending confirmation for `p` under `token` and send `prompt`.
+    /// Returns `false` if one is already pending for that player.
+    request: func(p: player, prompt: string, token: string) -> bool;
+    /// Consume a pending confirmation matching `p` and `token`.
+    check: func(p: player, token: string) -> bool;
+}
+
+/// A world importing the plugin host interface plus every SDK service
+/// interface, so the host can generate **one** linker entry covering all the
+/// imports a dependent component may use. Importing both here is what keeps
+/// `aether:plugin/types` defined once (the SDK interfaces `use` it too).
+world services {
+    import aether:plugin/types@0.1.0;
+    import aether:plugin/host@0.1.0;
+    import permissions;
+    import commands;
+    import messages;
+    import players;
+    import config;
+    import scheduler;
+    import cooldowns;
+    import confirm;
+}
