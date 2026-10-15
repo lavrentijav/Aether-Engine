@@ -624,10 +624,11 @@ fn apply_function(f: &Function, st: &mut LootStack, ctx: &LootContext, rng: &mut
                     base + rng.range(0, (*bonus_multiplier).max(0) * level)
                 }
                 BonusFormula::BinomialWithBonusCount { probability, extra } => {
+                    // Vanilla: `level + extra` rounds, each adding one.
                     let mut n = base;
-                    for _ in 0..level {
+                    for _ in 0..(level + extra).max(0) {
                         if rng.f32() < *probability {
-                            n += extra;
+                            n += 1;
                         }
                     }
                     n
@@ -1855,6 +1856,39 @@ mod tests {
             discs += 1;
         }
         assert_eq!(discs, 20_000);
+    }
+
+    /// Vanilla `BinomialWithBonusCount` runs `level + extra` rounds, each
+    /// adding one; the wheat-seed table is `extra:3, p:0.571` with fortune
+    /// III, so 1 + Binomial(6, 0.571) → mean ≈ 4.43, max 7.
+    #[test]
+    fn real_wheat_seeds_match_binomial_bonus() {
+        let Ok(root) = std::env::var("AETHER_VANILLA_PACK") else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let tables = LootTables::open(&root);
+        let t = tables.block_table("minecraft:wheat").expect("wheat table");
+        let ctx = LootContext {
+            block: Some(("minecraft:wheat".into(), vec![("age".into(), "7".into())])),
+            ..Default::default()
+        }
+        .with_enchant("minecraft:fortune", 3);
+        let mut rng = Rng::new(9);
+        let mut sum = 0u64;
+        let mut max = 0u8;
+        for _ in 0..100_000 {
+            let out = t.roll(&ctx, &mut rng);
+            let seeds = out
+                .iter()
+                .find(|s| s.item == "minecraft:wheat_seeds")
+                .map_or(0, |s| s.count);
+            sum += seeds as u64;
+            max = max.max(seeds);
+        }
+        assert_eq!(max, 7);
+        let mean = sum as f64 / 100_000.0;
+        assert!((mean - 4.4286).abs() < 0.05, "mean was {mean}");
     }
 
     /// Every table in the pack must parse; the ones that do not are printed.
