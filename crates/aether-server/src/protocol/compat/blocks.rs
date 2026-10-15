@@ -70,23 +70,26 @@ impl BlockTable {
     }
 }
 
-/// A pre-flattening version's table: engine state → its `(id << 4)` value.
+/// A pre-flattening version's table: engine state → its `(id << 4) | meta`
+/// value.
 ///
 /// 1.8.9 predates flattened states and stores `(block_id << 4) | meta`. The
-/// data has no metadata table, so a variant lands on its block's default meta;
-/// see [`V1_8`].
+/// generator resolves a variant to a rule that names its metadata, so a wool
+/// colour, a wood type or a flower species lands on the right one instead of
+/// its block's default; see [`V1_8`].
 #[derive(Clone, Copy)]
 pub struct LegacyTable {
-    /// `(first engine state, run length, legacy block id)`.
+    /// `(first engine state, run length, legacy block state)`.
     pub runs: &'static [(u32, u32, u16)],
-    /// `(legacy block id, engine default state)`, sorted by id.
+    /// `(legacy block id, engine default state)`, sorted by id — keyed by the
+    /// bare id, because a 1.8 placement packet carries an item id, no meta.
     pub reverse: &'static [(u16, u32)],
-    /// The version's stone id.
+    /// The version's stone state `(id << 4) | meta`.
     pub stone: u16,
 }
 
 impl LegacyTable {
-    /// The legacy numeric block id for an engine state.
+    /// The legacy block state `(id << 4) | meta` for an engine state.
     #[inline]
     pub fn vanilla(&self, id: BlockStateId) -> u16 {
         let raw = id.raw();
@@ -98,6 +101,9 @@ impl LegacyTable {
     }
 
     /// The engine state a legacy block id names, if the engine has that block.
+    ///
+    /// Takes the bare block id — the placement packet's item id — not the
+    /// `(id << 4) | meta` state; a variant's meta is dropped.
     #[inline]
     pub fn engine(&self, vanilla: u16) -> Option<BlockStateId> {
         self.reverse
@@ -127,6 +133,8 @@ flat!(V1_19_2, v1_19_2); // 1.19.2, 760
 flat!(V1_19_3, v1_19_3); // 1.19.3, 761
 flat!(V1_19_4, v1_19_4); // 1.19.4, 762
 flat!(V1_20_1, v1_20_1); // 1.20.1, 763
+flat!(V1_20_2, v1_20_2); // 1.20.2, 764
+flat!(V1_20_4, v1_20_4); // 1.20.3 / 1.20.4, 765
 flat!(V1_20_5, v1_20_5); // 1.20.5 / 1.20.6, 766
 flat!(V1_21_1, v1_21_1); // 1.21 / 1.21.1, 767
 flat!(V1_21_3, v1_21_3); // 1.21.2 / 1.21.3, 768
@@ -197,10 +205,9 @@ mod tests {
     #[test]
     fn no_rule_covered_block_falls_back_to_stone() {
         // Substitution is the whole point of J2: every release from 1.17 on has
-        // a stand-in for every engine block. This prints the remaining
-        // fallbacks for 1.8, which has fewer than a fifth of the modern blocks
-        // and no metadata table to derive variants from, so a large list there
-        // is expected; see docs/KNOWN_ISSUES.md.
+        // a stand-in for every engine block, and since the 1.8 rules gained the
+        // pre-flattening id:meta model (T4) so does 1.8.9 — see
+        // `one_point_eight_resolves_every_engine_block`.
         for (name, fallbacks) in [
             ("1.17", gen::v1_17::STONE_FALLBACKS),
             ("1.19", gen::v1_19::STONE_FALLBACKS),
@@ -219,12 +226,42 @@ mod tests {
     #[test]
     fn the_legacy_table_round_trips_the_common_blocks() {
         use aether_api::block_ids as b;
+        // 1.8 stores `(id << 4) | meta`, so the table returns the full state.
         assert_eq!(V1_8.vanilla(b::AIR), 0);
-        assert_eq!(V1_8.vanilla(b::STONE), 1);
-        assert_eq!(V1_8.vanilla(b::GRASS_BLOCK), 2);
+        assert_eq!(V1_8.vanilla(b::STONE), 1 << 4);
+        assert_eq!(V1_8.vanilla(b::GRASS_BLOCK), 2 << 4);
+        assert_eq!(V1_8.vanilla(b::DIRT), 3 << 4);
         // And the reverse names a real engine state for every id we emit.
         for (id, engine) in gen::v1_8::LEGACY_TO_ENGINE {
             assert_eq!(V1_8.engine(*id), Some(aether_world::BlockStateId(*engine)));
         }
+    }
+
+    #[test]
+    fn a_variant_substitution_carries_its_metadata() {
+        // 1.8 has one `wool` block and one `planks` block; the colour and the
+        // wood live in the metadata. The generator puts them there, so a
+        // substituted variant is the right one, not the first.
+        use aether_world::registry::blocks::default_state;
+        let state = |name| default_state(name).unwrap();
+        assert_eq!(V1_8.vanilla(state("minecraft:red_wool")), (35 << 4) | 14);
+        assert_eq!(V1_8.vanilla(state("minecraft:white_wool")), 35 << 4);
+        assert_eq!(
+            V1_8.vanilla(state("minecraft:dark_oak_planks")),
+            (5 << 4) | 5
+        );
+        assert_eq!(V1_8.vanilla(state("minecraft:oak_planks")), 5 << 4);
+    }
+
+    #[test]
+    fn one_point_eight_resolves_every_engine_block() {
+        // The whole point of the J2 rules: no engine block is shown as stone
+        // on 1.8.9. The list is generated and each entry would need a "why"
+        // in `docs/KNOWN_ISSUES.md`; it is empty.
+        assert!(
+            gen::v1_8::STONE_FALLBACKS.is_empty(),
+            "1.8 still falls back to stone: {:?}",
+            gen::v1_8::STONE_FALLBACKS
+        );
     }
 }

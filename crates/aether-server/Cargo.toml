@@ -30,9 +30,23 @@ postgres = { version = "0.19.10", optional = true }
 # storage crates), so this adds no new code to the build.
 libc = "0.2"
 
+# The server is a library plus a one-line binary, so benches can reach the
+# block-write / visibility hot path without starting a listener.
+[lib]
+name = "aether_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "aether-server"
 path = "src/main.rs"
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "visibility"
+harness = false
+test = false
 
 [lints]
 workspace = true

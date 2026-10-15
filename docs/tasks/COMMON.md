@@ -20,3 +20,5 @@
   same file names there, so a plain `cargo test` can run a binary another agent just rebuilt. Run
   `cargo-locked test ...` (and `cargo-locked run/bench`): it holds one lock for build + run. Plain
   `cargo check`/`clippy`/`fmt` are fine. A report "tests pass" is only valid from `cargo-locked`.
+- **Disk:** also `export CARGO_INCREMENTAL=0` with the shared target dir: incremental caches of a
+  dozen worktrees filled the disk (26 GB). Builds are slightly slower, the disk survives.

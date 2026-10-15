@@ -6,6 +6,7 @@
 //! depends on its codec (see [`crate::protocol::ProtocolCodec::full_gameplay`]).
 
 pub mod blockticks;
+pub mod brewing;
 pub mod combat;
 pub mod commands;
 pub mod containers;

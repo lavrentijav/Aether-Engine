@@ -515,6 +515,8 @@ pub enum Menu {
     Hopper,
     /// A dispenser or dropper, 9 slots.
     Dispenser,
+    /// A brewing stand, 5 slots.
+    BrewingStand,
 }
 
 /// Flag on an [`ServerEvent::EntityMeta`] index: the field belongs to a
@@ -883,6 +885,30 @@ mod tests {
     fn json_escape_handles_control_chars() {
         assert_eq!(json_escape("a\tb\r\n"), "a\\tb\\r\\n");
         assert_eq!(json_escape("\u{01}\u{1f}"), "\\u0001\\u001f");
+    }
+
+    #[test]
+    fn every_1_20_2_to_1_21_10_codec_runs_the_full_game() {
+        // J9 routed 766-773 through the shared gameplay path; T1 extends it to
+        // 764/765. Entities, combat, health, hunger, windows and effects, not
+        // the old client-trusting subset.
+        for proto in 764..=773 {
+            let c = codec_for(proto).unwrap_or_else(|| panic!("no codec for {proto}"));
+            assert!(c.full_gameplay(), "{proto} must run the full game");
+            assert!(c.supports_containers(), "{proto} must support windows");
+        }
+    }
+
+    #[test]
+    fn an_old_codec_places_blocks_and_keeps_a_spear_through_a_trident() {
+        let c = codec_for(767).unwrap();
+        assert_eq!(
+            c.block_for_item("minecraft:stone"),
+            Some(aether_api::block_ids::STONE),
+        );
+        let spear = crate::inventory::item("minecraft:iron_spear");
+        let trident = crate::inventory::item("minecraft:trident");
+        assert_eq!(c.resolve_reported_item(spear, trident), spear);
     }
 
     #[test]

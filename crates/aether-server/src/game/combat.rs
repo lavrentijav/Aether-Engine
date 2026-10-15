@@ -544,6 +544,7 @@ pub fn explode(pos: Vector3, radius: f32, registry: &SharedRegistry, world: &Dem
             block_ids::AIR,
             world.props_of(block_ids::AIR),
         );
+        crate::visibility::invalidate_block(*x, *y, *z);
         super::fluids::notify(world, *x, *y, *z);
         super::blockticks::notify(world, *x, *y, *z);
         registry.broadcast(

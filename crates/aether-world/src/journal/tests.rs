@@ -79,21 +79,61 @@ fn an_item_uid_is_eight_bytes_after_the_header() {
     assert_eq!(b[34..42], [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
 }
 
+/// The common prefix of every format: version, seq, time, actor.
+fn header(version: u8, actor: u128) -> Vec<u8> {
+    let mut b = vec![version];
+    b.extend_from_slice(&7u64.to_be_bytes());
+    b.extend_from_slice(&9u64.to_be_bytes());
+    b.extend_from_slice(&actor.to_be_bytes());
+    b
+}
+
 #[test]
-fn a_blob_from_before_64_bit_uids_is_refused_not_reinterpreted() {
-    // The v1 layout put 16-byte uids where this version puts 8, so a v1 blob
-    // read as v2 would shift every field after the uid. Refusing is the only
-    // safe answer.
-    let mut b = Event {
-        seq: 1,
-        at_ms: 1,
-        actor: alice(),
-        cause: None,
-        body: set(0, 0, 0, DIRT, STONE),
+fn a_version_1_or_2_block_event_still_decodes() {
+    // Block events did not change shape across versions; an upgraded world's
+    // history must stay readable for `/inspect` and rollback.
+    for version in [1u8, 2] {
+        let mut b = header(version, alice().0);
+        b.push(1); // TAG_BLOCK_SET
+        for v in [4i32, 5, 6] {
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        b.extend_from_slice(&DIRT.0.to_be_bytes());
+        b.extend_from_slice(&STONE.0.to_be_bytes());
+        let e = Event::decode(&b).unwrap_or_else(|err| panic!("v{version}: {err}"));
+        assert_eq!((e.seq, e.at_ms, e.actor), (7, 9, alice()));
+        assert_eq!(e.body, set(4, 5, 6, DIRT, STONE), "v{version}");
     }
-    .encode();
-    b[0] = 1;
-    assert_eq!(Event::decode(&b), Err(DecodeError::Version(1)));
+}
+
+#[test]
+fn old_item_events_read_their_uid_width_and_item_name() {
+    let name = b"minecraft:diamond";
+    // v1: 16-byte uid (low 64 bits kept), name; v2: 8-byte uid, name.
+    for (version, uid) in [(1u8, (0xAAu128 << 64) | 0x1234), (2, 0x1234)] {
+        let mut b = header(version, alice().0);
+        b.push(2); // TAG_ITEM_MINT
+        if version == 1 {
+            b.extend_from_slice(&uid.to_be_bytes());
+        } else {
+            b.extend_from_slice(&(uid as u64).to_be_bytes());
+        }
+        b.extend_from_slice(&(name.len() as u32).to_be_bytes());
+        b.extend_from_slice(name);
+        b.push(3); // count
+        b.push(4); // Place::Nowhere
+        let e = Event::decode(&b).unwrap_or_else(|err| panic!("v{version}: {err}"));
+        match e.body {
+            EventBody::ItemMint {
+                uid, item, count, ..
+            } => {
+                assert_eq!(uid, ItemUid(0x1234), "v{version}");
+                assert_eq!(item, ItemTypeId::vanilla("minecraft:diamond").unwrap());
+                assert_eq!(count, 3);
+            }
+            other => panic!("v{version}: {other:?}"),
+        }
+    }
 }
 
 #[test]
