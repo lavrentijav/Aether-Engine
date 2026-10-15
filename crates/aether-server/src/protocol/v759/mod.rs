@@ -113,10 +113,12 @@ impl ProtocolCodec for Codec {
         Ok(Some(PacketIn::new(&p.data).string()?))
     }
 
-    fn encryption_request_has_should_authenticate(&self) -> bool {
-        // 1.19 and 1.19.2 only: the Encryption Request carries this boolean,
-        // and the Encryption Response carries salt and a message signature
-        // after the shared secret and token, which the login path ignores.
+    fn encryption_response_has_verify_token_flag(&self) -> bool {
+        // 1.19/1.19.2 put a `has_verify_token` boolean between the shared
+        // secret and the verify token; the login path sends/expects the
+        // verify-token form. (The clientbound Encryption Request has no
+        // `should_authenticate` field in this generation — see the trait
+        // default, which is keyed off the protocol id.)
         true
     }
 

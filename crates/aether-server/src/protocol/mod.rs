@@ -853,10 +853,29 @@ pub trait ProtocolCodec: Sync + Send {
     fn read_login_start(&self, s: &mut Conn) -> io::Result<Option<String>>;
 
     /// Whether this version's clientbound Encryption Request ends with the
-    /// `should_authenticate` boolean that 1.19 and 1.19.2 added (and 1.19.3
-    /// removed). The Encryption Request and Response ids are `0x01` in every
-    /// version this server speaks, so only the extra field is version-gated.
+    /// `should_authenticate` boolean.
+    ///
+    /// It was added in **1.20.5** (protocol 766) and is present ever since,
+    /// including 26.x — it was *not* in 1.19/1.19.2, which is the opposite of
+    /// what an early version of this code assumed. Getting it wrong is not
+    /// subtle: a 1.21.11 client reads one byte past the packet, rejects it and
+    /// drops the connection before answering, which looks like a failed login
+    /// with no response.
+    ///
+    /// The clientbound Encryption Request id is `0x01` in every version this
+    /// server speaks, so only this field is version-gated, and the version id
+    /// alone decides it.
     fn encryption_request_has_should_authenticate(&self) -> bool {
+        self.protocol_id() >= 766
+    }
+
+    /// Whether this version's serverbound Encryption Response carries the
+    /// `has_verify_token` boolean (with an optional salt and chat signature)
+    /// between the shared secret and the verify token.
+    ///
+    /// Only 1.19 and 1.19.2 (protocols 759 and 760) do; from 1.19.3 the
+    /// packet is just the two byte arrays again.
+    fn encryption_response_has_verify_token_flag(&self) -> bool {
         false
     }
 
