@@ -184,13 +184,14 @@ mod imp {
         let _ = HOST.set(Mutex::new(host));
     }
 
-    /// The requested capabilities, narrowed by what the operator granted. An
-    /// empty operator list means "grant what the plugin asked for", which is
-    /// the convenient default for a known plugin.
+    /// The requested capabilities, narrowed by what the operator granted.
+    ///
+    /// **Default is deny.** A plugin receives a capability only if it both
+    /// asked for it and the operator listed it under `[plugins.<id>]`. Just
+    /// pointing `[plugins] dir` at a folder is not a grant, so a dropped-in
+    /// plugin cannot silently acquire one — the design's "requests *and* the
+    /// operator grants".
     fn effective_capabilities(requested: &[String], granted: &[String]) -> Vec<String> {
-        if granted.is_empty() {
-            return requested.to_vec();
-        }
         requested
             .iter()
             .filter(|c| granted.iter().any(|g| g == *c))
@@ -314,6 +315,32 @@ mod imp {
 
     pub fn shutdown() {
         with((), |h| h.shutdown());
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::effective_capabilities;
+
+        #[test]
+        fn capabilities_are_deny_by_default() {
+            // The operator granted nothing: the plugin gets nothing, however
+            // much it asked for.
+            let requested = vec!["log".to_string(), "storage.kv".to_string()];
+            assert!(
+                effective_capabilities(&requested, &[]).is_empty(),
+                "an ungranted capability must not be handed out"
+            );
+            // Granted: exactly the intersection.
+            assert_eq!(
+                effective_capabilities(
+                    &["log".to_string(), "world.write".to_string()],
+                    &["log".to_string()]
+                ),
+                vec!["log".to_string()]
+            );
+            // A grant the manifest never asked for is not forced on it.
+            assert!(effective_capabilities(&[], &["log".to_string()]).is_empty());
+        }
     }
 }
 
