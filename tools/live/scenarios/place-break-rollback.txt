@@ -10,6 +10,8 @@ send /give minecraft:stone 64
 wait 2
 send /changeslot 1
 wait 1
+send /dig -6 70 8
+wait 3
 send /useblock -6 70 8
 wait 2
 send /block -6 70 8
@@ -28,7 +30,7 @@ send /inspect
 wait 2
 send /dig -6 70 8
 wait 5
-send /rollback player:_alpha_01 radius:8
+send /rollback player:_alpha_01 radius:4
 wait 6
 expect rolled back
 reject unsupported journal format

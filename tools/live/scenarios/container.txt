@@ -12,14 +12,14 @@ send /inventory creativegive 37 Diamond 1
 wait 2
 send /changeslot 1
 wait 1
-send /dig -6 70 8
+send /dig -12 70 8
 wait 3
-send /useblock -6 70 8
+send /useblock -12 70 8
 wait 2
-send /block -6 70 8
+send /block -12 70 8
 wait 2
-expect -6 70 8: minecraft:chest
-send /useblock -6 70 8
+expect -12 70 8: minecraft:chest
+send /useblock -12 70 8
 wait 3
 expect opened: Chest
 send /inventory container list
@@ -31,7 +31,7 @@ wait 2
 expect Diamond
 send /inventory container close
 wait 2
-send /useblock -6 70 8
+send /useblock -12 70 8
 wait 3
 expect opened: Chest
 expect Diamond
