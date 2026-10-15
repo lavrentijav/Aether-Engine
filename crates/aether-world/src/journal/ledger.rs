@@ -65,10 +65,18 @@ pub struct Instance {
     /// Every place it has been, oldest first — the provenance trail a human
     /// actually reads when investigating.
     pub trail: Vec<(u64, Place)>,
-    /// The instances it was made from (a craft's inputs, the stack it was
-    /// split off); empty for one minted from nothing.
+    /// The instances it was made from (a craft's inputs); empty for one minted
+    /// from nothing.
     pub derived_from: Vec<ItemUid>,
+    /// How many units it began with — a mint's count, or a derive's.
+    pub minted: u8,
+    /// Units it has absorbed from merges.
+    pub merged_in: u32,
+    /// Units it has given to merges.
+    pub merged_out: u32,
     destroyed: bool,
+    /// Gone because a merge emptied it, not because of an explicit destroy.
+    merged_away: bool,
 }
 
 /// The current whereabouts of every item instance, plus everything the history
@@ -142,7 +150,7 @@ impl Ledger {
                 inst.count = *count;
                 inst.trail.push((e.seq, *to));
             }
-            EventBody::ItemDestroy { uid, from } => {
+            EventBody::ItemDestroy { uid, from, .. } => {
                 let Some(inst) = self.items.get_mut(uid) else {
                     self.anomalies.push(Anomaly::NeverMinted {
                         uid: *uid,
@@ -169,7 +177,48 @@ impl Ledger {
                 inst.at = Place::Nowhere;
                 inst.trail.push((e.seq, Place::Nowhere));
             }
+            EventBody::ItemMerge { into, from, count } => self.merge(e.seq, *into, *from, *count),
         }
+    }
+
+    /// Fold an [`EventBody::ItemMerge`] in: `count` units leave `from` for
+    /// `into`. A `from` emptied by the merge ceases to exist — no separate
+    /// destroy, because the merge is the whole of it.
+    fn merge(&mut self, seq: u64, into: ItemUid, from: ItemUid, count: u8) {
+        if !self.items.contains_key(&from) {
+            self.anomalies.push(Anomaly::NeverMinted { uid: from, seq });
+            return;
+        }
+        if !self.items.contains_key(&into) {
+            self.anomalies.push(Anomaly::NeverMinted { uid: into, seq });
+            return;
+        }
+        if self.items[&from].destroyed {
+            self.anomalies
+                .push(Anomaly::UsedAfterDestroyed { uid: from, seq });
+            return;
+        }
+        if self.items[&into].destroyed {
+            self.anomalies
+                .push(Anomaly::UsedAfterDestroyed { uid: into, seq });
+            return;
+        }
+        let taken = count.min(self.items[&from].count);
+        {
+            let f = self.items.get_mut(&from).unwrap();
+            f.count -= taken;
+            f.merged_out += taken as u32;
+            if f.count == 0 {
+                f.destroyed = true;
+                f.merged_away = true;
+                f.at = Place::Nowhere;
+                f.trail.push((seq, Place::Nowhere));
+            }
+        }
+        let t = self.items.get_mut(&into).unwrap();
+        t.count = t.count.saturating_add(taken);
+        t.merged_in += taken as u32;
+        t.trail.push((seq, t.at));
     }
 
     fn mint(
@@ -194,7 +243,11 @@ impl Ledger {
                 minted_at: seq,
                 trail: vec![(seq, to)],
                 derived_from,
+                minted: count,
+                merged_in: 0,
+                merged_out: 0,
                 destroyed: false,
+                merged_away: false,
             },
         );
     }
@@ -233,6 +286,48 @@ impl Ledger {
     /// Whether the ledger is empty.
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// The conservation tally over every instance the history ever created.
+    ///
+    /// Every uid is minted or derived exactly once and then ends in exactly
+    /// one place: still alive, destroyed outright, or emptied by a merge. A
+    /// shortfall is a uid that vanished untracked — the signature of a
+    /// duplication or a missing event. This is the whole of the balance the
+    /// property test asserts.
+    pub fn balance(&self) -> Balance {
+        let mut b = Balance::default();
+        for inst in self.items.values() {
+            b.created += 1;
+            if inst.merged_away {
+                b.merged_away += 1;
+            } else if inst.destroyed {
+                b.destroyed += 1;
+            } else {
+                b.alive += 1;
+            }
+        }
+        b
+    }
+}
+
+/// Every created instance is alive, destroyed or merged away.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Balance {
+    /// Instances ever created (a mint or a derive).
+    pub created: usize,
+    /// Instances still in the world.
+    pub alive: usize,
+    /// Instances that met an explicit destroy.
+    pub destroyed: usize,
+    /// Instances emptied by a merge.
+    pub merged_away: usize,
+}
+
+impl Balance {
+    /// Whether nothing appeared or vanished untracked.
+    pub fn is_balanced(&self) -> bool {
+        self.created == self.alive + self.destroyed + self.merged_away
     }
 }
 

@@ -205,6 +205,7 @@ fn every_place_variant_round_trips() {
             body: EventBody::ItemDestroy {
                 uid: ItemUid(1),
                 from: place,
+                reason: DestroyReason::Other,
             },
         };
         assert_eq!(Event::decode(&e.encode()), Ok(e));
@@ -627,6 +628,7 @@ fn a_destroyed_item_cannot_be_moved_again() {
         EventBody::ItemDestroy {
             uid: ItemUid(3),
             from: a,
+            reason: DestroyReason::Consumed,
         },
     )
     .unwrap();
@@ -849,6 +851,91 @@ fn an_untouched_block_reports_no_change_even_in_a_busy_column() {
 }
 
 #[test]
+fn a_version_3_blob_still_decodes() {
+    // A v3 blob stores the item as a two-byte id and a destroy with no reason.
+    // History written before v4 must stay readable for `/inspect` and rollback.
+    let mut b = header(3, alice().0);
+    b.push(2); // TAG_ITEM_MINT
+    b.extend_from_slice(&0x1234u64.to_be_bytes());
+    b.extend_from_slice(
+        &ItemTypeId::vanilla("minecraft:diamond")
+            .unwrap()
+            .0
+            .to_be_bytes(),
+    );
+    b.push(6); // count
+    b.push(4); // Place::Nowhere
+    let e = Event::decode(&b).expect("a v3 mint decodes");
+    match e.body {
+        EventBody::ItemMint { uid, count, .. } => {
+            assert_eq!(uid, ItemUid(0x1234));
+            assert_eq!(count, 6);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let mut d = header(3, alice().0);
+    d.push(4); // TAG_ITEM_DESTROY
+    d.extend_from_slice(&ItemUid(9).0.to_be_bytes());
+    d.push(4); // Place::Nowhere
+    let e = Event::decode(&d).expect("a v3 destroy decodes");
+    assert_eq!(
+        e.body,
+        EventBody::ItemDestroy {
+            uid: ItemUid(9),
+            from: Place::Nowhere,
+            reason: DestroyReason::Other,
+        },
+        "a v3 destroy had no reason byte; it reads as other"
+    );
+}
+
+#[test]
+fn a_version_4_merge_and_destroy_reason_round_trip() {
+    for reason in [
+        DestroyReason::Other,
+        DestroyReason::Consumed,
+        DestroyReason::Despawn,
+        DestroyReason::Burned,
+        DestroyReason::Void,
+        DestroyReason::Explosion,
+        DestroyReason::Crafted,
+        DestroyReason::CreativeReplace,
+        DestroyReason::Command,
+        DestroyReason::Cactus,
+        DestroyReason::MergedAway,
+    ] {
+        let e = Event {
+            seq: 4,
+            at_ms: 5,
+            actor: alice(),
+            cause: None,
+            body: EventBody::ItemDestroy {
+                uid: ItemUid(7),
+                from: Place::Ground { x: 1, y: 2, z: 3 },
+                reason,
+            },
+        };
+        assert_eq!(Event::decode(&e.encode()), Ok(e));
+    }
+
+    let m = Event {
+        seq: 9,
+        at_ms: 10,
+        actor: bob(),
+        cause: Some(8),
+        body: EventBody::ItemMerge {
+            into: ItemUid(1),
+            from: ItemUid(2),
+            count: 3,
+        },
+    };
+    let blob = m.encode();
+    assert_eq!(blob[0], event::FORMAT_VERSION);
+    assert_eq!(Event::decode(&blob), Ok(m));
+}
+
+#[test]
 fn a_derived_item_and_a_cause_survive_a_round_trip() {
     let e = Event {
         seq: 9,
@@ -933,6 +1020,72 @@ fn the_ledger_remembers_what_an_item_was_made_from() {
     let pick = l.get(ItemUid(12)).unwrap();
     assert_eq!(pick.derived_from, vec![ItemUid(10), ItemUid(11)]);
     assert!(l.anomalies().is_empty());
+}
+
+#[test]
+fn a_merge_moves_its_units_and_empties_the_source() {
+    let store = MemStore::new();
+    let j = Journal::open(&store).unwrap();
+    let a = Place::Inventory {
+        owner: alice(),
+        slot: 0,
+    };
+    let b = Place::Inventory {
+        owner: alice(),
+        slot: 1,
+    };
+    j.append(alice(), mint(1, a)).unwrap();
+    j.append(alice(), mint(2, b)).unwrap();
+    j.append(
+        alice(),
+        EventBody::ItemMerge {
+            into: ItemUid(1),
+            from: ItemUid(2),
+            count: 1,
+        },
+    )
+    .unwrap();
+    let l = Ledger::replay(&j.all_events().unwrap());
+    assert!(l.anomalies().is_empty(), "{:?}", l.anomalies());
+    assert_eq!(l.get(ItemUid(1)).unwrap().count, 2, "the units joined it");
+    assert_eq!(l.get(ItemUid(1)).unwrap().merged_in, 1);
+    let gone = l.get(ItemUid(2)).unwrap();
+    assert_eq!(gone.count, 0);
+    assert_eq!(gone.at, Place::Nowhere, "a fully merged stack ceases");
+    let bal = l.balance();
+    assert!(bal.is_balanced(), "{bal:?}");
+    assert_eq!(
+        (bal.created, bal.alive, bal.destroyed, bal.merged_away),
+        (2, 1, 0, 1)
+    );
+}
+
+#[test]
+fn a_merge_from_a_stack_that_was_never_minted_is_reported() {
+    let store = MemStore::new();
+    let j = Journal::open(&store).unwrap();
+    let a = Place::Inventory {
+        owner: alice(),
+        slot: 0,
+    };
+    j.append(alice(), mint(1, a)).unwrap();
+    j.append(
+        alice(),
+        EventBody::ItemMerge {
+            into: ItemUid(1),
+            from: ItemUid(99),
+            count: 1,
+        },
+    )
+    .unwrap();
+    let l = Ledger::replay(&j.all_events().unwrap());
+    assert_eq!(
+        l.anomalies(),
+        &[Anomaly::NeverMinted {
+            uid: ItemUid(99),
+            seq: 2
+        }]
+    );
 }
 
 #[test]

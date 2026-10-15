@@ -34,6 +34,61 @@ impl ActorId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ItemUid(pub u64);
 
+/// Why an item instance left the world.
+///
+/// A destroy used to be silent about its cause, which told a reader that a
+/// stack was gone but not whether it had been eaten, burnt or replaced. The
+/// byte is the whole of it: no string reaches the journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum DestroyReason {
+    /// No better reason is known.
+    #[default]
+    Other = 0,
+    /// Eaten or drunk.
+    Consumed = 1,
+    /// An item entity's five minutes ran out.
+    Despawn = 2,
+    /// Destroyed by fire or lava.
+    Burned = 3,
+    /// Fell out of the world.
+    Void = 4,
+    /// Caught in an explosion.
+    Explosion = 5,
+    /// An ingredient used up by a craft, smelt or brew.
+    Crafted = 6,
+    /// A creative client replaced the slot's contents.
+    CreativeReplace = 7,
+    /// Removed by a command (`/clear`, a `/kill` drop that is not kept).
+    Command = 8,
+    /// Cactus or other contact damage.
+    Cactus = 9,
+    /// Merged into another stack when the merge path had no way to keep the
+    /// source alive.
+    MergedAway = 10,
+}
+
+impl DestroyReason {
+    /// The reason a byte names, or [`DestroyReason::Other`] for one this
+    /// release does not know — a newer writer's reason must not fail an old
+    /// reader.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => DestroyReason::Consumed,
+            2 => DestroyReason::Despawn,
+            3 => DestroyReason::Burned,
+            4 => DestroyReason::Void,
+            5 => DestroyReason::Explosion,
+            6 => DestroyReason::Crafted,
+            7 => DestroyReason::CreativeReplace,
+            8 => DestroyReason::Command,
+            9 => DestroyReason::Cactus,
+            10 => DestroyReason::MergedAway,
+            _ => DestroyReason::Other,
+        }
+    }
+}
+
 /// Where an item instance sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
@@ -78,12 +133,34 @@ pub enum EventBody {
         to: Place,
         count: u8,
     },
-    /// An item instance left the world (used up, burnt, despawned).
-    ItemDestroy { uid: ItemUid, from: Place },
-    /// An item instance came into existence *out of* others: the output of a
-    /// craft or a smelt from its inputs, the half split off a stack from the
-    /// stack, what a pickup put in a slot from the stack on the ground. A mint
-    /// with a pedigree — the edge provenance follows backwards.
+    /// An item instance left the world (used up, burnt, despawned). `reason`
+    /// says why; without it a destroy could not be told from a bug.
+    ItemDestroy {
+        uid: ItemUid,
+        from: Place,
+        reason: DestroyReason,
+    },
+    /// `count` units of stack `from` joined stack `into`.
+    ///
+    /// The merge exists so that topping up a stack is not journalled as a move
+    /// of the whole stack: the destination's count grew from somewhere, and a
+    /// movement event with the same `from` and `to` said nothing about where.
+    /// `from` ceases to exist when it is fully merged; there is deliberately
+    /// no separate destroy for it.
+    ItemMerge {
+        into: ItemUid,
+        from: ItemUid,
+        count: u8,
+    },
+    /// An item instance came into existence *out of* others by a real
+    /// transformation: the output of a craft, smelt, brew, stonecut or
+    /// smithing from its consumed ingredients. A mint with a pedigree — the
+    /// edge provenance follows backwards.
+    ///
+    /// Deliberately not a split, and not a pickup: the half split off a stack
+    /// is a new identity for units that already existed (an [`ItemMint`],
+    /// with the source moving the other way), and a pickup is an
+    /// [`ItemMove`] or an [`ItemMerge`]. Reserve this for a change of item.
     ItemDerive {
         uid: ItemUid,
         item: ItemTypeId,
@@ -122,6 +199,7 @@ impl Event {
             EventBody::ItemMint { to, .. } => to.position(),
             EventBody::ItemMove { to, from, .. } => to.position().or_else(|| from.position()),
             EventBody::ItemDestroy { from, .. } => from.position(),
+            EventBody::ItemMerge { .. } => None,
             EventBody::ItemDerive { to, .. } => to.position(),
         }
     }
@@ -146,8 +224,10 @@ impl Place {
 /// wrong blocks, which is worse than refusing to undo anything.
 ///
 /// Version 3 replaced the item type's `String` name with a two-byte
-/// [`ItemTypeId`].
-pub const FORMAT_VERSION: u8 = 3;
+/// [`ItemTypeId`]. Version 4 added the [`EventBody::ItemMerge`] body (tag 6)
+/// and a `reason` byte to [`EventBody::ItemDestroy`]; a v1–v3 destroy reads
+/// back as [`DestroyReason::Other`].
+pub const FORMAT_VERSION: u8 = 4;
 
 /// Errors from [`Event::decode`].
 #[derive(Debug, PartialEq)]
@@ -180,6 +260,7 @@ const TAG_ITEM_MINT: u8 = 2;
 const TAG_ITEM_MOVE: u8 = 3;
 const TAG_ITEM_DESTROY: u8 = 4;
 const TAG_ITEM_DERIVE: u8 = 5;
+const TAG_ITEM_MERGE: u8 = 6;
 /// Optional trailer after the body: the cause. Absent in entries written
 /// before causes existed, which therefore decode with none.
 const TRAILER_CAUSE: u8 = 1;
@@ -335,10 +416,17 @@ impl Event {
                 put_place(&mut out, from);
                 put_place(&mut out, to);
             }
-            EventBody::ItemDestroy { uid, from } => {
+            EventBody::ItemDestroy { uid, from, reason } => {
                 out.push(TAG_ITEM_DESTROY);
                 out.extend_from_slice(&uid.0.to_be_bytes());
                 put_place(&mut out, from);
+                out.push(*reason as u8);
+            }
+            EventBody::ItemMerge { into, from, count } => {
+                out.push(TAG_ITEM_MERGE);
+                out.extend_from_slice(&into.0.to_be_bytes());
+                out.extend_from_slice(&from.0.to_be_bytes());
+                out.push(*count);
             }
             EventBody::ItemDerive {
                 uid,
@@ -397,9 +485,21 @@ impl Event {
                 from: c.place()?,
                 to: c.place()?,
             },
-            TAG_ITEM_DESTROY => EventBody::ItemDestroy {
-                uid: c.uid(v)?,
-                from: c.place()?,
+            TAG_ITEM_DESTROY => {
+                let uid = c.uid(v)?;
+                let from = c.place()?;
+                // The reason byte is new in v4; older entries simply had none.
+                let reason = if v >= 4 {
+                    DestroyReason::from_u8(c.u8()?)
+                } else {
+                    DestroyReason::Other
+                };
+                EventBody::ItemDestroy { uid, from, reason }
+            }
+            TAG_ITEM_MERGE if v >= 4 => EventBody::ItemMerge {
+                into: c.uid(v)?,
+                from: c.uid(v)?,
+                count: c.u8()?,
             },
             TAG_ITEM_DERIVE => {
                 let uid = c.uid(v)?;
