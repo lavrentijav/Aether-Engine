@@ -27,6 +27,7 @@ pub mod ops;
 pub mod outbox;
 pub mod placement;
 pub mod players;
+pub mod plugins;
 pub mod proto;
 pub mod protocol;
 pub mod rewards;
@@ -93,6 +94,13 @@ pub fn run() -> std::process::ExitCode {
         return fail(
             "a database is configured ([database] url or AETHER_DATABASE_URL) but this build \
              has no database support: rebuild with `--features postgres`, or unset it",
+        );
+    }
+    #[cfg(not(feature = "plugins"))]
+    if !cfg.plugins.dir.trim().is_empty() {
+        log::warn(
+            "a plugin directory is configured but this build has no plugin support: \
+             rebuild with the `plugins` feature (the default), or unset it",
         );
     }
 
@@ -209,6 +217,10 @@ pub fn run() -> std::process::ExitCode {
     let _ = GAME_MODE.set(cfg.server.game_mode);
     let cfg = Arc::new(cfg);
     let _ = CONFIG.set(Arc::clone(&cfg));
+    // Load the WebAssembly plugins after the world exists, so their
+    // `storage.kv` has somewhere to live, and before the listener accepts a
+    // connection, so no event can fire before `init` has run.
+    plugins::install(&cfg, &world);
     let next_eid = Arc::new(AtomicI32::new(1));
     let registry: SharedRegistry = Arc::new(Registry::default());
     // The world ticks on its own thread, independently of whether anyone is

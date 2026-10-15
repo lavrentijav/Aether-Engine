@@ -48,6 +48,8 @@ pub fn spawn_shutdown(registry: SharedRegistry, world: Arc<DemoWorld>) {
                 std::thread::sleep(Duration::from_millis(200));
             }
             crate::log::info("stopping: saving players and the world");
+            // Let plugins wind down before the process leaves; best effort.
+            crate::plugins::shutdown();
             let players = registry.snapshot();
             for p in &players {
                 if p.full() {

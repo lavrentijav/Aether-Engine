@@ -266,6 +266,23 @@ pub fn spawn_item(
     )
 }
 
+/// An item entity has fallen out of the world: record its destruction for
+/// good, with reason `Void`, and empty the stack so the shared cleanup does
+/// not also call it an expiry. Split out of the tick so the reason is testable
+/// without driving a whole world.
+fn destroy_void_item(world: &DemoWorld, it: &mut ItemEnt) {
+    if it.stack.count == 0 {
+        return;
+    }
+    provenance::ground_destroyed(
+        world,
+        it.stack.uid,
+        it.ground,
+        aether_world::journal::DestroyReason::Void,
+    );
+    it.stack.count = 0;
+}
+
 /// The orb value vanilla splits an outstanding amount of experience into:
 /// the largest of a fixed ladder of sizes that fits, down to `1`.
 fn orb_value(xp: i32) -> i32 {
@@ -521,6 +538,8 @@ pub struct MobHit {
     pub kind: &'static str,
     pub xp: i32,
     pub pos: Vector3,
+    /// The damage actually dealt, after resistance: what `after-damage` hears.
+    pub damage: f32,
     /// Sheep wool colour index, for the loot table's colour component.
     pub wool: u8,
     /// Whether a sheep was sheared when it died.
@@ -582,6 +601,7 @@ pub fn hurt_mob(
         kind: m.def.kind,
         xp: m.def.xp,
         pos,
+        damage: amount,
         wool: m.wool,
         sheared: m.sheared,
         on_fire: m.burning > 0,
@@ -794,23 +814,6 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                         e.dead = true;
                         continue;
                     }
-                    // An item that falls out of the world is destroyed for
-                    // good, not merely despawned by a timeout. Record it here,
-                    // with its own reason, and zero the stack so the shared
-                    // retain below does not also call it a despawn.
-                    if e.body.feet().y < -128.0 {
-                        if it.stack.count > 0 {
-                            provenance::ground_destroyed(
-                                world,
-                                it.stack.uid,
-                                it.ground,
-                                aether_world::journal::DestroyReason::Void,
-                            );
-                            it.stack.count = 0;
-                        }
-                        e.dead = true;
-                        continue;
-                    }
                     // Items bob at the waterline, as vanilla's do: lifted
                     // while their centre is under, left to settle once it is
                     // not — never held above the surface.
@@ -954,6 +957,15 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                 }
             }
             if e.body.feet().y < -128.0 {
+                // An item that falls out of the world is destroyed for good,
+                // with its own reason, not left to the shared cleanup below
+                // (which calls a still-full stack an expiry). Checked here,
+                // after the physics step, so a stack that crossed the
+                // threshold this tick is caught rather than missed by an
+                // earlier check.
+                if let Kind::Item(it) = &mut e.kind {
+                    destroy_void_item(world, it);
+                }
                 e.dead = true;
             }
             // Position updates. Mobs every other tick, as their steering
@@ -1081,11 +1093,13 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                         // next time the stack moved).
                         let arrow = crate::inventory::item("minecraft:arrow");
                         let actor = aether_world::journal::ActorId(handle.uuid);
-                        let (steps, left) = handle.inventory().give_many_report(arrow, 1);
-                        if left > 0 {
+                        let mut inv = handle.inventory();
+                        let Some(bodies) = provenance::give_one_events(actor, &mut inv, arrow)
+                        else {
                             continue;
-                        }
-                        for body in provenance::give_events(actor, arrow, &steps) {
+                        };
+                        drop(inv);
+                        for body in bodies {
                             let _ = world.journal().append(actor, body);
                         }
                         actions.push(Action::Picked {
@@ -1667,6 +1681,76 @@ pub fn reset_tracking(handle: &PlayerHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A throwaway world on a temp store, for the tests that must read a
+    /// journal.
+    fn test_world(seed: u64) -> DemoWorld {
+        use aether_api::{FjallStore, World};
+        let dir =
+            std::env::temp_dir().join(format!("aether-pv1-ent-{}-{seed}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FjallStore::open(&dir).expect("temp store");
+        let generator = crate::worldgen::Generator::load("", "", seed).expect("noise generator");
+        let revision = generator.revision();
+        let cfg = crate::gencache::CacheConfig {
+            root: String::new(),
+            ..Default::default()
+        };
+        let generator = crate::gencache::Cached::with_revision(generator, seed, revision, &cfg);
+        World::new(store, generator)
+    }
+
+    #[test]
+    fn an_item_that_falls_out_of_the_world_is_destroyed_as_void() {
+        // The generic kill at the world's floor must record a *void* destroy
+        // for a fallen item, not leave a still-full stack to be called an
+        // expiry by the shared cleanup.
+        let world = test_world(11);
+        let stack = Stack::named("minecraft:diamond", 3);
+        let uid = stack.uid;
+        let ground = provenance::ground_place(4.0, 70.0, 4.0);
+        let mut it = ItemEnt {
+            stack,
+            owner: None,
+            pickup_delay: 0,
+            ground,
+        };
+        destroy_void_item(&world, &mut it);
+        assert_eq!(
+            it.stack.count, 0,
+            "the stack is emptied so it is not a despawn"
+        );
+
+        let events = world.journal().all_events().unwrap();
+        let destroy = events
+            .iter()
+            .find_map(|e| match &e.body {
+                aether_world::journal::EventBody::ItemDestroy {
+                    uid: u,
+                    reason,
+                    from,
+                } if *u == uid => Some((*reason, *from)),
+                _ => None,
+            })
+            .expect("a destroy was journalled");
+        assert_eq!(destroy.0, aether_world::journal::DestroyReason::Void);
+        assert_eq!(destroy.1, ground, "from the place the ledger knew it at");
+    }
+
+    #[test]
+    fn an_empty_item_stack_falling_out_is_not_journalled() {
+        // Nothing to destroy: an already-emptied stack must not write a second
+        // void destroy.
+        let world = test_world(12);
+        let mut it = ItemEnt {
+            stack: Stack::named("minecraft:diamond", 0),
+            owner: None,
+            pickup_delay: 0,
+            ground: provenance::ground_place(0.0, 0.0, 0.0),
+        };
+        destroy_void_item(&world, &mut it);
+        assert!(world.journal().all_events().unwrap().is_empty());
+    }
 
     #[test]
     fn entity_ids_stay_clear_of_the_player_range() {

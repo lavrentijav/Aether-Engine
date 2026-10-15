@@ -11,7 +11,7 @@ SCRATCH="${MCC_SCRATCH:-/tmp/opencode/live}"
 OUT_MD="$HERE/last-run.md"
 
 DEFAULT_VERSIONS=(1.21.11 1.21.4 1.20.6 1.20.4 1.20.2)
-SCENARIOS=(join inspect place-break-rollback inventory-persist eat-effects container potion commands multi-version-join)
+SCENARIOS=(join inspect place-break-rollback inventory-persist eat-effects container potion commands journal-upgrade multi-version-join)
 
 if [ "$#" -gt 0 ]; then
     VERSIONS=("$@")

@@ -71,6 +71,10 @@ struct Ctx<'a> {
     cont: Option<&'a mut Vec<Option<Stack>>>,
     creative: bool,
     drops: Vec<Stack>,
+    /// What this click crafted, for the `after-craft` plugin event. Only the
+    /// player grid and the crafting table can craft, so a container click
+    /// always leaves this empty.
+    crafted: Vec<(aether_world::ItemTypeId, u8)>,
 }
 
 impl<'a> Ctx<'a> {
@@ -368,6 +372,7 @@ impl<'a> Ctx<'a> {
     fn take_result(&mut self) -> Option<Stack> {
         let r = self.craft_result()?;
         self.consume_grid();
+        self.crafted.push((r.item, r.count));
         Some(r)
     }
 
@@ -413,11 +418,13 @@ impl<'a> Ctx<'a> {
             match self.cursor.as_mut() {
                 None => {
                     self.consume_grid();
+                    self.crafted.push((res.item, res.count));
                     *self.cursor = Some(res);
                 }
                 Some(c) if c.stacks_with(&res) && c.count + res.count <= c.max_stack() => {
                     c.count += res.count;
                     self.consume_grid();
+                    self.crafted.push((res.item, res.count));
                 }
                 _ => {}
             }
@@ -480,6 +487,7 @@ impl<'a> Ctx<'a> {
                 let Some(res) = self.craft_result() else {
                     break;
                 };
+                let crafted = (res.item, res.count);
                 let targets = self.shift_targets(idx, &res);
                 // Only craft what fits whole: try on a copy first.
                 let before_inv = self.inv.clone();
@@ -488,6 +496,7 @@ impl<'a> Ctx<'a> {
                     break;
                 }
                 self.consume_grid();
+                self.crafted.push(crafted);
             }
             return;
         }
@@ -692,6 +701,7 @@ pub fn click(
     button: i8,
     mode: i32,
 ) {
+    let mut crafted: Vec<(aether_world::ItemTypeId, u8)> = Vec::new();
     let drops = {
         let mut st = handle.game();
         let creative = !st.survival();
@@ -725,8 +735,10 @@ pub fn click(
                     cont: None,
                     creative,
                     drops: Vec::new(),
+                    crafted: Vec::new(),
                 };
                 ctx.click(slot, button, mode, drag);
+                crafted.extend(ctx.crafted);
                 ctx.drops
             }
             Some(w) => {
@@ -745,8 +757,10 @@ pub fn click(
                             cont: None,
                             creative,
                             drops: Vec::new(),
+                            crafted: Vec::new(),
                         };
                         ctx.click(slot, button, mode, drag);
+                        crafted.extend(ctx.crafted);
                         ctx.drops
                     }
                     Some(ContainerTarget::Single(kind, pos)) => {
@@ -768,6 +782,7 @@ pub fn click(
                                 cont: Some(&mut c.slots),
                                 creative,
                                 drops: Vec::new(),
+                                crafted: Vec::new(),
                             };
                             ctx.click(slot, button, mode, drag);
                             let drops = ctx.drops;
@@ -815,6 +830,7 @@ pub fn click(
                                     cont: Some(&mut slots),
                                     creative,
                                     drops: Vec::new(),
+                                    crafted: Vec::new(),
                                 };
                                 ctx.click(slot, button, mode, drag);
                                 ctx.drops
@@ -829,6 +845,12 @@ pub fn click(
             }
         }
     };
+    // Crafting happened: tell the plugins that subscribed to `after-craft`.
+    for (item, count) in crafted {
+        if let Some(name) = world.item_name(item) {
+            crate::plugins::after_craft(handle, &name, u32::from(count));
+        }
+    }
     for s in drops {
         super::entities::throw_from(handle, s);
     }
@@ -1146,6 +1168,7 @@ mod tests {
             cont: None,
             creative: false,
             drops: Vec::new(),
+            crafted: Vec::new(),
         }
     }
 
@@ -1311,6 +1334,7 @@ mod tests {
             cont: Some(&mut cont),
             creative: false,
             drops: Vec::new(),
+            crafted: Vec::new(),
         };
         assert_eq!(c.len(), 90);
         assert_eq!(c.main_start(), 54);
@@ -1336,6 +1360,7 @@ mod tests {
                 cont: Some(&mut cont),
                 creative: false,
                 drops: Vec::new(),
+                crafted: Vec::new(),
             };
             // Shift-click the right half straight into the inventory.
             c.click(30, 0, 1, &mut drag);
@@ -1355,6 +1380,7 @@ mod tests {
                 cont: Some(&mut cont),
                 creative: false,
                 drops: Vec::new(),
+                crafted: Vec::new(),
             };
             // Left-click a right-half slot picks it up on the cursor.
             c.click(40, 0, 0, &mut drag);
