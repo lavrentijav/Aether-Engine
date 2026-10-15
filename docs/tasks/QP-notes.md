@@ -175,6 +175,23 @@ item stackability, so it sees the merge. The menu avoids *conjuring*
 wire-colliding items: a genuine conjure sharing a stand-in's wire id and a
 count the stale shadow can cover is the documented indistinguishable residual.
 
+## Round-6 fix (J10-fix15)
+
+`wire_stacks` used the **real** item's stack size, but the client stacks by the
+item it is *shown*. A horse harness (real stack 1) is shown as leather (stack
+64), so the client merges it onto a leather slot; judging by the real size made
+the server swap, materialising harnesses and stranding the slot's leather. Fix:
+`wire_stacks` now takes `max_stack_id(engine(wire(item).id))` — the shown item's
+size.
+
+Tests: `a_stackability_changing_stand_in_still_merges` (harness 1 onto
+leather 16 → leather 17, nothing carried); reverting the fix fails it and the
+property test. `run_reports` seeds a `white_harness` (shown as leather) and a
+genuine leather stack, and restores the `!allow_creation` full-multiset
+conservation — over the **wire** multiset, since a same-wire merge converts a
+disguised stack's real identity into the slot's item (the client cannot see the
+difference, so only the wire view is conserved).
+
 ## Left / interface note for the J5 (J9) agent
 
 The per-move logic keys off `compat::items::table_for(handle.codec.protocol_id())`.

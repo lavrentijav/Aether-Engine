@@ -122,15 +122,22 @@ impl ItemTable {
         }
     }
 
-    /// Whether the client sees this item as stackable.
+    /// Whether the client sees `item` as stackable.
     ///
     /// It decides whether two look-alike stacks merge or swap: the client piles
     /// two stackable items of the same wire id together, but swaps two
-    /// unstackable ones (a spear and a trident it cannot tell apart). A stand-in
-    /// keeps its real item's stack size, so the engine's own table answers it.
+    /// unstackable ones (a spear and a trident it cannot tell apart). The client
+    /// stacks by the item it is *shown*, so a stand-in that changes stackability
+    /// is judged by the stand-in's size, not the real item's: a horse harness
+    /// (stack 1) shown as leather (stack 64) is stacked by the client as leather,
+    /// and must merge, not swap.
     #[inline]
     fn wire_stacks(&self, item: ItemTypeId) -> bool {
-        crate::game::tables::max_stack_id(item) > 1
+        let shown = self
+            .wire(item)
+            .and_then(|w| self.engine(w.id))
+            .unwrap_or(item);
+        crate::game::tables::max_stack_id(shown) > 1
     }
 }
 
@@ -542,6 +549,17 @@ mod tests {
                 .expect("a real item")
         };
         let max_of = crate::game::tables::max_stack_id;
+        // The multiset of *wire* items across slots plus the cursor: what the
+        // client can actually see. A same-wire merge converts a disguised
+        // stack's real identity into the slot's item, so the *real* multiset is
+        // not conserved, but the wire view a pure move preserves exactly is.
+        let wire_multi = |slots: &[Option<(ItemTypeId, u8)>], cur: Option<(ItemTypeId, u8)>| {
+            let mut m = std::collections::BTreeMap::new();
+            for (it, c) in slots.iter().flatten().chain(cur.iter()) {
+                *m.entry(shown(*it)).or_insert(0u64) += *c as u64;
+            }
+            m
+        };
 
         // Menu items whose wire id does *not* collide with a stand-in. A
         // conjured item that shares a stand-in's wire id and a count the stale
@@ -559,17 +577,27 @@ mod tests {
             assert!(!t.stand_in_wire(t.wire(m).unwrap().id), "menu item {m:?}");
         }
 
+        // A stand-in that changes stackability: a horse harness (stack 1) is
+        // shown to these clients as leather (stack 64), so the client stacks it
+        // as leather and must merge, not swap.
+        let harness = id("minecraft:white_harness");
+        assert_eq!(shown_as(t, harness), Some(id("minecraft:leather")));
+
         let n = 9;
         let mut client: Vec<Option<(ItemTypeId, u8)>> = vec![None; n];
         client[0] = Some((spear, 1));
         client[2] = Some((id("minecraft:diamond"), 10));
         client[4] = Some((pale, 64));
         // Genuine items whose wire id a stand-in also uses (`oak_planks` with
-        // pale_oak_planks, `trident` with the spear): the client sees the
-        // carried disguised stack and such a slot as one kind and merges them.
+        // pale_oak_planks, `trident` with the spear, `leather` with a harness):
+        // the client sees the carried disguised stack and such a slot as one
+        // kind and merges them.
         client[6] = Some((id("minecraft:oak_planks"), 11));
         client[8] = Some((id("minecraft:trident"), 1));
+        client[1] = Some((harness, 1));
+        client[7] = Some((id("minecraft:leather"), 16));
         let mut cursor: Option<(ItemTypeId, u8)> = None;
+        let initial_wire = wire_multi(&client, cursor);
 
         let mut server = client.clone();
         let mut shadow: Option<Carried> = None;
@@ -673,6 +701,19 @@ mod tests {
                         "step {step}: shadow lost a cursor {item:?}"
                     );
                 }
+            }
+
+            // With no conjures, a pure move conserves the whole *wire*
+            // multiset — every item the client can see, count included. (The
+            // real multiset is not conserved because a same-wire merge converts
+            // a disguised stack into the slot's item, but the client cannot see
+            // the difference, so the wire view must not change.)
+            if !allow_creation {
+                assert_eq!(
+                    wire_multi(&client, cursor),
+                    initial_wire,
+                    "step {step}: a pure move changed the wire multiset"
+                );
             }
         }
     }
@@ -1154,6 +1195,32 @@ mod tests {
             held(pale, 21),
             "exactly 53 of the 74 were consumed, 21 remain the real item"
         );
+    }
+
+    #[test]
+    fn a_stackability_changing_stand_in_still_merges() {
+        // Round 6: the client stacks by the item it is *shown*. A horse harness
+        // (stack 1) is shown as leather (stack 64), so the client sees a
+        // stackable leather and merges it onto a leather slot. Judging by the
+        // *real* item's stack size (1) made the server swap, materialising 17
+        // harnesses out of one and stranding the slot's leather.
+        let harness = id("minecraft:white_harness");
+        let leather = id("minecraft:leather");
+        let t = &V1_21_1;
+        assert_eq!(shown_as(t, harness), Some(leather));
+        assert_eq!(crate::game::tables::max_stack_id(harness), 1, "real: 1");
+        assert_eq!(crate::game::tables::max_stack_id(leather), 64, "shown: 64");
+
+        // The cursor carries one harness; the slot holds 16 leather; the client
+        // reports the merged leather × 17.
+        let (res, carry) =
+            t.resolve_change(Some((leather, 17)), Some((leather, 16)), held(harness, 1));
+        assert_eq!(
+            res,
+            Resolution::Apply(Some((leather, 17))),
+            "the slot keeps its leather, filled to 17"
+        );
+        assert_eq!(carry, None, "the one harness was merged in");
     }
 
     #[test]
