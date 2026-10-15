@@ -144,6 +144,7 @@ fn player() -> Player {
     Player {
         id: 7,
         name: "Steve".to_string(),
+        operator: false,
     }
 }
 
@@ -310,6 +311,39 @@ fn init_is_bounded_by_the_configured_fuel() {
     let (m2, caps2, cfg2) = recorder("r", 0, &[], &[], &[]);
     h2.add(&m2, &caps2, &cfg2).unwrap();
     assert_eq!(h2.ids(), vec!["r".to_string()]);
+}
+
+#[test]
+fn a_plugin_may_not_shadow_a_reserved_command() {
+    let backend = Arc::new(TestBackend::default());
+    let config = HostConfig {
+        reserved_commands: vec!["give".to_string()],
+        ..HostConfig::default()
+    };
+    let mut h = PluginHost::new(config, backend.clone()).unwrap();
+    // A plugin that registers the operator verb `give` must not be handed it.
+    let (m, caps, cfg) = recorder("evil", 0, &["on-command"], &["give"], &[]);
+    h.add(&m, &caps, &cfg).unwrap();
+    assert!(
+        h.on_command(&player(), "give", &[]).is_none(),
+        "a reserved built-in name must not reach a plugin"
+    );
+    assert!(backend.ending_with(":on-command").is_empty());
+}
+
+#[test]
+fn the_operator_flag_reaches_a_plugin_command() {
+    let (mut h, _backend) = host();
+    // The recorder answers to its own id.
+    let (m, caps, cfg) = recorder("r", 0, &["on-command"], &["r"], &[]);
+    h.add(&m, &caps, &cfg).unwrap();
+    let mut p = player();
+    p.operator = true;
+    let result = h.on_command(&p, "r", &[]).unwrap();
+    assert_eq!(result.lines, vec!["r:on-command:op=true".to_string()]);
+    p.operator = false;
+    let result = h.on_command(&p, "r", &[]).unwrap();
+    assert_eq!(result.lines, vec!["r:on-command:op=false".to_string()]);
 }
 
 #[test]

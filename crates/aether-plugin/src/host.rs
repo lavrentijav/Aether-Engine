@@ -58,6 +58,11 @@ pub struct HostConfig {
     /// first-time work a timed call must not: the epoch deadline is not
     /// appropriate for it, so it is bounded by fuel instead.
     pub init_fuel: u64,
+    /// Built-in command names a plugin may never handle, set by the embedder.
+    /// The host refuses to route any of these to a plugin, so a plugin that
+    /// registers `give` or `tp` cannot shadow the built-in and its operator
+    /// check. The embedder supplies the names because only it knows them.
+    pub reserved_commands: Vec<String>,
 }
 
 impl Default for HostConfig {
@@ -68,6 +73,7 @@ impl Default for HostConfig {
             memory_mib: 64,
             max_faults: 5,
             init_fuel: 100_000_000,
+            reserved_commands: Vec::new(),
         }
     }
 }
@@ -672,7 +678,18 @@ impl PluginHost {
     }
 
     /// `on-command`: the first plugin that handles the command answers it.
+    ///
+    /// A reserved built-in name never reaches a plugin, so a plugin cannot
+    /// shadow the built-in command and its permission check.
     pub fn on_command(&mut self, p: &Player, name: &str, args: &[String]) -> Option<CommandResult> {
+        if self.config.reserved_commands.iter().any(|c| c == name) {
+            self.backend.log(
+                "host",
+                LogLevel::Warn,
+                &format!("refused to route built-in command `{name}` to a plugin"),
+            );
+            return None;
+        }
         let event = manifest::EVENT_ON_COMMAND;
         for i in 0..self.plugins.len() {
             if !self.plugins[i].receives(event) || !self.plugins[i].manifest.serves_command(name) {

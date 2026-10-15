@@ -17,6 +17,12 @@ interface types {
         id: u64,
         /// The player's login name.
         name: string,
+        /// Whether the server considers this player an operator. The host
+        /// fills this from its own operator list, so a plugin that offers a
+        /// privileged command of its own can refuse it to everyone else. It
+        /// does **not** let a plugin shadow a built-in command: the host
+        /// never routes a reserved built-in name to a plugin at all.
+        operator: bool,
     }
 
     /// What `init` returns: the host acknowledges the plugin and reports the

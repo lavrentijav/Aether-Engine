@@ -158,11 +158,13 @@ impl Guest for Recorder {
         let _ = observe("on-tick");
     }
 
-    fn on_command(_p: Player, name: String, _args: Vec<String>) -> CommandResult {
+    fn on_command(p: Player, name: String, _args: Vec<String>) -> CommandResult {
         let _ = observe("on-command");
         CommandResult {
             handled: name == id(),
-            lines: vec![format!("{}:on-command", id())],
+            // The player's operator bit is echoed so a test can see the host
+            // passed it through.
+            lines: vec![format!("{}:on-command:op={}", id(), p.operator)],
         }
     }
 }

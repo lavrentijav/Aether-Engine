@@ -71,6 +71,52 @@ fn usage() -> Reply {
     ])
 }
 
+/// Every built-in command name, across the game, economy and history layers.
+///
+/// Passed to the plugin host as its reserved set, so a plugin can never be
+/// handed one of these names even if the dispatch order below ever changed.
+/// Keep it in step with the `match`es that handle commands.
+pub const RESERVED_COMMANDS: &[&str] = &[
+    // game
+    "gamemode",
+    "gm",
+    "time",
+    "give",
+    "summon",
+    "killall",
+    "kill",
+    "spawn",
+    "tp",
+    "block",
+    "food",
+    "heal",
+    // history
+    "inspect",
+    "i",
+    "lookup",
+    "l",
+    "rollback",
+    "rb",
+    "page",
+    "pg",
+    "inv",
+    "inventory",
+    "stash",
+    "audit",
+    "cache",
+    // economy
+    "balance",
+    "bal",
+    "money",
+    "pay",
+    "sell",
+    "market",
+    "buy",
+    "listings",
+    "unlist",
+    "econ",
+];
+
 /// Handle `text` if it is a command. `None` means it was ordinary chat.
 pub fn dispatch(
     text: &str,
@@ -85,17 +131,15 @@ pub fn dispatch(
     let mut words = text[1..].split_whitespace();
     let cmd = words.next().unwrap_or_default();
     let args: Vec<&str> = words.collect();
-    // A plugin command is tried first: a plugin that registers a verb has
-    // claimed it, exactly as registering an event claims it.
-    let plugin_args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-    if let Some(lines) = crate::plugins::on_command(handle, cmd, &plugin_args) {
+    // **Built-ins first.** A plugin command is only tried once every built-in
+    // verb — including the operator-gated game commands — has declined the
+    // name, so a plugin can never shadow a built-in and its permission check.
+    // `[plugins]`-registered verbs that do not collide are unaffected.
+    if let Some(lines) = crate::game::commands::dispatch(cmd, &args, handle, registry, world) {
         return Some(Reply(lines));
     }
     // The economy owns its own verbs; it answers `None` for anything else, so
     // a command name never means two things.
-    if let Some(lines) = crate::game::commands::dispatch(cmd, &args, handle, registry, world) {
-        return Some(Reply(lines));
-    }
     if let Some(reply) = crate::economy::commands::dispatch(
         cmd,
         &args,
@@ -115,7 +159,13 @@ pub fn dispatch(
         "stash" => crate::stash::open_command(handle, world),
         "audit" => audit(world),
         "cache" => cache(world),
-        _ => usage(),
+        _ => {
+            let plugin_args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+            match crate::plugins::on_command(handle, cmd, &plugin_args) {
+                Some(lines) => Reply(lines),
+                None => usage(),
+            }
+        }
     })
 }
 
@@ -549,6 +599,20 @@ mod tests {
             0 => "minecraft:air".into(),
             1 => "minecraft:stone".into(),
             _ => "minecraft:unknown".into(),
+        }
+    }
+
+    #[test]
+    fn the_reserved_set_covers_the_operator_verbs() {
+        // The host refuses these before any plugin sees them; if one were
+        // dropped from the list a plugin could shadow it again.
+        for verb in [
+            "give", "tp", "gamemode", "summon", "killall", "time", "heal", "food", "pay", "econ",
+        ] {
+            assert!(
+                super::RESERVED_COMMANDS.contains(&verb),
+                "`{verb}` must be reserved"
+            );
         }
     }
 
