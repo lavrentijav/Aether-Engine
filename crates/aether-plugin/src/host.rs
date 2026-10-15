@@ -45,10 +45,17 @@ pub trait HostBackend: Send + Sync {
 pub struct HostConfig {
     /// Per-call time budget, in milliseconds. Enforced with epoch interruption.
     pub budget_ms: u64,
-    /// Shared time budget, in milliseconds, spent by **all** plugins across
-    /// one server tick. Once it is gone no further plugin is called until the
-    /// next tick, so a plugin (or many) cannot stall the tick even when each
-    /// individual call stays inside `budget_ms`.
+    /// Shared time budget, in milliseconds, that **all** plugins may spend
+    /// *running* across one server tick. Once it is exhausted no further
+    /// plugin is called until the next tick, so a plugin (or many) cannot
+    /// stall the tick even when each individual call stays inside
+    /// `budget_ms`.
+    ///
+    /// It measures time actually spent inside plugin calls, reset at the
+    /// start of each tick; it is not a wall-clock deadline. A tick is 50 ms
+    /// but a `before-*` event may fire near its end, and the time between
+    /// plugin calls is the server's, not the plugins', so neither must count
+    /// against it.
     pub tick_budget_ms: u64,
     /// Per-plugin linear-memory cap, in mebibytes.
     pub memory_mib: u64,
@@ -234,11 +241,17 @@ pub struct PluginHost {
     config: HostConfig,
     backend: Arc<dyn HostBackend>,
     plugins: Vec<LoadedPlugin>,
-    /// When the current tick's shared budget runs out. `None` until the first
-    /// [`on_tick`]; before any tick there is no tick to overrun, so calls are
-    /// bounded only by the per-call budget. Reset by every [`on_tick`].
-    tick_deadline: Option<Instant>,
-    /// The shared budget as a duration, kept beside the deadline.
+    /// Wall-clock time actually spent **inside plugin calls** since the
+    /// current tick began. `None` until the first [`on_tick`], so before any
+    /// tick there is no tick window to overrun and calls are bounded only by
+    /// the per-call budget. Reset to zero at the top of every [`on_tick`].
+    ///
+    /// Counting consumed time rather than a deadline is what keeps the budget
+    /// a property of the plugins, not of the wall clock: a tick's 50 ms pass
+    /// between `on_tick` and a later `before-*`, and an idle gap must not
+    /// spend the budget. Only time the plugins actually ran counts.
+    tick_used: Option<Duration>,
+    /// The shared budget as a duration, kept beside the used total.
     tick_budget: Duration,
     /// Whether the background epoch ticker has been started. It starts with
     /// the first plugin; a host that never loads one never spawns a thread.
@@ -261,7 +274,7 @@ impl PluginHost {
             config,
             backend,
             plugins: Vec::new(),
-            tick_deadline: None,
+            tick_used: None,
             tick_budget,
             ticker_started: false,
         })
@@ -293,10 +306,11 @@ impl PluginHost {
         self.ticker_started
     }
 
-    /// Reset the shared tick budget. Called at the start of every server tick,
-    /// before any plugin for that tick runs.
+    /// Reset the tick's consumed-time total to zero. Called at the start of
+    /// every server tick, before any plugin for that tick runs. It does not
+    /// start a clock: idling between plugin calls must not spend the budget.
     fn begin_tick(&mut self) {
-        self.tick_deadline = Some(Instant::now() + self.tick_budget);
+        self.tick_used = Some(Duration::ZERO);
     }
 
     /// The epoch deadline, in milliseconds, for the next plugin call: the
@@ -305,15 +319,32 @@ impl PluginHost {
     /// should run this tick.
     fn call_budget_ms(&self) -> u64 {
         let per_call = self.config.budget_ms.max(1);
-        match self.tick_deadline {
+        match self.tick_used {
             // No tick has run yet: there is no window to spend.
             None => per_call,
-            Some(deadline) => {
-                let remaining = deadline
-                    .saturating_duration_since(Instant::now())
-                    .as_millis() as u64;
+            Some(used) => {
+                let remaining = self.tick_budget.saturating_sub(used).as_millis() as u64;
                 per_call.min(remaining)
             }
+        }
+    }
+
+    /// Charge a finished plugin call against the tick's consumed time.
+    ///
+    /// `granted_ms` is the per-call allowance the call was given and `trapped`
+    /// whether it errored. A call that trapped on its epoch deadline ran to
+    /// that deadline, so it is charged at least its full allowance even if the
+    /// stopwatch reads a hair under it; a call that returned is charged exactly
+    /// what it took. Idle time is never passed here and so never counts.
+    fn charge_tick(&mut self, started: Instant, granted_ms: u64, trapped: bool) {
+        let elapsed = started.elapsed();
+        let charged = if trapped {
+            elapsed.max(Duration::from_millis(granted_ms))
+        } else {
+            elapsed
+        };
+        if let Some(used) = self.tick_used.as_mut() {
+            *used += charged;
         }
     }
 
@@ -485,10 +516,12 @@ impl PluginHost {
                 continue;
             }
             self.plugins[i].store.set_epoch_deadline(ms);
+            let started = Instant::now();
             let r = {
                 let pl = &mut self.plugins[i];
                 f(pl)
             };
+            self.charge_tick(started, ms, r.is_err());
             match r {
                 Ok(Decision::Allow) => {}
                 Ok(d @ Decision::Cancel(_)) => return d,
@@ -522,10 +555,12 @@ impl PluginHost {
                 continue;
             }
             self.plugins[i].store.set_epoch_deadline(ms);
+            let started = Instant::now();
             let r = {
                 let pl = &mut self.plugins[i];
                 f(pl)
             };
+            self.charge_tick(started, ms, r.is_err());
             if let Err(e) = r {
                 self.fault(i, event, e);
             }
@@ -667,10 +702,12 @@ impl PluginHost {
                 continue;
             }
             self.plugins[i].store.set_epoch_deadline(ms);
+            let started = Instant::now();
             let r = {
                 let pl = &mut self.plugins[i];
                 pl.bindings.call_on_tick(&mut pl.store, n)
             };
+            self.charge_tick(started, ms, r.is_err());
             if let Err(e) = r {
                 self.fault(i, manifest::EVENT_ON_TICK, e);
             }
@@ -700,10 +737,12 @@ impl PluginHost {
                 continue;
             }
             self.plugins[i].store.set_epoch_deadline(ms);
+            let started = Instant::now();
             let r = {
                 let pl = &mut self.plugins[i];
                 pl.bindings.call_on_command(&mut pl.store, p, name, args)
             };
+            self.charge_tick(started, ms, r.is_err());
             match r {
                 Ok(result) if result.handled => return Some(result),
                 Ok(_) => continue,

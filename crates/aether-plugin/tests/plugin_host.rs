@@ -429,6 +429,62 @@ fn a_fail_closed_plugin_vetoes_when_the_budget_is_spent() {
 }
 
 #[test]
+fn idling_between_calls_does_not_spend_the_tick_budget() {
+    // The shared budget is time the plugins spend *running*, not wall-clock
+    // time since the tick began. A tick is 50 ms and a `before-*` may fire
+    // anywhere in it, so if idle time counted, events late in the tick would
+    // be skipped (or, fail-closed, spuriously vetoed). Start a tick, idle far
+    // past the budget, and check the next `before-*` is still consulted.
+    let backend = Arc::new(TestBackend::default());
+    let config = HostConfig {
+        budget_ms: 5,
+        tick_budget_ms: 40,
+        ..HostConfig::default()
+    };
+    let mut h = PluginHost::new(config, backend.clone()).unwrap();
+    let (m, caps, cfg) = recorder("r", 0, &["before-block-break"], &[], &[]);
+    h.add(&m, &caps, &cfg).unwrap();
+
+    h.on_tick(1); // starts the tick; no plugin has run, so nothing is spent
+    std::thread::sleep(Duration::from_millis(150)); // three times the budget
+
+    let decision = h.before_block_break(&player(), 0, 64, 0, "minecraft:stone");
+    assert!(matches!(decision, Decision::Allow));
+    assert_eq!(
+        backend.ending_with(":before-block-break"),
+        vec!["r"],
+        "idling past the tick budget must not consume it: the plugin is still consulted"
+    );
+}
+
+#[test]
+fn idling_does_not_spuriously_veto_a_fail_closed_plugin() {
+    // The same wall-clock bug hit a `deny_on_fault` plugin harder: an event
+    // late in the tick looked like a spent budget and vetoed an action it had
+    // never examined. Idling must leave it consulted and allowing.
+    let backend = Arc::new(TestBackend::default());
+    let config = HostConfig {
+        budget_ms: 5,
+        tick_budget_ms: 40,
+        ..HostConfig::default()
+    };
+    let mut h = PluginHost::new(config, backend.clone()).unwrap();
+    let (mut m, caps, cfg) = recorder("guard", 0, &["before-block-break"], &[], &[]);
+    m.manifest.deny_on_fault = true;
+    h.add(&m, &caps, &cfg).unwrap();
+
+    h.on_tick(1);
+    std::thread::sleep(Duration::from_millis(150));
+
+    let decision = h.before_block_break(&player(), 0, 64, 0, "minecraft:stone");
+    assert!(
+        matches!(decision, Decision::Allow),
+        "no budget was spent, so a fail-closed plugin must not veto"
+    );
+    assert_eq!(backend.ending_with(":before-block-break"), vec!["guard"]);
+}
+
+#[test]
 fn a_plugin_that_overruns_its_budget_is_interrupted() {
     let backend = Arc::new(TestBackend::default());
     let config = HostConfig {
