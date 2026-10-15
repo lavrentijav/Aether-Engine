@@ -1,0 +1,20 @@
+# Manifest for the WorldGuard-style regions plugin (CMD-34). See crates/aether-plugin/src/manifest.rs.
+id = "regions"
+name = "Regions"
+version = "0.1.0"
+api = "0.1"
+entry = "regions.wasm"
+priority = 20
+
+capabilities = ["log", "config", "supports", "storage.kv", "world.read", "players"]
+
+subscribe = [
+    "before-block-break",
+    "before-block-place",
+    "before-use-item",
+    "before-attack",
+    "on-command",
+    "after-player-join",
+]
+
+commands = ["rg", "region"]

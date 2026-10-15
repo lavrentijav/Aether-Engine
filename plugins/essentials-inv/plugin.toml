@@ -1,0 +1,29 @@
+# Manifest for the essentials-inv plugin (CMD-39). See crates/aether-plugin/src/manifest.rs.
+id = "essentials-inv"
+name = "Essentials Inventory"
+version = "0.1.0"
+api = "0.1"
+entry = "essentials-inv.wasm"
+priority = 40
+
+capabilities = ["log", "config", "supports", "storage.kv", "players"]
+
+subscribe = ["on-command"]
+
+commands = [
+    "invsee",
+    "enderchest",
+    "ec",
+    "workbench",
+    "craft",
+    "anvil",
+    "stonecutter",
+    "grindstone",
+    "trash",
+    "disposal",
+    "clearinventory",
+    "ci",
+    "kit",
+    "kits",
+    "createkit",
+]

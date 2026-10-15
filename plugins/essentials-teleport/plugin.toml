@@ -1,0 +1,37 @@
+# Manifest for the essentials-teleport plugin (CMD-37). See crates/aether-plugin/src/manifest.rs.
+id = "essentials-teleport"
+name = "Essentials Teleport"
+version = "0.1.0"
+api = "0.1"
+entry = "essentials-teleport.wasm"
+priority = 30
+
+capabilities = ["log", "config", "supports", "storage.kv", "players", "scheduler"]
+
+subscribe = ["on-command", "after-entity-death"]
+
+commands = [
+    "sethome",
+    "home",
+    "delhome",
+    "homes",
+    "setwarp",
+    "warp",
+    "delwarp",
+    "warps",
+    "tpa",
+    "tpahere",
+    "tpaccept",
+    "tpdeny",
+    "tpcancel",
+    "tpall",
+    "tphere",
+    "tppos",
+    "back",
+    "top",
+    "jump",
+    "up",
+    "rtp",
+    "spawn",
+    "setspawn",
+]

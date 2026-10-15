@@ -1,0 +1,35 @@
+# Manifest for the WorldEdit-style editing plugin (CMD-36). See crates/aether-plugin/src/manifest.rs.
+id = "worldedit"
+name = "WorldEdit"
+version = "0.1.0"
+api = "0.1"
+entry = "worldedit.wasm"
+priority = 20
+
+capabilities = ["log", "config", "supports", "storage.kv", "world.read", "world.write", "players"]
+
+subscribe = ["on-command", "before-use-item"]
+
+commands = [
+    "wand",
+    "pos1",
+    "pos2",
+    "set",
+    "replace",
+    "walls",
+    "outline",
+    "copy",
+    "cut",
+    "paste",
+    "rotate",
+    "flip",
+    "stack",
+    "move",
+    "undo",
+    "redo",
+    "expand",
+    "contract",
+    "schem",
+    "brush",
+    "mask",
+]
