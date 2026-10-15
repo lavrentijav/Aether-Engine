@@ -970,6 +970,7 @@ impl WebAdmin {
         // Headers: bounded in count and total size.
         let mut length = 0usize;
         let mut header_bytes = 0usize;
+        let mut end_of_headers = false;
         for _ in 0..MAX_HEADERS {
             set_read_deadline(&stream);
             let mut h = Vec::new();
@@ -990,6 +991,7 @@ impl WebAdmin {
             let text = String::from_utf8_lossy(&h);
             let t = text.trim_end();
             if t.is_empty() {
+                end_of_headers = true;
                 break;
             }
             if let Some((k, v)) = t.split_once(':') {
@@ -1003,6 +1005,11 @@ impl WebAdmin {
                     length = v.parse().unwrap_or(0);
                 }
             }
+        }
+        // More headers than the cap without a blank line: refuse rather than
+        // read on and treat the rest as a request.
+        if !end_of_headers {
+            return write_response(stream, &Response::text(431, "too many headers\n"));
         }
 
         // A form body, bounded so a hostile client cannot make us allocate.
@@ -1819,6 +1826,24 @@ mod tests {
         assert!(rl.allow());
         assert!(rl.allow());
         assert!(!rl.allow(), "burst exhausted");
+    }
+
+    /// A request with too many headers is refused rather than read forever.
+    #[test]
+    fn too_many_headers_are_refused() {
+        let a = admin();
+        let mut server = a.serve("127.0.0.1:0".parse().unwrap()).unwrap();
+        let mut stream = TcpStream::connect(server.addr()).unwrap();
+        let mut req = String::from("GET /info?token=test HTTP/1.1\r\nHost: x\r\n");
+        for i in 0..(MAX_HEADERS + 8) {
+            req.push_str(&format!("X-Pad-{i}: v\r\n"));
+        }
+        req.push_str("\r\n");
+        let _ = stream.write_all(req.as_bytes());
+        let _ = stream.flush();
+        let body = read_all(&mut stream);
+        assert!(body.contains("431"), "too many headers refused: {body:?}");
+        server.stop();
     }
 
     fn read_all(stream: &mut TcpStream) -> String {
