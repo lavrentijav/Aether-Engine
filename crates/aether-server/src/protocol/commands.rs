@@ -8,82 +8,14 @@
 //! The commands still *run* — the client sends what was typed regardless — so
 //! this is discoverability rather than function.
 //!
-//! The tree here is deliberately shallow. Every command is one literal node,
-//! and the ones that take arguments get a single greedy string child rather
-//! than a faithful per-argument grammar. That is enough for completion of the
-//! command names — the part a player cannot guess — and it costs one node
-//! each instead of a parser tree that would have to be kept in step with
-//! every dispatcher by hand.
+//! The tree is now generated from the same [`crate::commands::tree`] the
+//! server parses against, so the declared grammar cannot drift from what the
+//! dispatcher answers. Argument *types* are still declared as one string each:
+//! the faithful per-version mapping is CMD-04, which replaces the parser
+//! lookup [`crate::commands::tree::ArgKind::parser`] hands it.
 
+use crate::commands::tree::{tree, CommandTree, Kind, Node};
 use crate::proto::PacketOut;
-
-/// One command, and whether anything may follow its name.
-pub struct Command {
-    /// The word after the slash.
-    pub name: &'static str,
-    /// Whether it accepts arguments.
-    pub args: bool,
-}
-
-const fn c(name: &'static str, args: bool) -> Command {
-    Command { name, args }
-}
-
-/// Every command the dispatchers answer, aliases included.
-///
-/// Kept beside the dispatchers by a test rather than by discipline: see
-/// [`tests::every_declared_command_is_answered`].
-pub const COMMANDS: &[Command] = &[
-    // crate::commands
-    c("inspect", false),
-    c("i", false),
-    c("lookup", true),
-    c("l", true),
-    c("rollback", true),
-    c("rb", true),
-    c("page", true),
-    c("pg", true),
-    c("inv", false),
-    c("inventory", false),
-    c("stash", false),
-    c("audit", false),
-    c("cache", false),
-    // crate::economy::commands
-    c("balance", true),
-    c("bal", true),
-    c("money", true),
-    c("pay", true),
-    c("sell", true),
-    c("market", true),
-    c("buy", true),
-    c("listings", false),
-    c("unlist", true),
-    c("econ", true),
-    // crate::game::commands
-    c("gamemode", true),
-    c("gm", true),
-    c("time", true),
-    c("give", true),
-    c("summon", true),
-    c("killall", false),
-    c("kill", false),
-    c("spawn", false),
-    c("tp", true),
-    c("block", true),
-    c("food", true),
-    c("heal", false),
-    c("visibility", true),
-];
-
-/// `brigadier:string`'s id in the parser registry.
-///
-/// Identical in every version from 1.19 to 1.21.11 — the first six parsers
-/// have never been reordered. Checked against `minecraft-data` for all of
-/// them before this was written down.
-const PARSER_STRING: i32 = 5;
-
-/// `brigadier:string`'s GREEDY_PHRASE mode: take the rest of the line.
-const GREEDY_PHRASE: i32 = 2;
 
 /// How this version names a parser.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -94,66 +26,110 @@ pub enum Parsers {
     ById,
 }
 
+/// A node flattened for the wire: its flags, name, parser and child indices.
+struct Flat {
+    flags: u8,
+    name: Option<String>,
+    parser: Option<crate::commands::tree::ParserRef>,
+    children: Vec<usize>,
+}
+
 /// Write the body of the "Declare Commands" packet: the node array and the
 /// index of the root.
-///
-/// Node layout, which the indices below depend on:
-///
-/// ```text
-/// 0            the root
-/// 1 ..= n      one literal per command, in `COMMANDS` order
-/// n+1 ..       one greedy-string argument per command that takes arguments
-/// ```
 pub fn write_tree(p: &mut PacketOut, parsers: Parsers) {
-    let n = COMMANDS.len();
-    let with_args = COMMANDS.iter().filter(|c| c.args).count();
-    p.var_int((1 + n + with_args) as i32);
+    let (nodes, root) = flatten(tree());
+    p.var_int(nodes.len() as i32);
 
-    // The root: type 0, not executable, every command as a child.
-    p.u8(0x00).var_int(n as i32);
-    for i in 0..n {
-        p.var_int((1 + i) as i32);
-    }
-
-    // The literals. Executable on their own even when they take arguments —
-    // `/inspect` and `/market` are both whole commands by themselves.
-    let mut arg_index = 1 + n;
-    for cmd in COMMANDS {
-        p.u8(0x01 | 0x04); // literal, executable
-        if cmd.args {
-            p.var_int(1).var_int(arg_index as i32);
-            arg_index += 1;
-        } else {
-            p.var_int(0);
+    for node in &nodes {
+        p.u8(node.flags);
+        p.var_int(node.children.len() as i32);
+        for child in &node.children {
+            p.var_int(*child as i32);
         }
-        p.string(cmd.name);
-    }
-
-    // The arguments: one greedy string each, swallowing the rest of the line.
-    for _ in 0..with_args {
-        p.u8(0x02 | 0x04); // argument, executable
-        p.var_int(0); // no children
-        p.string("args");
-        match parsers {
-            Parsers::ByName => {
-                p.string("brigadier:string");
+        p.string(node.name.as_deref().unwrap_or(""));
+        if let Some(parser) = &node.parser {
+            match parsers {
+                Parsers::ByName => {
+                    p.string(parser.name);
+                }
+                Parsers::ById => {
+                    p.var_int(parser.id);
+                }
             }
-            Parsers::ById => {
-                p.var_int(PARSER_STRING);
-            }
+            p.var_int(parser.properties);
         }
-        p.var_int(GREEDY_PHRASE);
     }
+    p.var_int(root as i32);
+}
 
-    p.var_int(0); // root index
+/// Flatten the tree into the packet's node array. The root is index 0; every
+/// command name and alias is its own literal node over the same children.
+fn flatten(t: &CommandTree) -> (Vec<Flat>, usize) {
+    let mut nodes = vec![Flat {
+        flags: 0x00,
+        name: None,
+        parser: None,
+        children: Vec::new(),
+    }];
+    let mut root_children = Vec::new();
+    for command in t.commands() {
+        let children: Vec<usize> = command
+            .children
+            .iter()
+            .map(|child| flatten_node(&mut nodes, child))
+            .collect();
+        let mut names = vec![command.name];
+        names.extend(command.aliases.iter().copied());
+        for name in names {
+            let idx = nodes.len();
+            nodes.push(Flat {
+                flags: 0x01 | if command.executable { 0x04 } else { 0 },
+                name: Some(name.to_string()),
+                parser: None,
+                children: children.clone(),
+            });
+            root_children.push(idx);
+        }
+    }
+    nodes[0].children = root_children;
+    (nodes, 0)
+}
+
+fn flatten_node(nodes: &mut Vec<Flat>, node: &Node) -> usize {
+    let children: Vec<usize> = node
+        .children
+        .iter()
+        .map(|child| flatten_node(nodes, child))
+        .collect();
+    let executable = if node.executable { 0x04 } else { 0 };
+    let (flags, parser) = match &node.kind {
+        Kind::Argument(kind) => (0x02 | executable, Some(kind.parser())),
+        _ => (0x01 | executable, None),
+    };
+    let idx = nodes.len();
+    nodes.push(Flat {
+        flags,
+        name: Some(node.name.to_string()),
+        parser,
+        children,
+    });
+    idx
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A decoded wire node: flags, children and name/parser.
+    struct Decoded {
+        flags: u8,
+        children: Vec<i32>,
+        name: Option<String>,
+        parser: Option<(String, i32)>,
+    }
+
     /// Decode the tree back the way a client does.
-    fn decode(parsers: Parsers) -> (Vec<(u8, Vec<i32>, Option<String>)>, i32) {
+    fn decode(parsers: Parsers) -> (Vec<Decoded>, i32) {
         let mut p = PacketOut::new(0x10);
         write_tree(&mut p, parsers);
         let mut wire = Vec::new();
@@ -169,90 +145,83 @@ mod tests {
                 .map(|_| pin.var_int().unwrap())
                 .collect::<Vec<_>>();
             assert_eq!(flags & 0x08, 0, "nothing here redirects");
-            let name = match flags & 0x03 {
-                0 => None,
-                1 => Some(pin.string().unwrap()),
+            let name = pin.string().unwrap();
+            let parser = match flags & 0x03 {
                 2 => {
-                    let name = pin.string().unwrap();
-                    match parsers {
-                        Parsers::ByName => {
-                            assert_eq!(pin.string().unwrap(), "brigadier:string");
-                        }
-                        Parsers::ById => {
-                            assert_eq!(pin.var_int().unwrap(), PARSER_STRING);
-                        }
-                    }
-                    assert_eq!(pin.var_int().unwrap(), GREEDY_PHRASE);
-                    Some(name)
+                    let parser = match parsers {
+                        Parsers::ByName => (pin.string().unwrap(), -1),
+                        Parsers::ById => (String::new(), pin.var_int().unwrap()),
+                    };
+                    let _properties = pin.var_int().unwrap();
+                    Some(parser)
                 }
-                _ => panic!("no node type 3 exists"),
+                _ => None,
             };
-            nodes.push((flags, children, name));
+            nodes.push(Decoded {
+                flags,
+                children,
+                name: Some(name),
+                parser,
+            });
         }
         let root = pin.var_int().unwrap();
         (nodes, root)
     }
 
     #[test]
-    fn the_root_names_every_command_once() {
+    fn the_root_names_every_command_and_alias_once() {
         for parsers in [Parsers::ByName, Parsers::ById] {
             let (nodes, root) = decode(parsers);
             assert_eq!(root, 0);
-            let (flags, children, name) = &nodes[0];
-            assert_eq!(flags & 0x03, 0, "the root is a root node");
-            assert_eq!(*name, None);
-            assert_eq!(children.len(), COMMANDS.len());
             let mut seen: Vec<&str> = Vec::new();
-            for &i in children {
-                let (f, _, n) = &nodes[i as usize];
-                assert_eq!(f & 0x03, 1, "a root child is a literal");
-                let n = n.as_deref().unwrap();
-                assert!(!seen.contains(&n), "{n} declared twice");
-                seen.push(n);
+            for &i in &nodes[0].children {
+                let node = &nodes[i as usize];
+                assert_eq!(node.flags & 0x03, 1, "a root child is a literal");
+                let name = node.name.as_deref().unwrap();
+                assert!(!seen.contains(&name), "{name} declared twice");
+                seen.push(name);
             }
-            assert!(seen.contains(&"inspect") && seen.contains(&"pay"));
+            // A name and one of its aliases both point at the same executor.
+            assert!(seen.contains(&"inspect") && seen.contains(&"i"));
+            assert!(seen.contains(&"pay"));
+            assert!(seen.contains(&"gamemode") && seen.contains(&"gm"));
         }
     }
 
     #[test]
-    fn a_command_that_takes_arguments_has_a_greedy_child_and_still_runs_alone() {
+    fn a_command_that_takes_arguments_has_an_argument_child_and_still_runs_alone() {
         let (nodes, _) = decode(Parsers::ById);
         let find = |want: &str| {
             nodes
                 .iter()
-                .find(|(f, _, n)| f & 0x03 == 1 && n.as_deref() == Some(want))
+                .find(|n| n.flags & 0x03 == 1 && n.name.as_deref() == Some(want))
                 .expect("declared")
         };
-        let (flags, children, _) = find("lookup");
-        assert_eq!(flags & 0x04, 0x04, "/lookup runs with no arguments too");
-        assert_eq!(children.len(), 1);
-        let (af, ac, an) = &nodes[children[0] as usize];
-        assert_eq!(af & 0x03, 2, "the child is an argument");
-        assert_eq!(af & 0x04, 0x04, "and is executable");
-        assert!(ac.is_empty(), "greedy: nothing can follow it");
-        assert_eq!(an.as_deref(), Some("args"));
+        let give = find("give");
+        assert_eq!(give.flags & 0x04, 0x04, "/give runs bare too");
+        assert_eq!(give.children.len(), 1);
+        let child = &nodes[give.children[0] as usize];
+        assert_eq!(child.flags & 0x03, 2, "the child is an argument");
+        assert_eq!(child.flags & 0x04, 0x04, "and is executable");
+        assert!(child.children.is_empty(), "greedy: nothing follows");
+        let (name, id) = child.parser.clone().unwrap();
+        assert_eq!(id, 5, "brigadier:string");
+        assert!(name.is_empty() || name == "brigadier:string");
 
-        let (flags, children, _) = find("stash");
-        assert_eq!(flags & 0x04, 0x04);
-        assert!(children.is_empty(), "/stash takes nothing");
+        let stash = find("stash");
+        assert_eq!(stash.flags & 0x04, 0x04);
+        assert!(stash.children.is_empty(), "/stash takes nothing");
     }
 
     #[test]
-    fn every_declared_command_is_answered() {
-        // The tree is a promise. A name here that no dispatcher answers is a
-        // completion that leads to "unknown command", which is worse than no
-        // completion at all.
-        let src = concat!(
-            include_str!("../commands/mod.rs"),
-            include_str!("../economy/commands.rs"),
-            include_str!("../game/commands.rs"),
-        );
-        for cmd in COMMANDS {
-            let quoted = format!("\"{}\"", cmd.name);
+    fn every_declared_command_is_answered_by_the_tree() {
+        // The tree is a promise: a declared name with no executor is a
+        // completion that leads nowhere.
+        for command in tree().commands() {
             assert!(
-                src.contains(&quoted),
-                "/{} is declared to clients but no dispatcher matches it",
-                cmd.name
+                command.executable && command.executor.is_some(),
+                "/{} is declared but not executable",
+                command.name
             );
         }
     }

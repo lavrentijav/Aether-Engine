@@ -22,6 +22,7 @@
 pub mod pager;
 pub mod query;
 pub mod registry;
+pub mod tree;
 
 use aether_api::{JournalActor, Ledger};
 use aether_world::journal::{now_ms, Event, EventBody};
@@ -32,6 +33,7 @@ use crate::protocol::ServerEvent;
 use crate::session::DemoWorld;
 use pager::Pager;
 use query::{Context, Query};
+use tree::{Ctx, Deny, Node, Requirement};
 
 /// Per-player command state: inspect mode, and the last answer to page
 /// through.
@@ -47,38 +49,16 @@ pub struct Session {
 pub struct Reply(pub Vec<String>);
 
 impl Reply {
-    fn one(s: impl Into<String>) -> Reply {
+    pub(crate) fn one(s: impl Into<String>) -> Reply {
         Reply(vec![s.into()])
     }
-}
-
-/// The usage text, sent for an unrecognised or malformed command.
-fn usage() -> Reply {
-    Reply(vec![
-        "History commands:".into(),
-        "  /inspect — toggle: hitting a block reports its history".into(),
-        "  /lookup <filters> — search; /rollback <filters> — undo".into(),
-        "  /page next|prev|<n> — move through the last answer".into(),
-        "  /inv — what the server thinks you are carrying".into(),
-        "  /stash — open the recovered blocks from your last rollback".into(),
-        "  /audit — item duplication report".into(),
-        "Filters: player:<name> time:30m block:stone action:place radius:20".into(),
-        "Game: /gamemode /time /give /summon /tp /heal /killall (operators), /kill /spawn".into(),
-        "Economy:".into(),
-        "  /balance [player]  /pay <player> <amount>".into(),
-        "  /sell <count> <price> [duration]  — sells what you hold".into(),
-        "  /market [item:diamond] [max:5]  /buy <id> [count]".into(),
-        "  /listings  /unlist <id>".into(),
-    ])
 }
 
 /// Every built-in command name, across the game, economy and history layers.
 ///
 /// Passed to the plugin host as its reserved set, so a plugin can never be
-/// handed one of these names even if the dispatch order below ever changed.
-/// Keep it in step with the `match`es that handle commands.
-// Only consulted by the plugin host, which is absent without the `plugins`
-// feature; kept in every build so the list has one home.
+/// handed one of these names. The tree is the single dispatcher now; this list
+/// is the readable form of the names it owns, kept for the host.
 #[allow(dead_code)]
 pub const RESERVED_COMMANDS: &[&str] = &[
     // game
@@ -94,6 +74,7 @@ pub const RESERVED_COMMANDS: &[&str] = &[
     "block",
     "food",
     "heal",
+    "visibility",
     // history
     "inspect",
     "i",
@@ -122,78 +103,117 @@ pub const RESERVED_COMMANDS: &[&str] = &[
 ];
 
 /// Handle `text` if it is a command. `None` means it was ordinary chat.
+///
+/// The tree is the one dispatcher: this runs `text` against
+/// [`tree::execute`], which answers every built-in and only falls to the plugin
+/// registry for a name the core does not own.
 pub fn dispatch(
     text: &str,
     handle: &PlayerHandle,
     registry: &SharedRegistry,
     world: &DemoWorld,
 ) -> Option<Reply> {
-    let text = text.trim();
-    if !text.starts_with('/') {
-        return None;
-    }
-    let mut words = text[1..].split_whitespace();
-    let cmd = words.next().unwrap_or_default();
-    let args: Vec<&str> = words.collect();
-    // **Built-ins first.** A plugin command is only tried once every built-in
-    // verb — including the operator-gated game commands — has declined the
-    // name, so a plugin can never shadow a built-in and its permission check.
-    // `[plugins]`-registered verbs that do not collide are unaffected.
-    if let Some(lines) = crate::game::commands::dispatch(cmd, &args, handle, registry, world) {
-        return Some(Reply(lines));
-    }
-    // The economy owns its own verbs; it answers `None` for anything else, so
-    // a command name never means two things.
-    if let Some(reply) = crate::economy::commands::dispatch(
-        cmd,
-        &args,
-        handle,
-        registry,
-        world,
-        crate::economy::get(),
-    ) {
-        return Some(reply);
-    }
-    Some(match cmd {
-        "inspect" | "i" => toggle_inspect(handle),
-        "lookup" | "l" => lookup(&args, handle, registry, world),
-        "rollback" | "rb" => rollback(&args, handle, registry, world),
-        "page" | "pg" => page(&args, handle),
-        "inv" | "inventory" => inventory(handle, world),
-        "stash" => crate::stash::open_command(handle, world),
-        "audit" => audit(world),
-        "cache" => cache(world),
-        "help" | "?" => help(&args, handle),
-        "aether" => aether_admin(&args, handle, world),
-        // Everything else is a fallback. Plugin commands are resolved through
-        // the registry here — **after** every core name has been offered, and
-        // with the same permission gate — so they can never shadow a core
-        // command; core stubs and usage are the last resort.
-        _ => fallback(cmd, &args, handle),
-    })
+    tree::execute(text, handle, registry, world)
 }
 
-/// The last-resort dispatcher: a plugin command (through the registry, with
-/// its permission check), else a core stub or the usage text.
-///
-/// This is the one place a plugin command is reached from. Because
-/// `registry::register_plugin` refuses core names, `registry::plugin_command`
-/// here can only answer a name the core does not own, so the core's gate is
-/// never bypassed.
-fn fallback(cmd: &str, args: &[&str], handle: &PlayerHandle) -> Reply {
-    if let Some(entry) = registry::plugin_command(cmd) {
-        if !permitted(handle, &entry.node, entry.op) {
-            return Reply::one("You do not have permission to run this command.");
-        }
-        let plugin_args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-        return match crate::plugins::on_command(handle, cmd, &plugin_args) {
-            Some(lines) => Reply(lines),
-            // Registered but no live plugin answered — the plugin is disabled
-            // or failed to load; say so rather than showing the usage text.
-            None => Reply::one(format!("/{cmd} is not available right now")),
-        };
+/// The history, `/help` and `/aether` commands — the ones that live in this
+/// module — as tree nodes.
+pub(crate) fn core_nodes() -> Vec<Node> {
+    vec![
+        tree::simple("inspect", &["i"], Requirement::None, exec_inspect),
+        tree::greedy("lookup", &["l"], Requirement::None, exec_lookup),
+        tree::greedy("rollback", &["rb"], Requirement::None, exec_rollback),
+        tree::greedy("page", &["pg"], Requirement::None, exec_page),
+        tree::simple("inv", &["inventory"], Requirement::None, exec_inventory),
+        tree::simple("stash", &[], Requirement::None, exec_stash),
+        tree::simple("audit", &[], Requirement::None, exec_audit),
+        tree::simple("cache", &[], Requirement::None, exec_cache),
+        tree::simple("help", &["?"], Requirement::None, exec_help),
+        tree::greedy("aether", &[], Requirement::Fn(require_admin), exec_aether),
+    ]
+}
+
+/// The `/aether` permission gate, enforced by the tree.
+pub fn require_admin(handle: &PlayerHandle) -> Result<(), Deny> {
+    if crate::is_operator(handle) {
+        Ok(())
+    } else {
+        Err(Deny::Message(
+            "You do not have permission to run this command.".into(),
+        ))
     }
-    stub(cmd, handle)
+}
+
+fn exec_inspect(ctx: &mut Ctx) -> Reply {
+    toggle_inspect(ctx.handle)
+}
+
+fn exec_lookup(ctx: &mut Ctx) -> Reply {
+    let args = ctx.refs();
+    lookup(&args, ctx.handle, ctx.registry, ctx.world)
+}
+
+fn exec_rollback(ctx: &mut Ctx) -> Reply {
+    let args = ctx.refs();
+    rollback(&args, ctx.handle, ctx.registry, ctx.world)
+}
+
+fn exec_page(ctx: &mut Ctx) -> Reply {
+    let args = ctx.refs();
+    page(&args, ctx.handle)
+}
+
+fn exec_inventory(ctx: &mut Ctx) -> Reply {
+    inventory(ctx.handle, ctx.world)
+}
+
+fn exec_stash(ctx: &mut Ctx) -> Reply {
+    crate::stash::open_command(ctx.handle, ctx.world)
+}
+
+fn exec_audit(ctx: &mut Ctx) -> Reply {
+    audit(ctx.world)
+}
+
+fn exec_cache(ctx: &mut Ctx) -> Reply {
+    cache(ctx.world)
+}
+
+fn exec_help(ctx: &mut Ctx) -> Reply {
+    let args = ctx.refs();
+    help(&args, ctx.handle)
+}
+
+fn exec_aether(ctx: &mut Ctx) -> Reply {
+    let args = ctx.refs();
+    aether_admin(&args, ctx.handle, ctx.world)
+}
+
+/// The one place a plugin command is reached from: the tree found no core
+/// node for the first word, and the registry knows it. Because
+/// `registry::register_plugin` refuses core names, this can only answer a name
+/// the core does not own, so the core's gate is never bypassed.
+pub(crate) fn plugin_command(text: &str, handle: &PlayerHandle) -> Option<Reply> {
+    let mut parts = text.splitn(2, ' ');
+    let cmd = parts.next()?;
+    let rest = parts.next().unwrap_or("");
+    let entry = registry::plugin_command(cmd)?;
+    if !permitted(handle, &entry.node, entry.op) {
+        return Some(Reply::one(
+            "You do not have permission to run this command.",
+        ));
+    }
+    let args: Vec<String> = if rest.is_empty() {
+        Vec::new()
+    } else {
+        rest.split_whitespace().map(str::to_string).collect()
+    };
+    Some(match crate::plugins::on_command(handle, cmd, &args) {
+        Some(lines) => Reply(lines),
+        // Registered but no live plugin answered — the plugin is disabled or
+        // failed to load; say so rather than pretending the name is unknown.
+        None => Reply::one(format!("/{cmd} is not available right now")),
+    })
 }
 
 /// `/aether <subcommand>` — server administration that does not belong to any
@@ -203,10 +223,7 @@ fn fallback(cmd: &str, args: &[&str], handle: &PlayerHandle) -> Reply {
 /// the Mojang uuid they now own. Migration is deliberately manual — the
 /// server cannot know a fresh online login is the same person as an old
 /// offline one.
-fn aether_admin(args: &[&str], handle: &PlayerHandle, world: &DemoWorld) -> Reply {
-    if !crate::is_operator(handle) {
-        return Reply::one("You do not have permission to run this command.");
-    }
+fn aether_admin(args: &[&str], _handle: &PlayerHandle, world: &DemoWorld) -> Reply {
     match args {
         ["auth", "migrate", name] => migrate_offline_player(name, world),
         _ => Reply::one("Usage: /aether auth migrate <name>"),
@@ -311,18 +328,6 @@ fn help(args: &[&str], handle: &PlayerHandle) -> Reply {
         }
     ));
     Reply(lines)
-}
-
-/// The fallback for a name no dispatcher answered: a known-but-unimplemented command replies with
-/// its task id (and enforces its permission), anything else is usage.
-fn stub(cmd: &str, handle: &PlayerHandle) -> Reply {
-    let Some(e) = registry::find(cmd) else {
-        return usage();
-    };
-    if !permitted(handle, e.node, e.op) {
-        return Reply::one("You do not have permission to run this command.");
-    }
-    Reply::one(format!("/{} is not implemented yet ({})", e.name, e.task))
 }
 
 /// `/cache` — how the generated-column cache is doing.
