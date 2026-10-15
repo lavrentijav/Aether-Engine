@@ -87,6 +87,78 @@ pub trait HostBackend: Send + Sync {
     fn capabilities(&self, _plugin: &str) -> Vec<String> {
         Vec::new()
     }
+
+    // --- History API (PA2) -------------------------------------------------
+    //
+    // Read-only journal queries behind the SDK `history` service. The defaults
+    // are the neutral answer — an empty page, "not original", an empty chain —
+    // so a host without a journal (a test, a stripped build) still satisfies
+    // the trait and a dependent sees an empty history rather than a trap. The
+    // server overrides every one of these over its world journal.
+
+    /// The full timeline of the block at `(x, y, z)`, newest first.
+    fn history_block(
+        &self,
+        _plugin: &str,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _before: Option<u64>,
+        _limit: u32,
+    ) -> crate::sdk::HistoryPage {
+        crate::sdk::empty_history_page()
+    }
+
+    /// Whether nobody has ever changed the block at `(x, y, z)`.
+    fn history_worldgen_original(&self, _plugin: &str, _x: i32, _y: i32, _z: i32) -> bool {
+        false
+    }
+
+    /// Events matching `window`, newest first.
+    fn history_events(
+        &self,
+        _plugin: &str,
+        _window: crate::sdk::HistoryWindow,
+        _before: Option<u64>,
+        _limit: u32,
+    ) -> crate::sdk::HistoryPage {
+        crate::sdk::empty_history_page()
+    }
+
+    /// The provenance chain of item `uid`, oldest first.
+    fn history_item_chain(
+        &self,
+        _plugin: &str,
+        _uid: u64,
+        _depth: u32,
+    ) -> Vec<crate::sdk::HistoryEvent> {
+        Vec::new()
+    }
+
+    /// Who accessed the container at `(x, y, z)`, newest first.
+    fn history_container_log(
+        &self,
+        _plugin: &str,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _before: Option<u64>,
+        _limit: u32,
+    ) -> crate::sdk::HistoryPage {
+        crate::sdk::empty_history_page()
+    }
+
+    /// One player's event stream, newest first.
+    fn history_player_events(
+        &self,
+        _plugin: &str,
+        _actor_low: u64,
+        _actor_high: u64,
+        _before: Option<u64>,
+        _limit: u32,
+    ) -> crate::sdk::HistoryPage {
+        crate::sdk::empty_history_page()
+    }
 }
 
 /// Sandbox and scheduling limits for the whole host.

@@ -26,9 +26,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use aether_plugin::manifest::{Manifest, PluginTier};
 use aether_plugin::sdk::{
-    self, ArgKind, CommandSpec, CommandsService, ConfirmService, CooldownsService, MessagesService,
-    PermissionsService, PlayersService, Pos, Resolution, SchedulerService, TeleportCause,
-    TitleTimes,
+    self, ArgKind, CommandSpec, CommandsService, ConfirmService, CooldownsService, HistoryEvent,
+    HistoryPage, HistoryService, HistoryWindow, MessagesService, PermissionsService,
+    PlayersService, Pos, Resolution, SchedulerService, TeleportCause, TitleTimes,
 };
 use aether_plugin::{
     HostBackend, LogLevel, NativeContext, NativePlugin, NativeRegistration, Player,
@@ -74,6 +74,10 @@ pub fn registration() -> NativeRegistration {
 const CAP_PERMISSIONS_ADMIN: &str = "permissions.admin";
 const CAP_MESSAGES_SEND: &str = "messages.send";
 const CAP_MESSAGES_BROADCAST: &str = "messages.broadcast";
+/// Read access to the world's history (PA2). A plugin asks for it in
+/// `plugin.toml`; the operator grants it; the gate reads the caller's
+/// effective grant by id.
+const CAP_HISTORY_READ: &str = "history.read";
 
 /// The SDK service host.
 pub struct SdkPlugin {
@@ -129,11 +133,16 @@ impl NativePlugin for SdkPlugin {
         sdk::register_cooldowns(ctx.services, cooldowns)?;
         let confirm: Arc<dyn ConfirmService> = self.confirm.clone();
         sdk::register_confirm(ctx.services, confirm)?;
+        // History is a facade over the host's journal: every query is
+        // capability-gated on the caller's `history.read` grant here, so native
+        // and WASM dependents are checked alike.
+        let history: Arc<dyn HistoryService> = Arc::new(History::new(Arc::clone(ctx.backend)));
+        sdk::register_history(ctx.services, history)?;
 
         ctx.log(
             LogLevel::Info,
             "SDK services registered (permissions, commands, messages, players, \
-             scheduler, cooldowns, confirm)",
+             scheduler, cooldowns, confirm, history)",
         );
         Ok(())
     }
@@ -378,6 +387,118 @@ impl PermissionsService for Permissions {
             ));
         }
         Err("the permission model (CMD-01/02) is not available yet".to_string())
+    }
+}
+
+// --- history -----------------------------------------------------------
+
+/// Read-only history queries, gated on the caller's `history.read`
+/// capability. The journal lives in the host backend; this service only
+/// fronts it, and applies the capability gate in one place so a native
+/// dependent and a WASM one are checked alike.
+struct History {
+    backend: Arc<dyn HostBackend>,
+}
+
+impl History {
+    fn new(backend: Arc<dyn HostBackend>) -> History {
+        History { backend }
+    }
+
+    /// Whether `caller` was granted `history.read`.
+    fn may(&self, caller: &str) -> bool {
+        self.backend
+            .capabilities(caller)
+            .iter()
+            .any(|c| c == CAP_HISTORY_READ)
+    }
+
+    /// Refuse a query from an unprivileged caller, logging it once.
+    fn deny(&self, caller: &str, what: &str) -> bool {
+        if self.may(caller) {
+            return false;
+        }
+        self.backend.log(
+            caller,
+            LogLevel::Warn,
+            &format!("lacks `{CAP_HISTORY_READ}`; refused history {what}"),
+        );
+        true
+    }
+}
+
+impl HistoryService for History {
+    fn block_history(
+        &self,
+        caller: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage {
+        if self.deny(caller, "block-history") {
+            return sdk::empty_history_page();
+        }
+        self.backend.history_block(caller, x, y, z, before, limit)
+    }
+
+    fn worldgen_original(&self, caller: &str, x: i32, y: i32, z: i32) -> bool {
+        if self.deny(caller, "worldgen-original") {
+            return false;
+        }
+        self.backend.history_worldgen_original(caller, x, y, z)
+    }
+
+    fn events(
+        &self,
+        caller: &str,
+        window: HistoryWindow,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage {
+        if self.deny(caller, "events") {
+            return sdk::empty_history_page();
+        }
+        self.backend.history_events(caller, window, before, limit)
+    }
+
+    fn item_chain(&self, caller: &str, uid: u64, depth: u32) -> Vec<HistoryEvent> {
+        if self.deny(caller, "item-chain") {
+            return Vec::new();
+        }
+        self.backend.history_item_chain(caller, uid, depth)
+    }
+
+    fn container_log(
+        &self,
+        caller: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage {
+        if self.deny(caller, "container-log") {
+            return sdk::empty_history_page();
+        }
+        self.backend
+            .history_container_log(caller, x, y, z, before, limit)
+    }
+
+    fn player_events(
+        &self,
+        caller: &str,
+        actor_low: u64,
+        actor_high: u64,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage {
+        if self.deny(caller, "player-events") {
+            return sdk::empty_history_page();
+        }
+        self.backend
+            .history_player_events(caller, actor_low, actor_high, before, limit)
     }
 }
 
@@ -1423,6 +1544,7 @@ mod tests {
         sdk::register_scheduler(&registry, Arc::new(Scheduler::new(Arc::clone(&clock)))).unwrap();
         sdk::register_cooldowns(&registry, Arc::new(Cooldowns::new(Arc::clone(&clock)))).unwrap();
         sdk::register_confirm(&registry, Arc::new(Confirm::new(clock, messages))).unwrap();
+        sdk::register_history(&registry, Arc::new(History::new(caps_backend("x", &[])))).unwrap();
         assert!(sdk::commands(&registry).is_some());
         assert!(sdk::permissions(&registry).is_some());
         assert!(sdk::messages(&registry).is_some());
@@ -1430,6 +1552,38 @@ mod tests {
         assert!(sdk::scheduler(&registry).is_some());
         assert!(sdk::cooldowns(&registry).is_some());
         assert!(sdk::confirm(&registry).is_some());
+        assert!(sdk::history(&registry).is_some());
+    }
+
+    #[test]
+    fn history_reads_are_gated_on_the_capability() {
+        // A caller without `history.read` gets the neutral answer, never a
+        // backend call: the gate is checked before forwarding.
+        let denied = History::new(caps_backend("outsider", &[]));
+        assert!(!denied.may("outsider"));
+        assert!(denied
+            .block_history("outsider", 1, 2, 3, None, 10)
+            .events
+            .is_empty());
+        assert!(!denied.worldgen_original("outsider", 1, 2, 3));
+        assert!(denied.item_chain("outsider", 1, 1).is_empty());
+        assert!(denied
+            .container_log("outsider", 1, 2, 3, None, 10)
+            .events
+            .is_empty());
+        assert!(denied
+            .player_events("outsider", 0, 0, None, 10)
+            .events
+            .is_empty());
+
+        // A granted caller is forwarded; the test backend has no journal, so
+        // the neutral answer comes from the backend, not from the gate.
+        let allowed = History::new(caps_backend("reader", &[CAP_HISTORY_READ]));
+        assert!(allowed.may("reader"));
+        assert!(allowed
+            .block_history("reader", 1, 2, 3, None, 10)
+            .events
+            .is_empty());
     }
 
     #[test]

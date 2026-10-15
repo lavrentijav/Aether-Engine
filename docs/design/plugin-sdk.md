@@ -176,6 +176,11 @@ interface confirm {
     request: func(p: player, prompt: string, command: string) -> bool;
 }
 
+interface history {                     // read-only journal queries (PA2)
+    // block-history / worldgen-original / events / item-chain /
+    // container-log / player-events, all paged; see `history-api.md`
+}
+
 interface services {                    // optional dependencies
     lookup: func(name: string, version: string) -> bool;
 }
@@ -250,6 +255,7 @@ own invariants (e.g. `grant` needs `permissions.admin`).
 | `scheduler` | timer wheel, run-later/every/cancel, async (native) | own `on-tick` |
 | `cooldowns` | per-dependent, per-key last-tick maps | clock |
 | `confirm` | pending confirmations + expiry | `scheduler` |
+| `history` | read-only facade + the `history.read` capability gate | core journal queries (PA2) |
 | `services` | optional-service lookup facade | host registry |
 
 **Does not own:** the permission *model* (core CMD-01/02 owns nodes, groups, inheritance,

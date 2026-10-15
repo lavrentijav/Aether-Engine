@@ -36,9 +36,22 @@ pub mod bindings {
 }
 
 pub use bindings::aether::sdk::commands::{Arg, ArgKind, CommandSpec, Resolution};
+pub use bindings::aether::sdk::history::{
+    Event as HistoryEvent, Page as HistoryPage, Pos as HistoryPos, Window as HistoryWindow,
+};
 pub use bindings::aether::sdk::messages::TitleTimes;
 pub use bindings::aether::sdk::players::{Pos, TeleportCause};
 pub use bindings::Services;
+
+/// An empty history page: no events, no continuation cursor. The neutral
+/// answer a host without history support (`None` provider, stripped build)
+/// returns, so a dependent sees an empty history rather than a trap.
+pub fn empty_history_page() -> HistoryPage {
+    HistoryPage {
+        events: Vec::new(),
+        next: None,
+    }
+}
 
 /// The provider-side permission service the SDK plugin implements.
 ///
@@ -141,6 +154,7 @@ pub struct PlayersProvider(pub Arc<dyn PlayersService>);
 pub struct SchedulerProvider(pub Arc<dyn SchedulerService>);
 pub struct CooldownsProvider(pub Arc<dyn CooldownsService>);
 pub struct ConfirmProvider(pub Arc<dyn ConfirmService>);
+pub struct HistoryProvider(pub Arc<dyn HistoryService>);
 
 /// The provider-side timer service.
 pub trait SchedulerService: Send + Sync {
@@ -170,6 +184,56 @@ pub trait ConfirmService: Send + Sync {
     fn check(&self, caller: &str, p: &Player, token: &str) -> bool;
 }
 
+/// The provider-side history service (PA2).
+///
+/// Read-only: no method writes. The `caller` is the dependent's plugin id, so
+/// the provider can gate on that caller's `history.read` capability and the
+/// host boundary itself stays capability-unaware (the gate is applied once, in
+/// the provider, exactly as for the permission service).
+pub trait HistoryService: Send + Sync {
+    /// The full timeline of the block at `(x, y, z)`, newest first.
+    fn block_history(
+        &self,
+        caller: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage;
+    /// Whether nobody has ever changed the block at `(x, y, z)`.
+    fn worldgen_original(&self, caller: &str, x: i32, y: i32, z: i32) -> bool;
+    /// Events matching `window`, newest first.
+    fn events(
+        &self,
+        caller: &str,
+        window: HistoryWindow,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage;
+    /// The provenance chain of item `uid`, oldest first.
+    fn item_chain(&self, caller: &str, uid: u64, depth: u32) -> Vec<HistoryEvent>;
+    /// Who accessed the container at `(x, y, z)`, newest first.
+    fn container_log(
+        &self,
+        caller: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage;
+    /// One player's event stream, newest first.
+    fn player_events(
+        &self,
+        caller: &str,
+        actor_low: u64,
+        actor_high: u64,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage;
+}
+
 /// The service names under which the SDK services are registered.
 pub const PERMISSIONS_SERVICE: &str = "sdk.permissions";
 pub const COMMANDS_SERVICE: &str = "sdk.commands";
@@ -178,6 +242,7 @@ pub const PLAYERS_SERVICE: &str = "sdk.players";
 pub const SCHEDULER_SERVICE: &str = "sdk.scheduler";
 pub const COOLDOWNS_SERVICE: &str = "sdk.cooldowns";
 pub const CONFIRM_SERVICE: &str = "sdk.confirm";
+pub const HISTORY_SERVICE: &str = "sdk.history";
 /// The service version.
 pub const SERVICE_VERSION: &str = "0.1";
 
@@ -311,6 +376,25 @@ pub fn cooldowns(registry: &ServiceRegistry) -> Option<Arc<dyn CooldownsService>
 pub fn confirm(registry: &ServiceRegistry) -> Option<Arc<dyn ConfirmService>> {
     registry
         .get::<ConfirmProvider>(CONFIRM_SERVICE, SERVICE_VERSION)
+        .map(|p| Arc::clone(&p.0))
+}
+
+/// Publish a history provider.
+pub fn register_history(
+    registry: &ServiceRegistry,
+    service: Arc<dyn HistoryService>,
+) -> Result<(), String> {
+    registry.register(
+        HISTORY_SERVICE,
+        SERVICE_VERSION,
+        Arc::new(HistoryProvider(service)),
+    )
+}
+
+/// Resolve the history provider, if one is registered.
+pub fn history(registry: &ServiceRegistry) -> Option<Arc<dyn HistoryService>> {
+    registry
+        .get::<HistoryProvider>(HISTORY_SERVICE, SERVICE_VERSION)
         .map(|p| Arc::clone(&p.0))
 }
 
@@ -694,6 +778,88 @@ impl bindings::aether::sdk::confirm::Host for StoreData {
     }
 }
 
+impl bindings::aether::sdk::history::Host for StoreData {
+    fn block_history(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage {
+        match history(&self.services) {
+            Some(svc) => svc.block_history(&self.plugin, x, y, z, before, limit),
+            None => {
+                self.service_unavailable(HISTORY_SERVICE, "block-history");
+                empty_history_page()
+            }
+        }
+    }
+
+    fn worldgen_original(&mut self, x: i32, y: i32, z: i32) -> bool {
+        match history(&self.services) {
+            Some(svc) => svc.worldgen_original(&self.plugin, x, y, z),
+            None => {
+                self.service_unavailable(HISTORY_SERVICE, "worldgen-original");
+                false
+            }
+        }
+    }
+
+    fn events(&mut self, window: HistoryWindow, before: Option<u64>, limit: u32) -> HistoryPage {
+        match history(&self.services) {
+            Some(svc) => svc.events(&self.plugin, window, before, limit),
+            None => {
+                self.service_unavailable(HISTORY_SERVICE, "events");
+                empty_history_page()
+            }
+        }
+    }
+
+    fn item_chain(&mut self, uid: u64, depth: u32) -> Vec<HistoryEvent> {
+        match history(&self.services) {
+            Some(svc) => svc.item_chain(&self.plugin, uid, depth),
+            None => {
+                self.service_unavailable(HISTORY_SERVICE, "item-chain");
+                Vec::new()
+            }
+        }
+    }
+
+    fn container_log(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage {
+        match history(&self.services) {
+            Some(svc) => svc.container_log(&self.plugin, x, y, z, before, limit),
+            None => {
+                self.service_unavailable(HISTORY_SERVICE, "container-log");
+                empty_history_page()
+            }
+        }
+    }
+
+    fn player_events(
+        &mut self,
+        actor_low: u64,
+        actor_high: u64,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage {
+        match history(&self.services) {
+            Some(svc) => svc.player_events(&self.plugin, actor_low, actor_high, before, limit),
+            None => {
+                self.service_unavailable(HISTORY_SERVICE, "player-events");
+                empty_history_page()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::bindings::aether::sdk::{commands, messages, permissions};
@@ -842,5 +1008,111 @@ mod tests {
             *self.last_caller.lock().unwrap() = Some(caller.to_string());
             Err("provider says no".to_string())
         }
+    }
+
+    /// A history provider that records the caller and returns one page.
+    #[derive(Default)]
+    struct RecordingHistory {
+        last_caller: Mutex<Option<String>>,
+    }
+
+    impl RecordingHistory {
+        fn note(&self, caller: &str) {
+            *self.last_caller.lock().unwrap() = Some(caller.to_string());
+        }
+    }
+
+    impl HistoryService for RecordingHistory {
+        fn block_history(
+            &self,
+            caller: &str,
+            _x: i32,
+            _y: i32,
+            _z: i32,
+            _before: Option<u64>,
+            _limit: u32,
+        ) -> HistoryPage {
+            self.note(caller);
+            HistoryPage {
+                events: Vec::new(),
+                next: Some(42),
+            }
+        }
+        fn worldgen_original(&self, caller: &str, _x: i32, _y: i32, _z: i32) -> bool {
+            self.note(caller);
+            true
+        }
+        fn events(
+            &self,
+            caller: &str,
+            _window: HistoryWindow,
+            _before: Option<u64>,
+            _limit: u32,
+        ) -> HistoryPage {
+            self.note(caller);
+            empty_history_page()
+        }
+        fn item_chain(&self, caller: &str, _uid: u64, _depth: u32) -> Vec<HistoryEvent> {
+            self.note(caller);
+            Vec::new()
+        }
+        fn container_log(
+            &self,
+            caller: &str,
+            _x: i32,
+            _y: i32,
+            _z: i32,
+            _before: Option<u64>,
+            _limit: u32,
+        ) -> HistoryPage {
+            self.note(caller);
+            empty_history_page()
+        }
+        fn player_events(
+            &self,
+            caller: &str,
+            _low: u64,
+            _high: u64,
+            _before: Option<u64>,
+            _limit: u32,
+        ) -> HistoryPage {
+            self.note(caller);
+            empty_history_page()
+        }
+    }
+
+    #[test]
+    fn the_history_bridge_forwards_the_caller_and_returns_the_page() {
+        use super::bindings::aether::sdk::history;
+        let backend = Arc::new(Rec {
+            granted: Vec::new(),
+            log: Mutex::new(Vec::new()),
+        });
+        let services = Arc::new(ServiceRegistry::new());
+        let provider = Arc::new(RecordingHistory::default());
+        register_history(&services, provider.clone()).unwrap();
+        let mut s = StoreData::for_test("reader", Vec::new(), services, backend);
+        let page = history::Host::block_history(&mut s, 1, 2, 3, None, 10);
+        assert_eq!(page.next, Some(42));
+        assert!(history::Host::worldgen_original(&mut s, 1, 2, 3));
+        assert_eq!(
+            provider.last_caller.lock().unwrap().as_deref(),
+            Some("reader")
+        );
+    }
+
+    #[test]
+    fn the_history_bridge_answers_the_neutral_value_without_a_provider() {
+        use super::bindings::aether::sdk::history;
+        let (mut s, backend) = store(&[]);
+        let page = history::Host::block_history(&mut s, 1, 2, 3, None, 10);
+        assert!(page.events.is_empty() && page.next.is_none());
+        assert!(!history::Host::worldgen_original(&mut s, 1, 2, 3));
+        assert!(history::Host::item_chain(&mut s, 1, 1).is_empty());
+        let logged = backend.log.lock().unwrap();
+        assert!(
+            logged.iter().any(|l| l.contains("sdk.history")),
+            "{logged:?}"
+        );
     }
 }

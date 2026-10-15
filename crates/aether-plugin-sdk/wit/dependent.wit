@@ -21,4 +21,5 @@ world dependent {
     import aether:sdk/scheduler@0.1.0;
     import aether:sdk/cooldowns@0.1.0;
     import aether:sdk/confirm@0.1.0;
+    import aether:sdk/history@0.1.0;
 }
