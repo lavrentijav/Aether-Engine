@@ -178,6 +178,7 @@ Grouped by roadmap phase (see [ROADMAP.md](ROADMAP.md) for the full sequence).
 
 **Phase 4 — Extensibility & ops**
 - 🚧 WASM plugin API: stage P1 shipped — `crates/aether-plugin` (Wasmtime 36 component model, `plugin.toml` manifest, sandbox limits, `before-*`/`after-*`/`on-tick`/`on-command` bus, `storage.kv`/`log`/`config`/`supports`) wired into `aether-server` behind the `plugins` feature, with `plugins/examples/hello` as the reference. Stage P2 (economy as a plugin, `storage.ledger`) and P3 (plugin registries) are next. The **plugin SDK (PS1)** adds an in-process **native** plugin tier (`tier = "native"`, shared service registry, load-time `requires`) and ships `plugins/sdk`: one-call helpers for permissions, commands, messages, players, config, scheduler, cooldowns and confirm prompts, callable by native and WASM dependents over one boundary crossing (`plugins/examples/greet`). The C-ABI native tier is still 📋.
+- ✅ **Sidebar scoreboard (SB1)**: the native plugin `plugins/sidebar` composes a per-player panel from `plugins/sidebar/config.toml` layouts and `%placeholders%` and pushes it through a core per-player scoreboard packet path (`protocol/scoreboard.rs`) that renders 1.8 through 26.x and resends only changed lines (teams up to 1.20.2, score display names + `number_format = blank` from 1.20.3), plus the tab-list header/footer and a `sidebar@0.1` service — see [design/sidebar.md](design/sidebar.md).
 - 🚧 Aether-Convert migration tool (initial version shipped; hardening ahead)
 - 📋 In-game profiler, ops hardening
 

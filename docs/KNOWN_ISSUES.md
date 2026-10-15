@@ -110,6 +110,12 @@
     - **`requires!` is unenforced.** The macro emits a `REQUIRES` constant that nothing reads; the host reads the dependency from `plugin.toml`, so the two are kept in step by the author.
     - **The capability gate is in the service layer.** `plugins/sdk` checks `permissions.admin` on grant/revoke and `messages.send`/`messages.broadcast` on sends, reading the host's record of the caller's effective grant by caller id. Native dependents are trusted-by-install, so the gate is a consistency check for them, not a sandbox.
 
+20. **The sidebar scoreboard is a native plugin over a core packet path, with four known edges (SB1).** `plugins/sidebar` composes a per-player panel from `config.toml` layouts and `%placeholders%` and hands it to `PlayerHandle::update_sidebar`, which renders 1.8 through 26.x (teams up to 1.20.2; the score's display name plus `number_format = blank` from 1.20.3) and resends only changed lines; the tab-list header/footer and a `sidebar@0.1` service ride along (see [design/sidebar.md](design/sidebar.md)). The limits:
+    - **CMD-15 is not landed.** The core keeps only the sidebar model and packets, not the full vanilla `/scoreboard` model, commands and storage (CMD-15a/b). Nothing else draws a sidebar today, so the plugin cannot yet conflict with a vanilla sidebar, but config `mode = "yield"` is parsed and **inert** until there is a vanilla model to yield to.
+    - **`%ping%` is 0 and `%time%` is 06:00.** The tab list does not measure round-trip latency and no world clock is exposed to plugins; the placeholders resolve to those constants rather than a guessed figure.
+    - **WASM plugins cannot register placeholders.** `sidebar@0.1` is typed in `crates/aether-plugin` for native consumers; a WASM consumer needs a WIT interface, which means a new package version because the `aether:plugin@0.1.0` exports are frozen. Deferred.
+    - **26.1–26.3 scoreboard packet ids are unverified.** No data-generator report for those releases was available, so `wire_for` reuses 1.21.11's ids for protocols 775–777. The field *shapes* are correct; a wrong id would be fixed by regenerating the table from the release's own `packets.json`.
+
 ### B. Known Deviations Registry (Phase 1 — accepted on purpose)
 These are **not bugs** in Phase 1 — they are documented, temporary compatibility gaps that must be recorded in the engine config and closed in Phase 2.
 
