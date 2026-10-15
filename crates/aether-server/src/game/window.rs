@@ -24,8 +24,9 @@ use crate::protocol::{BlockSource, Menu, ServerEvent};
 use crate::session::DemoWorld;
 
 type Pos = (i32, i32, i32);
-/// A window's id, its slots, and a furnace's four progress properties.
-type OpenSlots = (u8, Vec<Option<Stack>>, Option<(i16, i16, i16, i16)>);
+/// A window's id, its slots, and its `(property, value)` pairs — a furnace's
+/// four, a brewing stand's two.
+type OpenSlots = (u8, Vec<Option<Stack>>, Vec<(i16, i16)>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Layout {
@@ -35,6 +36,7 @@ enum Layout {
     Furnace,
     Hopper,
     Dispenser,
+    BrewingStand,
 }
 
 impl Layout {
@@ -43,7 +45,11 @@ impl Layout {
     fn is_container(self) -> bool {
         matches!(
             self,
-            Layout::Chest | Layout::Furnace | Layout::Hopper | Layout::Dispenser
+            Layout::Chest
+                | Layout::Furnace
+                | Layout::Hopper
+                | Layout::Dispenser
+                | Layout::BrewingStand
         )
     }
 }
@@ -212,6 +218,17 @@ impl<'a> Ctx<'a> {
                 tables::fuel_ticks_id(s.item) > 0
                     || s.item == crate::inventory::item("minecraft:bucket")
             }
+            Ref::Cont(0..=2) if self.layout == Layout::BrewingStand => s
+                .item
+                .vanilla_name()
+                .is_some_and(super::brewing::is_bottle_item),
+            Ref::Cont(3) if self.layout == Layout::BrewingStand => s
+                .item
+                .vanilla_name()
+                .is_some_and(super::brewing::is_ingredient),
+            Ref::Cont(4) if self.layout == Layout::BrewingStand => {
+                s.item.vanilla_name().is_some_and(super::brewing::is_fuel)
+            }
             _ => true,
         }
     }
@@ -220,6 +237,7 @@ impl<'a> Ctx<'a> {
     fn cap(&self, r: Ref, s: &Stack) -> u8 {
         match r {
             Ref::Inv(5..=8) => 1,
+            Ref::Cont(0..=2) if self.layout == Layout::BrewingStand => 1,
             _ => s.max_stack(),
         }
     }
@@ -293,6 +311,35 @@ impl<'a> Ctx<'a> {
                     rev(main, end)
                 } else {
                     fwd(0, main)
+                }
+            }
+            Layout::BrewingStand => {
+                if slot < main {
+                    // A bottle, the ingredient or the fuel slides straight
+                    // into the player's own inventory.
+                    rev(main, end)
+                } else if stack
+                    .item
+                    .vanilla_name()
+                    .is_some_and(super::brewing::is_fuel)
+                {
+                    vec![4]
+                } else if stack
+                    .item
+                    .vanilla_name()
+                    .is_some_and(super::brewing::is_ingredient)
+                {
+                    vec![3]
+                } else if stack
+                    .item
+                    .vanilla_name()
+                    .is_some_and(super::brewing::is_bottle_item)
+                {
+                    fwd(0, 3)
+                } else if slot < hotbar {
+                    fwd(hotbar, end)
+                } else {
+                    fwd(main, hotbar)
                 }
             }
             Layout::Furnace => {
@@ -622,6 +669,10 @@ fn layout_of(w: &OpenWindow) -> (Layout, Option<ContainerTarget>) {
             Layout::Dispenser,
             Some(ContainerTarget::Single(ContainerKind::Dispenser, *pos)),
         ),
+        WindowKind::BrewingStand { pos } => (
+            Layout::BrewingStand,
+            Some(ContainerTarget::Single(ContainerKind::BrewingStand, *pos)),
+        ),
     }
 }
 
@@ -798,7 +849,8 @@ fn container_positions(handle: &PlayerHandle) -> Vec<(i32, i32, i32)> {
         }
         Some(WindowKind::Furnace { pos })
         | Some(WindowKind::Hopper { pos })
-        | Some(WindowKind::Dispenser { pos }) => vec![*pos],
+        | Some(WindowKind::Dispenser { pos })
+        | Some(WindowKind::BrewingStand { pos }) => vec![*pos],
         _ => Vec::new(),
     }
 }
@@ -810,7 +862,8 @@ fn viewing_container(handle: &PlayerHandle) -> Option<(i32, i32, i32)> {
         Some(WindowKind::Chest { left, .. }) => Some(*left),
         Some(WindowKind::Furnace { pos })
         | Some(WindowKind::Hopper { pos })
-        | Some(WindowKind::Dispenser { pos }) => Some(*pos),
+        | Some(WindowKind::Dispenser { pos })
+        | Some(WindowKind::BrewingStand { pos }) => Some(*pos),
         _ => None,
     }
 }
@@ -821,7 +874,8 @@ fn window_shows(w: &OpenWindow, pos: (i32, i32, i32)) -> bool {
         WindowKind::Chest { left, right } => *left == pos || *right == Some(pos),
         WindowKind::Furnace { pos: p }
         | WindowKind::Hopper { pos: p }
-        | WindowKind::Dispenser { pos: p } => *p == pos,
+        | WindowKind::Dispenser { pos: p }
+        | WindowKind::BrewingStand { pos: p } => *p == pos,
         _ => false,
     }
 }
@@ -884,7 +938,7 @@ fn open_window_slots(st: &PlayerState, inv: &Inventory, world: &DemoWorld) -> Op
             let mut v = vec![res];
             v.extend(grid.iter().cloned());
             v.append(&mut player_part);
-            (w.id, v, None)
+            (w.id, v, Vec::new())
         }
         WindowKind::Chest { left, right } => {
             let mut v = match right {
@@ -897,24 +951,38 @@ fn open_window_slots(st: &PlayerState, inv: &Inventory, world: &DemoWorld) -> Op
                 None => containers::snapshot(world, *left, ContainerKind::Chest).slots,
             };
             v.append(&mut player_part);
-            (w.id, v, None)
+            (w.id, v, Vec::new())
         }
         WindowKind::Furnace { pos } => {
             let c = containers::snapshot(world, *pos, ContainerKind::Furnace);
-            let props = (c.burn as i16, c.burn_max as i16, c.cook as i16, 200);
+            let props = vec![
+                (0, c.burn as i16),
+                (1, c.burn_max as i16),
+                (2, c.cook as i16),
+                (3, 200),
+            ];
             let mut v = c.slots;
             v.append(&mut player_part);
-            (w.id, v, Some(props))
+            (w.id, v, props)
         }
         WindowKind::Hopper { pos } => {
             let mut v = containers::snapshot(world, *pos, ContainerKind::Hopper).slots;
             v.append(&mut player_part);
-            (w.id, v, None)
+            (w.id, v, Vec::new())
         }
         WindowKind::Dispenser { pos } => {
             let mut v = containers::snapshot(world, *pos, ContainerKind::Dispenser).slots;
             v.append(&mut player_part);
-            (w.id, v, None)
+            (w.id, v, Vec::new())
+        }
+        WindowKind::BrewingStand { pos } => {
+            let c = containers::snapshot(world, *pos, ContainerKind::BrewingStand);
+            // Property 0 is the brew time out of 400, property 1 the fuel
+            // out of 20, vanilla's `BrewingStandBlockEntity` data slots.
+            let props = vec![(0, c.cook as i16), (1, c.burn as i16)];
+            let mut v = c.slots;
+            v.append(&mut player_part);
+            (w.id, v, props)
         }
     })
 }
@@ -976,17 +1044,15 @@ pub fn sync_open(handle: &PlayerHandle, world: &DemoWorld) {
         },
         world,
     );
-    if let Some((burn, burn_max, cook, cook_max)) = props {
-        for (property, value) in [(0, burn), (1, burn_max), (2, cook), (3, cook_max)] {
-            handle.emit(
-                &ServerEvent::WindowProperty {
-                    window_id: id,
-                    property,
-                    value,
-                },
-                world,
-            );
-        }
+    for (property, value) in props {
+        handle.emit(
+            &ServerEvent::WindowProperty {
+                window_id: id,
+                property,
+                value,
+            },
+            world,
+        );
     }
 }
 
@@ -1002,6 +1068,7 @@ pub fn open(handle: &PlayerHandle, world: &DemoWorld, kind: WindowKind) {
             WindowKind::Furnace { .. } => (Menu::Furnace, "Furnace"),
             WindowKind::Hopper { .. } => (Menu::Hopper, "Hopper"),
             WindowKind::Dispenser { .. } => (Menu::Dispenser, "Dispenser"),
+            WindowKind::BrewingStand { .. } => (Menu::BrewingStand, "Brewing Stand"),
         };
         st.window = Some(OpenWindow { id, kind });
         (id, menu, title)

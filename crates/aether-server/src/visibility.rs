@@ -1,0 +1,1022 @@
+//! Visibility culling / anti-xray — the server half of the optional module
+//! (`docs/design/visibility-culling.md`).
+//!
+//! The pure graph and the breadth-first search live in
+//! [`aether_world::visibility`]; this module caches a section's graph across
+//! players, keeps each player's reachable set up to date, and masks the
+//! sections a player cannot see out of the column the codec is about to
+//! encode. Off unless `[visibility] enabled = true`.
+//!
+//! The masking is a [`BlockSource`] wrapper: the codec reads a hidden
+//! section and is handed `stone` (or `air`) for every one of its 4096 cells,
+//! so the existing per-version encoders turn it into the single-valued stone
+//! container 1.18+ already speaks, or a full stone section before that,
+//! without any codec change. Nothing here edits a codec.
+//!
+//! The one deliberate simplification: the codecs that compute real light ask
+//! the same [`BlockSource`] for blocks and for light, so a hidden section is
+//! lit as the stone it is (block light 0, sky light 0). For the common hidden
+//! section — solid rock — that is the real value anyway; a hidden section
+//! holding a sealed, lit pocket would differ until it is revealed.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use aether_world::visibility::{
+    compute_section_graph, default_is_opaque, reachable_sections, SectionGraph,
+};
+use aether_world::BlockStateId;
+
+use crate::config::HiddenFill;
+use crate::players::PlayerHandle;
+use crate::protocol::{BlockSource, GameMode, ServerEvent};
+
+/// The lowest section `y` this world has: `-64 >> 4`.
+pub const SECTION_MIN_Y: i32 = -4;
+/// The highest section `y`: `(384 - 1) >> 4`.
+pub const SECTION_MAX_Y: i32 = 23;
+/// Sections in a column.
+pub const SECTION_COUNT: usize = (SECTION_MAX_Y - SECTION_MIN_Y + 1) as usize;
+
+/// Solid stone, what a hidden section is filled with by default.
+const STONE: BlockStateId = aether_world::registry::ids::STONE;
+
+/// One player's visibility bookkeeping.
+///
+/// `Default` is the state before the first search: no centre, nothing known.
+#[derive(Default)]
+pub struct State {
+    /// Set by `/visibility off`: this player sees everything.
+    pub bypass: bool,
+    /// The section the last search was rooted at.
+    center: Option<(i32, i32, i32)>,
+    /// A graph inside this player's view changed since the last search. Set
+    /// from a writer thread, cleared by the next search.
+    dirty: bool,
+    /// Bumped on every search. A reveal plan computed for one search id is not
+    /// recomputed for the same id unless it was cut short by the budget.
+    search_id: u64,
+    /// Sections the player can currently see.
+    visible: HashSet<(i32, i32, i32)>,
+    /// For each column sent, the bitmask of hidden sections (bit `i` is
+    /// section `SECTION_MIN_Y + i`). What the client currently holds.
+    sent: HashMap<(i32, i32), u32>,
+    /// The search id the reveal plan was last computed for.
+    planned_search: u64,
+    /// Set when a reveal plan hit the per-tick budget, so the next tick
+    /// continues it instead of treating the plan as done.
+    reveal_pending: bool,
+}
+
+impl State {
+    /// Whether the cached reachable set already matches `section` and no
+    /// in-view graph has changed since it was computed.
+    pub fn is_fresh(&self, section: (i32, i32, i32)) -> bool {
+        self.center == Some(section) && !self.dirty
+    }
+
+    /// Adopt a freshly computed reachable set.
+    ///
+    /// `epoch_at_start` is the global edit epoch when the search began. The
+    /// stale flag is only cleared if no block was written while the search
+    /// ran: a write that landed mid-search is not lost, the next search runs
+    /// again.
+    pub fn set_visible_if(
+        &mut self,
+        section: (i32, i32, i32),
+        visible: HashSet<(i32, i32, i32)>,
+        epoch_at_start: u64,
+    ) {
+        self.center = Some(section);
+        self.visible = visible;
+        self.search_id = self.search_id.wrapping_add(1);
+        if EDIT_EPOCH.load(Ordering::Relaxed) == epoch_at_start {
+            self.dirty = false;
+        }
+    }
+
+    /// Adopt a reachable set together with the columns already sent, for the
+    /// join path where the first columns go out before a handle exists.
+    pub fn seed(
+        &mut self,
+        section: (i32, i32, i32),
+        visible: HashSet<(i32, i32, i32)>,
+        sent: HashMap<(i32, i32), u32>,
+    ) {
+        self.center = Some(section);
+        self.dirty = false;
+        self.visible = visible;
+        self.sent = sent;
+        self.search_id = self.search_id.wrapping_add(1);
+        self.planned_search = self.search_id;
+        self.reveal_pending = false;
+    }
+
+    /// The hidden-section mask for a column of the current reachable set.
+    pub fn hidden_for(&self, cx: i32, cz: i32) -> u32 {
+        desired_hidden(&self.visible, cx, cz)
+    }
+
+    /// Record the mask a column was actually sent with.
+    pub fn record_sent(&mut self, cx: i32, cz: i32, mask: u32) {
+        self.sent.insert((cx, cz), mask);
+    }
+
+    /// The mask to render column `(cx, cz)` with, updating what the client
+    /// holds.
+    ///
+    /// `bypass` is the caller's current flag. It matters even on the last
+    /// column: `/visibility off` re-renders the columns it had masked, and
+    /// recording the zero mask here is what tells the planner the client now
+    /// holds the real blocks (round-2 N4 / round-3 New-2).
+    pub fn mask_for_render(&mut self, cx: i32, cz: i32, bypass: bool) -> u32 {
+        let mask = if bypass { 0 } else { self.hidden_for(cx, cz) };
+        self.record_sent(cx, cz, mask);
+        mask
+    }
+
+    /// Forget a column the client no longer has.
+    pub fn forget(&mut self, cx: i32, cz: i32) {
+        self.sent.remove(&(cx, cz));
+    }
+
+    /// Drop everything: a respawn starts the client with an empty level, so
+    /// the columns it used to hold are no longer ours to reveal or mask.
+    pub fn reset(&mut self) {
+        self.center = None;
+        self.dirty = true;
+        self.visible.clear();
+        self.sent.clear();
+        self.search_id = self.search_id.wrapping_add(1);
+        self.planned_search = self.search_id;
+        self.reveal_pending = false;
+    }
+
+    /// Mark this player's reachable set stale if any of `sections` falls
+    /// inside the view box rooted at their current section.
+    ///
+    /// A change outside that box cannot alter the answer: the breadth-first
+    /// search never looks outside it. The vertical axis is always in range,
+    /// because the search walks the whole column.
+    pub fn mark_dirty_for(&mut self, view_radius: i32, sections: &[(i32, i32, i32)]) {
+        let Some(c) = self.center else {
+            return;
+        };
+        if sections
+            .iter()
+            .any(|s| (s.0 - c.0).abs() <= view_radius && (s.2 - c.2).abs() <= view_radius)
+        {
+            self.dirty = true;
+        }
+    }
+
+    /// Force the next search to run, regardless of what changed.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// The columns to re-send this tick: newly visible ones, nearest first,
+    /// at most `budget`. A plan cut short by the budget is continued on the
+    /// next tick rather than dropped.
+    pub fn reveal_step(&mut self, budget: u32) -> Vec<(i32, i32)> {
+        if budget == 0 {
+            return Vec::new();
+        }
+        if self.planned_search == self.search_id && !self.reveal_pending {
+            return Vec::new();
+        }
+        self.planned_search = self.search_id;
+        let plan = plan_reveals(
+            &self.visible,
+            &self.sent,
+            self.center.unwrap_or((0, 0, 0)),
+            budget,
+        );
+        self.reveal_pending = plan.len() as u32 == budget;
+        plan
+    }
+
+    /// The sections this player can currently see (tests and diagnostics).
+    pub fn visible(&self) -> &HashSet<(i32, i32, i32)> {
+        &self.visible
+    }
+
+    /// The columns sent and their last-known hidden masks (tests).
+    pub fn sent(&self) -> &HashMap<(i32, i32), u32> {
+        &self.sent
+    }
+}
+
+/// The shared section-graph cache.
+///
+/// The graph of a section depends only on the world, so one cache serves every
+/// player. A graph is computed from a snapshot of the blocks *outside* the
+/// lock; it is stored only if the global edit epoch is unchanged between the
+/// snapshot and the store, so a write that lands in that window discards the
+/// stale graph (finding 4).
+///
+/// The epoch is global and monotonic rather than a per-section counter that is
+/// reset on store: a per-section reset lets an in-flight compute that read the
+/// reset value be re-admitted after a newer graph is stored, poisoning the
+/// cache with a pre-write graph (round-3 New-1). A global version that only
+/// ever increases cannot be re-created, and it removes the per-section map
+/// entirely, so there is nothing to grow without bound (round-2 N3).
+#[derive(Default)]
+struct GraphCache {
+    graphs: HashMap<(i32, i32, i32), SectionGraph>,
+}
+
+/// Store `graph` for `key` only if no write landed since `computed_at` was
+/// read.
+fn store_graph(
+    cache: &mut GraphCache,
+    key: (i32, i32, i32),
+    graph: SectionGraph,
+    computed_at: u64,
+) {
+    if EDIT_EPOCH.load(Ordering::Relaxed) == computed_at {
+        cache.graphs.insert(key, graph);
+    }
+}
+
+static CACHE: OnceLock<Mutex<GraphCache>> = OnceLock::new();
+
+fn cache() -> &'static Mutex<GraphCache> {
+    CACHE.get_or_init(|| Mutex::new(GraphCache::default()))
+}
+
+/// The global edit epoch: every block write that could change a graph bumps
+/// it, and it is never reset.
+///
+/// It guards two things. A graph is only cached if it is unchanged since the
+/// snapshot was taken (finding 4). A player's search reads it before and after
+/// the breadth-first pass, so a write that lands mid-search is not cleared
+/// (round-2 N2). It is a single relaxed increment — no lock, no allocation.
+static EDIT_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Drop `key`'s cached graph and advance the epoch.
+fn invalidate_section(cache: &mut GraphCache, key: (i32, i32, i32)) {
+    cache.graphs.remove(&key);
+    EDIT_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Sections written since the last tick, for the tick thread to hand to the
+/// players in range. Bounded: drained once a tick.
+static DIRTY_SECTIONS: OnceLock<Mutex<HashSet<(i32, i32, i32)>>> = OnceLock::new();
+
+fn dirty_sections() -> &'static Mutex<HashSet<(i32, i32, i32)>> {
+    DIRTY_SECTIONS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Forget a section's cached graph after a block in it changed.
+///
+/// Called from every path that writes a block, so a broken wall reopens the
+/// sight line to whatever was behind it. It is deliberately the cheapest thing
+/// that can work: with culling off it returns before touching any lock or
+/// allocating, so a deployment on the default configuration pays nothing
+/// (N1). When on, it takes the cache lock once and records the section; the
+/// tick thread decides which players that actually affects. There is no
+/// snapshot of the player list here.
+#[inline]
+pub fn invalidate_block(x: i32, y: i32, z: i32) {
+    if !crate::visibility_enabled() {
+        return;
+    }
+    record_invalidation((x >> 4, y >> 4, z >> 4));
+}
+
+/// The cache/epoch/dirty work for one changed section.
+fn record_invalidation(key: (i32, i32, i32)) {
+    invalidate_section(&mut cache().lock().unwrap(), key);
+    dirty_sections().lock().unwrap().insert(key);
+}
+
+/// Drop every cached graph. Used by tests to start from a clean cache.
+#[cfg(test)]
+pub fn invalidate_all() {
+    cache().lock().unwrap().graphs.clear();
+    dirty_sections().lock().unwrap().clear();
+    EDIT_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The section graph for `c`, computed and cached on first ask.
+///
+/// `None` outside the world's vertical range, which stops the search at the
+/// floor and ceiling.
+fn graph(world: &dyn BlockSource, c: (i32, i32, i32)) -> Option<SectionGraph> {
+    if !(SECTION_MIN_Y..=SECTION_MAX_Y).contains(&c.1) {
+        return None;
+    }
+    // Read the epoch under the lock, at the same moment the miss is observed,
+    // so the version seen is exactly the one that was current when we decided
+    // to compute: an invalidation that lands after this point bumps the epoch
+    // and is caught at the store (finding 4).
+    let computed_at = {
+        let cc = cache().lock().unwrap();
+        if let Some(g) = cc.graphs.get(&c) {
+            return Some(*g);
+        }
+        EDIT_EPOCH.load(Ordering::Relaxed)
+    };
+    let mut blocks = [BlockStateId::AIR; 4096];
+    world.copy_section(c.0, c.1, c.2, &mut blocks);
+    let g = compute_section_graph(&blocks, default_is_opaque);
+    store_graph(&mut cache().lock().unwrap(), c, g, computed_at);
+    Some(g)
+}
+
+/// The section a player's feet are in.
+pub fn section_of(pos: crate::players::PosLook) -> (i32, i32, i32) {
+    (
+        (pos.x.floor() as i32) >> 4,
+        (pos.y.floor() as i32) >> 4,
+        (pos.z.floor() as i32) >> 4,
+    )
+}
+
+/// The reachable section set for a bare position, for the join path where the
+/// first columns go out before the player's handle exists.
+pub fn visible_from(
+    world: &dyn BlockSource,
+    pos: (f64, f64, f64),
+    view_distance: i32,
+) -> HashSet<(i32, i32, i32)> {
+    let margin = crate::visibility_config().margin_blocks as f64;
+    reachable_sections(
+        pos,
+        margin,
+        view_distance,
+        SECTION_MIN_Y,
+        SECTION_MAX_Y,
+        |x, y, z| graph(world, (x, y, z)),
+    )
+}
+
+/// Recompute a player's reachable set if the player moved to a new section or
+/// an in-view graph changed since the last search.
+fn ensure_visible(handle: &PlayerHandle, world: &dyn BlockSource) {
+    let pos = handle.pos();
+    let section = section_of(pos);
+    if handle.visibility().is_fresh(section) {
+        return;
+    }
+    let epoch = EDIT_EPOCH.load(Ordering::Relaxed);
+    let visible = visible_from(world, (pos.x, pos.y, pos.z), crate::server_view_radius());
+    handle.visibility().set_visible_if(section, visible, epoch);
+}
+
+/// Which sections of column `(cx, cz)` are hidden for this visible set.
+///
+/// Bit `i` set means section `SECTION_MIN_Y + i` is not visible.
+pub fn desired_hidden(visible: &HashSet<(i32, i32, i32)>, cx: i32, cz: i32) -> u32 {
+    let mut mask = 0u32;
+    for i in 0..SECTION_COUNT {
+        let cy = SECTION_MIN_Y + i as i32;
+        if !visible.contains(&(cx, cy, cz)) {
+            mask |= 1 << i;
+        }
+    }
+    mask
+}
+
+/// The fill block for this player.
+///
+/// `air` is only for a client that cannot fall through the hole it would open;
+/// a survival player is given stone even when the config asks for air.
+pub fn fill_for(handle: &PlayerHandle) -> BlockStateId {
+    fill_for_mode(handle.game().mode)
+}
+
+/// The fill block for a game mode, for the join path before a handle exists.
+pub fn fill_for_mode(mode: GameMode) -> BlockStateId {
+    match crate::visibility_config().hidden_fill {
+        HiddenFill::Stone => STONE,
+        HiddenFill::Air if mode == GameMode::Survival => STONE,
+        HiddenFill::Air => BlockStateId::AIR,
+    }
+}
+
+/// The hidden-section mask to encode column `(cx, cz)` with, recording it as
+/// what the client now holds. `0` when culling is off or bypassed.
+pub fn hidden_mask_for_render(
+    handle: &PlayerHandle,
+    world: &dyn BlockSource,
+    cx: i32,
+    cz: i32,
+) -> u32 {
+    if !crate::visibility_enabled() {
+        return 0;
+    }
+    let bypass = handle.visibility().bypass;
+    if !bypass {
+        ensure_visible(handle, world);
+    }
+    handle.visibility().mask_for_render(cx, cz, bypass)
+}
+
+/// Forget a column the client no longer has.
+pub fn forget_column(handle: &PlayerHandle, cx: i32, cz: i32) {
+    handle.visibility().forget(cx, cz);
+}
+
+/// The sections whose mask is currently non-zero, for `/visibility off`.
+fn masked_columns(sent: &HashMap<(i32, i32), u32>) -> Vec<(i32, i32)> {
+    sent.iter()
+        .filter(|(_, mask)| **mask != 0)
+        .map(|(&column, _)| column)
+        .collect()
+}
+
+/// Re-send every column this client currently holds masked, so `/visibility
+/// off` shows the real blocks without waiting for columns to re-stream.
+///
+/// The caller sets `bypass` first: with it on, re-encoding a column records a
+/// zero mask, so the client ends up with every section real and the reveal
+/// planner has nothing left to do.
+pub fn reveal_all(handle: &PlayerHandle, world: &dyn BlockSource) {
+    let columns = masked_columns(handle.visibility().sent());
+    for (cx, cz) in columns {
+        handle.emit(&ServerEvent::ChunkColumn { cx, cz }, world);
+    }
+}
+
+/// Drop the columns a respawned client no longer holds, so the reveal planner
+/// stops walking them (finding 7).
+pub fn reset_columns(handle: &PlayerHandle) {
+    handle.visibility().reset();
+}
+
+/// Columns to re-send (reveal) this pass, nearest first, capped at `budget`.
+///
+/// A reveal is a section whose bit is set in what the client holds but clear
+/// in the current visible set. Sections that went the other way (visible,
+/// then hidden) are left as they are: the client has already seen them, and
+/// re-hiding would cost a full column re-send for no gain.
+pub fn plan_reveals(
+    visible: &HashSet<(i32, i32, i32)>,
+    sent: &HashMap<(i32, i32), u32>,
+    player_section: (i32, i32, i32),
+    budget: u32,
+) -> Vec<(i32, i32)> {
+    let (px, pz) = (player_section.0, player_section.2);
+    let mut candidates: Vec<((i32, i32), i64)> = Vec::new();
+    for (&(cx, cz), &old) in sent {
+        let now = desired_hidden(visible, cx, cz);
+        if old & !now != 0 {
+            let dx = (cx - px) as i64;
+            let dz = (cz - pz) as i64;
+            candidates.push(((cx, cz), dx * dx + dz * dz));
+        }
+    }
+    candidates.sort_by_key(|&(_, distance)| distance);
+    candidates.truncate(budget as usize);
+    candidates.into_iter().map(|(column, _)| column).collect()
+}
+
+/// One per-player reveal pass, run from the game tick.
+///
+/// A search only reruns when the player crosses a section border or an
+/// in-view graph changed. A reveal that hit the budget keeps the plan pending
+/// so the rest of the backlog goes out on following ticks.
+pub fn tick(players: &[Arc<PlayerHandle>], world: &dyn BlockSource) {
+    let cfg = crate::visibility_config();
+    if !cfg.enabled {
+        return;
+    }
+    // Hand the sections written since the last tick to the players whose view
+    // covers one, so each one's own search is invalidated — without the writer
+    // thread ever walking the player list (N1). Drained here, so the set stays
+    // bounded; a write that lands during this tick waits for the next one.
+    let dirty: Vec<(i32, i32, i32)> = dirty_sections().lock().unwrap().drain().collect();
+    if !dirty.is_empty() {
+        let r = crate::server_view_radius();
+        for player in players {
+            let mut st = player.visibility();
+            if !st.bypass {
+                st.mark_dirty_for(r, &dirty);
+            }
+        }
+    }
+    for player in players {
+        if player.visibility().bypass {
+            continue;
+        }
+        ensure_visible(player, world);
+        let plan = player.visibility().reveal_step(cfg.reveal_budget_per_tick);
+        for (cx, cz) in plan {
+            player.emit(&ServerEvent::ChunkColumn { cx, cz }, world);
+        }
+    }
+}
+
+/// A [`BlockSource`] that reports a hidden section as a single repeated block.
+///
+/// The wrapper is what makes the anti-xray encoding codec-agnostic: every
+/// version's chunk writer already turns 4096 identical blocks into its own
+/// cheapest section form, so nothing downstream has to know about visibility.
+pub struct MaskedColumn<'a> {
+    inner: &'a dyn BlockSource,
+    cx: i32,
+    cz: i32,
+    hidden: u32,
+    fill: BlockStateId,
+}
+
+impl<'a> MaskedColumn<'a> {
+    /// Mask `hidden` (bit `i` is section `SECTION_MIN_Y + i`) of column
+    /// `(cx, cz)` with `fill`.
+    pub fn new(
+        inner: &'a dyn BlockSource,
+        cx: i32,
+        cz: i32,
+        hidden: u32,
+        fill: BlockStateId,
+    ) -> Self {
+        Self {
+            inner,
+            cx,
+            cz,
+            hidden,
+            fill,
+        }
+    }
+
+    fn hides(&self, cx: i32, cy: i32, cz: i32) -> bool {
+        if cx != self.cx || cz != self.cz {
+            return false;
+        }
+        if !(SECTION_MIN_Y..=SECTION_MAX_Y).contains(&cy) {
+            return false;
+        }
+        let i = (cy - SECTION_MIN_Y) as u32;
+        self.hidden & (1 << i) != 0
+    }
+}
+
+impl BlockSource for MaskedColumn<'_> {
+    fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+        if self.hides(x >> 4, y >> 4, z >> 4) {
+            return self.fill;
+        }
+        self.inner.block_at(x, y, z)
+    }
+
+    fn copy_section(&self, cx: i32, cy: i32, cz: i32, out: &mut [BlockStateId; 4096]) {
+        if self.hides(cx, cy, cz) {
+            out.fill(self.fill);
+            return;
+        }
+        self.inner.copy_section(cx, cy, cz, out);
+    }
+
+    fn column_biomes(&self, cx: i32, cz: i32) -> Option<Arc<aether_worldgen::ColumnBiomes>> {
+        self.inner.column_biomes(cx, cz)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A world that is solid stone below y=0 and air above, so a section's
+    /// graph is easy to reason about.
+    struct FlatWorld;
+    impl BlockSource for FlatWorld {
+        fn block_at(&self, _x: i32, y: i32, _z: i32) -> BlockStateId {
+            if y < 0 {
+                STONE
+            } else {
+                BlockStateId::AIR
+            }
+        }
+    }
+
+    fn visible(sections: &[(i32, i32, i32)]) -> HashSet<(i32, i32, i32)> {
+        sections.iter().copied().collect()
+    }
+
+    /// A state whose reachable set is every section of `columns`.
+    fn state_showing(columns: &[(i32, i32)], search_id: u64) -> State {
+        let mut vis = HashSet::new();
+        for &(cx, cz) in columns {
+            for i in 0..SECTION_COUNT {
+                vis.insert((cx, SECTION_MIN_Y + i as i32, cz));
+            }
+        }
+        State {
+            center: Some((0, 0, 0)),
+            dirty: false,
+            search_id,
+            visible: vis,
+            sent: HashMap::new(),
+            planned_search: search_id,
+            reveal_pending: false,
+            bypass: false,
+        }
+    }
+
+    #[test]
+    fn a_fully_visible_column_has_no_hidden_sections() {
+        let all: Vec<(i32, i32, i32)> = (0..SECTION_COUNT)
+            .map(|i| (0, SECTION_MIN_Y + i as i32, 0))
+            .collect();
+        assert_eq!(desired_hidden(&visible(&all), 0, 0), 0);
+    }
+
+    #[test]
+    fn a_sealed_cave_section_is_hidden() {
+        // Everything visible except the sections at y=-2 and y=-1 (a cave
+        // behind rock), which must stay hidden. Index `i` is `cy =
+        // SECTION_MIN_Y + i`, so y=-2 is 2 and y=-1 is 3.
+        let all: Vec<(i32, i32, i32)> = (0..SECTION_COUNT)
+            .filter_map(|i| {
+                let cy = SECTION_MIN_Y + i as i32;
+                (!(-2..=-1).contains(&cy)).then_some((0, cy, 0))
+            })
+            .collect();
+        let mask = desired_hidden(&visible(&all), 0, 0);
+        assert_eq!(mask, (1 << 2) | (1 << 3));
+    }
+
+    #[test]
+    fn a_reveal_plan_cut_short_by_the_budget_continues_next_tick() {
+        // Every column is sent fully hidden and every section is now visible:
+        // six columns, two per tick. All six must go out across ticks, not
+        // just the first two (finding 1).
+        let columns = [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0)];
+        let mut st = state_showing(&columns, 1);
+        // The masks are stale relative to the fresh reachable set, so a plan
+        // is due (the planner has not run for this search id yet).
+        st.planned_search = 0;
+        for &col in &columns {
+            st.record_sent(col.0, col.1, u32::MAX);
+        }
+        let mut revealed = Vec::new();
+        let mut ticks = 0;
+        loop {
+            let plan = st.reveal_step(2);
+            if plan.is_empty() {
+                break;
+            }
+            ticks += 1;
+            assert!(ticks < 100, "the reveal must make progress");
+            for (cx, cz) in plan {
+                let mask = st.hidden_for(cx, cz);
+                st.record_sent(cx, cz, mask);
+                revealed.push((cx, cz));
+            }
+        }
+        revealed.sort();
+        let mut expected = columns.to_vec();
+        expected.sort();
+        assert_eq!(revealed, expected, "every column must be re-sent");
+        assert!(ticks > 1, "the budget must force more than one tick");
+    }
+
+    #[test]
+    fn the_reveal_plan_is_nearest_first_and_budgeted() {
+        let all: Vec<(i32, i32, i32)> = (0..SECTION_COUNT)
+            .map(|i| (0, SECTION_MIN_Y + i as i32, 0))
+            .collect();
+        let vis = visible(&all);
+        let mut sent = HashMap::new();
+        for (cx, cz) in [(0, 0), (1, 0), (5, 0), (2, 0), (10, 0)] {
+            sent.insert((cx, cz), u32::MAX);
+        }
+        let plan = plan_reveals(&vis, &sent, (0, 0, 0), 2);
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0], (0, 0));
+        assert!(plan.contains(&(1, 0)), "nearest first: {plan:?}");
+    }
+
+    #[test]
+    fn no_reveal_when_nothing_became_visible() {
+        let all: Vec<(i32, i32, i32)> = (0..SECTION_COUNT)
+            .map(|i| (0, SECTION_MIN_Y + i as i32, 0))
+            .collect();
+        let vis = visible(&all);
+        let mut sent = HashMap::new();
+        sent.insert((0, 0), 0);
+        sent.insert((1, 0), 0);
+        assert!(plan_reveals(&vis, &sent, (0, 0, 0), 32).is_empty());
+    }
+
+    #[test]
+    fn an_idle_player_does_not_replan() {
+        let columns = [(0, 0), (1, 0)];
+        let mut st = state_showing(&columns, 7);
+        for &col in &columns {
+            st.record_sent(col.0, col.1, 0);
+        }
+        assert!(st.reveal_step(32).is_empty());
+        // Still nothing a second time.
+        assert!(st.reveal_step(32).is_empty());
+    }
+
+    #[test]
+    fn a_respawned_client_forgets_its_old_columns() {
+        // Old columns must not stay in `sent` forever (finding 7).
+        let mut st = State {
+            center: Some((0, 0, 0)),
+            search_id: 5,
+            planned_search: 5,
+            ..Default::default()
+        };
+        st.record_sent(0, 0, u32::MAX);
+        st.record_sent(1, 0, u32::MAX);
+        st.reset();
+        assert!(st.sent().is_empty(), "reset drops the old columns");
+        assert!(st.visible().is_empty());
+        assert!(st.reveal_step(32).is_empty());
+    }
+
+    #[test]
+    fn a_write_dirties_only_players_whose_view_covers_it() {
+        // A break inside a player's view marks them; one on the far side of
+        // the map does not (finding 5).
+        let mut near = State {
+            center: Some((0, 0, 0)),
+            ..Default::default()
+        };
+        near.mark_dirty_for(8, &[(3, 100, 3)]);
+        assert!(near.dirty, "a change in the view box must mark the player");
+        assert!(!near.is_fresh((0, 0, 0)));
+
+        let mut far = State {
+            center: Some((0, 0, 0)),
+            ..Default::default()
+        };
+        far.mark_dirty_for(8, &[(20, 0, 0)]);
+        assert!(!far.dirty, "a change beyond the view box must not");
+    }
+
+    #[test]
+    fn a_graph_computed_before_a_write_is_never_cached() {
+        // Round-3 New-1, the exact interleaving: two computes B then A of the
+        // same section plus a write W. B reads the version and snapshots
+        // pre-write; W bumps the version; A reads the new version, snapshots
+        // post-write and stores; B then tries to store its stale graph. With a
+        // monotonic global version B's store is rejected — the per-section
+        // reset that let `0 == unwrap_or(0)` match again is gone.
+        let _guard = global_test_lock();
+        invalidate_all();
+        let key = (0, 2, 0);
+        let mut cc = GraphCache::default();
+
+        // B: misses at the version current when it started.
+        let b_version = EDIT_EPOCH.load(Ordering::Relaxed);
+
+        // W: a write lands (evicts and bumps).
+        invalidate_section(&mut cc, key);
+
+        // A: reads the new version, computes post-write, stores.
+        let a_version = EDIT_EPOCH.load(Ordering::Relaxed);
+        assert_ne!(a_version, b_version, "the write advanced the version");
+        store_graph(&mut cc, key, SectionGraph::sealed(), a_version);
+        assert!(cc.graphs.contains_key(&key), "A's fresh graph is cached");
+
+        // B: stores its stale pre-write graph with the version it read.
+        store_graph(&mut cc, key, SectionGraph::open(), b_version);
+        assert_eq!(
+            cc.graphs.get(&key).copied(),
+            Some(SectionGraph::sealed()),
+            "B's stale graph must not overwrite A's"
+        );
+    }
+
+    /// A world whose section snapshot simulates a concurrent block write
+    /// arriving while the graph is being computed.
+    struct WriteDuringSnapshot;
+    impl BlockSource for WriteDuringSnapshot {
+        fn block_at(&self, _x: i32, _y: i32, _z: i32) -> BlockStateId {
+            BlockStateId::AIR
+        }
+        fn copy_section(&self, cx: i32, cy: i32, cz: i32, _out: &mut [BlockStateId; 4096]) {
+            record_invalidation((cx, cy, cz));
+        }
+    }
+
+    #[test]
+    fn a_write_during_a_graph_snapshot_is_not_cached() {
+        // The reviewer's requested concurrency test: invalidate_block
+        // interleaved with an in-flight graph computation, driven through the
+        // real `graph()` (not its pieces). The store must reject the graph
+        // computed from the pre-write snapshot.
+        let _guard = global_test_lock();
+        invalidate_all();
+        let key = (0, 2, 0);
+        assert!(graph(&WriteDuringSnapshot, key).is_some());
+        assert!(
+            !cache().lock().unwrap().graphs.contains_key(&key),
+            "a graph whose snapshot raced a write must not be cached"
+        );
+        // The same call without a racing write caches it, and a later write
+        // evicts it.
+        assert!(graph(&FlatWorld, key).is_some());
+        assert!(
+            cache().lock().unwrap().graphs.contains_key(&key),
+            "an un-raced graph is cached"
+        );
+        record_invalidation(key);
+        assert!(!cache().lock().unwrap().graphs.contains_key(&key));
+    }
+
+    /// Serialises the tests that touch the process-wide cache, epoch and
+    /// dirty set, which are shared across the whole test binary.
+    fn global_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn write_invalidation_is_free_when_off_and_records_when_on() {
+        // N1: with culling off (the default, and what every test here runs
+        // under) a block write must not touch the cache or record a section.
+        // Once on, it records the section and evicts the graph.
+        let _guard = global_test_lock();
+        invalidate_all();
+        graph(&FlatWorld, (0, 2, 0));
+        invalidate_block(0, 32, 0);
+        assert!(
+            dirty_sections().lock().unwrap().is_empty(),
+            "a disabled write must not record a section"
+        );
+        assert!(
+            cache().lock().unwrap().graphs.contains_key(&(0, 2, 0)),
+            "a disabled write must not evict a cached graph"
+        );
+
+        // The enabled path (what `invalidate_block` runs once the flag is on).
+        record_invalidation((0, 2, 0));
+        assert!(!cache().lock().unwrap().graphs.contains_key(&(0, 2, 0)));
+        assert!(dirty_sections().lock().unwrap().contains(&(0, 2, 0)));
+        dirty_sections().lock().unwrap().clear();
+    }
+
+    #[test]
+    fn a_write_during_the_search_keeps_the_reachable_set_stale() {
+        // N2 / the residual race of finding 4: the search reads the edit epoch
+        // before it starts and only clears the stale flag if no write landed
+        // while it ran.
+        let _guard = global_test_lock();
+        let mut st = State {
+            center: Some((0, 0, 0)),
+            dirty: true,
+            ..Default::default()
+        };
+        let epoch_before = EDIT_EPOCH.load(Ordering::Relaxed);
+        EDIT_EPOCH.fetch_add(1, Ordering::Relaxed); // a write lands mid-search
+        st.set_visible_if((0, 0, 0), HashSet::new(), epoch_before);
+        assert!(st.dirty, "a mid-search write must not be cleared");
+        assert!(!st.is_fresh((0, 0, 0)));
+
+        // With no write during the search the flag clears.
+        let epoch_before = EDIT_EPOCH.load(Ordering::Relaxed);
+        st.set_visible_if((0, 0, 0), HashSet::new(), epoch_before);
+        assert!(!st.dirty);
+        assert!(st.is_fresh((0, 0, 0)));
+    }
+
+    #[test]
+    fn reveal_all_selects_only_columns_still_masked() {
+        // N4: `/visibility off` must re-send the columns holding stone, and
+        // leave the unmasked ones alone.
+        let mut sent = HashMap::new();
+        sent.insert((0, 0), 0);
+        sent.insert((1, 0), u32::MAX);
+        sent.insert((2, 0), 1 << 3);
+        let mut got = masked_columns(&sent);
+        got.sort();
+        assert_eq!(got, vec![(1, 0), (2, 0)]);
+    }
+
+    #[test]
+    fn rendering_a_bypassed_column_records_a_zero_mask() {
+        // N4 / New-2: `/visibility off` re-renders the masked columns; each
+        // must record a zero mask, or the planner keeps believing the client
+        // holds stone and re-plans columns it already has.
+        let columns = [(0, 0), (1, 0)];
+        let mut st = state_showing(&columns, 1);
+        for &col in &columns {
+            st.record_sent(col.0, col.1, u32::MAX);
+        }
+        assert_eq!(masked_columns(st.sent()).len(), 2, "both start masked");
+
+        // The reveal pass re-renders each column with bypass on.
+        for (cx, cz) in masked_columns(st.sent()) {
+            assert_eq!(st.mask_for_render(cx, cz, true), 0);
+        }
+        assert!(
+            masked_columns(st.sent()).is_empty(),
+            "after reveal the client holds real columns and `sent` says so"
+        );
+
+        // A non-bypassed render still records the real mask: a column the
+        // player cannot see comes back with every section hidden.
+        let all_hidden = (1u32 << SECTION_COUNT) - 1;
+        assert_eq!(st.mask_for_render(9, 9, false), all_hidden);
+    }
+
+    #[test]
+    fn the_tick_hands_only_in_range_sections_to_a_player() {
+        // A drained section within the player's view dirties them; one beyond
+        // it does not, and the drain is what bounds the set.
+        let mut st = State {
+            center: Some((0, 0, 0)),
+            ..Default::default()
+        };
+        st.mark_dirty_for(2, &[(5, 0, 0)]);
+        assert!(!st.dirty, "5 sections away is outside a radius-2 view");
+        st.mark_dirty_for(2, &[(1, 0, 1)]);
+        assert!(st.dirty, "1 section away is inside");
+    }
+
+    #[test]
+    fn masked_column_reports_the_fill_in_a_hidden_section_only() {
+        let world = FlatWorld;
+        let hide_surface = 1u32 << ((0 - SECTION_MIN_Y) as u32);
+        let masked = MaskedColumn::new(&world, 0, 0, hide_surface, STONE);
+        assert_eq!(masked.block_at(0, 5, 0), STONE, "hidden air becomes stone");
+        assert_eq!(masked.block_at(0, -5, 0), STONE);
+
+        let other = MaskedColumn::new(&world, 1, 0, hide_surface, STONE);
+        assert_eq!(
+            other.block_at(0, 5, 0),
+            BlockStateId::AIR,
+            "other column real"
+        );
+    }
+
+    #[test]
+    fn a_flat_world_below_the_surface_caches_a_sealed_graph() {
+        let _guard = global_test_lock();
+        invalidate_all();
+        let world = FlatWorld;
+        let g = graph(&world, (0, -2, 0)).unwrap();
+        assert_eq!(g.open_faces(), 0);
+        let g = graph(&world, (0, 2, 0)).unwrap();
+        assert_eq!(g.open_faces(), aether_world::visibility::ALL_FACES);
+    }
+
+    #[test]
+    fn visible_from_hides_a_sealed_underground_column() {
+        let _guard = global_test_lock();
+        invalidate_all();
+        // The player is on the surface of the flat world: the solid sections
+        // far below must not be in the reachable set.
+        let vis = visible_from(&FlatWorld, (0.5, 5.5, 0.5), 8);
+        assert!(
+            vis.contains(&(0, 0, 0)),
+            "the player's own section is visible"
+        );
+        assert!(!vis.contains(&(0, -4, 0)), "bedrock depth must stay hidden");
+    }
+
+    #[test]
+    fn the_spawn_column_is_masked_the_way_the_join_path_masks_it() {
+        // The join path masks its first columns through exactly these calls
+        // (finding 2). A buried ore a section below the surface must not reach
+        // the client as itself.
+        let _guard = global_test_lock();
+        invalidate_all();
+        struct BuriedOre;
+        impl BlockSource for BuriedOre {
+            fn block_at(&self, _x: i32, y: i32, _z: i32) -> BlockStateId {
+                if y == -48 {
+                    BlockStateId(1234) // a stand-in ore id
+                } else if y < 0 {
+                    STONE
+                } else {
+                    BlockStateId::AIR
+                }
+            }
+        }
+        let world = BuriedOre;
+        let vis = visible_from(&world, (0.5, 5.5, 0.5), 8);
+        let hidden = desired_hidden(&vis, 0, 0);
+        assert_ne!(hidden, 0, "the deep sections must be hidden");
+        let masked = MaskedColumn::new(&world, 0, 0, hidden, fill_for_mode(GameMode::Creative));
+        assert_eq!(
+            masked.block_at(0, -48, 0),
+            STONE,
+            "the buried ore must be sent as stone"
+        );
+        // A column the mask does not cover keeps the real block.
+        let unmasked = MaskedColumn::new(&world, 1, 0, hidden, STONE);
+        assert_eq!(unmasked.block_at(0, -48, 0), BlockStateId(1234));
+    }
+
+    #[test]
+    fn section_of_floors_negative_coordinates() {
+        let pos = crate::players::PosLook {
+            x: -0.5,
+            y: -1.0,
+            z: 15.9,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: false,
+        };
+        assert_eq!(section_of(pos), (-1, -1, 0));
+    }
+}

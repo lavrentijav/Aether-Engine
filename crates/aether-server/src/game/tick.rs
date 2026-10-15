@@ -66,6 +66,10 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
     super::blockticks::tick(world, registry, rng);
 
     let players = registry.snapshot();
+    // Anti-xray: recompute a player's reachable sections where needed and
+    // re-send (reveal) newly visible columns, capped per tick. A no-op unless
+    // `[visibility] enabled`.
+    crate::visibility::tick(&players, world);
     for p in &players {
         // Eating finishes here, in the tick: journal what it used up. Only
         // while eating, so a capture is not taken every tick for nothing.
@@ -256,6 +260,17 @@ fn apply(a: Action, registry: &SharedRegistry, world: &DemoWorld) {
                 combat::give_xp(&p, world, value);
             }
         }
+        Action::PotionImpact {
+            pos,
+            potion,
+            lingering,
+            shooter,
+        } => entities::potion_impact(registry, world, pos, potion, lingering, shooter),
+        Action::CloudPulse {
+            pos,
+            potion,
+            radius,
+        } => entities::cloud_pulse(registry, world, pos, potion, radius),
         Action::Tracked(id, ev) => registry.broadcast_tracking(id, &ev, world),
     }
 }
@@ -287,7 +302,36 @@ fn survival(p: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, now:
                     inv.held_index()
                 };
                 if let Some(food) = inv.slot(slot).cloned() {
-                    if let Some(f) = tables::food_id(food.item) {
+                    if food
+                        .item
+                        .vanilla_name()
+                        .is_some_and(super::brewing::is_drinkable)
+                    {
+                        // A drinkable potion applies its effects and leaves a
+                        // glass bottle. Instant effects take hold at once, the
+                        // rest wait in the effect list above.
+                        let potion = food.potion.unwrap_or(super::brewing::WATER);
+                        for e in super::brewing::effects_of(potion) {
+                            if effects::is_instant(e.id) {
+                                if e.id == effects::INSTANT_HEALTH {
+                                    if st.survival() {
+                                        st.health = (st.health
+                                            + effects::instant_heal(e.amplifier, 1.0))
+                                        .min(20.0);
+                                    }
+                                } else if st.survival() {
+                                    hurts.push((
+                                        effects::instant_damage(e.amplifier, 1.0),
+                                        "minecraft:magic",
+                                    ));
+                                }
+                            } else {
+                                applied.push(e);
+                            }
+                        }
+                        consume_one(&mut inv, slot, food.item, st.survival());
+                        ate = true;
+                    } else if let Some(f) = tables::food_id(food.item) {
                         st.food = (st.food + f.nutrition as i32).min(20);
                         st.saturation = (st.saturation + f.saturation).min(st.food as f32);
                         consume_one(&mut inv, slot, food.item, st.survival());
@@ -454,7 +498,11 @@ fn consume_one(
         || item == crate::inventory::item("minecraft:suspicious_stew")
     {
         Some("minecraft:bowl")
-    } else if item == crate::inventory::item("minecraft:honey_bottle") {
+    } else if item == crate::inventory::item("minecraft:honey_bottle")
+        || item
+            .vanilla_name()
+            .is_some_and(super::brewing::is_potion_item)
+    {
         Some("minecraft:glass_bottle")
     } else {
         None

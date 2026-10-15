@@ -37,6 +37,8 @@ pub enum WindowKind {
     Hopper { pos: (i32, i32, i32) },
     /// A dispenser or dropper at a position.
     Dispenser { pos: (i32, i32, i32) },
+    /// A brewing stand at a position.
+    BrewingStand { pos: (i32, i32, i32) },
 }
 
 /// A drag in progress (click mode 5).

@@ -57,6 +57,9 @@ pub struct PlayerHandle {
     game: Mutex<crate::game::player::PlayerState>,
     /// Entities (not players) this client currently has spawned.
     tracked: Mutex<std::collections::HashSet<i32>>,
+    /// Anti-xray / visibility-culling bookkeeping for this client. See
+    /// [`crate::visibility`].
+    visibility: Mutex<crate::visibility::State>,
 }
 
 impl PlayerHandle {
@@ -89,6 +92,11 @@ impl PlayerHandle {
     /// Borrow the set of entities this client has spawned.
     pub fn tracked(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<i32>> {
         self.tracked.lock().unwrap()
+    }
+
+    /// Borrow this client's visibility-culling state.
+    pub fn visibility(&self) -> std::sync::MutexGuard<'_, crate::visibility::State> {
+        self.visibility.lock().unwrap()
     }
 
     /// Whether this client runs the full, server-authoritative gameplay.
@@ -185,7 +193,22 @@ impl PlayerHandle {
             // copies each section once instead of locking per block.
             ServerEvent::ChunkColumn { cx, cz } => {
                 let view = crate::protocol::ColumnView::new(world, *cx, *cz);
-                self.codec.encode(ev, &view)
+                // Anti-xray: mask the sections this player cannot see before
+                // the codec ever reads them, so every version's cheapest
+                // single-valued stone form falls out of the existing encoder.
+                let hidden = crate::visibility::hidden_mask_for_render(self, world, *cx, *cz);
+                if hidden != 0 {
+                    let fill = crate::visibility::fill_for(self);
+                    let masked =
+                        crate::visibility::MaskedColumn::new(&view, *cx, *cz, hidden, fill);
+                    self.codec.encode(ev, &masked)
+                } else {
+                    self.codec.encode(ev, &view)
+                }
+            }
+            ServerEvent::UnloadColumn { cx, cz } => {
+                crate::visibility::forget_column(self, *cx, *cz);
+                self.codec.encode(legacy.as_ref().unwrap_or(ev), world)
             }
             _ => self.codec.encode(legacy.as_ref().unwrap_or(ev), world),
         };
@@ -249,6 +272,7 @@ impl Registry {
                 crate::server_game_mode(),
             )),
             tracked: Mutex::new(std::collections::HashSet::new()),
+            visibility: Mutex::new(crate::visibility::State::default()),
         });
         self.players
             .write()

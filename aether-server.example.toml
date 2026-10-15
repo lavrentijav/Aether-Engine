@@ -67,3 +67,15 @@ queue_depth = 100000    # events that may wait before submissions are dropped
 dir = "world-cache"     # empty disables the cache
 ttl_hours = 24          # entries older than this are regenerated
 max_entries = 20000     # above this the oldest are swept away, hourly
+
+[visibility]
+# Anti-xray / visibility culling. Off by default until it is proven.
+# A section the player cannot see is sent as solid stone instead of its real
+# blocks, so x-ray mods and transparent resource packs see only stone. See
+# docs/design/visibility-culling.md.
+enabled = false
+margin_blocks = 5        # "could see it if he turned or stepped" sphere, in blocks
+hidden_fill = "stone"    # "stone" (safe) or "air" (spectators/flying only)
+ray_refinement = false   # reserved, not implemented
+mask_buried_ores = false # reserved, not implemented
+reveal_budget_per_tick = 32  # columns re-sent (revealed) per tick, nearest first

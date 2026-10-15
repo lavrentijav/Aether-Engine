@@ -46,6 +46,8 @@ pub mod gen {
     pub mod v1_19_3;
     pub mod v1_19_4;
     pub mod v1_20_1;
+    pub mod v1_20_2;
+    pub mod v1_20_4;
     pub mod v1_20_5;
     pub mod v1_21_1;
     pub mod v1_21_3;
@@ -73,6 +75,8 @@ pub mod item_gen {
     pub mod v1_19_3;
     pub mod v1_19_4;
     pub mod v1_20_1;
+    pub mod v1_20_2;
+    pub mod v1_20_4;
     pub mod v1_20_5;
     pub mod v1_21_1;
     pub mod v1_21_3;
@@ -90,8 +94,8 @@ pub mod behaviour;
 pub mod items;
 
 pub use blocks::{
-    BlockTable, V1_17, V1_17_1, V1_18, V1_18_2, V1_19, V1_19_2, V1_19_3, V1_19_4, V1_20_1, V1_20_5,
-    V1_21_1, V1_21_3, V1_21_4, V1_21_5, V1_21_6, V1_21_8, V1_21_9, V1_8,
+    BlockTable, V1_17, V1_17_1, V1_18, V1_18_2, V1_19, V1_19_2, V1_19_3, V1_19_4, V1_20_1, V1_20_2,
+    V1_20_4, V1_20_5, V1_21_1, V1_21_3, V1_21_4, V1_21_5, V1_21_6, V1_21_8, V1_21_9, V1_8,
 };
 
 /// The block table for a codec's protocol id, if this layer knows it.
@@ -114,6 +118,8 @@ pub fn block_table(protocol: i32) -> Option<&'static BlockTable> {
         761 => &V1_19_3,
         762 => &V1_19_4,
         763 => &V1_20_1,
+        764 => &V1_20_2,
+        765 => &V1_20_4,
         766 => &V1_20_5,
         767 => &V1_21_1,
         768 => &V1_21_3,

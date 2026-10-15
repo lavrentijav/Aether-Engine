@@ -64,6 +64,11 @@ pub struct Stack {
     /// Wear on a tool or armour piece, `0` for new (and for anything that
     /// does not wear). The `minecraft:damage` data component on the wire.
     pub damage: u16,
+    /// The `minecraft:potion` registry index this stack holds, for a potion,
+    /// splash potion or lingering potion. `None` is everything else — the
+    /// `minecraft:potion_contents` data component on the wire, which is what
+    /// tells the client which potion it is.
+    pub potion: Option<u16>,
 }
 
 impl Stack {
@@ -74,6 +79,7 @@ impl Stack {
             count,
             uid: mint_uid(),
             damage: 0,
+            potion: None,
         }
     }
 
@@ -83,14 +89,32 @@ impl Stack {
         Self::new(crate::inventory::item(item), count)
     }
 
+    /// A potion, splash potion or lingering potion of `potion` (a
+    /// `minecraft:potion` registry index), from a canonical item name.
+    pub fn potion(item: &str, potion: u16, count: u8) -> Self {
+        Self {
+            potion: Some(potion),
+            ..Self::named(item, count)
+        }
+    }
+
+    /// The `minecraft:potion` registry index, or `None` for everything else.
+    pub fn potion_id(&self) -> Option<u16> {
+        self.potion
+    }
+
     /// The most of this item one slot may hold.
     pub fn max_stack(&self) -> u8 {
         crate::game::tables::max_stack_id(self.item)
     }
 
-    /// Whether `other` could merge into this stack: same item, same wear.
+    /// Whether `other` could merge into this stack: same item, same wear, and
+    /// the same potion contents. Two different potions never merge.
     pub fn stacks_with(&self, other: &Stack) -> bool {
-        self.item == other.item && self.damage == other.damage && self.max_stack() > 1
+        self.item == other.item
+            && self.damage == other.damage
+            && self.potion == other.potion
+            && self.max_stack() > 1
     }
 
     /// Split `n` off this stack into a new instance, leaving the rest here.
@@ -102,6 +126,7 @@ impl Stack {
             count: n,
             uid: mint_uid(),
             damage: self.damage,
+            potion: self.potion,
         }
     }
 }
@@ -267,12 +292,18 @@ impl Inventory {
 
     /// Remove one item from the held stack. Returns it.
     pub fn consume_held(&mut self) -> Option<Stack> {
-        let i = self.held_index();
-        let slot = self.slot_mut(i)?;
-        let s = slot.as_mut()?;
+        self.consume_at(self.held_index())
+    }
+
+    /// Remove one item from `slot`. Returns it, or `None` when the slot was
+    /// already empty.
+    pub fn consume_at(&mut self, slot: usize) -> Option<Stack> {
+        self.ensure();
+        let cell = self.slots.get_mut(slot)?;
+        let s = cell.as_mut()?;
         let one = s.split(1);
         if s.count == 0 {
-            *slot = None;
+            *cell = None;
         }
         Some(one)
     }
@@ -377,12 +408,20 @@ impl SlotChange {
 /// this is refused rather than guessed at: a misread inventory would hand a
 /// player somebody else's items.
 ///
-/// Version 4 stores the item as a two-byte id rather than a length-prefixed
-/// name; version 3 narrowed item uids from 16 bytes to 8 (see
-/// [`aether_world::journal::event::ItemUid`]); version 2 added the wear field.
-/// There is no backwards compatibility branch: old worlds are wiped, and
-/// guessing at an old layout risks handing a player the wrong items.
-pub const FORMAT_VERSION: u8 = 4;
+/// Version 5 added the potion contents field; version 4 stores the item as a
+/// two-byte id rather than a length-prefixed name; version 3 narrowed item uids
+/// from 16 bytes to 8 (see [`aether_world::journal::event::ItemUid`]); version
+/// 2 added the wear field. A version 4 blob loads, its stacks holding no
+/// potion. A version 3 blob loads too: its only difference is the item stored
+/// as a name, which resolves to the same vanilla id losslessly (an unknown name
+/// refuses the whole inventory). Versions 1–2 carry 16-byte uids that have no
+/// 8-byte equivalent, so they are refused — handing a player the wrong items is
+/// worse than handing them none — unless they hold no stack at all: an empty
+/// inventory has nothing to misread, and refusing it locked players out.
+pub const FORMAT_VERSION: u8 = 5;
+
+/// A potion field's "no potion" sentinel in the version 5 layout.
+const NO_POTION: u16 = u16::MAX;
 
 /// Serialize for the KV store.
 pub fn encode(inv: &Inventory) -> Vec<u8> {
@@ -395,6 +434,7 @@ pub fn encode(inv: &Inventory) -> Vec<u8> {
         out.extend_from_slice(&s.uid.0.to_be_bytes());
         out.extend_from_slice(&s.damage.to_be_bytes());
         out.extend_from_slice(&s.item.0.to_be_bytes());
+        out.extend_from_slice(&s.potion.unwrap_or(NO_POTION).to_be_bytes());
     }
     out
 }
@@ -411,25 +451,44 @@ pub fn decode(blob: &[u8]) -> Option<Inventory> {
         Some(s)
     };
     let version = take(1)?[0];
-    if version != FORMAT_VERSION {
+    if !(1..=FORMAT_VERSION).contains(&version) {
         return None;
     }
     let held = take(1)?[0];
     let n = u16::from_be_bytes(take(2)?.try_into().ok()?) as usize;
     let mut inv = Inventory::new();
     inv.held = held.min(8);
+    if version <= 2 {
+        // 16-byte uids: only an empty inventory is unambiguous.
+        return (n == 0 && c == blob.len()).then_some(inv);
+    }
     for _ in 0..n {
         let slot = take(1)?[0] as usize;
         let count = take(1)?[0];
         let uid = u64::from_be_bytes(take(8)?.try_into().ok()?);
         let damage = u16::from_be_bytes(take(2)?.try_into().ok()?);
-        let item = ItemTypeId(u16::from_be_bytes(take(2)?.try_into().ok()?));
+        let item = if version == 3 {
+            let len = u16::from_be_bytes(take(2)?.try_into().ok()?) as usize;
+            ItemTypeId::vanilla(std::str::from_utf8(take(len)?).ok()?)?
+        } else {
+            ItemTypeId(u16::from_be_bytes(take(2)?.try_into().ok()?))
+        };
+        // Version 4 predates the potion field.
+        let potion = if version >= 5 {
+            match u16::from_be_bytes(take(2)?.try_into().ok()?) {
+                NO_POTION => None,
+                p => Some(p),
+            }
+        } else {
+            None
+        };
         if slot < SLOTS && count > 0 {
             inv.slots[slot] = Some(Stack {
                 item,
                 count,
                 uid: ItemUid(uid),
                 damage,
+                potion,
             });
         }
     }
@@ -461,6 +520,43 @@ pub fn legacy_key(uuid: u128) -> [u8; 17] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_old_empty_inventory_loads_as_empty_rather_than_locking_the_player_out() {
+        for version in 1..=3u8 {
+            let inv = decode(&[version, 2, 0, 0])
+                .expect("an empty v1-3 inventory has nothing to misread");
+            assert_eq!(inv.occupied().count(), 0, "v{version}");
+            assert_eq!(inv.held, 2);
+        }
+        // Trailing bytes after an "empty" v1/v2 header are not empty at all.
+        assert!(decode(&[2, 0, 0, 0, 9]).is_none());
+    }
+
+    #[test]
+    fn a_version_3_inventory_resolves_its_item_names() {
+        let name = b"minecraft:diamond";
+        let mut b = vec![3u8, 0, 0, 1, 5, 7];
+        b.extend_from_slice(&42u64.to_be_bytes());
+        b.extend_from_slice(&3u16.to_be_bytes());
+        b.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        b.extend_from_slice(name);
+        let inv = decode(&b).expect("v3 decodes");
+        let s = inv.slot(5).expect("slot 5");
+        assert_eq!(s.item, item("minecraft:diamond"));
+        assert_eq!((s.count, s.uid.0, s.damage, s.potion), (7, 42, 3, None));
+
+        // An unknown name refuses the whole inventory rather than dropping it.
+        let mut bad = b.clone();
+        let at = bad.len() - name.len();
+        bad[at..].copy_from_slice(b"minecraft:diamonX");
+        assert!(decode(&bad).is_none());
+    }
+
+    #[test]
+    fn a_non_empty_version_2_inventory_is_still_refused() {
+        assert!(decode(&[2, 0, 0, 1, 0, 1]).is_none());
+    }
+
     use super::*;
 
     /// A canonical item id by name, for the tests' literals.
@@ -645,6 +741,43 @@ mod tests {
     }
 
     #[test]
+    fn a_potion_bottle_keeps_its_contents_across_a_round_trip() {
+        let mut inv = Inventory::new();
+        inv.put_slot(
+            36,
+            Some(Stack::potion(
+                "minecraft:potion",
+                crate::game::brewing::potion_id("minecraft:long_swiftness").unwrap(),
+                1,
+            )),
+        );
+        inv.put_slot(37, Some(Stack::named("minecraft:potion", 1)));
+        let back = decode(&encode(&inv)).expect("decodes");
+        assert_eq!(back, inv);
+        assert_eq!(
+            back.get(36).unwrap().potion_id(),
+            crate::game::brewing::potion_id("minecraft:long_swiftness")
+        );
+        assert_eq!(back.get(37).unwrap().potion_id(), None);
+    }
+
+    #[test]
+    fn a_version_four_inventory_loads_without_potion_contents() {
+        // A version 4 blob has no potion field; its stacks read as no potion
+        // rather than as a shifted layout.
+        let mut inv = Inventory::new();
+        inv.put_slot(36, Some(Stack::named("minecraft:stone", 5)));
+        let mut b = encode(&inv);
+        b[0] = 4;
+        // Drop the two-byte potion field of the one occupied slot: version,
+        // held, count u16, then slot, count, uid, damage, item.
+        b.truncate(b.len() - 2);
+        let back = decode(&b).expect("a version 4 blob loads");
+        assert_eq!(back.get(36).map(|s| s.count), Some(5));
+        assert_eq!(back.get(36).unwrap().potion_id(), None);
+    }
+
+    #[test]
     fn an_empty_inventory_round_trips() {
         let inv = Inventory::new();
         assert_eq!(decode(&encode(&inv)), Some(inv));
@@ -669,14 +802,15 @@ mod tests {
         assert_eq!(decode(&b), None);
         b[0] = 0;
         assert_eq!(decode(&b), None);
-        // Version 2 stored 16-byte uids where this version stores 8; reading
-        // one as the other would shift every field after the first uid.
-        b[0] = 2;
-        assert_eq!(decode(&b), None);
-        // Version 1 is also refused now: old worlds are wiped, and there is no
-        // compatibility branch to guess with.
-        b[0] = 1;
-        assert_eq!(decode(&b), None);
+        // Versions 1-2 stored 16-byte uids where this version stores 8; reading
+        // one as the other would shift every field after the first uid, so a
+        // non-empty one is refused (an empty one has nothing to misread; see
+        // `an_old_empty_inventory_loads_as_empty_rather_than_locking_the_player_out`).
+        for v in [1u8, 2] {
+            let mut full = vec![v, 0, 0, 1];
+            full.extend_from_slice(&[0u8; 40]);
+            assert_eq!(decode(&full), None, "v{v}");
+        }
     }
 
     #[test]
