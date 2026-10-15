@@ -5,15 +5,15 @@ wait 3
 expect Time set
 send /gamemode creative
 wait 3
-expect Creative mode
+expect is now in Creative mode
 send /tp 0 100 0
 wait 3
-expect Teleported
+expect Teleported to 0 100 0
 send /spawn
 wait 3
-expect Teleported to spawn|Teleported
+expect Teleported to spawn
 send /send /help
 wait 4
-expect Inspect mode|/inspect|History commands|/rollback
+expect History commands:
 reject Unknown command
 reject insufficient permissions

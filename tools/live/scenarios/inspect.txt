@@ -2,11 +2,13 @@
 wait 22
 send /gamemode creative
 wait 3
+expect is now in Creative mode
 send /inspect
 wait 3
 expect Inspect mode ON
 send /look down
 wait 2
+expect Looking Down
 send /dig
 wait 5
 expect Attempting to dig block
