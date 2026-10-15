@@ -14,6 +14,7 @@
 //!   uuid`) clients, behind a trait so tests can mock them;
 //! * `policy` — the hybrid decision table.
 
+pub mod api;
 pub mod crypto;
 pub mod store;
 

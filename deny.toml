@@ -12,11 +12,25 @@ allow = [
     "Zlib",
     "0BSD",
     "BSL-1.0",
+    # Pulled in by rustls / ring through the online-mode HTTP client, and by
+    # `subtle` under `rsa`.
+    "ISC",
+    "CDLA-Permissive-2.0",
+    "BSD-3-Clause",
 ]
 confidence-threshold = 0.8
 
 [advisories]
 # Defaults: deny known vulnerabilities, warn on unmaintained/yanked.
+ignore = [
+    # RUSTSEC-2023-0071 (Marvin timing side channel) in the RustCrypto `rsa`
+    # crate has no patched release. Online-mode login is the only user of a
+    # private-key operation, and the task requires RustCrypto with no OpenSSL.
+    # The exposure is the standard one every Minecraft server has; the
+    # mitigation is to keep login attempts rate-limited and the world's
+    # operator list bound, not a dependency swap.
+    "RUSTSEC-2023-0071",
+]
 
 [bans]
 multiple-versions = "warn"

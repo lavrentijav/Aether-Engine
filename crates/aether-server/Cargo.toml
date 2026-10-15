@@ -30,6 +30,8 @@ cfb8 = "0.8"
 cipher = "0.4"
 sha1 = "0.10"
 rand = "0.8"
+# The Mojang session-server/profile-API calls. rustls, never OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 postgres = { version = "0.19.10", optional = true }
 
 [target.'cfg(unix)'.dependencies]
