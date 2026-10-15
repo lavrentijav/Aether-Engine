@@ -12,7 +12,7 @@
 
 use std::net::IpAddr;
 
-use crate::auth::api::{ApiError, LookupCache, Profile, ProfileApi};
+use crate::auth::api::{LookupCache, Profile, ProfileApi};
 use crate::auth::bounce::BounceCache;
 use crate::auth::crypto::{self, ServerKey, TOKEN_LEN};
 use crate::auth::store::{self, Lock, MetaStore};
@@ -134,37 +134,60 @@ fn hybrid(
     name: &str,
     ip: Option<IpAddr>,
 ) -> std::io::Result<Admission> {
-    if let Some(lock) = store::get_by_name(store, name) {
-        // Locked: the owner must authenticate. This is the only place a name
-        // may be refused for auth reasons.
-        log::info(&format!(
-            "[auth] {name} is locked to {} (completed online auth here before): online auth required",
-            crate::auth::api::hyphenated_uuid(lock.uuid)
-        ));
-        let outcome = online_login(s, codec, key, api, name, ip)?;
-        return Ok(match outcome {
-            OnlineOutcome::Ok(profile) => lock_profile(store, name, profile),
-            OnlineOutcome::Dropped => {
-                log::info(&format!("[auth] {name} left during online auth"));
-                Admission::Ended
-            }
-            OnlineOutcome::ApiDown => {
-                log::warn(&format!(
-                    "[auth] {name} refused: session server unreachable, cannot verify a locked name"
-                ));
-                Admission::Refused(
-                    "The authentication service is unavailable; this name is locked to an \
-                     account and cannot join offline."
-                        .into(),
-                )
-            }
-            _ => {
-                log::info(&format!(
-                    "[auth] {name} refused: an offline attempt on a locked name"
-                ));
-                Admission::Refused(premium_message(name))
-            }
-        });
+    match store::check(store, name) {
+        store::Lookup::Locked(lock) => {
+            // Locked: the owner must authenticate. This is the only place a
+            // name may be refused for auth reasons.
+            log::info(&format!(
+                "[auth] {name} is locked to {} (completed online auth here before): online auth required",
+                crate::auth::api::hyphenated_uuid(lock.uuid)
+            ));
+            let outcome = online_login(s, codec, key, api, name, ip)?;
+            return Ok(match outcome {
+                OnlineOutcome::Ok(profile) => lock_profile(store, name, profile),
+                OnlineOutcome::Dropped => {
+                    log::info(&format!("[auth] {name} left during online auth"));
+                    Admission::Ended
+                }
+                // A 5xx or a decode failure is a service failure, not an
+                // offline attempt. A locked name cannot be verified, so it is
+                // refused under either on_lookup_failure setting — offline
+                // would let a squatter in.
+                OnlineOutcome::ApiDown => {
+                    log::warn(&format!(
+                        "[auth] {name} refused: session server failure on a locked name \
+                         (on_lookup_failure = {:?})",
+                        cfg.on_lookup_failure
+                    ));
+                    Admission::Refused(
+                        "The authentication service is unavailable; this name is locked to \
+                         an account and cannot join offline."
+                            .into(),
+                    )
+                }
+                _ => {
+                    log::info(&format!(
+                        "[auth] {name} refused: an offline attempt on a locked name"
+                    ));
+                    Admission::Refused(premium_message(name))
+                }
+            });
+        }
+        store::Lookup::Corrupt => {
+            // Fail closed: an unreadable lock must never silently unlock a
+            // name. This is not reachable from remote input (a disk fault or a
+            // crash mid-write), so it is logged loudly for an operator.
+            log::error(&format!(
+                "[auth] {name} refused: its premium lock is unreadable; \
+                 refusing rather than admitting offline"
+            ));
+            return Ok(Admission::Refused(
+                "Your account's lock on this server could not be read. Nothing was changed; \
+                 ask an operator."
+                    .into(),
+            ));
+        }
+        store::Lookup::Missing => {}
     }
 
     // A client that dropped during a recent auth from this address is not
@@ -334,12 +357,29 @@ fn online_login(
     match api.has_joined(name, &hash, ip) {
         Ok(Some(profile)) => Ok(OnlineOutcome::Ok(profile)),
         Ok(None) => Ok(OnlineOutcome::NoSession),
-        Err(ApiError::Unreachable) => Ok(OnlineOutcome::ApiDown),
-        Err(_) => Ok(OnlineOutcome::NoSession),
+        // Every transport or status failure is a *service* failure, not proof
+        // that the client has no session. `ApiError::Unreachable` (timeout,
+        // connection failure), `Status(5xx)` and `Decode` all mean "could not
+        // ask", so they follow `on_lookup_failure` rather than admitting a
+        // locked name offline.
+        Err(_) => Ok(OnlineOutcome::ApiDown),
     }
 }
 
-/// Read a VarInt-prefixed byte array.
+/// The most a byte array in an Encryption Response can legitimately be.
+///
+/// The shared secret is 16 bytes and the verify token 4; each is RSA-encrypted
+/// to the 1024-bit key's 128 bytes. 256 is a generous ceiling for both. It
+/// exists because the wire length is a VarInt and so can name up to ~2 GiB:
+/// allocating that before reading is a remote, pre-authentication OOM.
+const MAX_FIELD_LEN: usize = 256;
+
+/// Read a VarInt-prefixed byte array, bounded before allocating.
+///
+/// `len` is rejected unless it is non-negative, at most [`MAX_FIELD_LEN`], and
+/// no larger than the bytes actually left in the packet — the last check is
+/// the important one, since a short packet claiming a huge array must fail
+/// without allocating it.
 fn read_byte_array(pin: &mut PacketIn) -> Result<Vec<u8>, std::io::Error> {
     let len = pin.var_int()?;
     if len < 0 {
@@ -348,7 +388,14 @@ fn read_byte_array(pin: &mut PacketIn) -> Result<Vec<u8>, std::io::Error> {
             "negative array length",
         ));
     }
-    let mut out = vec![0u8; len as usize];
+    let len = len as usize;
+    if len > MAX_FIELD_LEN || len > pin.remaining() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "byte array longer than the packet",
+        ));
+    }
+    let mut out = vec![0u8; len];
     for b in out.iter_mut() {
         *b = pin.u8()?;
     }
@@ -538,6 +585,78 @@ mod tests {
 
     fn online_profile(name: &str) -> Result<Option<Profile>, ApiError> {
         Ok(Some(Mock::profile(0xAAAA, name)))
+    }
+
+    #[test]
+    fn a_byte_array_length_is_bounded_before_allocating() {
+        // The pre-auth OOM: a VarInt can name ~2 GiB, and this is parsed
+        // before any authentication. It must fail, not allocate.
+        let mut body = Vec::new();
+        write_varint(&mut body, 0x7FFF_FFFF);
+        let mut pin = PacketIn::new(&body);
+        assert!(read_byte_array(&mut pin).is_err(), "2 GiB must be refused");
+
+        // A length larger than the bytes actually present is refused too: a
+        // four-byte packet claiming 200 bytes.
+        let mut body = Vec::new();
+        write_varint(&mut body, 200);
+        body.extend_from_slice(&[0u8; 4]);
+        let mut pin = PacketIn::new(&body);
+        assert!(read_byte_array(&mut pin).is_err());
+
+        // A legitimate little array still reads.
+        let mut body = Vec::new();
+        write_varint(&mut body, 3);
+        body.extend_from_slice(&[1, 2, 3]);
+        let mut pin = PacketIn::new(&body);
+        assert_eq!(read_byte_array(&mut pin).unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn a_claiming_encryption_response_is_refused_without_a_huge_alloc() {
+        // End to end: a client answers the Encryption Request with an array
+        // length of 0x7FFFFFFF. The login must come back as a refusal, not
+        // OOM.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let mut peer = client.try_clone().unwrap();
+        let (server, _) = listener.accept().unwrap();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let Some(_req) = read_client_frame(&mut peer) else {
+                return;
+            };
+            let mut body = Vec::new();
+            write_varint(&mut body, 0x7FFF_FFFF);
+            body.extend_from_slice(&[0u8; 8]);
+            let mut frame = Vec::new();
+            write_varint(&mut frame, body.len() as i32 + 1);
+            write_varint(&mut frame, 0x01);
+            frame.extend_from_slice(&body);
+            let _ = peer.write_all(&frame);
+            let _ = peer.shutdown(std::net::Shutdown::Both);
+        });
+        let mock = Mock::new(Ok(None), Ok(Some(0xAAAA)));
+        let a = authenticate(
+            &mut Conn::new(server),
+            crate::protocol::codec_for(47).unwrap(),
+            &cfg(AuthMode::Online, LookupFailure::Offline),
+            &MapStore::default(),
+            super::super::test_key(),
+            &mock,
+            &LookupCache::new(),
+            &BounceCache::new(),
+            "Notch",
+            None,
+        )
+        .unwrap();
+        assert!(matches!(a, Admission::Refused(_)));
+        assert_eq!(
+            *mock.joined_calls.lock().unwrap(),
+            0,
+            "never reached Mojang"
+        );
     }
 
     #[test]
@@ -794,6 +913,114 @@ mod tests {
         .unwrap();
         assert!(matches!(a, Admission::Online(_)));
         assert_eq!(*mock.joined_calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_locked_name_is_refused_when_the_session_server_fails() {
+        // A 5xx from hasJoined is a service failure, not proof of no session:
+        // a locked name must not be admitted offline because of it.
+        let store = MapStore::default();
+        store::put(
+            &store,
+            &Lock {
+                uuid: 0xAAAA,
+                name: "notch".into(),
+                first_seen: 1,
+                last_seen: 1,
+            },
+        );
+        let mock = Mock::new(Err(ApiError::Status(503)), Ok(None));
+        let (mut s, _c) = handshake_pair(super::super::test_key(), Answer::Good);
+        let a = authenticate(
+            &mut s,
+            crate::protocol::codec_for(47).unwrap(),
+            &cfg(AuthMode::Hybrid, LookupFailure::Offline),
+            &store,
+            super::super::test_key(),
+            &mock,
+            &LookupCache::new(),
+            &BounceCache::new(),
+            "Notch",
+            None,
+        )
+        .unwrap();
+        match a {
+            Admission::Refused(msg) => assert!(msg.contains("unavailable"), "{msg}"),
+            other => panic!("expected refusal, got {other:?}"),
+        }
+        assert_eq!(
+            *mock.joined_calls.lock().unwrap(),
+            1,
+            "hasJoined was called"
+        );
+    }
+
+    #[test]
+    fn an_unlocked_premium_name_with_a_5xx_follows_on_lookup_failure() {
+        let store = MapStore::default();
+        let mock = Mock::new(Err(ApiError::Status(500)), Ok(Some(0xAAAA)));
+
+        let (mut s, _c) = handshake_pair(super::super::test_key(), Answer::Good);
+        let a = authenticate(
+            &mut s,
+            crate::protocol::codec_for(47).unwrap(),
+            &cfg(AuthMode::Hybrid, LookupFailure::Offline),
+            &store,
+            super::super::test_key(),
+            &mock,
+            &LookupCache::new(),
+            &BounceCache::new(),
+            "Notch",
+            None,
+        )
+        .unwrap();
+        assert!(matches!(a, Admission::Offline));
+
+        let (mut s, _c) = handshake_pair(super::super::test_key(), Answer::Good);
+        let a = authenticate(
+            &mut s,
+            crate::protocol::codec_for(47).unwrap(),
+            &cfg(AuthMode::Hybrid, LookupFailure::Deny),
+            &store,
+            super::super::test_key(),
+            &mock,
+            &LookupCache::new(),
+            &BounceCache::new(),
+            "Notch",
+            None,
+        )
+        .unwrap();
+        assert!(matches!(a, Admission::Refused(_)));
+    }
+
+    #[test]
+    fn a_corrupt_lock_fails_closed_and_refuses() {
+        // An unreadable lock key must refuse, not silently admit offline.
+        let store = MapStore::default();
+        store::set_corrupt(&store, "notch");
+        // This mock would admit an unlocked premium name offline; the corrupt
+        // lock must short-circuit before any auth.
+        let mock = Mock::new(Ok(None), Ok(None));
+        let (mut s, _c) = handshake_pair(super::super::test_key(), Answer::Good);
+        let a = authenticate(
+            &mut s,
+            crate::protocol::codec_for(47).unwrap(),
+            &cfg(AuthMode::Hybrid, LookupFailure::Offline),
+            &store,
+            super::super::test_key(),
+            &mock,
+            &LookupCache::new(),
+            &BounceCache::new(),
+            "Notch",
+            None,
+        )
+        .unwrap();
+        match a {
+            Admission::Refused(msg) => assert!(msg.contains("could not be read"), "{msg}"),
+            other => panic!("expected refusal, got {other:?}"),
+        }
+        assert_eq!(*mock.lookup_calls.lock().unwrap(), 0, "no lookup");
+        assert_eq!(*mock.joined_calls.lock().unwrap(), 0, "no hasJoined");
     }
 
     #[test]

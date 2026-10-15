@@ -208,6 +208,11 @@ pub struct AuthConfig {
     pub lookup_timeout_ms: u64,
     /// What `hybrid` does when the profile API cannot be reached.
     pub on_lookup_failure: LookupFailure,
+    /// Login attempts allowed per address per minute. `0` disables the limit.
+    ///
+    /// Each attempt can cost a Mojang lookup and a connection thread, so this
+    /// bounds how fast a scanner can drive outbound calls or park threads.
+    pub login_rate_per_min: u32,
 }
 
 impl Default for AuthConfig {
@@ -218,6 +223,7 @@ impl Default for AuthConfig {
             profile_api: "https://api.mojang.com".to_string(),
             lookup_timeout_ms: 3000,
             on_lookup_failure: LookupFailure::Offline,
+            login_rate_per_min: 10,
         }
     }
 }
@@ -549,6 +555,7 @@ session_server = "https://sessionserver.mojang.com"
 profile_api = "https://api.mojang.com"
 lookup_timeout_ms = 3000     # how long a Mojang HTTP call may take
 on_lookup_failure = "offline" # hybrid, API unreachable: "offline" or "deny"
+login_rate_per_min = 10      # login attempts per address per minute; 0 disables
 
 [database]
 # Mirror the world history into PostgreSQL for querying (needs

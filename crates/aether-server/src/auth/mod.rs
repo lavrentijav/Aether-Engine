@@ -26,10 +26,22 @@ pub mod api;
 pub mod bounce;
 pub mod crypto;
 pub mod policy;
+pub mod ratelimit;
 pub mod store;
 
 pub use policy::Admission;
 pub use store::Lock;
+
+/// Whether `name` is a valid Minecraft username: 3–16 characters of
+/// `[A-Za-z0-9_]`, the vanilla rule.
+///
+/// Enforced for every login, offline included. Without it a claimed
+/// `"notch "`, `"notch\u{200b}"` or a homoglyph does not match the locked
+/// `notch` and would be admitted offline under a name that renders as a
+/// near-copy of the premium one — defeating the whole point of the lock.
+pub fn valid_username(name: &str) -> bool {
+    (3..=16).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
 
 use std::sync::OnceLock;
 
@@ -41,16 +53,19 @@ static API: OnceLock<Box<dyn api::ProfileApi>> = OnceLock::new();
 static CACHE: OnceLock<api::LookupCache> = OnceLock::new();
 /// Clients that dropped during online auth, shared by every connection.
 static BOUNCE: OnceLock<bounce::BounceCache> = OnceLock::new();
+/// The per-address login rate limit, shared by every connection.
+static RATE: OnceLock<ratelimit::LoginLimiter> = OnceLock::new();
 
-/// Build the key, HTTP client and cache for online or hybrid mode.
+/// Build the key, HTTP client, caches and rate limiter.
 ///
-/// A no-op under [`AuthMode::Offline`](crate::config::AuthMode::Offline),
-/// so an offline server never generates a key or opens a socket to Mojang.
-/// Called at startup; a failure to build the HTTP client stops the server,
-/// because hybrid mode that cannot reach Mojang would refuse every premium
-/// name.
+/// The rate limiter is installed in every mode (it protects offline servers
+/// too); the RSA key and Mojang client only for online/hybrid, so an offline
+/// server never generates a key or opens a socket to Mojang. Called at
+/// startup; a failure to build the HTTP client stops the server, because
+/// hybrid mode that cannot reach Mojang would refuse every premium login.
 pub fn install(cfg: &crate::config::AuthConfig) -> Result<(), String> {
     use crate::config::AuthMode;
+    let _ = RATE.set(ratelimit::LoginLimiter::new(cfg.login_rate_per_min));
     if cfg.mode == AuthMode::Offline {
         return Ok(());
     }
@@ -63,6 +78,17 @@ pub fn install(cfg: &crate::config::AuthConfig) -> Result<(), String> {
     let _ = CACHE.set(api::LookupCache::new());
     let _ = BOUNCE.set(bounce::BounceCache::new());
     Ok(())
+}
+
+/// Whether a login attempt from `ip` is within the rate limit.
+///
+/// Before startup installs the limiter (and in unit tests) this allows, so no
+/// caller is ever silently gated by an uninitialised configuration.
+pub fn rate_limit_allow(ip: Option<std::net::IpAddr>) -> bool {
+    match RATE.get() {
+        Some(limiter) => limiter.allow(ip),
+        None => true,
+    }
 }
 
 /// Resolve a login for the session layer, using the installed key/API/cache.
@@ -133,5 +159,40 @@ impl store::MetaStore for crate::session::DemoWorld {
     }
     fn del(&self, key: &[u8]) {
         let _ = self.delete_meta(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_username;
+
+    #[test]
+    fn the_vanilla_username_rule_is_enforced() {
+        for ok in [
+            "abc",
+            "Notch",
+            "a_1",
+            "a".repeat(16).as_str(),
+            "_x_",
+            "0123456789",
+        ] {
+            assert!(valid_username(ok), "{ok:?} should be valid");
+        }
+        for bad in [
+            "",
+            "ab",                    // too short
+            "a".repeat(17).as_str(), // too long
+            "notch ",
+            " notch",
+            "not ch",        // spaces
+            "notch\u{200b}", // zero-width space
+            "n\u{043e}tch",  // a Cyrillic o — a homoglyph claim
+            "notch!",
+            "café",
+            "a.b",
+            "a-b", // punctuation / non-ascii
+        ] {
+            assert!(!valid_username(bad), "{bad:?} should be rejected");
+        }
     }
 }

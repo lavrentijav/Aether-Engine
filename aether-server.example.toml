@@ -59,6 +59,7 @@ session_server = "https://sessionserver.mojang.com"
 profile_api = "https://api.mojang.com"
 lookup_timeout_ms = 3000     # how long a Mojang HTTP call may take
 on_lookup_failure = "offline" # hybrid, API unreachable: "offline" or "deny"
+login_rate_per_min = 10      # login attempts per address per minute; 0 disables
 
 [database]
 # Mirror the world history into PostgreSQL for querying (needs

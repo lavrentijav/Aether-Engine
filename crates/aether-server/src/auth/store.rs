@@ -82,11 +82,41 @@ fn decode(name: &str, bytes: &[u8]) -> Option<Lock> {
     })
 }
 
-/// The lock on `name`, case-insensitively, if any.
-pub fn get_by_name(store: &dyn MetaStore, name: &str) -> Option<Lock> {
+/// The result of a locked-name check.
+///
+/// A corrupt blob is its own case, not "missing": a security boundary must
+/// fail **closed**, so the caller refuses rather than treating an unreadable
+/// lock as an unlocked name.
+#[derive(Debug)]
+pub enum Lookup {
+    /// No lock for this name.
+    Missing,
+    /// The name is locked.
+    Locked(Lock),
+    /// A lock key exists but does not decode. Refuse.
+    Corrupt,
+}
+
+/// Whether `name` is locked, case-insensitively — failing closed on a corrupt
+/// blob.
+pub fn check(store: &dyn MetaStore, name: &str) -> Lookup {
     let lower = name.to_ascii_lowercase();
-    let bytes = store.get(&name_key(&lower))?;
-    decode(&lower, &bytes)
+    let Some(bytes) = store.get(&name_key(&lower)) else {
+        return Lookup::Missing;
+    };
+    match decode(&lower, &bytes) {
+        Some(lock) => Lookup::Locked(lock),
+        None => Lookup::Corrupt,
+    }
+}
+
+/// The lock on `name`, case-insensitively, if any. A corrupt blob reads as
+/// `None` here; the locked-name check that must fail closed uses [`check`].
+pub fn get_by_name(store: &dyn MetaStore, name: &str) -> Option<Lock> {
+    match check(store, name) {
+        Lookup::Locked(lock) => Some(lock),
+        _ => None,
+    }
 }
 
 /// The lock that belongs to `uuid`, whichever name it currently holds.
@@ -98,18 +128,48 @@ pub fn get_by_uuid(store: &dyn MetaStore, uuid: u128) -> Option<Lock> {
 
 /// Write a lock, both directions.
 ///
-/// If the uuid already held a *different* name, that older name's lock is
-/// removed: a name change at Mojang moves the lock rather than leaving the
-/// abandoned name locked forever.
+/// The two invariants:
+///
+/// * a name changing hands (a different uuid now owns it) clears the *old*
+///   owner's reverse index, or a stale `u/<old>` keeps resolving the name
+///   through the name index to the new owner;
+/// * a uuid renaming at Mojang releases its *own* old name — but only if that
+///   name is still that uuid's. Resolving the old name through the name index
+///   without checking the uuid is exactly the bug that let one player delete
+///   another's lock.
+///
+/// The new name is written before the old is released, so a crash mid-write
+/// leaves a name locked rather than unlocked.
 pub fn put(store: &dyn MetaStore, lock: &Lock) {
     let lower = lock.name.to_ascii_lowercase();
-    if let Some(old) = get_by_uuid(store, lock.uuid) {
-        if !old.name.eq_ignore_ascii_case(&lower) {
-            store.del(&name_key(&old.name));
-        }
-    }
+
+    // Capture the uuid (if any) that currently owns this name, so its reverse
+    // index can be cleared after the forward index is rewritten.
+    let displaced = get_by_name(store, &lower).map(|l| l.uuid);
+    // The name (if any) this uuid used to hold, and whether it is still its
+    // own (a stale `u/<uuid>` can point at a name now owned by someone else).
+    let old_name = get_by_uuid(store, lock.uuid)
+        .filter(|old| old.uuid == lock.uuid && !old.name.eq_ignore_ascii_case(&lower))
+        .map(|old| old.name);
+
     store.put(&name_key(&lower), &encode(lock));
     store.put(&uuid_key(lock.uuid), lower.as_bytes());
+
+    if let Some(prev) = displaced {
+        if prev != lock.uuid {
+            store.del(&uuid_key(prev));
+        }
+    }
+    if let Some(name) = old_name {
+        store.del(&name_key(&name));
+    }
+}
+
+/// Write a deliberately unreadable lock blob for `name`. Tests only.
+#[cfg(test)]
+pub(crate) fn set_corrupt(store: &dyn MetaStore, name: &str) {
+    let lower = name.to_ascii_lowercase();
+    store.put(&name_key(&lower), &[0u8; 5]);
 }
 
 #[cfg(test)]
@@ -180,9 +240,51 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_blob_reads_as_unlocked_not_a_panic() {
+    fn a_corrupt_blob_is_reported_as_corrupt_not_missing() {
+        // A security check must fail closed: a key that exists but does not
+        // decode is Corrupt, never Missing, so the caller refuses.
         let store = MapStore::default();
         store.put(&name_key("x"), &[0u8; 5]);
-        assert_eq!(get_by_name(&store, "x"), None);
+        assert!(matches!(check(&store, "x"), Lookup::Corrupt));
+        assert_eq!(
+            get_by_name(&store, "x"),
+            None,
+            "non-fatal readers read None"
+        );
+    }
+
+    #[test]
+    fn a_handover_then_the_old_owners_rename_does_not_delete_the_new_lock() {
+        // Regression for the review's finding 2: a stale uuid->name index let
+        // the old owner of a name delete the new owner's lock.
+        let store = MapStore::default();
+        // 1. Alice (uuid A) locks `alice`.
+        put(&store, &lock(0xAA, "alice", 1, 1));
+        assert_eq!(get_by_name(&store, "alice").unwrap().uuid, 0xAA);
+
+        // 2. Bob (uuid B) becomes `alice` at Mojang and logs in online. The
+        //    name is handed over; A's reverse index must be cleared.
+        put(&store, &lock(0xBB, "alice", 2, 2));
+        assert_eq!(get_by_name(&store, "alice").unwrap().uuid, 0xBB);
+        assert_eq!(get_by_uuid(&store, 0xAA), None, "A's stale index is gone");
+
+        // 3. Alice (uuid A) logs in under a new name. This must NOT delete
+        //    Bob's `alice` lock.
+        put(&store, &lock(0xAA, "bob", 1, 3));
+        assert_eq!(
+            get_by_name(&store, "alice").map(|l| l.uuid),
+            Some(0xBB),
+            "Bob's lock survives Alice's rename"
+        );
+        assert_eq!(get_by_name(&store, "bob").unwrap().uuid, 0xAA);
+    }
+
+    #[test]
+    fn a_handover_clears_the_displaced_owners_reverse_index() {
+        let store = MapStore::default();
+        put(&store, &lock(1, "name", 1, 1));
+        put(&store, &lock(2, "name", 2, 2));
+        assert_eq!(get_by_uuid(&store, 1), None);
+        assert_eq!(get_by_uuid(&store, 2).unwrap().name, "name");
     }
 }

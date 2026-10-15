@@ -314,6 +314,15 @@ impl<'a> PacketIn<'a> {
         ))
     }
 
+    /// How many bytes remain unread.
+    ///
+    /// A length field must be checked against this before it is used to
+    /// allocate: a VarInt can name up to `0x7FFF_FFFF`, and `vec![0; len]`
+    /// for that is a remote out-of-memory.
+    pub fn remaining(&self) -> usize {
+        self.buf.len().saturating_sub(self.pos)
+    }
+
     /// Read a length-prefixed string.
     pub fn string(&mut self) -> io::Result<String> {
         let len = self.var_int()? as usize;

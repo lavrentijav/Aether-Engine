@@ -159,6 +159,25 @@ fn login_and_play(
     let Some(claimed) = codec.read_login_start(s)? else {
         return Ok(());
     };
+    // The vanilla username rule, enforced for every login including offline:
+    // a padded or homoglyph claim must not be admitted as a near-copy of a
+    // locked name.
+    if !crate::auth::valid_username(&claimed) {
+        crate::log::info(&format!(
+            "[x] {} refused: invalid username ({})",
+            protocol::json_escape(&claimed),
+            ip.map(|i| i.to_string()).unwrap_or_default()
+        ));
+        return protocol::kick_login(s, "Invalid username.");
+    }
+    // Per-address login rate limit, before any Mojang traffic or game work.
+    if !crate::auth::rate_limit_allow(ip) {
+        crate::log::warn(&format!(
+            "[x] {claimed} refused: too many login attempts from {}",
+            ip.map(|i| i.to_string()).unwrap_or_default()
+        ));
+        return protocol::kick_login(s, "Too many login attempts; try again in a minute.");
+    }
     if !cfg.may_join(&claimed) {
         crate::log::info(&format!(
             "[x] {claimed} refused: not on the whitelist ({})",
