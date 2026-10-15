@@ -474,16 +474,31 @@ mod tests {
             };
             shadow = carry;
 
-            let now = multiset(&server, shadow);
-            assert!(
-                now.get(&spear).copied().unwrap_or(0) <= initial[&spear],
-                "step {step}: the spear count grew"
+            // The server's whole view must match the client's: no slot, and no
+            // cursor item, may differ. This is what a loss or a wrong move
+            // shows up as (N3) — the old test only counted spears, so any bug
+            // that dropped an item passed.
+            assert_eq!(server, client, "step {step}: server slots diverged");
+            assert_eq!(shadow, cursor, "step {step}: server cursor diverged");
+
+            // And the multiset of real items, count included, must never lose
+            // anything; a spear (engine-only) may never be created.
+            let now = multiset(&client, cursor);
+            for (item, count) in &initial {
+                assert!(
+                    now.get(item).copied().unwrap_or(0) >= *count,
+                    "step {step}: lost {item:?}"
+                );
+            }
+            assert_eq!(
+                now.get(&spear).copied().unwrap_or(0),
+                initial[&spear],
+                "step {step}: the spear count changed"
             );
             if !allow_creation {
                 assert_eq!(
-                    now.get(&spear).copied().unwrap_or(0),
-                    initial[&spear],
-                    "step {step}: a pure move changed the spear count"
+                    now, initial,
+                    "step {step}: a pure move changed the multiset"
                 );
             }
         }
