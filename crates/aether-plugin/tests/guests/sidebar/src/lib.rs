@@ -45,7 +45,7 @@ impl Guest for Sid {
             };
         }
         // Feed a placeholder through the shared registry...
-        let replaced = placeholders::register("balance");
+        let registered = placeholders::register("balance");
         placeholders::set("balance", &p, "1234");
         let resolved = placeholders::resolve(&p, "b=%balance%");
         // ...put a line on the panel, then toggle.
@@ -56,7 +56,9 @@ impl Guest for Sid {
         sidebar::hide(&p);
         types::CommandResult {
             handled: true,
-            lines: vec![format!("shown={shown} replaced={replaced} resolved={resolved}")],
+            lines: vec![format!(
+                "shown={shown} registered={registered} resolved={resolved}"
+            )],
         }
     }
 

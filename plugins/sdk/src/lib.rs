@@ -642,6 +642,9 @@ struct PlaceholderState {
     declared: HashSet<String>,
     /// Pushed values: token → player id → last value.
     values: HashMap<String, HashMap<u64, String>>,
+    /// Which caller owns each custom token, so one plugin cannot overwrite
+    /// another's `%name%`. A built-in is never shown here (it is reserved).
+    owners: HashMap<String, String>,
     /// Resolved-token cache: player id → token → (value, tick).
     cache: HashMap<u64, HashMap<String, (String, u64)>>,
 }
@@ -795,29 +798,100 @@ impl Placeholders {
         }
         builtin(token, q)
     }
+
+    /// Log a refused registration/push, so a spoofing attempt is visible in
+    /// the server log rather than silently ignored.
+    fn refuse(&self, caller: &str, name: &str, why: &str) {
+        if let Some(b) = self.backend.get() {
+            b.log(
+                caller,
+                LogLevel::Warn,
+                &format!("placeholder `%{name}%` refused: {why}"),
+            );
+        }
+    }
+}
+
+/// The built-in token names. A plugin may not push a value under one of these
+/// (a native closure still may, being trusted-by-install).
+fn is_builtin(token: &str) -> bool {
+    matches!(
+        token,
+        "player"
+            | "name"
+            | "displayname"
+            | "display_name"
+            | "online"
+            | "max"
+            | "max_players"
+            | "tps"
+            | "ping"
+            | "world"
+            | "x"
+            | "y"
+            | "z"
+            | "health"
+            | "level"
+            | "time"
+            | "world_time"
+            | "server_time"
+    )
 }
 
 impl PlaceholdersService for Placeholders {
-    fn register(&self, _caller: &str, name: String, provider: PlaceholderFn) -> bool {
+    fn register(&self, caller: &str, name: String, provider: PlaceholderFn) -> bool {
         let mut st = self.state.write().unwrap();
-        let replaced = st.providers.insert(name, provider).is_some();
+        if let Some(owner) = st.owners.get(&name).cloned() {
+            if owner != caller {
+                drop(st);
+                self.refuse(caller, &name, &format!("owned by `{owner}`"));
+                return false;
+            }
+        }
+        st.providers.insert(name.clone(), provider);
+        st.owners.insert(name, caller.to_string());
         // A new provider must be visible immediately, not after the cache
         // expires.
         st.cache.clear();
-        replaced
+        true
     }
 
-    fn register_name(&self, _caller: &str, name: String) -> bool {
+    fn register_name(&self, caller: &str, name: String) -> bool {
+        if is_builtin(&name) {
+            self.refuse(caller, &name, "reserved built-in");
+            return false;
+        }
         let mut st = self.state.write().unwrap();
-        let known = st.declared.contains(&name) || st.providers.contains_key(&name);
-        st.declared.insert(name);
-        known
+        if let Some(owner) = st.owners.get(&name).cloned() {
+            if owner != caller {
+                drop(st);
+                self.refuse(caller, &name, &format!("owned by `{owner}`"));
+                return false;
+            }
+        }
+        st.declared.insert(name.clone());
+        st.owners.insert(name, caller.to_string());
+        true
     }
 
-    fn set_value(&self, _caller: &str, name: String, player: u64, value: String) {
+    fn set_value(&self, caller: &str, name: String, player: u64, value: String) {
+        if is_builtin(&name) {
+            self.refuse(caller, &name, "reserved built-in");
+            return;
+        }
         let tick = self.now();
         let mut st = self.state.write().unwrap();
+        if let Some(owner) = st.owners.get(&name).cloned() {
+            if owner != caller {
+                drop(st);
+                self.refuse(caller, &name, &format!("owned by `{owner}`"));
+                return;
+            }
+        }
         st.declared.insert(name.clone());
+        st.owners
+            .entry(name.clone())
+            .or_insert_with(|| caller.to_string());
         st.values
             .entry(name.clone())
             .or_default()
@@ -2048,6 +2122,53 @@ mod placeholder_tests {
             p.substitute("wasm", &Player { id: 8, ..who() }, "%balance%"),
             "%balance%"
         );
+    }
+
+    #[test]
+    fn a_second_caller_cannot_hijack_anothers_name() {
+        let p = placeholders();
+        // `economy` owns `%balance%`.
+        assert!(p.register_name("economy", "balance".to_string()));
+        p.set_value("economy", "balance".to_string(), 7, "100".to_string());
+        // An untrusted `evil` cannot claim or overwrite it.
+        assert!(!p.register_name("evil", "balance".to_string()), "owned");
+        p.set_value("evil", "balance".to_string(), 7, "0".to_string());
+        assert_eq!(
+            p.substitute("sidebar", &who(), "%balance%"),
+            "100",
+            "the owner's value is untouched"
+        );
+        // A native closure from another caller is refused too.
+        assert!(!p.register(
+            "evil",
+            "balance".to_string(),
+            Arc::new(|_| Some("0".into()))
+        ));
+        assert_eq!(p.substitute("sidebar", &who(), "%balance%"), "100");
+    }
+
+    #[test]
+    fn a_plugin_cannot_shadow_a_builtin_by_pushing() {
+        let p = placeholders();
+        assert!(
+            !p.register_name("evil", "player".to_string()),
+            "built-ins are reserved"
+        );
+        p.set_value("evil", "player".to_string(), 7, "Notch".to_string());
+        assert_eq!(
+            p.substitute("evil", &who(), "%player%"),
+            "Steve",
+            "the pushed built-in is ignored"
+        );
+    }
+
+    #[test]
+    fn the_same_caller_may_update_its_own_pushed_name() {
+        let p = placeholders();
+        assert!(p.register_name("economy", "balance".to_string()));
+        p.set_value("economy", "balance".to_string(), 7, "1".to_string());
+        p.set_value("economy", "balance".to_string(), 7, "2".to_string());
+        assert_eq!(p.substitute("sidebar", &who(), "%balance%"), "2");
     }
 
     #[test]

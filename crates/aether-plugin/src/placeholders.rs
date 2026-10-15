@@ -71,17 +71,30 @@ pub type PlaceholderFn = Arc<dyn Fn(&PlaceholderQuery) -> Option<String> + Send 
 /// A token is resolved in this order: a **native** provider, then a **pushed**
 /// per-player value, then a built-in. An unknown token is left literal, so a
 /// typo is visible rather than vanishing.
+///
+/// **Trust.** A name is **owned** by the caller that first registers or pushes
+/// it, so one plugin cannot silently overwrite another's `%economy_balance%`
+/// — a second caller's `register`/`register_name`/`set_value` for that name is
+/// refused (and logged). The **built-in** names (`%player%`, `%tps%`, …) are
+/// reserved from the pushed path entirely: no plugin may shadow them.
+/// *Reading* is unrestricted — any consumer may `resolve` any token, which is
+/// the whole point of a shared registry.
 pub trait PlaceholdersService: Send + Sync {
-    /// Register (or replace) `name` with a **native closure**. Returns whether
-    /// an existing provider was replaced.
+    /// Register (or replace) `name` with a **native closure**, claiming
+    /// ownership for `caller`. Returns whether it was accepted (the caller now
+    /// owns the name); `false` if another caller owns it. A native provider
+    /// may shadow a built-in (it is trusted-by-install).
     fn register(&self, caller: &str, name: String, provider: PlaceholderFn) -> bool;
 
     /// Declare `name` (without `%`) that `caller` will fill with
-    /// [`Self::set_value`], so it counts as known before the first value
-    /// arrives. Returns whether it was already known.
+    /// [`Self::set_value`]. Returns whether it was accepted (the caller now
+    /// owns the name); `false` if it is a reserved built-in or owned by
+    /// another caller.
     fn register_name(&self, caller: &str, name: String) -> bool;
 
-    /// Set `name`'s value for `player`, from `caller`. Implies [`Self::register_name`].
+    /// Set `name`'s value for `player`, from `caller`. Implies
+    /// [`Self::register_name`]. Refused (and logged) for a reserved built-in
+    /// or a name owned by another caller.
     fn set_value(&self, caller: &str, name: String, player: u64, value: String);
 
     /// Resolve every `%name%` in `text` for `player`, on `caller`'s behalf.

@@ -96,7 +96,7 @@ fn a_wasm_dependent_drives_the_sidebar_through_the_host() {
     // so its calls are neutral (`replaced=false`, `resolve` returns the text).
     assert_eq!(
         result.lines,
-        vec!["shown=true replaced=false resolved=b=%balance%".to_string()]
+        vec!["shown=true registered=false resolved=b=%balance%".to_string()]
     );
 
     assert_eq!(
@@ -122,6 +122,6 @@ fn the_sidebar_bridge_is_neutral_when_no_provider_is_registered() {
     assert!(result.handled);
     assert_eq!(
         result.lines,
-        vec!["shown=false replaced=false resolved=b=%balance%".to_string()]
+        vec!["shown=false registered=false resolved=b=%balance%".to_string()]
     );
 }

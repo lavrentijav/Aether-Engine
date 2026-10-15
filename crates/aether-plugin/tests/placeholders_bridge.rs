@@ -99,7 +99,7 @@ fn a_wasm_dependent_drives_the_placeholder_registry_through_the_host() {
     // provider is absent here, so `shown=false`.
     assert_eq!(
         result.lines,
-        vec!["shown=false replaced=false resolved=b=1234".to_string()]
+        vec!["shown=false registered=false resolved=b=1234".to_string()]
     );
 
     assert_eq!(
@@ -134,6 +134,6 @@ fn the_placeholders_bridge_is_neutral_when_no_provider_is_registered() {
     // its input unchanged.
     assert_eq!(
         result.lines,
-        vec!["shown=false replaced=false resolved=b=%balance%".to_string()]
+        vec!["shown=false registered=false resolved=b=%balance%".to_string()]
     );
 }
