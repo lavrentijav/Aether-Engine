@@ -64,6 +64,8 @@ pub mod prelude {
     pub use crate::bindings::aether::plugin::types::{
         CommandResult, Decision, LogLevel, ManifestAck, Player,
     };
-    pub use crate::bindings::aether::sdk::{commands, config, messages, permissions, players};
+    pub use crate::bindings::aether::sdk::{
+        commands, config, confirm, cooldowns, messages, permissions, players, scheduler,
+    };
     pub use crate::bindings::{export, Guest};
 }

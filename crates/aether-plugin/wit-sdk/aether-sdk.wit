@@ -147,6 +147,41 @@ interface config {
     revision: func() -> u64;
 }
 
+/// Timers, driven by the dependent's own `on-tick`.
+///
+/// The SDK owns the timer wheel but cannot call back into a component (the
+/// world's exports are frozen), so a timer is *polled*: the dependent calls
+/// `poll()` each tick and runs the handlers for the ids it gets back.
+interface scheduler {
+    /// A one-shot timer `ticks` from now; returns its id.
+    after: func(ticks: u64) -> u64;
+    /// A repeating timer every `period` ticks; returns its id.
+    every: func(period: u64) -> u64;
+    /// Cancel a timer; `true` if it existed.
+    cancel: func(id: u64) -> bool;
+    /// Take the ids due since the last poll, for this caller.
+    poll: func() -> list<u64>;
+}
+
+/// Per-caller, per-key cooldowns.
+interface cooldowns {
+    /// Whether `key` is off cooldown; arms it for `ticks` when it is.
+    ready: func(key: string, ticks: u64) -> bool;
+    /// Ticks left on `key`, `0` when ready.
+    remaining: func(key: string) -> u64;
+}
+
+/// "Type again to confirm" prompts.
+interface confirm {
+    use aether:plugin/types@0.1.0.{player};
+
+    /// Record a pending confirmation for `p` under `token` and send `prompt`.
+    /// Returns `false` if one is already pending for that player.
+    request: func(p: player, prompt: string, token: string) -> bool;
+    /// Consume a pending confirmation matching `p` and `token`.
+    check: func(p: player, token: string) -> bool;
+}
+
 /// A world importing the plugin host interface plus every SDK service
 /// interface, so the host can generate **one** linker entry covering all the
 /// imports a dependent component may use. Importing both here is what keeps
@@ -159,4 +194,7 @@ world services {
     import messages;
     import players;
     import config;
+    import scheduler;
+    import cooldowns;
+    import confirm;
 }

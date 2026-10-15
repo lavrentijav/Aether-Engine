@@ -20,19 +20,21 @@
 //! `requires` one of its services refuses to load when no provider is present.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use aether_plugin::manifest::{Manifest, PluginTier};
 use aether_plugin::sdk::{
-    self, ArgKind, CommandSpec, CommandsService, MessagesService, PermissionsService,
-    PlayersService, Pos, TeleportCause, TitleTimes,
+    self, ArgKind, CommandSpec, CommandsService, ConfirmService, CooldownsService, MessagesService,
+    PermissionsService, PlayersService, Pos, SchedulerService, TeleportCause, TitleTimes,
 };
 use aether_plugin::{
     HostBackend, LogLevel, NativeContext, NativePlugin, NativeRegistration, Player,
 };
 
-/// The SDK plugin's manifest. It subscribes to no events: it is a service host,
-/// driven by the calls its dependents make.
+/// The SDK plugin's manifest. It subscribes to `on-tick` to advance the timer
+/// wheel (`scheduler`) and expire cooldowns/confirmations; otherwise it is a
+/// service host driven by the calls its dependents make.
 pub fn manifest() -> Manifest {
     Manifest {
         id: "sdk".to_string(),
@@ -40,11 +42,10 @@ pub fn manifest() -> Manifest {
         api: "0.1".to_string(),
         entry: String::new(),
         name: "Aether SDK".to_string(),
-        // Loads before gameplay plugins; the value only orders event calls,
-        // which there are none of here.
+        // Loads before gameplay plugins; the value only orders event calls.
         priority: 1000,
         capabilities: Vec::new(),
-        subscribe: Vec::new(),
+        subscribe: vec!["on-tick".to_string()],
         commands: Vec::new(),
         tick_period: 1,
         deny_on_fault: false,
@@ -66,6 +67,9 @@ pub struct SdkPlugin {
     commands: Arc<Commands>,
     messages: Arc<Messages>,
     players: Arc<Players>,
+    scheduler: Arc<Scheduler>,
+    cooldowns: Arc<Cooldowns>,
+    confirm: Arc<Confirm>,
 }
 
 impl Default for SdkPlugin {
@@ -73,9 +77,15 @@ impl Default for SdkPlugin {
         // One shared slot the services read the host backend from, filled in
         // `init` before any dependent can call.
         let backend: Arc<OnceLock<Arc<dyn HostBackend>>> = Arc::new(OnceLock::new());
+        // One shared tick clock the timer-driven services advance from.
+        let clock = Arc::new(Clock::default());
+        let messages = Arc::new(Messages::new(Arc::clone(&backend)));
         SdkPlugin {
             commands: Arc::new(Commands::default()),
-            messages: Arc::new(Messages::new(Arc::clone(&backend))),
+            scheduler: Arc::new(Scheduler::new(Arc::clone(&clock))),
+            cooldowns: Arc::new(Cooldowns::new(Arc::clone(&clock))),
+            confirm: Arc::new(Confirm::new(clock, Arc::clone(&messages))),
+            messages,
             players: Arc::new(Players::new(backend)),
         }
     }
@@ -95,12 +105,25 @@ impl NativePlugin for SdkPlugin {
         sdk::register_messages(ctx.services, messages)?;
         let players: Arc<dyn PlayersService> = self.players.clone();
         sdk::register_players(ctx.services, players)?;
+        let scheduler: Arc<dyn SchedulerService> = self.scheduler.clone();
+        sdk::register_scheduler(ctx.services, scheduler)?;
+        let cooldowns: Arc<dyn CooldownsService> = self.cooldowns.clone();
+        sdk::register_cooldowns(ctx.services, cooldowns)?;
+        let confirm: Arc<dyn ConfirmService> = self.confirm.clone();
+        sdk::register_confirm(ctx.services, confirm)?;
 
         ctx.log(
             LogLevel::Info,
-            "SDK services registered (permissions, commands, messages, players)",
+            "SDK services registered (permissions, commands, messages, players, \
+             scheduler, cooldowns, confirm)",
         );
         Ok(())
+    }
+
+    fn on_tick(&mut self, _ctx: &mut NativeContext, n: u64) {
+        // Advance the clock the timer-driven services read, then fire due
+        // timers into the pending queue a dependent polls.
+        self.scheduler.advance(n);
     }
 }
 
@@ -390,6 +413,254 @@ impl PlayersService for Players {
     }
 }
 
+// --- scheduler / cooldowns / confirm -----------------------------------
+
+/// The current world tick, shared by the timer-driven services. Advanced once
+/// per tick by [`SdkPlugin::on_tick`].
+#[derive(Default)]
+struct Clock {
+    tick: AtomicU64,
+}
+
+impl Clock {
+    fn now(&self) -> u64 {
+        self.tick.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, n: u64) {
+        self.tick.store(n, Ordering::Relaxed);
+    }
+}
+
+struct Timer {
+    caller: String,
+    due: u64,
+    period: Option<u64>,
+}
+
+/// The timer wheel. Ids are global and monotonically increasing; a timer is
+/// owned by the caller that created it, so one dependent can neither see nor
+/// cancel another's.
+struct Scheduler {
+    clock: Arc<Clock>,
+    next: AtomicU64,
+    timers: Mutex<HashMap<u64, Timer>>,
+    /// `(id, caller)` pairs that came due since the last `poll`, retaining the
+    /// caller so a poll by one dependent leaves another's due timers for them.
+    due: Mutex<Vec<(u64, String)>>,
+}
+
+impl Scheduler {
+    fn new(clock: Arc<Clock>) -> Scheduler {
+        Scheduler {
+            clock,
+            next: AtomicU64::new(0),
+            timers: Mutex::new(HashMap::new()),
+            due: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn advance(&self, n: u64) {
+        self.clock.set(n);
+        let mut due = self.due.lock().unwrap();
+        let mut timers = self.timers.lock().unwrap();
+        let mut fired_one_shot = Vec::new();
+        for (id, timer) in timers.iter_mut() {
+            if timer.due > n {
+                continue;
+            }
+            due.push((*id, timer.caller.clone()));
+            match timer.period {
+                Some(period) if period > 0 => {
+                    // Catch up without spinning if several periods passed.
+                    let behind = n - timer.due;
+                    timer.due += (behind / period + 1) * period;
+                }
+                // A one-shot is spent; drop it so it cannot fire again.
+                _ => fired_one_shot.push(*id),
+            }
+        }
+        for id in fired_one_shot {
+            timers.remove(&id);
+        }
+    }
+
+    fn after(&self, caller: &str, ticks: u64) -> u64 {
+        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        let due = self.clock.now() + ticks.max(1);
+        self.timers.lock().unwrap().insert(
+            id,
+            Timer {
+                caller: caller.to_string(),
+                due,
+                period: None,
+            },
+        );
+        id
+    }
+
+    fn every(&self, caller: &str, period: u64) -> u64 {
+        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        let period = period.max(1);
+        let due = self.clock.now() + period;
+        self.timers.lock().unwrap().insert(
+            id,
+            Timer {
+                caller: caller.to_string(),
+                due,
+                period: Some(period),
+            },
+        );
+        id
+    }
+
+    fn cancel(&self, caller: &str, id: u64) -> bool {
+        let mut timers = self.timers.lock().unwrap();
+        match timers.get(&id) {
+            Some(t) if t.caller == caller => {
+                timers.remove(&id);
+                drop(timers);
+                // A timer that already came due this tick must not be delivered.
+                self.due.lock().unwrap().retain(|(d, _)| *d != id);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn poll(&self, caller: &str) -> Vec<u64> {
+        let mut due = self.due.lock().unwrap();
+        let mut mine = Vec::new();
+        let mut rest = Vec::new();
+        for (id, owner) in due.drain(..) {
+            if owner == caller {
+                mine.push(id);
+            } else {
+                rest.push((id, owner));
+            }
+        }
+        *due = rest;
+        mine
+    }
+}
+
+impl SchedulerService for Scheduler {
+    fn after(&self, caller: &str, ticks: u64) -> u64 {
+        Scheduler::after(self, caller, ticks)
+    }
+    fn every(&self, caller: &str, period: u64) -> u64 {
+        Scheduler::every(self, caller, period)
+    }
+    fn cancel(&self, caller: &str, id: u64) -> bool {
+        Scheduler::cancel(self, caller, id)
+    }
+    fn poll(&self, caller: &str) -> Vec<u64> {
+        Scheduler::poll(self, caller)
+    }
+}
+
+/// Per-caller, per-key cooldowns: `(armed_tick, duration_ticks)`.
+struct Cooldowns {
+    clock: Arc<Clock>,
+    map: Mutex<HashMap<(String, String), (u64, u64)>>,
+}
+
+impl Cooldowns {
+    fn new(clock: Arc<Clock>) -> Cooldowns {
+        Cooldowns {
+            clock,
+            map: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl CooldownsService for Cooldowns {
+    fn ready(&self, caller: &str, key: &str, ticks: u64) -> bool {
+        let now = self.clock.now();
+        let mut map = self.map.lock().unwrap();
+        let entry = map.get_mut(&(caller.to_string(), key.to_string()));
+        match entry {
+            Some((armed, duration)) if now < *armed + *duration => false,
+            _ => {
+                map.insert((caller.to_string(), key.to_string()), (now, ticks.max(1)));
+                true
+            }
+        }
+    }
+
+    fn remaining(&self, caller: &str, key: &str) -> u64 {
+        let now = self.clock.now();
+        let map = self.map.lock().unwrap();
+        match map.get(&(caller.to_string(), key.to_string())) {
+            Some((armed, duration)) => (*armed + *duration).saturating_sub(now),
+            None => 0,
+        }
+    }
+}
+
+/// Pending "type again to confirm" prompts, expiring after 30 seconds.
+struct Confirm {
+    clock: Arc<Clock>,
+    messages: Arc<Messages>,
+    pending: Mutex<HashMap<(String, u64, String), u64>>,
+}
+
+/// How long a confirmation stays valid, in ticks (30s at 20 tps).
+const CONFIRM_TICKS: u64 = 600;
+
+impl Confirm {
+    fn new(clock: Arc<Clock>, messages: Arc<Messages>) -> Confirm {
+        Confirm {
+            clock,
+            messages,
+            pending: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Drop expired entries; returns the caller's live entries count for
+    /// `player`.
+    fn live_for(&self, caller: &str, player: u64) -> usize {
+        let now = self.clock.now();
+        let mut pending = self.pending.lock().unwrap();
+        pending.retain(|_, expires| *expires > now);
+        pending
+            .keys()
+            .filter(|(c, p, _)| c == caller && *p == player)
+            .count()
+    }
+}
+
+impl ConfirmService for Confirm {
+    fn request(&self, caller: &str, p: &Player, prompt: &str, token: &str) -> bool {
+        if self.live_for(caller, p.id) > 0 {
+            return false;
+        }
+        let expires = self.clock.now() + CONFIRM_TICKS;
+        self.pending
+            .lock()
+            .unwrap()
+            .insert((caller.to_string(), p.id, token.to_string()), expires);
+        self.messages.send(caller, p, prompt);
+        true
+    }
+
+    fn check(&self, caller: &str, p: &Player, token: &str) -> bool {
+        let now = self.clock.now();
+        let mut pending = self.pending.lock().unwrap();
+        match pending.get(&(caller.to_string(), p.id, token.to_string())) {
+            Some(expires) if *expires > now => {
+                pending.remove(&(caller.to_string(), p.id, token.to_string()));
+                true
+            }
+            Some(_) => {
+                pending.remove(&(caller.to_string(), p.id, token.to_string()));
+                false
+            }
+            None => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,13 +880,120 @@ mod tests {
     fn init_registers_every_service() {
         let registry = ServiceRegistry::new();
         let backend: Arc<OnceLock<Arc<dyn HostBackend>>> = Arc::new(OnceLock::new());
+        let clock = Arc::new(Clock::default());
+        let messages = Arc::new(Messages::new(Arc::clone(&backend)));
+        let messages_svc: Arc<dyn MessagesService> = messages.clone();
         sdk::register_commands(&registry, Arc::new(Commands::default())).unwrap();
         sdk::register_permissions(&registry, Arc::new(Permissions)).unwrap();
-        sdk::register_messages(&registry, Arc::new(Messages::new(Arc::clone(&backend)))).unwrap();
+        sdk::register_messages(&registry, messages_svc).unwrap();
         sdk::register_players(&registry, Arc::new(Players::new(backend))).unwrap();
+        sdk::register_scheduler(&registry, Arc::new(Scheduler::new(Arc::clone(&clock)))).unwrap();
+        sdk::register_cooldowns(&registry, Arc::new(Cooldowns::new(Arc::clone(&clock)))).unwrap();
+        sdk::register_confirm(&registry, Arc::new(Confirm::new(clock, messages))).unwrap();
         assert!(sdk::commands(&registry).is_some());
         assert!(sdk::permissions(&registry).is_some());
         assert!(sdk::messages(&registry).is_some());
         assert!(sdk::players(&registry).is_some());
+        assert!(sdk::scheduler(&registry).is_some());
+        assert!(sdk::cooldowns(&registry).is_some());
+        assert!(sdk::confirm(&registry).is_some());
+    }
+
+    #[test]
+    fn a_one_shot_timer_fires_once_at_its_tick() {
+        let clock = Arc::new(Clock::default());
+        let scheduler = Scheduler::new(Arc::clone(&clock));
+        let id = scheduler.after("a", 5);
+        scheduler.advance(4);
+        assert!(scheduler.poll("a").is_empty(), "not due yet");
+        scheduler.advance(5);
+        assert_eq!(scheduler.poll("a"), vec![id]);
+        // A one-shot fires once.
+        scheduler.advance(6);
+        assert!(scheduler.poll("a").is_empty());
+    }
+
+    #[test]
+    fn a_repeating_timer_fires_every_period() {
+        let clock = Arc::new(Clock::default());
+        let scheduler = Scheduler::new(clock);
+        let id = scheduler.every("a", 3);
+        scheduler.advance(3);
+        assert_eq!(scheduler.poll("a"), vec![id]);
+        // Skipping several periods still yields one delivery this poll.
+        scheduler.advance(30);
+        assert_eq!(scheduler.poll("a"), vec![id]);
+        scheduler.advance(33);
+        assert_eq!(scheduler.poll("a"), vec![id]);
+    }
+
+    #[test]
+    fn a_timer_is_owned_by_its_caller() {
+        let clock = Arc::new(Clock::default());
+        let scheduler = Scheduler::new(clock);
+        let a = scheduler.after("a", 1);
+        scheduler.advance(1);
+        // `b` cannot poll or cancel `a`'s timer.
+        assert!(scheduler.poll("b").is_empty());
+        assert!(!scheduler.cancel("b", a));
+        assert_eq!(scheduler.poll("a"), vec![a]);
+    }
+
+    #[test]
+    fn a_cancelled_timer_never_fires() {
+        let clock = Arc::new(Clock::default());
+        let scheduler = Scheduler::new(clock);
+        let id = scheduler.after("a", 2);
+        assert!(scheduler.cancel("a", id));
+        scheduler.advance(2);
+        assert!(scheduler.poll("a").is_empty());
+    }
+
+    #[test]
+    fn a_cooldown_is_not_ready_until_it_expires() {
+        let clock = Arc::new(Clock::default());
+        let cooldowns = Cooldowns::new(Arc::clone(&clock));
+        assert!(cooldowns.ready("a", "home", 20));
+        assert_eq!(cooldowns.remaining("a", "home"), 20);
+        clock.set(10);
+        assert!(!cooldowns.ready("a", "home", 20));
+        assert_eq!(cooldowns.remaining("a", "home"), 10);
+        clock.set(20);
+        assert!(cooldowns.ready("a", "home", 20));
+        // Another caller's cooldown is independent.
+        assert!(cooldowns.ready("b", "home", 20));
+    }
+
+    #[test]
+    fn a_confirmation_must_be_requested_then_checked() {
+        let clock = Arc::new(Clock::default());
+        let backend: Arc<OnceLock<Arc<dyn HostBackend>>> = Arc::new(OnceLock::new());
+        let confirm = Confirm::new(Arc::clone(&clock), Arc::new(Messages::new(backend)));
+        let p = Player {
+            id: 1,
+            name: "Steve".to_string(),
+            operator: false,
+        };
+        assert!(confirm.request("a", &p, "really?", "delete"));
+        // A second request for the same player is refused while one is pending.
+        assert!(!confirm.request("a", &p, "really?", "other"));
+        assert!(confirm.check("a", &p, "delete"));
+        // Consumed: a second check fails.
+        assert!(!confirm.check("a", &p, "delete"));
+    }
+
+    #[test]
+    fn an_expired_confirmation_is_not_accepted() {
+        let clock = Arc::new(Clock::default());
+        let backend: Arc<OnceLock<Arc<dyn HostBackend>>> = Arc::new(OnceLock::new());
+        let confirm = Confirm::new(Arc::clone(&clock), Arc::new(Messages::new(backend)));
+        let p = Player {
+            id: 1,
+            name: "Steve".to_string(),
+            operator: false,
+        };
+        confirm.request("a", &p, "really?", "delete");
+        clock.set(CONFIRM_TICKS + 1);
+        assert!(!confirm.check("a", &p, "delete"));
     }
 }

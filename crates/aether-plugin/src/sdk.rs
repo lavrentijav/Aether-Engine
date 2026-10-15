@@ -135,12 +135,46 @@ pub struct PermissionsProvider(pub Arc<dyn PermissionsService>);
 pub struct CommandsProvider(pub Arc<dyn CommandsService>);
 pub struct MessagesProvider(pub Arc<dyn MessagesService>);
 pub struct PlayersProvider(pub Arc<dyn PlayersService>);
+pub struct SchedulerProvider(pub Arc<dyn SchedulerService>);
+pub struct CooldownsProvider(pub Arc<dyn CooldownsService>);
+pub struct ConfirmProvider(pub Arc<dyn ConfirmService>);
+
+/// The provider-side timer service.
+pub trait SchedulerService: Send + Sync {
+    /// A one-shot timer, `ticks` from now.
+    fn after(&self, caller: &str, ticks: u64) -> u64;
+    /// A repeating timer.
+    fn every(&self, caller: &str, period: u64) -> u64;
+    /// Cancel a timer.
+    fn cancel(&self, caller: &str, id: u64) -> bool;
+    /// Take the ids due since the last poll.
+    fn poll(&self, caller: &str) -> Vec<u64>;
+}
+
+/// The provider-side cooldown service.
+pub trait CooldownsService: Send + Sync {
+    /// Whether `key` is ready, arming it for `ticks` when it is.
+    fn ready(&self, caller: &str, key: &str, ticks: u64) -> bool;
+    /// Ticks left on `key`.
+    fn remaining(&self, caller: &str, key: &str) -> u64;
+}
+
+/// The provider-side confirmation service.
+pub trait ConfirmService: Send + Sync {
+    /// Record a pending confirmation and send its prompt.
+    fn request(&self, caller: &str, p: &Player, prompt: &str, token: &str) -> bool;
+    /// Consume a pending confirmation.
+    fn check(&self, caller: &str, p: &Player, token: &str) -> bool;
+}
 
 /// The service names under which the SDK services are registered.
 pub const PERMISSIONS_SERVICE: &str = "sdk.permissions";
 pub const COMMANDS_SERVICE: &str = "sdk.commands";
 pub const MESSAGES_SERVICE: &str = "sdk.messages";
 pub const PLAYERS_SERVICE: &str = "sdk.players";
+pub const SCHEDULER_SERVICE: &str = "sdk.scheduler";
+pub const COOLDOWNS_SERVICE: &str = "sdk.cooldowns";
+pub const CONFIRM_SERVICE: &str = "sdk.confirm";
 /// The service version.
 pub const SERVICE_VERSION: &str = "0.1";
 
@@ -217,6 +251,63 @@ pub fn messages(registry: &ServiceRegistry) -> Option<Arc<dyn MessagesService>> 
 pub fn players(registry: &ServiceRegistry) -> Option<Arc<dyn PlayersService>> {
     registry
         .get::<PlayersProvider>(PLAYERS_SERVICE, SERVICE_VERSION)
+        .map(|p| Arc::clone(&p.0))
+}
+
+/// Publish a scheduler provider.
+pub fn register_scheduler(
+    registry: &ServiceRegistry,
+    service: Arc<dyn SchedulerService>,
+) -> Result<(), String> {
+    registry.register(
+        SCHEDULER_SERVICE,
+        SERVICE_VERSION,
+        Arc::new(SchedulerProvider(service)),
+    )
+}
+
+/// Publish a cooldown provider.
+pub fn register_cooldowns(
+    registry: &ServiceRegistry,
+    service: Arc<dyn CooldownsService>,
+) -> Result<(), String> {
+    registry.register(
+        COOLDOWNS_SERVICE,
+        SERVICE_VERSION,
+        Arc::new(CooldownsProvider(service)),
+    )
+}
+
+/// Publish a confirmation provider.
+pub fn register_confirm(
+    registry: &ServiceRegistry,
+    service: Arc<dyn ConfirmService>,
+) -> Result<(), String> {
+    registry.register(
+        CONFIRM_SERVICE,
+        SERVICE_VERSION,
+        Arc::new(ConfirmProvider(service)),
+    )
+}
+
+/// Resolve the scheduler provider, if one is registered.
+pub fn scheduler(registry: &ServiceRegistry) -> Option<Arc<dyn SchedulerService>> {
+    registry
+        .get::<SchedulerProvider>(SCHEDULER_SERVICE, SERVICE_VERSION)
+        .map(|p| Arc::clone(&p.0))
+}
+
+/// Resolve the cooldown provider, if one is registered.
+pub fn cooldowns(registry: &ServiceRegistry) -> Option<Arc<dyn CooldownsService>> {
+    registry
+        .get::<CooldownsProvider>(COOLDOWNS_SERVICE, SERVICE_VERSION)
+        .map(|p| Arc::clone(&p.0))
+}
+
+/// Resolve the confirmation provider, if one is registered.
+pub fn confirm(registry: &ServiceRegistry) -> Option<Arc<dyn ConfirmService>> {
+    registry
+        .get::<ConfirmProvider>(CONFIRM_SERVICE, SERVICE_VERSION)
         .map(|p| Arc::clone(&p.0))
 }
 
@@ -499,5 +590,93 @@ impl bindings::aether::sdk::config::Host for StoreData {
 
     fn revision(&mut self) -> u64 {
         self.backend.config_revision(&self.plugin)
+    }
+}
+
+impl bindings::aether::sdk::scheduler::Host for StoreData {
+    fn after(&mut self, ticks: u64) -> u64 {
+        match scheduler(&self.services) {
+            Some(svc) => svc.after(&self.plugin, ticks),
+            None => {
+                self.service_unavailable(SCHEDULER_SERVICE, "after");
+                0
+            }
+        }
+    }
+
+    fn every(&mut self, period: u64) -> u64 {
+        match scheduler(&self.services) {
+            Some(svc) => svc.every(&self.plugin, period),
+            None => {
+                self.service_unavailable(SCHEDULER_SERVICE, "every");
+                0
+            }
+        }
+    }
+
+    fn cancel(&mut self, id: u64) -> bool {
+        match scheduler(&self.services) {
+            Some(svc) => svc.cancel(&self.plugin, id),
+            None => {
+                self.service_unavailable(SCHEDULER_SERVICE, "cancel");
+                false
+            }
+        }
+    }
+
+    fn poll(&mut self) -> Vec<u64> {
+        match scheduler(&self.services) {
+            Some(svc) => svc.poll(&self.plugin),
+            None => {
+                self.service_unavailable(SCHEDULER_SERVICE, "poll");
+                Vec::new()
+            }
+        }
+    }
+}
+
+impl bindings::aether::sdk::cooldowns::Host for StoreData {
+    fn ready(&mut self, key: String, ticks: u64) -> bool {
+        match cooldowns(&self.services) {
+            Some(svc) => svc.ready(&self.plugin, &key, ticks),
+            None => {
+                self.service_unavailable(COOLDOWNS_SERVICE, "ready");
+                // Fail open on cooldowns would let a spam guard be bypassed;
+                // fail closed by treating the call as on cooldown.
+                false
+            }
+        }
+    }
+
+    fn remaining(&mut self, key: String) -> u64 {
+        match cooldowns(&self.services) {
+            Some(svc) => svc.remaining(&self.plugin, &key),
+            None => {
+                self.service_unavailable(COOLDOWNS_SERVICE, "remaining");
+                0
+            }
+        }
+    }
+}
+
+impl bindings::aether::sdk::confirm::Host for StoreData {
+    fn request(&mut self, p: Player, prompt: String, token: String) -> bool {
+        match confirm(&self.services) {
+            Some(svc) => svc.request(&self.plugin, &p, &prompt, &token),
+            None => {
+                self.service_unavailable(CONFIRM_SERVICE, "request");
+                false
+            }
+        }
+    }
+
+    fn check(&mut self, p: Player, token: String) -> bool {
+        match confirm(&self.services) {
+            Some(svc) => svc.check(&self.plugin, &p, &token),
+            None => {
+                self.service_unavailable(CONFIRM_SERVICE, "check");
+                false
+            }
+        }
     }
 }
