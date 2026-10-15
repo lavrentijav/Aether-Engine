@@ -65,6 +65,13 @@ pub struct Manifest {
     /// `0` is treated as every tick.
     #[serde(default = "default_tick_period")]
     pub tick_period: u64,
+    /// Whether a fault in a `before-*` handler counts as a **veto** instead
+    /// of as `allow`. Off by default: a broken plugin must not silently change
+    /// gameplay. A plugin whose job is to protect something — a region guard,
+    /// an anti-grief rule — sets this so that a trap, an overrun or a spent
+    /// tick budget fails closed rather than letting the action through.
+    #[serde(default)]
+    pub deny_on_fault: bool,
 }
 
 fn default_api() -> String {
@@ -177,6 +184,13 @@ tick_period = 20
         assert_eq!(minimal.api, API_VERSION);
         assert_eq!(minimal.tick_period, 1);
         assert!(minimal.subscribe.is_empty());
+        assert!(!minimal.deny_on_fault, "faults allow by default");
+    }
+
+    #[test]
+    fn deny_on_fault_is_opt_in() {
+        let m: Manifest = toml::from_str("id=\"g\"\nentry=\"g.wasm\"\ndeny_on_fault=true").unwrap();
+        assert!(m.deny_on_fault);
     }
 
     #[test]

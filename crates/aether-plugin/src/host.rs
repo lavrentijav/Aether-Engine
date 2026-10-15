@@ -436,7 +436,13 @@ impl PluginHost {
             if ms == 0 {
                 // The tick's shared budget is gone: no plugin runs again this
                 // tick. This is what bounds the *aggregate* cost, not just one
-                // call.
+                // call. A fail-closed plugin cannot run, so it vetoes.
+                if self.plugins[i].manifest.deny_on_fault {
+                    return Decision::Cancel(format!(
+                        "plugin `{}` could not check this action: the plugin budget is spent",
+                        self.plugins[i].manifest.id
+                    ));
+                }
                 continue;
             }
             self.plugins[i].store.set_epoch_deadline(ms);
@@ -447,7 +453,16 @@ impl PluginHost {
             match r {
                 Ok(Decision::Allow) => {}
                 Ok(d @ Decision::Cancel(_)) => return d,
-                Err(e) => self.fault(i, event, e),
+                Err(e) => {
+                    // Default: a trap is `allow` (a broken plugin must not
+                    // silently veto). A fail-closed plugin flips that.
+                    let fail_closed = self.plugins[i].manifest.deny_on_fault;
+                    let id = self.plugins[i].manifest.id.clone();
+                    self.fault(i, event, e);
+                    if fail_closed {
+                        return Decision::Cancel(format!("plugin `{id}` failed in `{event}`"));
+                    }
+                }
             }
         }
         Decision::Allow

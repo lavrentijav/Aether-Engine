@@ -111,6 +111,7 @@ fn recorder(
         subscribe: subscribe.iter().map(|s| s.to_string()).collect(),
         commands: commands.iter().map(|s| s.to_string()).collect(),
         tick_period: 1,
+        deny_on_fault: false,
     };
     let mut cfg = std::collections::BTreeMap::new();
     // Every recorder acknowledges under the id the test gave it, so two
@@ -283,6 +284,58 @@ fn the_shared_tick_budget_bounds_all_plugins_together() {
     assert!(
         took < Duration::from_millis(300),
         "the shared budget should keep the whole hook near one tick, took {took:?}"
+    );
+}
+
+#[test]
+fn a_fail_closed_plugin_vetoes_when_it_traps() {
+    let (mut h, _backend) = host();
+    let (mut m, caps, cfg) = recorder(
+        "guard",
+        0,
+        &["before-block-break"],
+        &[],
+        &[("trap", "before-block-break")],
+    );
+    m.manifest.deny_on_fault = true;
+    h.add(&m, &caps, &cfg).unwrap();
+    let decision = h.before_block_break(&player(), 0, 64, 0, "minecraft:stone");
+    assert!(
+        matches!(decision, Decision::Cancel(_)),
+        "a fail-closed plugin that traps must veto, not allow"
+    );
+}
+
+#[test]
+fn a_fail_closed_plugin_vetoes_when_the_budget_is_spent() {
+    let backend = Arc::new(TestBackend::default());
+    let config = HostConfig {
+        budget_ms: 40,
+        tick_budget_ms: 40,
+        ..HostConfig::default()
+    };
+    let mut h = PluginHost::new(config, backend.clone()).unwrap();
+    // "burn" spins and eats the whole shared tick budget, without vetoing.
+    let (burn, caps, burn_cfg) = recorder(
+        "burn",
+        30,
+        &["before-block-break"],
+        &[],
+        &[("spin", "before-block-break")],
+    );
+    h.add(&burn, &caps, &burn_cfg).unwrap();
+    // "guard" is fail-closed but never gets to run: the budget is gone.
+    let (mut guard, guard_caps, guard_cfg) =
+        recorder("guard", 10, &["before-block-break"], &[], &[]);
+    guard.manifest.deny_on_fault = true;
+    h.add(&guard, &guard_caps, &guard_cfg).unwrap();
+
+    // A tick starts the shared budget window.
+    h.on_tick(1);
+    let decision = h.before_block_break(&player(), 0, 64, 0, "minecraft:stone");
+    assert!(
+        matches!(decision, Decision::Cancel(_)),
+        "a fail-closed plugin that cannot run must veto, not allow"
     );
 }
 
