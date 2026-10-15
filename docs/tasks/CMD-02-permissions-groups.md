@@ -19,6 +19,9 @@ resolution the core and plugins read.
 - Storage: reuse the existing world KV (`aether-api` key prefixes) or a `permissions.json` in the
   world dir — mirror however the players/config is stored today, add the prefix to the central key
   list (see T5) and a test that fails on a duplicate prefix.
+- The built-in group **`op`** (level 4) is created at startup and receives the `config.operators`
+  entries as members (the seed from CMD-01). It is the group the `is_operator` check maps to and it
+  cannot be deleted from the UI; a name in the config that is already a member is not duplicated.
 - Writes happen off the tick (safe point) and swap in an immutable snapshot; readers take an
   `Arc` snapshot per check. No `Mutex` on the hot path.
 

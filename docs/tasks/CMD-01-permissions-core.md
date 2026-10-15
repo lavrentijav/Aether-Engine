@@ -25,6 +25,15 @@ A node resolves in this order:
 lower-case, dot-separated, `[a-z0-9_.-]`; validation rejects empty segments and upper case.
 Unknown nodes default to `op` (deny for non-ops), never to `true` — a typo must fail closed.
 
+### Operators config is a seed, not the source of truth
+The existing `config.operators` list stays, but only as a **seed**. On startup every entry is
+applied as membership of the built-in group `op` (level 4); the permission store is the source of
+truth from then on. A later `/op`/`/deop` (CMD-08) and group edits (CMD-02) change the store, not
+the config. On restart the seed is reconciled (an entry the store already knows is not duplicated;
+removing a name from the config does **not** silently deop — record the chosen rule in the module
+docs and test it). `is_operator` becomes `permissions::level(handle) >= 1`; the built-in group `op`
+must exist and be non-deletable.
+
 Reference levels (vanilla `CommandSourceStack`): 0 everyone, 1 bypass spawn protection, 2
 gamemasters (most gameplay commands), 3 admins (kick/ban/op/whitelist), 4 owners (stop/save/reload).
 Levels are stored as `u8` and clamped to `0..=4`.
@@ -44,6 +53,9 @@ Levels are stored as `u8` and clamped to `0..=4`.
 - Unknown / malformed node names fail closed (deny).
 - Level clamping: a configured level › 4 behaves as 4; a negative/overflow parse is rejected.
 - `is_operator` behaviour is unchanged for the existing economy/game/session call sites.
+- **operators seed:** a config entry becomes an `op`-group member on start; the group is level 4;
+  the `op` group cannot be deleted; an entry already in the store is not duplicated on restart;
+  changing the config does not retroactively deop (per the documented rule).
 
 ## Done criteria
 - New module with unit tests for the resolution order above.
