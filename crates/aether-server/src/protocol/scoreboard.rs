@@ -353,16 +353,21 @@ pub enum TextForm {
 /// The shape of the `teams` packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeamForm {
-    /// 1.8: `name, prefix, suffix, friendlyFire, nameTagVisibility, color`;
-    /// prefix and suffix are 16-character strings.
+    /// 1.8: `name, mode, displayName, prefix, suffix, friendlyFire,
+    /// nameTagVisibility, color, players`; prefix and suffix are
+    /// 16-character strings, friendly-fire and colour are bytes.
     Legacy,
     /// 1.13–1.20.2: `name, friendlyFire, nameTagVisibility, collisionRule,
-    /// color, prefix, suffix, players`; strings, up to 64 characters.
+    /// formatting, prefix, suffix, players`; name/prefix/suffix are JSON
+    /// components, up to 64 characters.
     Classic,
-    /// 1.20.3–1.21.8: `Classic`, but name/prefix/suffix are NBT components.
+    /// 1.20.3–1.21.4: `Classic`, but name/prefix/suffix are NBT components.
     Nbt,
-    /// 1.21.9+: `Nbt`, but friendly-fire is a flag byte and visibility and
-    /// collision are VarInt enums.
+    /// 1.21.5 only: `Nbt`, but `nameTagVisibility` and `collisionRule` are
+    /// VarInt enums (friendly-fire is still a byte, `mode` still an `i8`).
+    NbtEnums,
+    /// 1.21.6+: `NbtEnums`, but friendly-fire and see-invisible are one flag
+    /// byte (the `friendlyFire` byte is gone) and `mode` is a mapped `i8`.
     NbtFlags,
 }
 
@@ -581,8 +586,10 @@ pub fn tab_for(protocol: i32) -> Option<TabWire> {
             id: 0x60,
             text: TextForm::Json,
         },
+        // 1.19.2 renamed the packet to `message_header` for its signed chat,
+        // and the tab list is `playerlist_header` at `0x63`.
         760 => TabWire {
-            id: 0x32,
+            id: 0x63,
             text: TextForm::Json,
         },
         761 => TabWire {
@@ -597,8 +604,15 @@ pub fn tab_for(protocol: i32) -> Option<TabWire> {
             id: 0x68,
             text: TextForm::Json,
         },
-        765..=767 => TabWire {
+        // 1.20.3.
+        765 => TabWire {
             id: 0x6a,
+            text: TextForm::Nbt,
+        },
+        // 1.20.5/1.20.6 and 1.21/1.21.1 moved it to `0x6d` (`0x6a` is
+        // `stop_sound` there).
+        766 | 767 => TabWire {
+            id: 0x6d,
             text: TextForm::Nbt,
         },
         768 | 769 => TabWire {
@@ -701,20 +715,27 @@ fn write_team(
     if named {
         match wire.team_form {
             TeamForm::Legacy => {
-                // 1.8 order: name, prefix, suffix, friendlyFire,
-                // nameTagVisibility, color.
+                // 1.8 order: mode, displayName, prefix, suffix, friendlyFire,
+                // nameTagVisibility, color. The display name is a cosmetic
+                // label; the team name written above is its id. Dropping it
+                // shifts every following field, so the client reads the member
+                // count from the middle of the prefix.
+                p.string(name); // displayName
                 p.string(&prefix).string(&suffix);
-                p.u8(0); // no friendly fire
-                p.string("always");
-                p.u8(0xFF); // no colour override
+                p.u8(0); // friendlyFire: off
+                p.string("always"); // nameTagVisibility
+                p.u8(0xFF); // color: none (-1)
             }
             TeamForm::Classic => {
-                p.string(name);
+                // name/prefix/suffix are JSON chat components here, not raw
+                // strings.
+                write_text(&mut p, TextForm::Json, name);
                 p.u8(0); // no friendly fire
                 p.string("always");
                 p.string("always"); // collision rule
                 p.var_int(21); // formatting: reset
-                p.string(&prefix).string(&suffix);
+                write_text(&mut p, TextForm::Json, &prefix);
+                write_text(&mut p, TextForm::Json, &suffix);
             }
             TeamForm::Nbt => {
                 write_text(&mut p, TextForm::Nbt, name);
@@ -722,6 +743,17 @@ fn write_team(
                 p.string("always");
                 p.string("always");
                 p.var_int(21);
+                write_text(&mut p, TextForm::Nbt, &prefix);
+                write_text(&mut p, TextForm::Nbt, &suffix);
+            }
+            TeamForm::NbtEnums => {
+                // 1.21.5: same as `Nbt`, but visibility and collision are
+                // VarInt enums (0 = always), not strings.
+                write_text(&mut p, TextForm::Nbt, name);
+                p.u8(0); // no friendly fire
+                p.var_int(0); // name tag visibility: always
+                p.var_int(0); // collision rule: always
+                p.var_int(21); // formatting: reset
                 write_text(&mut p, TextForm::Nbt, &prefix);
                 write_text(&mut p, TextForm::Nbt, &suffix);
             }
@@ -771,8 +803,10 @@ pub fn wire_for(protocol: i32) -> Option<Wire> {
         766 | 767 => Wire::modern(0x5e, 0x61, 0x57, 0x60, 0x44, TeamForm::Nbt),
         // 1.21.2 – 1.21.4.
         768 | 769 => Wire::modern(0x64, 0x68, 0x5c, 0x67, 0x49, TeamForm::Nbt),
-        // 1.21.5 – 1.21.8.
-        770..=772 => Wire::modern(0x63, 0x67, 0x5b, 0x66, 0x48, TeamForm::Nbt),
+        // 1.21.5: visibility and collision became VarInt enums.
+        770 => Wire::modern(0x63, 0x67, 0x5b, 0x66, 0x48, TeamForm::NbtEnums),
+        // 1.21.6 – 1.21.8: friendly-fire became a flag byte.
+        771 | 772 => Wire::modern(0x63, 0x67, 0x5b, 0x66, 0x48, TeamForm::NbtFlags),
         // 1.21.9 – 1.21.11: the team packet gained a flags byte and VarInt
         // enums.
         773 | 774 => Wire::modern(0x68, 0x6c, 0x60, 0x6b, 0x4d, TeamForm::NbtFlags),
@@ -781,7 +815,12 @@ pub fn wire_for(protocol: i32) -> Option<Wire> {
         // `set_player_team`, `set_score`, `reset_score`). Two packets were
         // inserted before them, so every id shifted by two.
         775 | 776 => Wire::modern(0x6a, 0x6e, 0x62, 0x6d, 0x4f, TeamForm::NbtFlags),
-        // 26.3 (777): shifted by four from 1.21.11, not two.
+        // 26.3 (777): shifted by four from 1.21.11 for objective/score/display/
+        // team, but `reset_score` sits one earlier (a packet was inserted
+        // *after* it), so it is +3, not +4. All six from this release's own
+        // `packets.json` (`set_display_objective` 100, `set_objective` 108,
+        // `set_player_team` 111, `set_score` 112, `reset_score` 80,
+        // `tab_list` 125).
         777 => Wire::modern(0x6c, 0x70, 0x64, 0x6f, 0x50, TeamForm::NbtFlags),
         _ => return None,
     })
@@ -1204,9 +1243,84 @@ mod tests {
         assert_eq!(pin.var_int().unwrap(), 0x3E);
         assert_eq!(pin.string().unwrap(), "sbl0");
         assert_eq!(pin.u8().unwrap(), 2, "change");
-        // 1.8 order: name, prefix, suffix, ...
+        // 1.8 order: mode, displayName, prefix, suffix, ...
+        assert_eq!(pin.string().unwrap(), "sbl0", "display name");
         assert_eq!(pin.string().unwrap(), "0123456789abcdef");
         assert_eq!(pin.string().unwrap(), "ghijklmnopqrstuv");
+    }
+
+    #[test]
+    fn a_classic_team_spells_its_name_as_a_json_component() {
+        // 1.13–1.20.2: name, prefix and suffix are JSON text components.
+        let wire = wire_for(756).unwrap();
+        let ops = encode(
+            &wire,
+            &ScoreboardOp::TeamAdd {
+                name: "sbl0".to_string(),
+                prefix: "line".to_string(),
+                suffix: String::new(),
+                members: vec!["§0".to_string()],
+            },
+        );
+        let mut pin = crate::proto::PacketIn::new(ops[0].body());
+        assert_eq!(pin.var_int().unwrap(), 0x55);
+        assert_eq!(pin.string().unwrap(), "sbl0", "team id");
+        assert_eq!(pin.u8().unwrap(), 0, "add");
+        assert_eq!(
+            pin.string().unwrap(),
+            "{\"text\":\"sbl0\"}",
+            "the name is a JSON component"
+        );
+        assert_eq!(pin.u8().unwrap(), 0, "friendly fire");
+        assert_eq!(pin.string().unwrap(), "always");
+        assert_eq!(pin.string().unwrap(), "always", "collision rule");
+        assert_eq!(pin.var_int().unwrap(), 21, "formatting");
+        assert_eq!(pin.string().unwrap(), "{\"text\":\"line\"}", "prefix JSON");
+        assert_eq!(pin.string().unwrap(), "{\"text\":\"\"}", "suffix JSON");
+    }
+
+    #[test]
+    fn a_1_21_5_team_uses_varint_visibility_and_collision() {
+        // 1.21.5 kept the byte friendly-fire but made visibility and collision
+        // VarInt enums; writing the `Nbt` form's `"always"` strings would push
+        // every following field out of place.
+        let wire = wire_for(770).unwrap();
+        assert_eq!(wire.team_form, TeamForm::NbtEnums);
+        let ops = encode(
+            &wire,
+            &ScoreboardOp::TeamAdd {
+                name: "sbl0".to_string(),
+                prefix: "line".to_string(),
+                suffix: String::new(),
+                members: vec!["§0".to_string()],
+            },
+        );
+        let mut pin = crate::proto::PacketIn::new(ops[0].body());
+        assert_eq!(pin.var_int().unwrap(), 0x66);
+        assert_eq!(pin.string().unwrap(), "sbl0");
+        assert_eq!(pin.u8().unwrap(), 0, "add");
+        assert_eq!(pin.u8().unwrap(), 8, "name is TAG_String");
+        let len = pin.u16().unwrap() as usize;
+        pin.skip(len).unwrap();
+        assert_eq!(pin.u8().unwrap(), 0, "friendly fire byte");
+        assert_eq!(pin.var_int().unwrap(), 0, "visibility: always (VarInt)");
+        assert_eq!(pin.var_int().unwrap(), 0, "collision: always (VarInt)");
+        assert_eq!(pin.var_int().unwrap(), 21, "formatting");
+    }
+
+    #[test]
+    fn the_team_form_matches_every_release() {
+        // The form changed four times; a mixed-up row sends a packet the
+        // client reads as garbage.
+        assert_eq!(wire_for(47).unwrap().team_form, TeamForm::Legacy);
+        assert_eq!(wire_for(756).unwrap().team_form, TeamForm::Classic);
+        assert_eq!(wire_for(764).unwrap().team_form, TeamForm::Classic);
+        assert_eq!(wire_for(765).unwrap().team_form, TeamForm::Nbt);
+        assert_eq!(wire_for(769).unwrap().team_form, TeamForm::Nbt);
+        assert_eq!(wire_for(770).unwrap().team_form, TeamForm::NbtEnums);
+        assert_eq!(wire_for(771).unwrap().team_form, TeamForm::NbtFlags);
+        assert_eq!(wire_for(772).unwrap().team_form, TeamForm::NbtFlags);
+        assert_eq!(wire_for(773).unwrap().team_form, TeamForm::NbtFlags);
     }
 
     #[test]
@@ -1239,9 +1353,12 @@ mod tests {
     fn the_tab_wire_follows_the_text_form() {
         assert_eq!(tab_for(47).unwrap().id, 0x47);
         assert_eq!(tab_for(47).unwrap().text, TextForm::Json);
-        assert_eq!(tab_for(760).unwrap().id, 0x32, "1.19.2 renamed the packet");
+        // 1.19.2's `playerlist_header` is `0x63`; `0x32` is `message_header`.
+        assert_eq!(tab_for(760).unwrap().id, 0x63);
         assert_eq!(tab_for(765).unwrap().id, 0x6a);
         assert_eq!(tab_for(765).unwrap().text, TextForm::Nbt, "1.20.3+");
+        assert_eq!(tab_for(766).unwrap().id, 0x6d, "1.20.5 moved it");
+        assert_eq!(tab_for(767).unwrap().id, 0x6d, "1.21/1.21.1");
         assert_eq!(tab_for(774).unwrap().id, 0x78);
         // 26.x `tab_list`, from the release reports.
         assert_eq!(tab_for(775).unwrap().id, 0x7a);
@@ -1268,8 +1385,10 @@ mod tests {
 
     #[test]
     fn an_old_team_packet_keeps_the_1_8_field_order() {
-        // The 1.8 team packet has no collision rule and puts prefix before
-        // the friendly-fire byte; the modern one puts them after.
+        // 1.8 is `team, mode, displayName, prefix, suffix, friendlyFire,
+        // nameTagVisibility, color, players`. The display name must be written
+        // or every following field shifts and the client reads the member
+        // count from the wrong place.
         let wire = wire_for(47).unwrap();
         let ops = encode(
             &wire,
@@ -1282,9 +1401,10 @@ mod tests {
         );
         let mut pin = crate::proto::PacketIn::new(ops[0].body());
         assert_eq!(pin.var_int().unwrap(), 0x3E);
-        assert_eq!(pin.string().unwrap(), "sbl0");
+        assert_eq!(pin.string().unwrap(), "sbl0", "team id");
         assert_eq!(pin.u8().unwrap(), 0, "add");
-        assert_eq!(pin.string().unwrap(), "line", "1.8: prefix comes first");
+        assert_eq!(pin.string().unwrap(), "sbl0", "1.8: display name");
+        assert_eq!(pin.string().unwrap(), "line", "then prefix");
         assert_eq!(pin.string().unwrap(), "", "then suffix");
         assert_eq!(pin.u8().unwrap(), 0, "then friendly fire");
         assert_eq!(pin.string().unwrap(), "always", "then name-tag visibility");
