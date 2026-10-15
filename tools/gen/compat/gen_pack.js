@@ -141,10 +141,15 @@ function expand(release, assignment) {
 function buildRelease(release, assignments) {
   const pairs = []
   const seenCarrier = new Map()
+  const canonical = new Map() // carrier engine state -> canonical engine state
+  const canonicalOf = new Map() // carrier block name -> canonical engine state
   let packFormat
   for (const a of assignments) {
     const expanded = expand(release, a)
     if (packFormat === undefined) packFormat = expanded.packFormat
+    const carrierBlock = base.blocksByName[strip(a.carrier)]
+    const canon = carrierBlock.defaultState
+    canonicalOf.set(carrierBlock.name, canon)
     for (const s of expanded.states) {
       const prev = seenCarrier.get(s.carrierId)
       if (prev !== undefined && prev !== s.engineState) {
@@ -152,16 +157,34 @@ function buildRelease(release, assignments) {
           `${release}: carrier state ${s.carrierId} assigned to two blocks (${prev}, ${s.engineState})`,
         )
       }
+      if (s.carrierId === canon) {
+        throw new Error(
+          `${release}: ${a.block} is disguised on the carrier's *canonical* state ` +
+            `${canon}, which is left vanilla — real ${a.carrier} would render as ` +
+            `${a.block}. Use a non-canonical carrier state.`,
+        )
+      }
       seenCarrier.set(s.carrierId, s.engineState)
       pairs.push([s.engineState, s.carrierId])
     }
   }
+  // Every *state* of every carrier maps to that carrier's canonical state, so a
+  // genuine carrier block (a tuned note, a powered one) is never sent in the
+  // state a disguise occupies. The engine keeps the true state; only the wire
+  // is canonicalised, and the server plays the sound.
+  for (const [carrierName, canon] of canonicalOf) {
+    const carrierBlock = base.blocksByName[carrierName]
+    for (let id = carrierBlock.minStateId; id <= carrierBlock.maxStateId; id++) {
+      if (id !== canon && !canonical.has(id)) canonical.set(id, canon)
+    }
+  }
   pairs.sort((x, y) => x[0] - y[0])
+  const canonicalPairs = [...canonical.entries()].sort((x, y) => x[0] - y[0])
   if (packFormat === undefined) throw new Error(`${release}: no assignment declares a packFormat`)
-  return { pairs, packFormat }
+  return { pairs, canonicalPairs, packFormat }
 }
 
-function writeRelease(release, { pairs, packFormat }) {
+function writeRelease(release, { pairs, canonicalPairs, packFormat }) {
   const out = []
   const w = s => out.push(s)
   w(`//! Carrier table for the compat resource pack on ${release}.`)
@@ -178,6 +201,14 @@ function writeRelease(release, { pairs, packFormat }) {
   w('/// just as it would any other engine block.')
   w(`pub static CARRIERS: &[(u32, u32)] = &[`)
   for (const [from, to] of pairs) w(`    (${from}, ${to}),`)
+  w('];')
+  w('')
+  w('/// `(engine carrier state, canonical engine state)`, sorted by the first.')
+  w('/// A genuine carrier block is shown as this canonical (vanilla-model)')
+  w('/// state on a carrier-enabled client, whatever its real state, so it can')
+  w('/// never be mistaken for a disguise; the server keeps the true state.')
+  w(`pub static CANONICAL: &[(u32, u32)] = &[`)
+  for (const [from, to] of canonicalPairs) w(`    (${from}, ${to}),`)
   w('];')
   w('')
   fs.mkdirSync(outDir, { recursive: true })
@@ -199,7 +230,9 @@ function main() {
     writeRelease(release, built)
     console.log(
       `${modName(release).padEnd(9)} ${release.padEnd(7)} proto ${String(list[0].protocol).padEnd(3)}` +
-        ` carriers ${String(built.pairs.length).padStart(5)} pack_format ${built.packFormat}`,
+        ` carriers ${String(built.pairs.length).padStart(5)}` +
+        ` canonical ${String(built.canonicalPairs.length).padStart(5)}` +
+        ` pack_format ${built.packFormat}`,
     )
   }
 }

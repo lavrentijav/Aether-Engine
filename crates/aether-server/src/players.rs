@@ -251,7 +251,7 @@ impl PlayerHandle {
                     x: *x,
                     y: *y,
                     z: *z,
-                    block: t.carrier(*block).unwrap_or(*block),
+                    block: t.display(*block),
                 };
                 self.codec.encode(&remapped, world)
             }

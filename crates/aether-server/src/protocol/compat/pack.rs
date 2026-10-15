@@ -45,19 +45,46 @@ use super::pack_gen;
 pub struct PackTable {
     /// `(engine block state, carrier engine block state)`, sorted by the first.
     pub carriers: &'static [(u32, u32)],
+    /// `(engine carrier state, canonical engine state)`, sorted by the first:
+    /// a *real* carrier block, in any state, is shown as its canonical
+    /// (vanilla-model) state so it can never be taken for a disguise.
+    pub canonical: &'static [(u32, u32)],
     /// The resource-pack `pack_format` this assignment was generated for. The
     /// pack offered to a client of this release must declare the same format.
     pub pack_format: u32,
 }
 
 impl PackTable {
-    /// The carrier engine state to show for `id`, or `None` when `id` is not
-    /// disguised and should render as itself.
+    /// The carrier engine state to show for a disguised block, or `None` when
+    /// `id` is not a disguised block.
     #[inline]
     pub fn carrier(&self, id: BlockStateId) -> Option<BlockStateId> {
         let raw = id.raw();
         let i = self.carriers.binary_search_by_key(&raw, |e| e.0).ok()?;
         Some(BlockStateId(self.carriers[i].1))
+    }
+
+    /// The canonical engine state to show for a **real** carrier block in state
+    /// `id`, or `None` when `id` is not a state of any carrier.
+    #[inline]
+    pub fn canonicalise(&self, id: BlockStateId) -> Option<BlockStateId> {
+        let raw = id.raw();
+        let i = self.canonical.binary_search_by_key(&raw, |e| e.0).ok()?;
+        Some(BlockStateId(self.canonical[i].1))
+    }
+
+    /// What to put on the wire for the engine block `id` on a carrier-enabled
+    /// client: the disguise state when `id` is a disguised block, the canonical
+    /// state when it is a real carrier (so a tuned note block cannot render as
+    /// a disguise), and `id` itself otherwise.
+    ///
+    /// A single pass: a disguise's *output* is a carrier state, but it is not
+    /// fed back here, so it is not then canonicalised away.
+    #[inline]
+    pub fn display(&self, id: BlockStateId) -> BlockStateId {
+        self.carrier(id)
+            .or_else(|| self.canonicalise(id))
+            .unwrap_or(id)
     }
 
     /// Whether this release has any carrier assignments at all.
@@ -81,6 +108,7 @@ macro_rules! pack_table {
         /// The carrier table for this release.
         pub static $name: PackTable = PackTable {
             carriers: pack_gen::$m::CARRIERS,
+            canonical: pack_gen::$m::CANONICAL,
             pack_format: pack_gen::$m::PACK_FORMAT,
         };
     };
@@ -110,15 +138,13 @@ impl<'a> CarrierView<'a> {
 impl super::super::BlockSource for CarrierView<'_> {
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
         let block = self.inner.block_at(x, y, z);
-        self.table.carrier(block).unwrap_or(block)
+        self.table.display(block)
     }
 
     fn copy_section(&self, cx: i32, cy: i32, cz: i32, out: &mut [BlockStateId; 4096]) {
         self.inner.copy_section(cx, cy, cz, out);
         for slot in out.iter_mut() {
-            if let Some(carrier) = self.table.carrier(*slot) {
-                *slot = carrier;
-            }
+            *slot = self.table.display(*slot);
         }
     }
 
@@ -166,6 +192,42 @@ mod tests {
         let table = table_for(763).unwrap();
         let stone = aether_api::block_ids::STONE;
         assert_eq!(table.carrier(stone), None);
+        assert_eq!(table.display(stone), stone);
+    }
+
+    #[test]
+    fn a_real_carrier_is_canonicalised_and_never_shows_the_disguise() {
+        // Review 1 design point: a genuine note block is craftable and tunable,
+        // so it can sit in exactly the state a disguise occupies. It must be
+        // sent as the carrier's canonical state — never the disguise state —
+        // or it would render as pale-oak planks. The engine keeps its true
+        // state; only the wire is canonicalised.
+        use aether_world::registry::blocks::{block_of_state, default_state, states_of};
+        let table = table_for(763).unwrap();
+        let block = default_state("minecraft:pale_oak_planks").unwrap();
+        let disguise = table.carrier(block).unwrap();
+        let canonical = default_state("minecraft:note_block").expect("note block default");
+
+        // The disguise state really is a note_block state (that is the point).
+        assert_eq!(
+            block_of_state(disguise).map(|(_, n)| n),
+            Some("minecraft:note_block")
+        );
+        assert_ne!(canonical, disguise, "the disguise is not canonical");
+        // A real note block in the disguise state canonicalises, and does NOT
+        // come back as the disguise.
+        assert_eq!(table.display(disguise), canonical);
+        assert_eq!(table.canonicalise(disguise), Some(canonical));
+        // Every note_block state the engine knows shows the canonical state.
+        for id in states_of("minecraft:note_block").unwrap() {
+            assert_eq!(
+                table.display(BlockStateId(id)),
+                canonical,
+                "note_block state {id}"
+            );
+        }
+        // The disguise is still the disguise for the block it stands for.
+        assert_eq!(table.display(block), disguise);
     }
 
     #[test]
