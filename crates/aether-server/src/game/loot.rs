@@ -2123,6 +2123,34 @@ mod tests {
         assert!(slots.iter().all(|s| *s < 27));
     }
 
+    /// An entry whose condition cannot run is excluded before the weighted
+    /// draw, so the pool renormalises to the entries that can. The fishing
+    /// junk pool's only such entry is bamboo (`location_check`).
+    #[test]
+    fn real_fishing_junk_excludes_unrunnable_entries() {
+        let Ok(root) = std::env::var("AETHER_VANILLA_PACK") else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let tables = LootTables::open(&root);
+        let t = tables
+            .table("minecraft:gameplay/fishing/junk")
+            .expect("junk table");
+        let mut rng = Rng::new(21);
+        for _ in 0..20_000 {
+            let out = t.roll(&LootContext::default(), &mut rng);
+            assert_eq!(
+                out.len(),
+                1,
+                "a roll must not silently yield nothing: {out:?}"
+            );
+            assert_ne!(
+                out[0].item, "minecraft:bamboo",
+                "bamboo's location_check cannot pass"
+            );
+        }
+    }
+
     /// Every table in the pack must parse; the ones that do not are printed.
     #[test]
     fn every_real_table_parses() {
