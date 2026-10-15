@@ -86,6 +86,13 @@ minecraft:allium, minecraft:amethyst_block, minecraft:amethyst_cluster, minecraf
     - **Economy and registries are not plugins yet.** P2 (the economy service and `storage.ledger`) and P3 (plugin-registered custom enchantments/items) are not implemented: the economy still runs the built-in PostgreSQL `Economy`, and the frozen `aether:plugin@0.1.0` world means they will arrive as a new package version.
     - **No native tier and no hot reload.** The native C-ABI tier and hot reload from the design are not started.
 
+17. **The plugin SDK is a native service plugin with partial coverage (PS1).** The SDK ships as a native plugin (`plugins/sdk`, tier `native`) that publishes `sdk.permissions@0.1`, `sdk.commands@0.1`, `sdk.messages@0.1`, `sdk.players@0.1`, `sdk.scheduler@0.1`, `sdk.cooldowns@0.1` and `sdk.confirm@0.1`; a dependent (native or WASM) declares them in `plugin.toml` `requires` and calls them, and the host refuses the load with a clear error when the SDK is disabled. Known limits:
+    - **Permissions fail closed.** The core permission model (CMD-01/02) is not on `oc/P1`, so `sdk.permissions` denies every check and refuses every write; it is a facade that will front the core resolver, not a second implementation.
+    - **Players teleport/give and permission meta are unavailable.** These need core APIs not yet landed (CMD-02/31/32); the service returns the neutral answer (`Err`/unchanged count) rather than guessing.
+    - **Config is host-backed, not a registry service.** `sdk.config` reads the caller's `[plugins.<id>]` values directly in the host bridge, so it works whenever the host does and `revision()` is constant until a config-reload counter exists.
+    - **Timers are polled, not called back.** The frozen `aether:plugin@0.1.0` world has no callback export, so `sdk.scheduler` records due timers and the dependent polls `poll()` on its own `on-tick`; the SDK cannot invoke a WASM dependent's closure.
+    - **A dependent generates its own bindings.** `wit-bindgen` 0.57 cannot export a world from a separate bindings crate, so `crates/aether-plugin-sdk` ships the `dependent` world and the `requires!` macro, and a dependent runs `generate!` in-crate (see `plugins/examples/greet`). The prelude remains for reference.
+
 ### B. Known Deviations Registry (Phase 1 — accepted on purpose)
 These are **not bugs** in Phase 1 — they are documented, temporary compatibility gaps that must be recorded in the engine config and closed in Phase 2.
 

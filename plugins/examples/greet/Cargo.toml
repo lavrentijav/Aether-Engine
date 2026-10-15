@@ -1,0 +1,22 @@
+[package]
+name = "greet-plugin"
+version = "0.1.0"
+edition = "2024"
+description = "Aether Engine example plugin built on the SDK: registers /greet and answers it with the messages service."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+name = "greet"
+
+[dependencies]
+# The SDK client ships the canonical `dependent` world and the `requires!`
+# macro; the guest bindings themselves are generated in-crate.
+aether-plugin-sdk = { path = "../../../crates/aether-plugin-sdk" }
+wit-bindgen = "0.57"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

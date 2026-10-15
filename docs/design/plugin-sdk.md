@@ -1,9 +1,12 @@
 # Plugin SDK — native service plugin + thin guest client (design)
 
-Status: 📋 design (PS1a, 2026-10-15). Step 1 of [`QUEUE-PS-plugin-sdk.md`](../tasks/QUEUE-PS-plugin-sdk.md).
-It surveys the repeated patterns in the command catalogue (`docs/design/commands.md` on `oc/CMD0`),
-the 15 plugin stubs (`plugins/*/README.md` on `oc/CMD0`) and the P1 host on this branch, then fixes
-the shape of the SDK before any code is written. Step 2 implements it.
+Status: ✅ implemented (2026-10-15), stage PS1a–PS1e. Step 1 of
+[`QUEUE-PS-plugin-sdk.md`](../tasks/QUEUE-PS-plugin-sdk.md); this document is
+the survey and the as-built record. The SDK is a native plugin (`plugins/sdk`)
+publishing services; `crates/aether-plugin-sdk` ships the `dependent` world and
+the `requires!` macro; `plugins/examples/greet` is the WASM dependent, verified
+end-to-end by `crates/aether-plugin/tests/sdk_bridge.rs`. Known limits are in
+[KNOWN_ISSUES §17](../KNOWN_ISSUES.md).
 
 Base: `oc/PS1`, built on `oc/P1` (the WASM plugin host is not on `main` yet). The SDK sits on top of
 P1's raw API. Parts of the survey that need core APIs not yet landed (permissions CMD-01/02, regions
@@ -185,7 +188,7 @@ interface services {                    // optional dependencies
 - **`scheduler.after/every` need the dependent's `on-tick` to fire.** The SDK cannot add a
   subscription at runtime; a dependent that uses the scheduler declares `on-tick` in its manifest
   and the SDK's thin client dispatches due timers when the host calls `on-tick`. (Documented
-  requirement, checked by the `depends!` macro where possible.)
+  requirement, mirrored by the `requires!` macro.)
 - **Versioning.** A breaking change to a service bumps `aether:sdk@0.2`; a dependent names the
   version it built against. The host can hold several versions at once, exactly as
   [`plugins.md`](plugins.md) prescribes for plugin package versions. The frozen
@@ -221,9 +224,9 @@ Three coordinated declarations, checked at load:
 
    The guest generates bindings against `world: "dependent"`; the host linker always provides the
    SDK interfaces (returning an "unavailable" error if no provider is registered), so adding them
-   refuses nobody and a non-dependent still loads unchanged. The `depends!("sdk")` macro in the thin
-   client expands the manifest `requires` and the world imports from one place, so the two cannot
-   drift.
+   refuses nobody and a non-dependent still loads unchanged. The `requires!` macro in the thin
+   client mirrors the manifest `requires` list, so the two cannot drift, and a dependent runs
+   `generate!` in-crate against the shipped `dependent` world (see §11).
 
 **Optional services** (economy, regions) use the same machinery but are **not** declared as
 `requires`: a dependent calls `services.lookup("economy", "0.1")`, gets `false`/`None` when absent,
@@ -417,8 +420,10 @@ Contents, and nothing more:
 - `src/prelude.rs` — ergonomic re-exports: `permissions()`, `commands()`, `messages()`, `players()`,
   `config()`, `scheduler()`, `cooldowns()`, `confirm()`, `services()` — thin newtype handles over the
   generated resources with no behaviour beyond forwarding.
-- `depends!("sdk")` / `export_plugin!` — macros that (a) expand the manifest `requires` and the
-  world imports together, and (b) seed the frozen `Guest` impl, dispatching to handler tables.
+- `requires!` — a macro that emits the `REQUIRES` constant from the same service list the manifest
+  uses, so the two cannot drift. (The design's `export_plugin!` was not built: `wit-bindgen` 0.57
+  cannot export a world from a separate bindings crate, so a dependent generates its bindings
+  in-crate and `export!` itself — see §11.)
 
 Explicitly **not** in the crate: formatting, parsing, registries, schedulers, cooldowns,
 translation, config typing, or any state. Those are the native plugin's, reached over the boundary.
@@ -443,17 +448,37 @@ translation, config typing, or any state. Those are the native plugin's, reached
 
 ## 11. Implementation plan (step 2)
 
-| commit | scope |
-|---|---|
-| **PS1a** (this) | survey + design; no code |
-| **PS1b** | native tier (`NativePlugin`, `NativeContext`, service registry, bus wiring); `plugins/sdk` skeleton with the `permissions` + `commands` services; thin client crate (bindings + `dependent` world + `depends!`) |
-| **PS1c** | `messages`, `players`, `config` services + thin-client prelude |
-| **PS1d** | `scheduler`, `cooldowns`, `confirm` (+ native async); `on-tick` drain |
-| **PS1e** | port one WASM example (`plugins/examples/hello`) and one native example to the SDK; line-count before/after; EN+RU docs; STATUS/ROADMAP/KNOWN_ISSUES |
+| commit | scope | landed |
+|---|---|---|
+| **PS1a** | survey + design; no code | `293d621` |
+| **PS1b** | native tier (`NativePlugin`, `NativeContext`, `ServiceRegistry`, bus wiring); `tier`/`requires` in the manifest; `aether:sdk@0.1` with `permissions` + `commands` and the host bridge; `plugins/sdk`; thin client crate (`dependent` world + `requires!`) | `e0cf009` |
+| **PS1c** | `messages`, `players`, `config` services + `HostBackend` player hooks + thin-client prelude | `c097849` |
+| **PS1d** | `scheduler`, `cooldowns`, `confirm`, driven by the SDK's own `on-tick` | `96b5d47` |
+| **PS1e** | WASM dependent example (`plugins/examples/greet`) + end-to-end host test; EN+RU docs; STATUS/ROADMAP/KNOWN_ISSUES | this commit |
 
-PS1b necessarily introduces the minimal native tier, because the SDK requires it. Missing core APIs
-(permissions, teleport, players) are stubbed behind `supports()` in the same commit and filled in
-when CMD-01/02, CMD-31/32 and P2 land.
+Async scheduling for native plugins was **deferred with PA3** (owner decision 6); the sync timer
+wheel shipped. Dynamic tab-completion stays out of scope until `aether:plugin@0.2.0` (owner
+decision 3). The permissions service fronts CMD-01/02 and fails closed until it lands (owner
+decision 4).
+
+### Line count: raw host vs SDK
+
+`plugins/examples/hello` (raw WIT host) is 115 lines and `plugins/examples/greet` (SDK) is 98.
+Both must implement the full frozen export set — eleven no-op `before-*`/`after-*`/`on-tick`
+handlers plus `init`/`shutdown` — and that fixed ~75-line boilerplate is most of each file and is
+not what the SDK targets. The SDK changes the *active* code:
+
+| task | raw (hello-style) | SDK (greet) |
+|---|---|---|
+| register a command (args, usage, permission, completions) | hand-written manifest + dispatch in `on-command` | `commands::register(&spec)` in `init` |
+| answer a command with a coloured message | `format!` + manual `§` handling | `messages::send(&p, "&a…")` |
+| permission check before acting | hand-rolled lookup | `permissions::require(&p, "node")` (now: fail-closed facade) |
+| a per-key cooldown / a timer / a confirm prompt | plugin-owned state + `on-tick` plumbing | `cooldowns::ready`, `scheduler::after`/`poll`, `confirm::request`/`check` |
+
+So the reduction is per feature, not in the fixed boilerplate, and it grows with a real plugin
+(dozens of commands, config, timers) rather than showing in a two-command example. The thicker
+sample plugins in `plugins/*` are where it pays off once the core APIs land.
+
 
 ## 12. Open questions for review
 

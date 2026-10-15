@@ -23,7 +23,7 @@ members = [
 # The example plugins are separate WebAssembly components: they target
 # `wasm32-wasip2` and are built on their own (see plugins/examples/*/Makefile),
 # not as part of the host workspace.
-exclude = ["plugins/examples/hello"]
+exclude = ["plugins/examples/hello", "plugins/examples/greet"]
 
 [workspace.package]
 version = "0.1.0"
