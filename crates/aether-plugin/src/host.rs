@@ -102,6 +102,15 @@ pub trait HostBackend: Send + Sync {
     /// core resends only when the pair changes. The default does nothing.
     fn set_tab_header_footer(&self, _plugin: &str, _player: u64, _header: &str, _footer: &str) {}
 
+    /// Whether the vanilla `/scoreboard` model already owns the `sidebar`
+    /// display slot for `player` (an objective other than the plugin's set
+    /// with `setdisplay sidebar`). The sidebar plugin reads this to honour
+    /// `mode = "yield"`. Until CMD-15 lands the core keeps no vanilla
+    /// scoreboard, so the default is `false`.
+    fn vanilla_sidebar_claimed(&self, _plugin: &str, _player: u64) -> bool {
+        false
+    }
+
     /// The extra per-player facts a placeholder can show (position, world,
     /// ping, health, level). The default is `None`: a host that cannot answer
     /// simply leaves those placeholders empty.

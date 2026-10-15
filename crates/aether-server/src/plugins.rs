@@ -256,6 +256,13 @@ mod imp {
         fn world_time(&self, _plugin: &str) -> i64 {
             crate::game::time_of_day()
         }
+
+        fn vanilla_sidebar_claimed(&self, _plugin: &str, _player: u64) -> bool {
+            // The vanilla scoreboard model (CMD-15) is not implemented yet, so
+            // no `/scoreboard objectives setdisplay sidebar` can have claimed
+            // the slot. When it lands, this reads that model.
+            false
+        }
     }
 
     static HOST: OnceLock<Mutex<PluginHost>> = OnceLock::new();

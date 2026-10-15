@@ -28,7 +28,7 @@ use aether_plugin::sdk::{self, PermissionsService};
 use aether_plugin::sidebar::{self, SidebarBoard, SidebarService};
 use aether_plugin::{LogLevel, NativeContext, NativePlugin, NativeRegistration, Player};
 
-use config::SidebarConfig;
+use config::{SidebarConfig, SidebarMode};
 
 /// The most lines a sidebar can show; mirrored by the core.
 pub const MAX_LINES: usize = 15;
@@ -73,10 +73,20 @@ pub fn registration() -> NativeRegistration {
 /// The state the plugin and its service share.
 struct State {
     config: RwLock<SidebarConfig>,
+    /// The `config.toml` path the plugin was started with, so `/sidebar
+    /// reload` rereads the same file.
+    config_path: RwLock<String>,
     /// Per-player line overrides set through the service.
     overrides: Mutex<HashMap<u64, HashMap<usize, String>>>,
     /// Players who turned their sidebar off with `/sidebar toggle`.
     hidden: Mutex<HashSet<u64>>,
+    /// Fractional redraw accumulator, so an `update_hz` that does not divide
+    /// 20 (8, 6, …) still averages exactly that many redraws a second instead
+    /// of rounding up to the next integer tick period.
+    redraw_acc: Mutex<f64>,
+    /// The result of a background `config.toml` read, applied on the next tick
+    /// so the file read never happens on the tick thread.
+    pending: Mutex<Option<Result<SidebarConfig, String>>>,
     /// The shared placeholder registry, resolved once at `init` (the manifest
     /// requires it, so it is present).
     placeholders: OnceLock<Arc<dyn PlaceholdersService>>,
@@ -89,8 +99,11 @@ impl Default for State {
     fn default() -> Self {
         State {
             config: RwLock::new(SidebarConfig::builtin()),
+            config_path: RwLock::new("plugins/sidebar/config.toml".to_string()),
             overrides: Mutex::new(HashMap::new()),
             hidden: Mutex::new(HashSet::new()),
+            redraw_acc: Mutex::new(0.0),
+            pending: Mutex::new(None),
             placeholders: OnceLock::new(),
             permissions: OnceLock::new(),
         }
@@ -108,11 +121,8 @@ impl NativePlugin for SidebarPlugin {
         // Load the config from the file named by `config`, defaulting to the
         // plugin's own `config.toml`; fall back to the built-in board if it is
         // missing, so a fresh install still shows something useful.
-        let path = ctx
-            .config
-            .get("config")
-            .cloned()
-            .unwrap_or_else(|| "plugins/sidebar/config.toml".to_string());
+        let path = self.config_path(ctx);
+        *self.state.config_path.write().unwrap() = path.clone();
         let cfg = match std::fs::read_to_string(&path) {
             Ok(text) => SidebarConfig::parse(&text).map_err(|e| format!("sidebar: {path}: {e}"))?,
             Err(_) => SidebarConfig::builtin(),
@@ -125,6 +135,12 @@ impl NativePlugin for SidebarPlugin {
         }
         if let Some(tab) = ctx.config.get("tab").and_then(|v| v.parse().ok()) {
             cfg.tab = tab;
+        }
+        if let Some(mode) = ctx.config.get("mode").map(|s| s.as_str()) {
+            cfg.mode = match mode {
+                "yield" => SidebarMode::Yield,
+                _ => SidebarMode::Override,
+            };
         }
         *self.state.config.write().unwrap() = cfg;
 
@@ -155,20 +171,34 @@ impl NativePlugin for SidebarPlugin {
         Ok(())
     }
 
-    fn on_tick(&mut self, ctx: &mut NativeContext, n: u64) {
-        let (hz, tab) = {
+    fn on_tick(&mut self, ctx: &mut NativeContext, _n: u64) {
+        self.apply_pending(ctx);
+        let (hz, tab, mode) = {
             let cfg = self.state.config.read().unwrap();
-            (cfg.update_hz.max(1), cfg.tab)
+            (cfg.update_hz.clamp(1, 20), cfg.tab, cfg.mode)
         };
-        let period = (20 / hz).max(1) as u64;
-        if n % period != 0 {
-            return;
+        // Redraw `hz` times per second on average, without rounding to whole
+        // tick periods: a fractional accumulator fires on alternating ticks
+        // rather than dropping the remainder.
+        {
+            let mut acc = self.state.redraw_acc.lock().unwrap();
+            *acc += hz as f64 / 20.0;
+            if *acc < 1.0 {
+                return;
+            }
+            *acc -= 1.0;
         }
         let Some(svc) = self.state.placeholders.get().cloned() else {
             return;
         };
         let players = ctx.backend.online_players(ctx.id);
         for p in &players {
+            // `mode = "yield"`: leave the vanilla `/scoreboard` sidebar alone
+            // while it owns the slot (hide ours so its panel shows).
+            if mode == SidebarMode::Yield && ctx.backend.vanilla_sidebar_claimed(ctx.id, p.id) {
+                ctx.backend.clear_sidebar(ctx.id, p.id);
+                continue;
+            }
             if self.state.hidden.lock().unwrap().contains(&p.id) {
                 // Hide once; the core's diff makes a repeat a no-op.
                 ctx.backend.clear_sidebar(ctx.id, p.id);
@@ -195,7 +225,7 @@ impl NativePlugin for SidebarPlugin {
 
     fn on_command(
         &mut self,
-        ctx: &mut NativeContext,
+        _ctx: &mut NativeContext,
         p: &Player,
         name: &str,
         args: &[String],
@@ -230,10 +260,17 @@ impl NativePlugin for SidebarPlugin {
                 self.state.hidden.lock().unwrap().insert(p.id);
                 lines.push("&7Sidebar hidden.".to_string());
             }
-            "reload" => match self.reload(ctx) {
-                Ok(()) => lines.push("&aSidebar config reloaded.".to_string()),
-                Err(e) => lines.push(format!("&cReload failed: {e}")),
-            },
+            "reload" => {
+                // Reloading rereads a file and touches every player's board,
+                // so it is operator-only.
+                if !p.operator {
+                    lines.push("&cYou must be an operator to reload the sidebar.".to_string());
+                } else {
+                    let path = self.state.config_path.read().unwrap().clone();
+                    self.request_reload(path);
+                    lines.push("&7Sidebar config reload started.".to_string());
+                }
+            }
             other => {
                 lines.push(format!("&cUnknown subcommand `{other}`."));
                 lines.push("&7/sidebar toggle|show|hide|reload".to_string());
@@ -307,18 +344,49 @@ impl SidebarPlugin {
         best
     }
 
-    /// Reload the `config.toml`, keeping the previous config on a parse error.
-    fn reload(&self, ctx: &mut NativeContext) -> Result<(), String> {
-        let path = ctx
-            .config
+    /// The configured `config.toml` path.
+    fn config_path(&self, ctx: &NativeContext) -> String {
+        ctx.config
             .get("config")
             .cloned()
-            .unwrap_or_else(|| "plugins/sidebar/config.toml".to_string());
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
-        let cfg = SidebarConfig::parse(&text)?;
-        *self.state.config.write().unwrap() = cfg;
-        Ok(())
+            .unwrap_or_else(|| "plugins/sidebar/config.toml".to_string())
     }
+
+    /// Read and parse the config on a background thread, leaving the result for
+    /// [`Self::apply_pending`] to pick up next tick. The file read therefore
+    /// never blocks the tick thread. Returns the worker's handle (the caller
+    /// ignores it; tests join it).
+    fn request_reload(&self, path: String) -> std::thread::JoinHandle<()> {
+        let state = Arc::clone(&self.state);
+        std::thread::Builder::new()
+            .name("sidebar-reload".into())
+            .spawn(move || {
+                let result = load_config_file(&path);
+                *state.pending.lock().unwrap() = Some(result);
+            })
+            .expect("spawn sidebar reload thread")
+    }
+
+    /// Apply a finished background reload, if any: keep the old config on a
+    /// parse/read error and log it.
+    fn apply_pending(&self, ctx: &mut NativeContext) {
+        let Some(result) = self.state.pending.lock().unwrap().take() else {
+            return;
+        };
+        match result {
+            Ok(cfg) => {
+                *self.state.config.write().unwrap() = cfg;
+                ctx.log(LogLevel::Info, "sidebar config reloaded");
+            }
+            Err(e) => ctx.log(LogLevel::Warn, &format!("sidebar reload failed: {e}")),
+        }
+    }
+}
+
+/// Read and parse a sidebar `config.toml`.
+fn load_config_file(path: &str) -> Result<SidebarConfig, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    SidebarConfig::parse(&text)
 }
 
 /// Split a board into a tab-list header and footer: the title is the header,
