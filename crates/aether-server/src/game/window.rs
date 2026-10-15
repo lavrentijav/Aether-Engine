@@ -703,6 +703,29 @@ fn open_menu_id_kind(kind: &WindowKind) -> Option<u64> {
     }
 }
 
+/// Where a click goes. Pure and total: the security invariant is that a click
+/// on an open menu is **always** [`ClickTarget::Menu`] for every window id,
+/// slot, button and mode, so it never reaches the inventory click logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClickTarget {
+    /// The player's own or a container window: the normal click logic runs.
+    Inventory,
+    /// A virtual menu owned by `u64`: the click is delivered to the plugin
+    /// and no inventory logic runs.
+    Menu(u64),
+}
+
+fn route_click(open: Option<&WindowKind>, window: u8) -> ClickTarget {
+    if window == 0 {
+        // Window 0 is the player's own inventory, even while a menu is open.
+        return ClickTarget::Inventory;
+    }
+    match open.and_then(open_menu_id_kind) {
+        Some(menu) => ClickTarget::Menu(menu),
+        None => ClickTarget::Inventory,
+    }
+}
+
 /// The id of the menu window this player has open, if the open window is a
 /// virtual menu. Locks the player state only long enough to read it.
 pub fn open_menu_id(handle: &PlayerHandle) -> Option<u64> {
@@ -736,12 +759,14 @@ pub fn click(
     // are stand-ins for actions, not items. The click is handed to the plugin
     // that owns the menu, and the client is resynced so any local prediction
     // (a client-side peek at the item, a shift-click animation) is reverted.
-    if window != 0 {
-        if let Some(menu) = open_menu_id(handle) {
-            crate::plugins::menu_click(handle, menu, slot as i32, button, mode);
-            sync_open(handle, world);
-            return;
-        }
+    let routed = {
+        let st = handle.game();
+        route_click(st.window.as_ref().map(|w| &w.kind), window)
+    };
+    if let ClickTarget::Menu(menu) = routed {
+        crate::plugins::menu_click(handle, menu, slot as i32, button, mode);
+        sync_open(handle, world);
+        return;
     }
     let mut crafted: Vec<(aether_world::ItemTypeId, u8)> = Vec::new();
     let drops = {
@@ -1659,6 +1684,47 @@ mod tests {
             open_menu_id_kind(&WindowKind::Hopper { pos: (0, 0, 0) }),
             None
         );
+    }
+
+    #[test]
+    fn every_click_on_a_menu_routes_to_the_plugin_not_the_inventory() {
+        // A deterministic xorshift over random window/slot/button/mode
+        // sequences. The router ignores the slot, button and mode on purpose:
+        // that is the invariant — no click *type* can steer a menu click into
+        // the inventory logic.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let menu = WindowKind::Menu {
+            menu: 77,
+            shape: MenuShape::Chest6,
+            slots: vec![],
+        };
+        let chest = WindowKind::Chest {
+            left: (0, 0, 0),
+            right: None,
+        };
+        for _ in 0..20_000 {
+            let window = (next() % 4) as u8;
+            let slot = ((next() % 400) as i64 - 100) as i16;
+            let button = (next() % 12) as i8;
+            let mode = (next() % 8) as i32;
+            // The click coordinates never change the decision.
+            let _ = (slot, button, mode);
+            if window == 0 {
+                // Window 0 is the player's own inventory, menu or not.
+                assert_eq!(route_click(Some(&menu), window), ClickTarget::Inventory);
+                continue;
+            }
+            assert_eq!(route_click(Some(&menu), window), ClickTarget::Menu(77));
+            // A real container window never routes to a menu.
+            assert_eq!(route_click(Some(&chest), window), ClickTarget::Inventory);
+            assert_eq!(route_click(None, window), ClickTarget::Inventory);
+        }
     }
 
     #[test]

@@ -788,6 +788,52 @@ mod tests {
     }
 
     #[test]
+    fn random_click_sequences_never_touch_the_real_inventory() {
+        let rec = Arc::new(Rec::default());
+        rec.inventory.lock().unwrap().extend([10, 20, 30, 40]);
+        let m = menus_with(rec.clone());
+
+        // A 6-row menu with every slot a clickable, action-running button.
+        let mut builder = MenuBuilder::new("all").layout(L::Chest6);
+        for slot in 0..54 {
+            builder = builder.button(
+                slot,
+                "minecraft:stone",
+                "Button",
+                vec![
+                    MenuAction::Command("say hi".into()),
+                    MenuAction::Give {
+                        item: "minecraft:dirt".into(),
+                        count: 1,
+                    },
+                ],
+            );
+        }
+        m.open("caller", &player(), &builder.build()).unwrap();
+        let id = rec.opened.lock().unwrap()[0].0;
+        let before = rec.inventory.lock().unwrap().clone();
+
+        // Walk every click type — left, right, shift, number-key swap, drop,
+        // drag, double-click collect, creative middle-click — over random
+        // slots, including the player-inventory rows and outside-the-window.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..50_000 {
+            let slot = ((next() % 130) as i64 - 30) as i32;
+            let button = (next() % 12) as i8;
+            let mode = (next() % 8) as i32;
+            m.handle_click(&player(), id, slot, button, mode);
+        }
+        // The menu ran actions, but never the player's real inventory.
+        assert_eq!(*rec.inventory.lock().unwrap(), before);
+    }
+
+    #[test]
     fn a_declarative_menu_loads_opens_and_acts() {
         let rec = Arc::new(Rec::default());
         let m = menus_with(rec.clone());
