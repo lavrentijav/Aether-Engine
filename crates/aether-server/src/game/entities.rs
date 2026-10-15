@@ -452,6 +452,12 @@ pub struct MobHit {
     pub kind: &'static str,
     pub xp: i32,
     pub pos: Vector3,
+    /// Sheep wool colour index, for the loot table's colour component.
+    pub wool: u8,
+    /// Whether a sheep was sheared when it died.
+    pub sheared: bool,
+    /// Whether the mob was on fire, for `furnace_smelt` on its loot.
+    pub on_fire: bool,
 }
 
 /// Hurt the mob `id` by `amount`, knocked back away from `from`.
@@ -507,6 +513,9 @@ pub fn hurt_mob(
         kind: m.def.kind,
         xp: m.def.xp,
         pos,
+        wool: m.wool,
+        sheared: m.sheared,
+        on_fire: m.burning > 0,
     })
 }
 

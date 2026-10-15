@@ -410,18 +410,8 @@ pub fn block_xp(block: &str) -> Option<(u8, u8)> {
     })
 }
 
-/// What killing a `kind` mob drops, as `(item, count)`.
-pub fn mob_drops(kind: &str, player_kill: bool, rng: &mut Rng) -> Vec<(String, u8)> {
-    let ctx = LootContext {
-        player_kill,
-        entity_kind: Some(kind.to_owned()),
-        ..Default::default()
-    };
-    mob_drops_ctx(kind, &ctx, rng)
-}
-
-/// Like [`mob_drops`] but with a full context — looting, whether the mob was
-/// on fire, the attacker's kind.
+/// What killing a `kind` mob drops, with a full context — looting, whether
+/// the mob was on fire, its components and `type_specific` fields.
 pub fn mob_drops_ctx(kind: &str, ctx: &LootContext, rng: &mut Rng) -> Vec<(String, u8)> {
     if let Some(t) = LootTables::global().entity_table(kind) {
         return t

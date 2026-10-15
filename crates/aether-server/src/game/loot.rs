@@ -144,6 +144,12 @@ pub enum Condition {
         on_fire: bool,
         is_baby: bool,
         sneaking: bool,
+        /// `components`: expected component id → value, e.g.
+        /// `minecraft:sheep/color` → `white`.
+        components: Vec<(String, String)>,
+        /// `type_specific`: the entity type and its named fields (`sheared`,
+        /// `size`, …) as integers (booleans as 0/1).
+        type_specific: Option<(String, Vec<(String, PredValue)>)>,
     },
     AnyOf(Vec<Condition>),
     AllOf(Vec<Condition>),
@@ -157,6 +163,22 @@ pub enum EntityRef {
     Killer,
     Attacker,
     DirectAttacker,
+}
+
+/// A `type_specific` field value from a predicate.
+#[derive(Debug, Clone, Copy)]
+pub enum PredValue {
+    Int(i64),
+    Bool(bool),
+}
+
+impl PredValue {
+    fn as_i64(self) -> i64 {
+        match self {
+            Self::Int(v) => v,
+            Self::Bool(b) => b as i64,
+        }
+    }
 }
 
 /// A function applied to a produced stack or count.
@@ -266,6 +288,12 @@ pub struct LootContext {
     pub entity_on_fire: bool,
     pub entity_is_baby: bool,
     pub attacker_kind: Option<String>,
+    /// The entity's components (`minecraft:sheep/color` → `white`), for
+    /// `entity_properties.components`.
+    pub entity_components: Vec<(String, String)>,
+    /// The entity's `type_specific` fields (`minecraft:sheep`, `sheared`),
+    /// integers with booleans as 0/1.
+    pub entity_type_specific: Option<(String, Vec<(String, i64)>)>,
     /// Luck, scaling `bonus_rolls` and `quality`; zero in this engine.
     pub luck: f32,
 }
@@ -548,7 +576,10 @@ fn test(c: &Condition, ctx: &LootContext, rng: &mut Rng) -> bool {
             on_fire,
             is_baby,
             sneaking,
+            components,
+            type_specific,
         } => {
+            let is_this = matches!(entity, EntityRef::This);
             let (this_kind, this_fire, this_baby, this_sneak) = match entity {
                 EntityRef::This => (
                     ctx.entity_kind.as_deref(),
@@ -579,6 +610,35 @@ fn test(c: &Condition, ctx: &LootContext, rng: &mut Rng) -> bool {
             }
             if *sneaking && !this_sneak {
                 return false;
+            }
+            // Components and `type_specific` are only known for `this`.
+            if !components.is_empty()
+                && (!is_this
+                    || !components.iter().all(|(k, v)| {
+                        ctx.entity_components
+                            .iter()
+                            .any(|(ck, cv)| ck == k && cv == v)
+                    }))
+            {
+                return false;
+            }
+            if let Some((ty, fields)) = type_specific {
+                if !is_this {
+                    return false;
+                }
+                let Some((ctx_ty, ctx_fields)) = &ctx.entity_type_specific else {
+                    return false;
+                };
+                if ctx_ty != ty {
+                    return false;
+                }
+                if !fields.iter().all(|(k, want)| {
+                    ctx_fields
+                        .iter()
+                        .any(|(ck, got)| ck == k && got == &want.as_i64())
+                }) {
+                    return false;
+                }
             }
             true
         }
@@ -1252,9 +1312,11 @@ fn parse_condition(j: &Json, tags: Option<&TagLoader>) -> Option<Condition> {
             let pred = j.get("predicate").cloned().unwrap_or(Json::Null);
             // `vehicle`, `equipment`, `nbt`, `effects`, `slots`, … cannot be
             // evaluated here; fail closed rather than match by accident.
+            // `type`, `flags`, `components` and `type_specific` are handled.
+            let known = ["type", "flags", "components", "type_specific"];
             if pred
                 .as_obj()
-                .is_some_and(|m| m.keys().any(|k| k != "type" && k != "flags"))
+                .is_some_and(|m| m.keys().any(|k| !known.contains(&k.as_str())))
             {
                 return Some(Condition::Impossible);
             }
@@ -1289,6 +1351,42 @@ fn parse_condition(j: &Json, tags: Option<&TagLoader>) -> Option<Condition> {
                 }
                 _ => (None, None),
             };
+            // Components must be simple name → string pairs; anything else
+            // (nested predicates) is not understood.
+            let mut components = Vec::new();
+            if let Some(obj) = pred.get("components").and_then(Json::as_obj) {
+                for (k, v) in obj {
+                    match v {
+                        Json::Str(s) => components.push((k.clone(), s.clone())),
+                        _ => return Some(Condition::Impossible),
+                    }
+                }
+            }
+            // `type_specific` must name a concrete entity type and carry only
+            // int/bool fields.
+            let type_specific = match pred.get("type_specific").and_then(Json::as_obj) {
+                None => None,
+                Some(obj) => {
+                    let Some(ty) = obj.get("type").and_then(Json::as_str) else {
+                        return Some(Condition::Impossible);
+                    };
+                    if ty.starts_with('#') {
+                        return Some(Condition::Impossible);
+                    }
+                    let mut fields = Vec::new();
+                    for (k, v) in obj {
+                        if k == "type" {
+                            continue;
+                        }
+                        match v {
+                            Json::Num(n) => fields.push((k.clone(), PredValue::Int(*n as i64))),
+                            Json::Bool(b) => fields.push((k.clone(), PredValue::Bool(*b))),
+                            _ => return Some(Condition::Impossible),
+                        }
+                    }
+                    Some((with_ns(ty), fields))
+                }
+            };
             let flags = pred.get("flags");
             Condition::EntityProperties {
                 entity,
@@ -1297,6 +1395,8 @@ fn parse_condition(j: &Json, tags: Option<&TagLoader>) -> Option<Condition> {
                 on_fire: flags.is_some_and(|f| f.bool_or("is_on_fire", false)),
                 is_baby: flags.is_some_and(|f| f.bool_or("is_baby", false)),
                 sneaking: flags.is_some_and(|f| f.bool_or("is_sneaking", false)),
+                components,
+                type_specific,
             }
         }
         "minecraft:any_of" => Condition::AnyOf(parse_conditions(j.get("terms"), tags)),
@@ -1889,6 +1989,47 @@ mod tests {
         assert_eq!(max, 7);
         let mean = sum as f64 / 100_000.0;
         assert!((mean - 4.4286).abs() < 0.05, "mean was {mean}");
+    }
+
+    /// Sheep wool is dispatched by the `components`/`type_specific`
+    /// predicates: colour picks the sub-table, and a sheared sheep drops no
+    /// wool. The old code deleted the whole pool and hard-coded white wool.
+    #[test]
+    fn real_sheep_wool_follows_colour_and_shear() {
+        let Ok(root) = std::env::var("AETHER_VANILLA_PACK") else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let tables = LootTables::open(&root);
+        let t = tables.entity_table("minecraft:sheep").expect("sheep table");
+        let roll = |colour: &str, sheared: bool, rng: &mut Rng| {
+            let ctx = LootContext {
+                entity_kind: Some("minecraft:sheep".into()),
+                entity_components: vec![("minecraft:sheep/color".into(), colour.into())],
+                entity_type_specific: Some((
+                    "minecraft:sheep".into(),
+                    vec![("sheared".into(), sheared as i64)],
+                )),
+                ..Default::default()
+            };
+            t.roll(&ctx, rng)
+        };
+        let mut rng = Rng::new(4);
+        for _ in 0..500 {
+            let out = roll("white", false, &mut rng);
+            assert!(
+                out.iter().any(|s| s.item == "minecraft:white_wool"),
+                "white ewe dropped {out:?}"
+            );
+            assert!(out.iter().any(|s| s.item == "minecraft:mutton"));
+            let out = roll("black", false, &mut rng);
+            assert!(out.iter().any(|s| s.item == "minecraft:black_wool"));
+            let out = roll("white", true, &mut rng);
+            assert!(
+                !out.iter().any(|s| s.item.ends_with("_wool")),
+                "sheared ewe still dropped wool: {out:?}"
+            );
+        }
     }
 
     /// Every table in the pack must parse; the ones that do not are printed.
