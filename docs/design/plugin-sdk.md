@@ -1,464 +1,485 @@
-# Plugin SDK — one-call helpers over the raw host API (survey)
+# Plugin SDK — native service plugin + thin guest client (design)
 
-Status: 📋 design (PS1a, 2026-10-15). This is step 1 of
-[`QUEUE-PS-plugin-sdk.md`](../tasks/QUEUE-PS-plugin-sdk.md). It surveys the repeated patterns in the
-command catalogue (`docs/design/commands.md` on `oc/CMD0`), the 15 plugin stubs
-(`plugins/*/README.md` on `oc/CMD0`) and the P1 host on this branch, then fixes the shape of the SDK
-before any code is written. Step 2 implements it.
+Status: 📋 design (PS1a, 2026-10-15). Step 1 of [`QUEUE-PS-plugin-sdk.md`](../tasks/QUEUE-PS-plugin-sdk.md).
+It surveys the repeated patterns in the command catalogue (`docs/design/commands.md` on `oc/CMD0`),
+the 15 plugin stubs (`plugins/*/README.md` on `oc/CMD0`) and the P1 host on this branch, then fixes
+the shape of the SDK before any code is written. Step 2 implements it.
 
-Base: `oc/PS1`, built on `oc/P1` (the WASM plugin host is not on `main` yet). The SDK wraps P1's
-raw API; the parts of the survey that need core APIs not yet landed (`permissions` CMD-01/02,
-`regions` CMD-29, `bulk-edit` CMD-30, `teleport` CMD-31, `player/UI` CMD-32, `economy` P2) are
-marked as dependencies and are designed behind `supports()` probes, not assumed present.
+Base: `oc/PS1`, built on `oc/P1` (the WASM plugin host is not on `main` yet). The SDK sits on top of
+P1's raw API. Parts of the survey that need core APIs not yet landed (permissions CMD-01/02, regions
+CMD-29, bulk-edit CMD-30, teleport CMD-31, player/UI CMD-32, economy P2) are recorded as
+dependencies and are reached through versioned services, never assumed present.
 
-## 1. Goal
+## 1. Owner decision: the SDK is a native plugin, not a library
 
-Plugin authors — native and WASM alike — write the same handful of patterns in every plugin:
-look up a permission, answer a command, send a coloured message, read the config, schedule a task,
-remember something between ticks. Today each one is hand-rolled against the raw host functions and
-the game's own types. The SDK puts each behind **one call** in a thin layer over the raw API, so a
-typical plugin is a few lines. The owner's example is permissions:
+The SDK is **not** a guest-side helper library that every plugin statically links. It is a **native
+plugin**, `plugins/sdk`, in the sense of the "N" tier in `docs/tasks/CMD-OVERVIEW.ru.md` (tiers
+**C** core / **N** native / **W** wasm). It runs **in-process** and exposes its helpers as
+**services** through the plugin API. A dependent plugin — native or WASM — declares that it needs
+the SDK service and then gets every helper with **one call over one boundary crossing**.
 
-```rust
-if !sdk::perms().require(p, "essentials.home") { return; }
-```
+Consequences, which the rest of this document is structured around:
 
-One function each for `check`, `require` (with the "no permission" reply), `grant`/`revoke`,
-`level`, `has_level`, level/group management — not a hand-rolled store lookup in every plugin.
+- **The runtime logic lives in the SDK plugin**, not in a client crate: the permission facade, the
+  command builder and its registry, message formatting and translation, the scheduler's timer
+  wheel, cooldowns, confirm prompts, typed config/KV. Each is a service the plugin owns and can
+  keep state for (which is exactly why it is a plugin and not sugar: timers, confirmations and
+  per-dependent cooldowns must outlive a single call and be driven by a tick).
+- **`crates/aether-plugin-sdk` is a thin typed client for guests only** — generated WIT bindings, a
+  prelude and the shared world declaration. No formatting, parsing, registry or scheduling logic;
+  those crossed into the native plugin. ("No logic": the crate re-exports what the host provides.)
+- **Native dependents call the same services in-process.** They resolve the SDK service from the
+  host's service registry and call a typed Rust trait object; no linkage to the SDK crate, so the
+  SDK stays disableable.
+- **Core stays unaware of the SDK.** No game or server-core subsystem references it. The plugin
+  *host* binds service interfaces (that is its job as the ABI), but nothing in the engine's
+  gameplay, storage or protocol layers depends on the SDK.
+- **It can be disabled like any plugin.** With `[plugins.sdk] enabled = false` the services are not
+  registered; every dependent that declared a requirement **fails to load with a clear error**
+  (see §5) rather than half-working.
 
-Non-goals: a second plugin runtime, a stable ABI for the native tier (still "later" in
-[`plugins.md`](plugins.md)), hot reload, and reimplementing core mechanisms in the SDK. The SDK is
-*thin*: it holds no game state of its own beyond sugar and small registries, and every helper maps
-to an existing (or planned) host call with a known cost.
+## 2. Tiers and what exists today (P1)
 
-## 2. What the raw API is today (P1)
+The host is `crates/aether-plugin`. Today it ships one tier:
 
-The host is `crates/aether-plugin`. A plugin is a `wasm32-wasip2` component exporting the world
-`aether:plugin/plugin@0.1.0` (`crates/aether-plugin/wit/aether-plugin.wit`). It may call four host
-imports, each capability-gated and refused (logged, returning the neutral value) if not granted:
+- **W (wasm).** A `wasm32-wasip2` component exporting the world
+  `aether:plugin/plugin@0.1.0` (`crates/aether-plugin/wit/aether-plugin.wit`). Four capability-gated
+  host imports (`log`, `storage.kv`, `config`, `supports`). The **export set is frozen**
+  (`tests/wit_world.rs`): `init`/`shutdown`; six `before-*` → `decision`; seven `after-*`;
+  `on-tick(n)`; `on-command(p, name, args) -> command-result { handled, lines }`. A `plugin.toml`
+  declares `capabilities`, `subscribe`, `commands`, `priority`, `tick_period`, `deny_on_fault`. The
+  host orders plugins by priority and calls only subscribed events.
 
-| import under `host` | capability | returns |
-|---|---|---|
-| `log(level, message)` | `log` | — |
-| `kv-get/kv-put/kv-delete/kv-list` | `storage.kv` | `option<list<u8>>` / `list<string>` |
-| `config(key)` | `config` | `option<string>` |
-| `supports(feature)` | `supports` | `bool` |
+Two facts drive the design:
 
-Its **exports are frozen** (`tests/wit_world.rs`): `init`/`shutdown`; six `before-*` returning
-`decision`; seven `after-*` returning nothing; `on-tick(n)`; `on-command(p, name, args) ->
-command-result { handled, lines }`. A `plugin.toml` manifest declares capabilities, event
-`subscribe`, `commands`, `priority`, `tick_period` and `deny_on_fault`. The host orders plugins by
-priority and calls only subscribed events.
+1. **Imports are additive; exports are not.** A component *requests* imports; the host linker
+   satisfying a superset is fine, so adding host imports (and therefore new service interfaces the
+   host provides) does not refuse components already built against `@0.1.0`. Adding or changing an
+   *export*, or a type an export uses, changes the world and refuses them. The checked-in
+   `hello.wasm` fixture is the regression guard. Anything that needs a new guest callback or a
+   changed export type goes to a new package version (`aether:plugin@0.2.0`).
+2. **The SDK's own logic is native, so it does not widen the frozen world at all.** Only the thin
+   guest *client* imports new interfaces, and only dependents that opt in.
 
-Two consequences shape the whole design:
-
-1. **Adding imports is backward compatible, adding exports is not.** A component's imports must be
-   satisfied but not exhausted: the linker may provide a superset, so new host *imports* (and new
-   functions on the existing `host` interface) do not refuse components already built against
-   `@0.1.0`. New *exports*, or a change to a type used by an export — e.g. adding a `completions`
-   field to `command-result` — do. The checked-in `hello.wasm` fixture, compiled against `@0.1.0`,
-   stays loadable in the host tests and is our regression guard for this. Anything needing a new
-   guest callback or a changed export type goes into a **new package version** (`aether:plugin@0.2.0`),
-   per [`plugins.md`](plugins.md).
-2. **The SDK guest half must implement exactly the frozen export set.** So the SDK cannot invent
-   `on-scheduled` or `on-complete`; it works by dispatching the frozen events to registered
-   handlers, and the host drives everything else.
-
-What the server already offers *behind* the host (native side, `crates/aether-server`): the player
-registry (`players.rs`: by name/uuid/entity, snapshot, broadcast), per-player inventory, the
-`Economy` trait (`economy/mod.rs`), effects/containers (`game/effects.rs`, `game/containers.rs`),
-and an internal tick scheduler (`game/scheduler.rs`). What does **not** exist yet and gates parts of
-the SDK: permission nodes/groups (CMD-01/02), the region index and bulk-edit and teleport and
-player/UI APIs (CMD-29/30/31/32), and the economy service over WIT (P2). The SDK designs a uniform
-surface over all of them and degrades safely when a service is absent.
+What the **native (N) tier** needs, and P1 does not yet have: a `NativePlugin` trait, a
+`NativeContext` with the shared **service registry**, and wiring so native plugins sit on the same
+event bus, with the same priority/manifest/enable semantics as WASM ones. PS1 introduces this
+minimal in-process native tier because the SDK plugin requires it. It is deliberately *not* the
+native C-ABI tier from [`plugins.md`](plugins.md) (still "later"); it is in-process Rust.
 
 ## 3. Architecture
 
 ```
-crates/aether-plugin-sdk
-  Host trait (the service surface helpers call)
-   ├─ guest:  forwards to the generated WIT imports  (feature "guest")
-   └─ native: implemented over aether-server APIs      (feature "native")
-  + pure sugar: command builder, colour, cooldowns, confirm, arg parse, typed config/KV
+ core (game, storage, protocol)          ← no reference to the SDK
+   │  native Rust APIs
+   ├──────────────┐
+   │              │
+ aether-server ──► plugin host (crates/aether-plugin)
+                    ├─ W wasm plugins   (wasmtime, frozen world)
+                    ├─ N  native plugins (in-process Rust: plugins/sdk, natives)
+                    └─ service registry (name@version → provider)
+                            ▲            ▲
+       native dependent ─────┘            └───── WASM dependent
+       (typed Rust call)                 (one WIT call: guest → host → SDK)
+
+ plugins/sdk  (native plugin, tier N)
+   services: permissions, commands, messages, players,
+             config, scheduler, cooldowns, confirm, services
+ crates/aether-plugin-sdk  (thin guest client)
+   generated bindings + prelude + `dependent` world; no logic
 ```
 
-- **One crate, two backends.** Helpers are generic over a `Host` trait; only the backend impl (and
-  the generated bindings) differ between a WASM guest and a native plugin. Sugar — formatting, arg
-  parsing, cooldowns, the command spec builder, typed config — is backend-independent and is the
-  bulk of the crate, so it is unit-tested on the host target with a mock `Host`.
-- **The `Plugin` builder** gives plugin authors one place to register handlers:
+- **Native tier.** `plugin.toml` gains `tier = "native"` (default `"wasm"`). A native plugin is a
+  Rust type implementing `NativePlugin`, included at server build time and registered with the host
+  under its manifest id. It goes through the same enable/priority/subscribe logic; the host calls
+  its Rust event hooks directly instead of a wasmtime export.
+- **Service registry.** The host owns `ServiceRegistry: (name, version) → Arc<dyn Any + Send + Sync>`.
+  A provider registers in `init`; a consumer resolves in `init`. The registry is shared by both
+  tiers, so a native provider serves WASM consumers and vice versa.
+- **SDK plugin.** `plugins/sdk` implements `NativePlugin`; in `init` it registers each service. It
+  keeps the state the helpers need (timer wheel, confirmations, cooldowns, command registry,
+  message tables) and drives it from its own `on-tick`. It subscribes to no gameplay events; it is
+  a service host.
+- **WASM dependent.** Its world imports the SDK service interfaces (via the thin client's
+  `dependent` world, §5). Each helper call is one component-model crossing: guest → host function →
+  the host reads the caller id from `StoreData` → the host calls the registered native SDK provider
+  in-process. One crossing total, no second hop.
+- **Native dependent.** Resolves `ctx.service::<dyn SdkService>("sdk", "0.1")` in `init` and calls
+  it directly. One in-process call; a services lookup at load.
 
-  ```rust
-  pub fn plugin() -> Plugin;
-  Plugin::on_init(|ctx| { ... })                       // runs in init
-        .command("home").perm("essentials.home").arg(...).run(|ctx, a| { ... })
-        .on_before(Event::BlockBreak, 0, |p, e| { ... })
-        .on_after(Event::PlayerJoin, |p| { ... });
-  export_plugin!(MY_PLUGIN);                           // seeds the frozen Guest impl
-  ```
+## 4. The service interface (WIT)
 
-  The `export_plugin!` macro expands the frozen `Guest` impl, dispatching each export to the
-  handlers registered on that one plugin value. Native plugins register the same value with the
-  server instead of through `export_plugin!`.
-- **Initialisation order is fixed**: `init` builds the registries; the frozen exports never
-  register, only dispatch. This mirrors the host's "registration only in `init`".
-- **The SDK owns no lock unless it must.** Guest is single-threaded (one `Store` per plugin,
-  called on the tick thread), so the registries live in a `static`/`OnceCell`, no mutex. Native
-  handlers are called on the tick thread too; any shared state a native plugin keeps is its own.
+Services live in their own package, versioned independently of the frozen `plugin` world:
+`aether:sdk@0.1`. It contains one interface per area, so a dependent imports only what it uses:
 
-Crate layout (proposed):
+```wit
+package aether:sdk@0.1;
 
+interface permissions {
+    check: func(p: player, node: string) -> bool;
+    require: func(p: player, node: string) -> bool;   // check + "no permission" reply
+    level: func(p: player) -> u8;
+    has-level: func(p: player, level: u8) -> bool;
+    groups: func(p: player) -> list<string>;
+    in-group: func(p: player, group: string) -> bool;
+    meta: func(p: player, key: string) -> option<string>;
+    grant: func(subject: subject, node: string, value: bool) -> result<_, string>; // cap permissions.admin
+    revoke: func(subject: subject, node: string) -> result<_, string>;
+    add-group: func(subject: subject, group: string) -> result<_, string>;
+    remove-group: func(subject: subject, group: string) -> result<_, string>;
+    create-group: func(group: string, parent: option<string>) -> result<_, string>;
+    delete-group: func(group: string) -> result<_, string>;
+}
+
+interface commands {
+    register: func(spec: command-spec) -> result<_, string>;
+    parse: func(name: string, args: list<string>) -> invocation;
+    usage: func(name: string) -> string;
+}
+
+interface messages {
+    send: func(p: player, text: string);
+    send-key: func(p: player, key: string, args: list<(string, string)>);
+    actionbar: func(p: player, text: string);
+    title: func(p: player, title: string, subtitle: option<string>, times: title-times);
+    broadcast: func(text: string);
+}
+
+interface players {
+    online: func() -> list<player>;
+    by-name: func(name: string) -> option<player>;
+    by-uuid: func(uuid: u64, high: u64) -> option<player>;
+    teleport: func(p: player, to: pos, cause: teleport-cause) -> result<_, string>;
+    give: func(p: player, item: string, count: u32) -> u64;
+}
+
+interface config {
+    value: func(key: string) -> option<string>;
+    revision: func() -> u64;
+}
+
+interface scheduler {
+    after: func(ticks: u64) -> timer-id;
+    every: func(period: u64) -> timer-id;
+    cancel: func(id: timer-id) -> bool;
+}
+
+interface cooldowns {
+    ready: func(key: string, ticks: u64) -> bool;
+    remaining: func(key: string) -> u64;
+}
+
+interface confirm {
+    request: func(p: player, prompt: string, command: string) -> bool;
+}
+
+interface services {                    // optional dependencies
+    lookup: func(name: string, version: string) -> bool;
+}
 ```
-src/lib.rs          re-exports, Plugin builder, export_plugin!
-src/host.rs         Host trait, Error, Capability, feature constants
-src/guest.rs        WIT-backed Host (feature "guest")
-src/native.rs       server-backed Host adapter (feature "native")
-src/prelude.rs      the prelude
-src/command.rs      CommandSpec/Builder, Arg, parse, usage
-src/message.rs      colour codes, Formatted, title/actionbar/broadcast
-src/permissions.rs  check/require/grant/revoke/level/groups/meta
-src/players.rs      lookup, online, teleport, give, inventory
-src/config.rs       typed config + defaults + reload
-src/store.rs        typed KV and a simple persistent map
-src/scheduler.rs    run-after / repeat / cancel, tick-driven
-src/events.rs       handler tables, priority, cancel
-src/cooldown.rs     per-key cooldowns
-src/confirm.rs      "type again to confirm"
-src/services.rs     optional economy/regions handles
-```
 
-## 4. WIT additions: host vs sugar
+- **Caller identity is injected by the host.** A guest does not pass its own plugin id: the host
+  function reads `StoreData.plugin` (already present in P1) and forwards `(caller, args)` to the
+  provider. The SDK keys timers, confirmations and cooldowns by that id, so disabling a dependent
+  drops its state, and capability checks are per-caller.
+- **`scheduler.after/every` need the dependent's `on-tick` to fire.** The SDK cannot add a
+  subscription at runtime; a dependent that uses the scheduler declares `on-tick` in its manifest
+  and the SDK's thin client dispatches due timers when the host calls `on-tick`. (Documented
+  requirement, checked by the `depends!` macro where possible.)
+- **Versioning.** A breaking change to a service bumps `aether:sdk@0.2`; a dependent names the
+  version it built against. The host can hold several versions at once, exactly as
+  [`plugins.md`](plugins.md) prescribes for plugin package versions. The frozen
+  `aether:plugin@0.1.0` world is untouched.
 
-Everything that touches game state or another subsystem crosses the host boundary and therefore
-needs a WIT import; pure bookkeeping and formatting do not. The proposed additions, all **additive
-imports** to `aether:plugin@0.1.0` (safe as argued in §2):
+## 5. How dependents declare the dependency
 
-| interface / function | capability | needs | purpose |
-|---|---|---|---|
-| `host.clock-now-ticks() -> u64` | `clock` | P1 | cooldowns, scheduler, warmups |
-| `host.config-revision() -> u64` | `config` | P1 | cheap change detection for reload |
-| `permissions.*` | `permissions` / `permissions.admin` | CMD-01/02 | check, level, groups, meta; grant/revoke |
-| `players.*` | `players` | P1 + CMD-31/32 | online/lookup, message/title/actionbar, broadcast, teleport, give/take, inventory |
-| `world.*` | `world.read` / `world.write` | P1 (planned) | block reads and queued writes |
-| `commands.register(spec)` | `commands` | P1 + CMD-03/04 | declare args, usage, permission, **static** completions |
-| `storage.ledger` | `storage.ledger` | P2 | money-grade transactional KV |
-| `services.lookup(name, version)` | `services` | P3 | economy/regions cross-plugin handle |
-| `economy@0.1`, `regions@0.1` | via `services` | P2 / CMD-29 | typed service calls |
+Three coordinated declarations, checked at load:
 
-Pure SDK sugar (no WIT change): the command arg parser and usage text, colour/format codes,
-translatable-key lookup (given a locale string from the host), cooldowns, confirm prompts, the
-scheduler's pending queue, typed config defaults, typed KV serialisation, optional-service
-`Option` handling, and all the `require`/`has_level`/`in_group`-style conveniences.
+1. **Manifest.** `plugin.toml` gains `requires = ["sdk@0.1"]` (optionally finer:
+   `["sdk.permissions@0.1", "sdk.scheduler@0.1"]`). The host resolves each against the service
+   registry **before instantiation / before native `init`**. A missing service is a load error that
+   names the plugin, the service and the likely cause:
+   `plugin "economy" requires service "sdk@0.1", which is not registered (is the SDK plugin enabled?).
+   refusing to load.` This is what makes "disable the SDK → dependents fail with a clear error"
+   true, rather than dependents trapping at first call.
+2. **Native: `NativePlugin::requires()`** returns the same `ServiceRef`s; the host checks them
+   identically.
+3. **WASM: the `dependent` world.** A guest that wants SDK services cannot use the host's frozen
+   `plugin` world unchanged, because a component can only call interfaces it imports. The thin
+   client ships a small `dependent` world that `include`s the host's `plugin` world and adds the SDK
+   imports:
 
-**Dynamic tab-completion is the one helper that needs a new package version.** The host drives
-completion from its command tree, so the guest must answer a new callback (`on-complete`) or the
-export type must grow a `completions` field — both break the frozen export set. Until
-`aether:plugin@0.2.0`, the SDK supports only **static** completions declared at registration
-(enumerations, online-player names, item/material names) via `commands.register`; a plugin that
-needs to complete its own dynamic state (e.g. `/home <name>`) must fall back to a usage hint. This
-is recorded as an open question in §10.
+   ```wit
+   package aether:sdk-client@0.1;
+   world dependent {
+       include aether:plugin/plugin@0.1.0;   // the frozen exports/imports
+       import aether:sdk/permissions@0.1;
+       import aether:sdk/commands@0.1;
+       // ...only the interfaces the plugin uses
+   }
+   ```
 
-## 5. Pattern catalogue
+   The guest generates bindings against `world: "dependent"`; the host linker always provides the
+   SDK interfaces (returning an "unavailable" error if no provider is registered), so adding them
+   refuses nobody and a non-dependent still loads unchanged. The `depends!("sdk")` macro in the thin
+   client expands the manifest `requires` and the world imports from one place, so the two cannot
+   drift.
 
-Format per group: the helper, what it wraps, its cost, and where it lives. "Shared" means the code
-compiles for both backends and the backend impl only differs in the `Host` method it calls.
+**Optional services** (economy, regions) use the same machinery but are **not** declared as
+`requires`: a dependent calls `services.lookup("economy", "0.1")`, gets `false`/`None` when absent,
+and degrades. Only hard dependencies go in `requires`.
 
-### 5.1 Permissions
+Capability policy is unchanged: a service method that writes (permissions admin) or sends is gated
+by the **caller's** capability, enforced by the host before forwarding, and the SDK re-checks its
+own invariants (e.g. `grant` needs `permissions.admin`).
 
-The owner's motivating example, and the most repeated pattern (permissions, regions, claims,
-teleport, chat, moderation, social, shops, worldedit all gate commands and events).
+## 6. What the native SDK plugin owns — and does not
+
+**Owns (stateful services):**
+
+| service | owns | delegates to |
+|---|---|---|
+| `permissions` | facade + `require` auto-reply + admin write path | core CMD-01/02 resolver |
+| `commands` | command registry, spec validation, usage text, parse | host command tree (CMD-03/04) |
+| `messages` | colour codes, translation tables, key lookup | host player sends |
+| `players` | ergonomic wrappers | core player/teleport APIs (CMD-31/32) |
+| `config` | typed view + revision polling per dependent | host `config` import |
+| `scheduler` | timer wheel, run-later/every/cancel, async (native) | own `on-tick` |
+| `cooldowns` | per-dependent, per-key last-tick maps | clock |
+| `confirm` | pending confirmations + expiry | `scheduler` |
+| `services` | optional-service lookup facade | host registry |
+
+**Does not own:** the permission *model* (core CMD-01/02 owns nodes, groups, inheritance,
+snapshots); the command *tree and transport* (host/CMD-03/04 owns parsing primitives and the
+Declare Commands packet); the player, world, teleport or economy mechanisms (core CMD-29/30/31/32,
+P2). The SDK is a **facade and state holder**, never a second implementation. It holds no authority:
+it cannot allow what the core denies, and capability checks still apply to its callers.
+
+## 7. Pattern catalogue
+
+The survey below is unchanged from the first pass — these are the repeated patterns across the 15
+stubs — but each helper is now a **method on an SDK service**, not a function in a linked library.
+"Cost" assumes the call path in §8. "SDK-owned" means the native plugin, "client" means the thin
+crate (bindings only).
+
+### 7.1 Permissions — the owner's example
+
+Used by permissions, regions, claims, teleport, chat, moderation, social, shops, worldedit.
 
 ```rust
-perms().check(p, "essentials.home") -> bool            // raw: permissions.check(player, node)
-perms().require(p, "essentials.home") -> bool          // check + auto "no permission" reply
-perms().level(p) -> u8                                  // raw: permissions.level(player)
-perms().has_level(p, 2) -> bool                         // sugar: level(p) >= 2
-perms().groups(p) -> Vec<String>                        // raw
-perms().in_group(p, "staff") -> bool                    // sugar over groups()
-perms().meta(p, "prefix") -> Option<String>             // raw (prefix/suffix/weight)
-perms().grant(Subject::Player(uuid), "node", true)      // raw, cap permissions.admin
-perms().revoke(Subject::Player(uuid), "node")           // raw, cap permissions.admin
-perms().add_group(Subject::Player(uuid), "staff")       // raw, cap permissions.admin
-perms().create_group("staff") / remove_group("staff")   // raw, cap permissions.admin
+permissions().require(p, "essentials.home");   // check + auto reply; returns bool
+permissions().check(p, "worldguard.region.bypass")
+permissions().level(p) / permissions().has_level(p, 2)
+permissions().groups(p) / permissions().in_group(p, "staff")
+permissions().meta(p, "prefix")
+permissions().grant(Subject::Player(uuid), "essentials.fly", true)   // cap permissions.admin
+permissions().revoke(...) / permissions().add_group(...) / permissions().create_group(...)
 ```
 
-- **Wraps** the core CMD-01/02 resolver (native) / the proposed `permissions` WIT interface (guest).
-  Writes are the admin half of CMD-02; they need `permissions.admin` so a dropped-in plugin cannot
-  rewrite rights.
-- **Cost**: one host call each, no allocation: the node/group is a `&str`, the host looks it up in
-  its immutable snapshot and returns a primitive. `require` adds one message send only on denial.
-  Never cached in the SDK — the resolver's snapshot swap must be visible immediately.
-- **Shared.** `require`/`has_level`/`in_group` are pure sugar; the rest is backend-abstracted.
-- **Dependency**: CMD-01/02 are not on this branch. Until they are, the native backend answers
-  deny/`0` and reports `supports("permissions.v1") == false`, so plugins fail closed. Whether PS1
-  waits for CMD-01/02 or ships a minimal resolver is an open question (§10) — the SDK itself never
-  owns the permission model.
+Wraps the core CMD-01/02 resolver and admin writes. One service call each; `require` adds a message
+only on denial. Never cached in the client — a resolver snapshot swap must be visible immediately.
+**Dependency:** CMD-01/02 are not on this branch; until they land the service reports
+`supports("permissions.v1") == false` and answers deny/`0` (fail closed). The permission *model*
+lands once, in CMD-01/02; the SDK only fronts it.
 
-### 5.2 Commands
+### 7.2 Commands
 
-Every one of the 15 stubs registers commands; several register a dozen (WorldEdit, essentials-*).
-The repetition is register-with-args + permission + tab-complete + usage + subcommands.
+Every stub registers commands; WorldEdit and essentials-* register a dozen.
 
 ```rust
-plugin.command("home")
-    .perm("essentials.home")                 // checked before dispatch
-    .usage("/home [name]")
-    .arg(Arg::word("name").optional().suggest(homes))   // static completions
-    .sub("set", |c| c.arg(Arg::word("name")).run(set_home))
-    .run(|ctx, a| { let name = a.str("name").unwrap_or("home"); ... });
+sdk.commands.register(
+    CommandSpec::new("home")
+        .perm("essentials.home")
+        .usage("/home [name]")
+        .arg(Arg::word("name").optional().suggest_static(&["home", "base"]))
+        .sub(CommandSpec::new("set").arg(Arg::word("name")))
+)?;
 ```
 
-- **Wraps**: `on-command` dispatch (frozen), the manifest's `commands` list (the host routes only
-  declared names), and the proposed `commands.register(spec)` import for the tree/completions.
-- **Design**: the builder's `CommandSpec` is stored in the SDK registry; the frozen `on-command`
-  export looks the name up, checks `.perm`, parses args, and calls the handler. `permission` is
-  enforced by the SDK *and* should be declared to the host so the tree shows it and future hosts can
-  check it before the guest is entered.
-- **Cost**: dispatch does at most one small `Vec` of arg slices over the incoming `args` (which the
-  host already allocated); no per-tick cost, commands are rare. Arg parsing is zero-copy (`&str`).
-- **Shared**; `commands.register` is guest-only (native registers with the server directly).
-- **Subcommands** are just nested specs; `sub()` builds a child table so `/home set x` routes to the
-  `set` handler with the remaining args.
+The builder type (`CommandSpec`) is constructed by pure sugar in the thin client; `register` is the
+service call that validates and registers the node with the host tree (name, usage, permission,
+**static** completions). Dispatch still enters the dependent's frozen `on-command` export; the thin
+client's generated dispatch calls `commands.parse(name, args)` (one call) and then the handler, so
+permission and usage stay uniform across plugins. Subcommands are nested specs.
 
-### 5.3 Messages
+**Dynamic tab-completion is the one helper that cannot fit `@0.1.0`.** The host drives completion
+from its tree, so the guest must answer a new callback (`on-complete`) or `command-result` must grow
+a `completions` field — both break the frozen exports. Until `aether:plugin@0.2.0`, only static
+completions are supported; a plugin needing to complete its own state (e.g. `/home <name>`) shows a
+usage hint. (Open question §12.)
 
-Chat, titles, action bars, broadcasts, prefixes, colour and translation recur in every stub.
+### 7.3 Messages
 
 ```rust
-msg().send(p, "&aWelcome, &f{name}!");                 // raw: players.send-message
-msg().send_key(p, "essentials.home.set", &[("name", n)]);  // pure: lookup + format
-msg().actionbar(p, "&7Warping…");                      // raw
-msg().title(p, "&eHome", "&7Teleported", TitleTimes::new(5, 40, 10));  // raw
-msg().broadcast("&6Server restarting");                // raw: players.broadcast
-msg().prefix(p) -> String                              // sugar over perms().meta(p,"prefix")
+messages().send(p, "&aWelcome, &f{name}!");
+messages().send_key(p, "essentials.home.set", &[("name", n)]);
+messages().actionbar(p, "&7Warping…");
+messages().title(p, "&eHome", Some("&7Teleported"), TitleTimes::new(5, 40, 10));
+messages().broadcast("&6Server restarting");
 ```
 
-- **Wraps** the `players` WIT import for the sends; colour and translation are pure.
-- **Colour**: `Colorize` translates `&`/`§` codes to the section-sign form the codec expects and
-  strips them for width. It writes into a caller-provided `String` where possible (`write_colored`)
-  to avoid a second allocation; the `&str -> String` conversion at the host boundary is the host's
-  cost and is unavoidable.
-- **Translatable keys**: the SDK keeps a small per-plugin message table (`en_us` built in,
-  extra locales loaded from config/data files) and looks a key up with the player's locale obtained
-  once per send from the host (`players.locale`). Missing key falls back to the key itself so a
-  missing translation is visible, never silent.
-- **Cost**: one host call; formatting allocates one `String` per message, which is inherent to
-  sending text and is not on the per-tick hot path (unless a plugin broadcasts in `on-tick` — the
-  SDK documents that pattern as discouraged and the tick budget already bounds it).
-- **Shared** sugar; sends are backend-abstracted.
+Colour translation, the per-plugin translation tables and locale lookup live in the SDK plugin;
+each send is one service call. Formatting is pure and allocates one `String` per message (inherent
+to sending text). The SDK documents that broadcasting from `on-tick` is discouraged; the tick budget
+bounds it anyway.
 
-### 5.4 Players
-
-Lookup and direct manipulation recur in teleport, player, inv, chat, moderation, social, shops, fun.
+### 7.4 Players
 
 ```rust
-players().online() -> Vec<PlayerRef>                    // raw, allocates one Vec
-players().by_name("Steve") -> Option<PlayerRef>         // raw
-players().by_uuid(uuid) -> Option<PlayerRef>            // raw
-players().offline_name(uuid) -> Option<String>          // raw (player store)
-players().teleport(p, Pos::safe(x, y, z), Cause::Plugin) -> Result<(), TeleportError>  // CMD-31
-players().give(p, "minecraft:diamond", 8) -> u64        // raw: players.give (returns leftover)
-players().inventory(p) -> InventoryView                 // raw (read-only borrow/snapshot)
+players().online() -> Vec<PlayerRef>        // allocates one Vec, host-built
+players().by_name("Steve") / players().by_uuid(uuid)
+players().teleport(p, Pos::safe(x, y, z), Cause::Plugin)?
+players().give(p, "minecraft:diamond", 8) -> u64   // returns leftover
+players().inventory(p) -> InventoryView
 ```
 
-- **Wraps** `players` (P1/CMD-32) and `teleport` (CMD-31). `Players::online()` crosses the host
-  boundary and allocates the list; every call that returns a collection is documented as such and
-  is not called from `on-tick` by well-behaved plugins.
-- **Safe teleport** is a single call that runs CMD-31's safe-spot search host-side; the SDK does not
-  reimplement collision.
-- **Cost**: `by_name`/`by_uuid`/`give`/`teleport` are one call; `online()`/`inventory()` allocate
-  (the host builds the list) — unavoidable when the caller asked for a list.
-- **Shared**; all are `Host` methods.
+Wraps core player APIs (CMD-31/32). Safe teleport runs CMD-31's search host-side; the SDK does not
+reimplement collision. `online()`/`inventory()` allocate and are documented as such.
 
-### 5.5 Config and data
-
-Typed config, defaults, reload, a per-plugin data dir and a simple KV recur in nearly every stub.
+### 7.5 Config and data
 
 ```rust
-let cfg: MyConfig = config().typed()?;          // reads all keys in init, typed via serde
-config().revision();                            // host.config-revision, cheap
-if config().changed() { cfg = config().typed()?; }   // in on-tick, no allocation when unchanged
-store().kv::<Homes>("homes", p.uuid).get("base");     // sugar over kv-get/put/delete/list
-store().data_dir()                                // per-plugin data dir (P1 config)
+let cfg: MyConfig = config().typed()?;          // read once in init
+if config().changed() { cfg = config().typed()?; }   // O(1) via revision
+store().kv::<Homes>("homes", p.uuid).get("base");
 ```
 
-- **Wraps** `host.config` and `host.kv-*` (both exist in P1); `config-revision` is the only new
-  import, needed so `changed()` is O(1) and does not re-read every key per tick. The data dir is a
-  host-provided path (config), not a raw filesystem grant — the sandbox stays closed.
-- **Typed config** deserialises the flat string map once; `changed()` compares the revision and
-  `reload()` re-deserialises, so the common "poll every tick" case allocates nothing.
-- **Typed KV** serialises a `T: Serialize` under a namespaced key prefix; keys are the plugin's
-  own, the host already namespaces by plugin id. A simple persistent map (`PersistentMap<K, V>`)
-  wraps list/get/put/delete for the homes/warps/friends patterns.
-- **Cost**: KV reads/writes cross the boundary (bytes); no per-tick hidden work unless the plugin
-  chooses to poll storage, which the SDK does not do for it.
-- **Shared** sugar over the existing imports.
+`config.revision()` makes `changed()` O(1) so polling per tick allocates nothing. Typed config and
+typed KV are sugar in the client (serde over the flat string map); the underlying
+`config`/`kv-*` remain P1 host imports scoped to the **dependent's own** namespace.
 
-### 5.6 Scheduler
-
-Run later / repeat / cancel, and "async with the result back on the main tick".
+### 7.6 Scheduler
 
 ```rust
-sched().after(20, |ctx| { ... });          // run once, 20 ticks later
-sched().every(600, |ctx| { ... });         // repeat until cancelled
-let id = sched().after(40, f); sched().cancel(id);
-sched().async_result(|| long_work()).then(|r| { ... });   // native only
+let id = sched().after(20, |ctx| { ... });
+let id = sched().every(600, |ctx| { ... });
+sched().cancel(id);
 ```
 
-- **Wraps**: there is no `on-scheduled` export (frozen), so the SDK's scheduler is **tick-driven
-  sugar**: it keeps a small ordered queue of `(due_tick, id, FnOnce)` drained by the SDK's
-  `on-tick` dispatch, which every plugin using the scheduler must therefore subscribe to. The
-  plugin's manifest declares `on-tick`; the SDK cannot add it at runtime. `now-ticks()` (new
-  import) is the clock; the SDK caches the last tick seen so `before-*` handlers can also test
-  cooldowns.
-- **Async** (a blocking result delivered back on the tick) is **native-only**: the native backend
-  runs the work on a thread/task and re-queues a closure for the next tick. A WASM guest has no
-  threads and its std is sandboxed; async network work belongs to the net capability (PA3) and is
-  not part of this SDK step.
-- **Cost**: the queue is a `BTreeMap<u64, Vec<...>>`; draining once per tick walks only due
-  entries, so an idle scheduler is O(1) and allocates nothing. Handlers are `FnOnce` boxed once at
-  registration.
-- **Shared** for timers; **native-only** for `async_result`.
+This is the clearest justification for a native plugin: the SDK owns one shared timer wheel, keyed
+by (dependent id, timer id), drained once per tick from the SDK's own `on-tick`. An idle wheel is
+O(1); a due batch is O(due). A dependent's timers are dropped when it is disabled or unloaded.
+**Async** (blocking work delivered back on the tick) is native-only for the *dependent*: the SDK can
+schedule the result, but the work itself is the dependent's. Network work belongs to PA3, not PS1.
 
-### 5.7 Events, cooldowns, confirm
-
-Event hooks with a closure, cancel and priority recur in regions, claims, chat, moderation,
-teleport, shops, fun.
+### 7.7 Events, cooldowns, confirm
 
 ```rust
-plugin.on_before(Event::BlockBreak, 10, |p, e| {
-    if !perms().check(p, "worldedit.build") { return Verdict::Cancel("no build perms") }
-    Verdict::Allow
-});
+plugin.on_before(Event::BlockBreak, 10, |p, e| { ... Verdict::Allow });
 plugin.on_after(Event::PlayerJoin, |p| { ... });
 
-cooldown().ready(p, "home", Duration::ticks(60)) -> bool   // sugar over clock
-confirm().request(p, "delete your claim?", |p| { ... })     // sugar over scheduler
+cooldown().ready("home", 60) -> bool;              // one service call
+confirm().request(p, "delete your claim?", "claim delete")   // schedules expiry
 ```
 
-- **Design**: `on_before`/`on_after` register into per-kind ordered tables. The frozen exports
-  dispatch to those tables; `on_before` handlers run in **SDK-local priority order** (the host
-  already orders plugins by manifest `priority`), and the first `Cancel` short-circuits. `on_after`
-  is observe-only. The seven `after-*` and six `before-*` kinds are enum variants, so a handler is
-  a closure, not a hand-written export.
-- **Cooldowns** are pure: a per-key last-tick map, tested against the cached `now-ticks()`. No host
-  call on the query path.
-- **Confirm** is pure sugar over the scheduler: it records a pending confirmation with an expiry
-  tick and resolves it when the player retypes the command, which is why it is listed with the
-  scheduler. It needs `on-tick` like the scheduler.
-- **Cost**: the before/after dispatch is a slice walk; an unregistered event costs one empty-table
-  check (deduplicated because the *host* already refuses to call unsubscribed events). No per-event
-  allocation unless a handler asks for one.
-- **Shared.**
+Event handler tables live in the **dependent** (generated by the thin client from the frozen
+exports); the host already orders plugins by manifest priority, and SDK-local priority orders
+handlers within a plugin. Cooldowns and confirmations are SDK-owned state, keyed by caller id;
+`confirm` is sugar over the SDK scheduler. Cost: a before/after dispatch is a table walk with an
+`is_empty` fast path; an unregistered event costs nothing because the host never calls it.
 
-### 5.8 Optional services: economy, regions, permissions
-
-Shops/social/moderation need the economy; regions/claims/worldedit need the region check; many need
-permissions. The pattern is "use it if installed, degrade if not".
+### 7.8 Optional services: economy, regions
 
 ```rust
-if let Some(econ) = services().economy() {
-    econ.withdraw(p, Money::from_major(10))?;
-}
-if let Some(regions) = services().regions() {
-    regions.check(&RegionQuery::build(p, pos))?;
-} else {
-    // fall back to a permission node
-}
+if let Some(econ) = services().economy() { econ.withdraw(p, Money::major(10))?; }
+if services().lookup("regions", "0.1") { /* use typed handle */ }
 ```
 
-- **Wraps** `services.lookup(name, version)` (P3) plus typed `economy@0.1`/`regions@0.1` interfaces.
-  A missing service is `None`, **never a trap** (the `supports()` philosophy from `plugins.md`).
-- **Cost**: `lookup` is done once in `init` and cached; a service call is one host call.
-- **Shared**; the typed handles are generated from the service WIT.
+Not `requires`: absence is `None`/`false`, never a trap (the `supports()` philosophy). Lookup is
+done once in `init` and cached; a call is one service call.
 
-## 6. Cost model — no hidden per-tick allocations
+## 8. Cost per call
 
-- **Dispatch is subscription-driven.** The host never calls an event a plugin did not subscribe to,
-  so the SDK adds no per-tick work for those events. The SDK's per-kind tables are checked with an
-  `is_empty` fast path.
-- **Helpers take `&str`/borrowed refs** and return primitives where they can; the only allocations
-  are where the data itself is a collection (`online()`, `inventory()`) or text (a message), and
-  those are documented at the call site.
-- **`changed()` is O(1)** via the config revision; **`cooldown().ready()`** is a map lookup plus a
-  subtraction; **an idle scheduler drains nothing**.
-- **The tick budget still bounds the worst case.** P1's shared per-tick budget (consumed-time, not
-  wall-clock) charges every plugin call, so even a plugin that ignores this section cannot stall
-  the tick; the SDK's job is to not waste the budget on bookkeeping the plugin did not ask for.
-- A short "cost" line is required in the doc comment of every public helper, and the hot-path ones
-  (`check`, `now_ticks`, cooldowns, empty scheduler drain) get an allocation test where practical.
+| path | crossings | work |
+|---|---|---|
+| native dependent → SDK service | 0 | direct `Arc<dyn SdkService>` call on the tick thread; no serialization, no lock on the query path |
+| WASM dependent → SDK service | **1** | guest → host WIT import; host reads caller id and calls the native provider in-process; primitives/short strings copied once each way |
+| service resolution (`init` / load) | 0 | registry hash lookup, once |
+| SDK `on-tick` drain | 0 | one walk of the shared timer wheel; O(1) when idle, O(due) otherwise |
+| `config.changed()` | 1 | compares a revision integer returned by the host |
+| `cooldowns.ready` | 1 | map lookup + subtraction; no allocation |
 
-## 7. Versioning and capability policy
+No hidden per-tick allocations: dispatch is subscription-driven (the host calls only subscribed
+events); helpers take borrowed args and return primitives where possible; the only allocations are
+explicit collections (`online`, `inventory`) and message strings. Every public helper carries a
+one-line "cost" note, and the hot-path ones (empty dispatch, cooldown miss, `changed()` false, idle
+scheduler) get allocation tests where practical. P1's shared per-tick budget still caps the worst
+case, so a heavy plugin cannot stall the tick regardless.
 
-- The SDK crate versions independently (`0.1`) but compiles against the host's WIT. A helper whose
-  host import is absent is gated by `supports()` and returns a typed "not available" error / the
-  neutral value.
-- New capabilities are named exactly as the manifest spells them (`storage.kv`, `permissions`,
-  `permissions.admin`, `players`, `world.read`, …). A helper whose capability is ungranted is
-  refused by the host, which logs it; the SDK returns the neutral value, matching P1.
-- New host imports stay in `aether:plugin@0.1.0`; a new guest callback or export type change is a
-  `@0.2.0` world. The SDK is written so the guest backend can be regenerated against either.
+## 9. The thin guest client (`crates/aether-plugin-sdk`)
 
-## 8. Testing
+Contents, and nothing more:
 
-- **Mock `Host`**: the bulk of the SDK (sugar, command parse, colour, cooldowns, scheduler,
-  confirm, typed config/KV) is tested on the host target against a mock `Host` that records calls
-  and returns canned values. No WASM target, no server.
-- **Host-side integration**: every new WIT import gets a host test in `crates/aether-plugin` (like
-  the existing `plugin_host.rs`) that loads a fixture plugin and asserts capability refusal,
-  neutral values and the documented result.
-- **Frozen-world regression**: the checked-in `hello.wasm` must still load after every import
-  addition; `tests/wit_world.rs` continues to pin the export set. Consider extending it to pin the
-  import interface names as well so an accidental breaking import change is caught.
-- **Cost**: an allocation-counting test for the hot-path helpers (empty dispatch, cooldown miss,
-  `changed()` false, idle scheduler), so "no hidden per-tick allocations" is enforced, not just
-  claimed.
+- `wit/` — the `aether:sdk@0.1` package and the `dependent` world, vendored from the host's copy so
+  they cannot drift.
+- `src/lib.rs` — `wit_bindgen::generate!({ world: "dependent", path: "wit" })` with the standard
+  `pub use` surface.
+- `src/prelude.rs` — ergonomic re-exports: `permissions()`, `commands()`, `messages()`, `players()`,
+  `config()`, `scheduler()`, `cooldowns()`, `confirm()`, `services()` — thin newtype handles over the
+  generated resources with no behaviour beyond forwarding.
+- `depends!("sdk")` / `export_plugin!` — macros that (a) expand the manifest `requires` and the
+  world imports together, and (b) seed the frozen `Guest` impl, dispatching to handler tables.
+
+Explicitly **not** in the crate: formatting, parsing, registries, schedulers, cooldowns,
+translation, config typing, or any state. Those are the native plugin's, reached over the boundary.
+
+## 10. Testing
+
+- **Native SDK plugin unit tests**: the stateful services (timer wheel, cooldowns, confirmations,
+  command parse, colour/translation) run in-process against a mock core (permissions resolver,
+  player registry). This is where the bulk of the logic is tested.
+- **Service interface tests**: a fixture WASM plugin that calls each service; the host test asserts
+  forwarding, caller-id injection, capability refusal and neutral values — extending
+  `crates/aether-plugin/tests/plugin_host.rs`.
+- **Load-time dependency tests**: a dependent with `requires = ["sdk@0.1"]` fails to load with the
+  documented error when the SDK is disabled, and loads when it is enabled; a non-dependent loads
+  either way.
+- **Frozen-world regression**: `tests/wit_world.rs` keeps pinning the `@0.1.0` export set, and the
+  checked-in `hello.wasm` must still load after the SDK imports are added. Extend the pin to the
+  host's *import* interface names, so an accidental breaking import change is caught.
+- **Allocation/cost tests** for the hot-path helpers.
 - Checks per `COMMON.md`: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -j4
-  -- -D warnings`, `cargo-locked test` for the touched crates.
+  -- -D warnings`, `cargo-locked test` for touched crates.
 
-## 9. Implementation plan (step 2)
-
-Mapped to the queue's commits; each step lands helpers + tests + doc updates, and stops if a
-dependency is missing.
+## 11. Implementation plan (step 2)
 
 | commit | scope |
 |---|---|
 | **PS1a** (this) | survey + design; no code |
-| **PS1b** | crate skeleton, `Host` trait, mock; `command` builder; `permissions` facade |
-| **PS1c** | `message`, `players`, `config`, `store` |
-| **PS1d** | `scheduler`, `events`, `cooldown`, `confirm` |
-| **PS1e** | port `plugins/examples/hello` (WASM) and one native example; line-count before/after; EN+RU docs |
+| **PS1b** | native tier (`NativePlugin`, `NativeContext`, service registry, bus wiring); `plugins/sdk` skeleton with the `permissions` + `commands` services; thin client crate (bindings + `dependent` world + `depends!`) |
+| **PS1c** | `messages`, `players`, `config` services + thin-client prelude |
+| **PS1d** | `scheduler`, `cooldowns`, `confirm` (+ native async); `on-tick` drain |
+| **PS1e** | port one WASM example (`plugins/examples/hello`) and one native example to the SDK; line-count before/after; EN+RU docs; STATUS/ROADMAP/KNOWN_ISSUES |
 
-PS1b starts with the pieces that need no new host capability (`command` parsing/builder, permissions
-sugar over the planned import) and the mock, so a missing CMD-01/02 only affects the native/WIT
-backend, not the testable core. The examples port in PS1e is where the line-count reduction is
-measured.
+PS1b necessarily introduces the minimal native tier, because the SDK requires it. Missing core APIs
+(permissions, teleport, players) are stubbed behind `supports()` in the same commit and filled in
+when CMD-01/02, CMD-31/32 and P2 land.
 
-## 10. Open questions for review
+## 12. Open questions for review
 
-1. **Permissions backend.** CMD-01/02 are not on `oc/P1`. Do we (a) make the SDK's permission
-   helpers a facade that returns deny/`supports == false` until CMD-01/02 land, or (b) have PS1
-   also add the minimal core resolver? Recommendation: (a) — the permission model is core and
-   should land once, in CMD-01/02; PS1 provides the facade and the import so plugins are written
-   against the final API from day one.
-2. **Dynamic tab-completion.** Static declarations cover most stubs, but `/home <name>`,
-   `/warp <name>` and `/lp …` want dynamic suggestions. Confirm that this waits for
-   `aether:plugin@0.2.0` with an `on-complete` export, rather than growing the frozen
-   `command-result`.
-3. **Async scheduler scope.** Native-only `async_result` adds threads to native plugins; confirm
-   that is in scope for PS1d or deferred with PA3.
-4. **Config reload signal.** `config-revision` is the cheapest signal; the alternative is polling a
-   boolean on `on-tick`. Confirm the revision import is acceptable (it is additive).
-5. **Native example.** There is no native loader yet, so the "one native example" in PS1e will be a
-   test-only native plugin driven by the mock `Host` unless a loader lands first. Confirm that is
-   an acceptable reading of "port one native example" given P1 only ships WASM.
+1. **Native tier scope.** The owner's decision pulls a minimal in-process native tier into PS1b.
+   Confirm this is intended now (vs. a follow-up), and that `tier = "native"` + a build-time
+   registry is the right shape for "loaded like any plugin" before the C-ABI tier exists.
+2. **Service-call mechanism in the host.** Confirm the forwarding design: host binds the
+   `aether:sdk@0.1` interfaces and calls the registered provider through a typed bridge, with
+   caller-id injected from `StoreData`. (Alternative: a generic dynamic `services.call`, less typed.)
+3. **Dynamic tab-completion** waits for `aether:plugin@0.2.0` (`on-complete`); confirm it is out of
+   scope for PS1.
+4. **Permissions backend.** Confirm the SDK *fronts* the CMD-01/02 model (fail closed until it
+   lands) rather than growing its own resolver in PS1.
+5. **Native example in PS1e.** With the minimal native tier in PS1b there is now a native loader, so
+   the "one native example" is a real native dependent; confirm.
+6. **Async scheduler** native-only, and whether it is PS1d or deferred with PA3.
 
-## 11. Risks
+## 13. Risks
 
-- **The frozen world** is the main constraint: anything that needs a new guest callback or a changed
-  export type is blocked on `@0.2.0`. The catalogue is written to stay inside the frozen set.
-- **Dependencies not landed** (permissions/regions/bulk/teleport/player/economy) mean several
-  helpers exist as gated facades before their host import does; the `supports()` policy keeps them
-  honest and testable against a mock in the meantime.
-- **Thinness.** The SDK must not grow a second implementation of the game. Every helper is a
-  `Host` method plus sugar; anything that starts to need real state belongs in the host or core.
+- **A native tier is new surface.** Until now only WASM rules applied (sandbox, epoch budget). A
+  native plugin is trusted, in-process code: it can crash the server. The SDK must therefore stay
+  thin, hold no locks across calls, and never panic on a bad argument; PS1 treats native plugins as
+  trusted-by-install, documented in `plugins.md`.
+- **The frozen world** still blocks new guest callbacks; the catalogue stays inside it and dynamic
+  completion waits for `@0.2.0`.
+- **Dependencies not landed** (permissions/regions/bulk/teleport/player/economy): the services exist
+  as `supports()`-gated facades first, testable against a mock, honest about absence.
+- **Thinness.** The SDK must not grow a second implementation of the game; anything needing real
+  state beyond timers/registry belongs in the host or core.
