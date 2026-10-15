@@ -59,8 +59,14 @@ pub struct PlaceholderQuery {
     pub max_players: u32,
     /// Ticks per second, as the host measures it.
     pub tps: f64,
-    /// World time of day, in ticks, for `%time%`.
+    /// World time of day, in ticks, for the world clock (`%time%` /
+    /// `%world_time%`).
     pub time: i64,
+    /// Seconds since the Unix epoch, for the server clock (`%server_time%`).
+    pub unix_time: i64,
+    /// Whether `%time%` shows the server wall clock rather than the world
+    /// clock. The sidebar plugin sets it from its `clock` config.
+    pub clock_server: bool,
 }
 
 /// A closure that resolves a `%name%` placeholder, or `None` to leave the token

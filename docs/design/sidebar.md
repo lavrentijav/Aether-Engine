@@ -86,6 +86,7 @@ Tab list: the `playerlist_header` packet (a different id in every generation, `m
 title = "&6&lAether"
 update_hz = 4          # times per second; default 4, capped at 20
 tab = false            # mirror the board into the tab list header/footer
+clock = "world"        # what %time% shows: "world" (default) | "server"
 mode = "override"      # "override" | "yield" (see limitations)
 
 [[layout]]
@@ -103,8 +104,11 @@ The highest-priority layout whose conditions pass is drawn. Conditions: `permiss
 permission service; fails closed while CMD-01/02 are absent), `world`, and `placeholder`/`equals`.
 
 **Built-in placeholders**: `%player%`, `%displayname%`, `%ping%`, `%online%`, `%max%`, `%world%`,
-`%x%` `%y%` `%z%`, `%tps%`, `%health%`, `%level%`, `%time%`. `&`-colour codes are translated to `§`.
-An unknown token is left literal, so a typo shows up instead of vanishing.
+`%x%` `%y%` `%z%`, `%tps%`, `%health%`, `%level%`, `%time%` (world or server clock per the `clock`
+setting), `%world_time%` and `%server_time%` (explicit). `%ping%` and `%tps%` are measured, not
+invented: the core times the keep-alive round trip and smooths the actual tick rate. `&`-colour
+codes are translated to `§`. An unknown token is left literal, so a typo shows up instead of
+vanishing.
 
 **Other plugins** register their own (`%economy_balance%`, `%rank_prefix%`) through the `sidebar@0.1`
 service registered in the host's service registry:
@@ -138,9 +142,8 @@ Checks per [`COMMON.md`](../tasks/COMMON.md): `cargo fmt`, `cargo clippy -- -D w
   packets). The full vanilla `/scoreboard` model, commands and storage are a separate task
   (CMD-15a/b); `mode = "yield"` is parsed but inert until there is a vanilla sidebar model to yield
   to.
-- **`%time%` is 06:00.** No world clock is exposed to plugins yet (the core's
-  `game::time_of_day()` is not routed into `PlayerExtra`); the placeholder exists and is honest
-  about the gap. `%ping%` is the real measured keep-alive round trip.
+- **Player `%level%` is 0.** The experience level is tracked on `PlayerState` but not routed into
+  `PlayerExtra` yet; ping, world time and TPS are real.
 - **WASM plugins cannot register placeholders yet.** The `sidebar@0.1` service is typed in
   `crates/aether-plugin` for native consumers. A WASM consumer needs a WIT interface (a new package
   version, since exports are frozen), which is deferred.

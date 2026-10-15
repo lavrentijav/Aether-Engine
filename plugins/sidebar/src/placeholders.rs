@@ -98,7 +98,16 @@ fn builtin(token: &str, q: &PlaceholderQuery) -> Option<String> {
         "z" => extra.map(|e| e.z.floor() as i64)?.to_string(),
         "health" => extra.map(|e| format!("{:.1}", e.health))?,
         "level" => extra.map(|e| e.level.to_string())?,
-        "time" => clock(q.time),
+        // `%time%` follows the config; the explicit tokens never do.
+        "time" => {
+            if q.clock_server {
+                wall_clock(q.unix_time)
+            } else {
+                world_clock(q.time)
+            }
+        }
+        "world_time" => world_clock(q.time),
+        "server_time" => wall_clock(q.unix_time),
         _ => return None,
     })
 }
@@ -138,10 +147,18 @@ fn is_color_code(c: char) -> bool {
 
 /// Format a world time in ticks as `HH:MM`, the way a wall clock would show it
 /// (Minecraft's day starts at 06:00).
-fn clock(time: i64) -> String {
+fn world_clock(time: i64) -> String {
     let time = time.rem_euclid(24_000);
     let hours = (time / 1000 + 6) % 24;
     let minutes = (time % 1000) * 60 / 1000;
+    format!("{hours:02}:{minutes:02}")
+}
+
+/// Format a Unix timestamp as `HH:MM` in UTC.
+fn wall_clock(unix: i64) -> String {
+    let secs = unix.rem_euclid(86_400);
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
     format!("{hours:02}:{minutes:02}")
 }
 
@@ -167,6 +184,8 @@ mod tests {
             max_players: 20,
             tps: 19.9,
             time: 6000,
+            unix_time: 0,
+            clock_server: false,
         }
     }
 
@@ -216,8 +235,25 @@ mod tests {
     #[test]
     fn time_is_a_wall_clock() {
         // 0 ticks is 06:00, 6000 is noon.
-        assert_eq!(clock(0), "06:00");
-        assert_eq!(clock(6000), "12:00");
-        assert_eq!(clock(18000), "00:00");
+        assert_eq!(world_clock(0), "06:00");
+        assert_eq!(world_clock(6000), "12:00");
+        assert_eq!(world_clock(18000), "00:00");
+        // A Unix timestamp, UTC: midnight, 06:00, noon.
+        assert_eq!(wall_clock(0), "00:00");
+        assert_eq!(wall_clock(21_600), "06:00");
+        assert_eq!(wall_clock(43_200), "12:00");
+    }
+
+    #[test]
+    fn percent_time_follows_the_clock_config() {
+        let p = Placeholders::default();
+        let mut q = query();
+        q.time = 6000; // noon
+        q.unix_time = 0; // 00:00 UTC
+        assert_eq!(p.resolve("%time%", &q), "12:00", "world clock by default");
+        assert_eq!(p.resolve("%world_time%", &q), "12:00");
+        assert_eq!(p.resolve("%server_time%", &q), "00:00");
+        q.clock_server = true;
+        assert_eq!(p.resolve("%time%", &q), "00:00", "server clock when asked");
     }
 }

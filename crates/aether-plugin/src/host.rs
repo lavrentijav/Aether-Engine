@@ -119,6 +119,12 @@ pub trait HostBackend: Send + Sync {
     fn max_players(&self, _plugin: &str) -> u32 {
         20
     }
+
+    /// The world time of day, in ticks (`0..24000`), for the world clock. The
+    /// default is sunrise.
+    fn world_time(&self, _plugin: &str) -> i64 {
+        0
+    }
 }
 
 /// Sandbox and scheduling limits for the whole host.

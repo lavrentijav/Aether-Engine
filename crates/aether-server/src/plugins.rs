@@ -249,9 +249,12 @@ mod imp {
         }
 
         fn server_tps(&self, _plugin: &str) -> f64 {
-            // The tick loop keeps a smoothed rate; until it is exposed here,
-            // report the ideal rather than a guessed figure.
-            20.0
+            // The tick loop's measured rate.
+            crate::game::tps()
+        }
+
+        fn world_time(&self, _plugin: &str) -> i64 {
+            crate::game::time_of_day()
         }
     }
 

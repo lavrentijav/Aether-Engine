@@ -124,6 +124,9 @@ impl NativePlugin for SidebarPlugin {
         if let Some(tab) = ctx.config.get("tab").and_then(|v| v.parse().ok()) {
             cfg.tab = tab;
         }
+        if let Some("server") = ctx.config.get("clock").map(|s| s.as_str()) {
+            cfg.clock = config::ClockMode::Server;
+        }
         *self.state.config.write().unwrap() = cfg;
 
         // The permission service is optional: the SDK fronts the permission
@@ -248,6 +251,7 @@ impl SidebarPlugin {
         tps: f64,
     ) -> Option<SidebarBoard> {
         let extra = ctx.backend.player_extra(ctx.id, p.id);
+        let cfg = self.state.config.read().unwrap();
         let q = PlaceholderQuery {
             player: p.id,
             name: p.name.clone(),
@@ -255,11 +259,10 @@ impl SidebarPlugin {
             online,
             max_players,
             tps,
-            // The server exposes no world clock to plugins yet; the token
-            // resolves to dawn until it does.
-            time: 0,
+            time: ctx.backend.world_time(ctx.id),
+            unix_time: unix_now(),
+            clock_server: cfg.clock == config::ClockMode::Server,
         };
-        let cfg = self.state.config.read().unwrap();
         let layout = self.pick_layout(&cfg, ctx.id, p, &q)?;
         let overrides = self.state.overrides.lock().unwrap();
         let player_overrides = overrides.get(&p.id);
@@ -332,6 +335,14 @@ impl SidebarPlugin {
 /// the lines are the footer.
 fn tab_parts(board: &SidebarBoard) -> (String, String) {
     (board.title.clone(), board.lines.join("\n"))
+}
+
+/// The current Unix time in seconds, for the server clock.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// The `sidebar@0.1` service, over the plugin's shared state.
