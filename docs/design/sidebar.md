@@ -149,6 +149,11 @@ registry, so it is permission-checked like any other).
 - `plugins/sidebar`: config parsing, placeholder resolution + colour translation, and an end-to-end
   test that drives the real `NativePlugin` through a recording `HostBackend` (board pushed and
   resolved, service placeholder + line override, toggle, tab mirror).
+- `crates/aether-plugin/tests/sidebar_bridge.rs`: a real WASM component
+  (`tests/fixtures/sidebar/sidebar.wasm`, built from `tests/guests/sidebar`) calls every
+  `aether:sidebar` import and the host forwards each to a mock provider with the caller's id; a
+  second test pins the neutral answer when no provider is registered. `tests/wit_world.rs` pins the
+  `aether:sidebar@0.1.0` package identity.
 
 Checks per [`COMMON.md`](../tasks/COMMON.md): `cargo fmt`, `cargo clippy -- -D warnings`,
 `cargo-locked test`.
