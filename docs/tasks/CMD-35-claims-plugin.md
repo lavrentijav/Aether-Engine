@@ -3,6 +3,12 @@
 Status: 📋 task brief (CMD0) · size: L · core: no · plugin: `plugins/claims`
 Needs: `oc/P1`, `oc/CMD-29`
 
+## Split (CMD0 review)
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-35a | `docs/tasks/CMD-35a-claims-model.md` | claim model + `/claim` `/abandonclaim` `/abandonallclaims` `/claimslist` + golden shovel | M |
+| CMD-35b | `docs/tasks/CMD-35b-claims-trust.md` | trust levels (access/container/build/manage) + limits | S |
+
 ## Goal
 A simpler claim system for players than WorldGuard regions: claim land with a golden shovel, trust
 other players, abandon claims. Built on the same core region index/check (CMD-29) but owned by

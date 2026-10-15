@@ -3,6 +3,13 @@
 Status: 📋 task brief (CMD0) · size: L · core: yes
 Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-15`, `oc/CMD-21`
 
+## Split (CMD0 review)
+This L task is split into:
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-22a | `docs/tasks/CMD-22a-execute-modifiers.md` | modifiers: `as/at/positioned/rotated/facing/align/anchored/in/on/summon` | M |
+| CMD-22b | `docs/tasks/CMD-22b-execute-conditions-store.md` | `if/unless` conditions, `store`, `run` | M |
+
 ## Goal
 The full vanilla `/execute`: modifier subcommands that reshape the command source stack, condition
 subcommands, and `store`. This is the most-used command in data packs and must match vanilla

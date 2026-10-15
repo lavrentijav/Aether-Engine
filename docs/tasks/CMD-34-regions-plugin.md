@@ -3,6 +3,12 @@
 Status: 📋 task brief (CMD0) · size: L · core: no · plugin: `plugins/regions`
 Needs: `oc/P1`, `oc/CMD-29`
 
+## Split (CMD0 review)
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-34a | `docs/tasks/CMD-34a-regions-model.md` | region model + `/rg define/redefine/remove/priority/info/list` | M |
+| CMD-34b | `docs/tasks/CMD-34b-regions-flags-members.md` | `/rg flag`, members/owners, bypass | M |
+
 ## Goal
 The region **model**, flags and `/rg` commands on top of the core region index + protection check
 (CMD-29). This is the WorldGuard half of "core API + plugin": the fast check is core, everything an

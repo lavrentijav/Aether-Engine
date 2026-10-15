@@ -3,6 +3,12 @@
 Status: 📋 task brief (CMD0) · size: L · core: no · plugin: `plugins/essentials-inv`
 Needs: `oc/P1`, `oc/CMD-32`
 
+## Split (CMD0 review)
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-39a | `docs/tasks/CMD-39a-inv-view.md` | `/invsee` `/enderchest` `/clearinventory` | M |
+| CMD-39b | `docs/tasks/CMD-39b-stations-kits.md` | `/workbench` `/anvil` `/stonecutter` `/grindstone` `/trash` `/kit` `/kits` `/createkit` | M |
+
 ## Goal
 Inventory, ender-chest and crafting-station access, kits and a trash can — the EssentialsX
 inventory family, on the window/player API (CMD-32, PA1).

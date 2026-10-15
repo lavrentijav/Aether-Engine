@@ -3,6 +3,12 @@
 Status: 📋 task brief (CMD0) · size: L → split · core: no · plugin: `plugins/moderation`
 Needs: `oc/P1`, `oc/CMD-32`, `oc/CMD-40`
 
+## Split (CMD0 review)
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-41a | `docs/tasks/CMD-41a-moderation-chat.md` | `/mute` `/tempmute` `/unmute` `/warn` `/warnings` `/delwarn` `/tempban` `/tempbanip` `/banip` `/clearchat` `/slowmode` `/staffchat` | M |
+| CMD-41b | `docs/tasks/CMD-41b-moderation-staff.md` | `/jail` `/unjail` `/setjail` `/vanish` `/sudo` `/freeze` `/report` `/reports` `/history` | M |
+
 ## Goal
 The staff toolkit: mutes, warnings, temporary bans, jails, vanish, freeze, sudo, chat control and
 reports. Bans/kicks stay core (CMD-08); the **temporary / IP-range** variants and everything else

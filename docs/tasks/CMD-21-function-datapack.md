@@ -3,6 +3,14 @@
 Status: 📋 task brief (CMD0) · size: L · core: yes
 Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-20`
 
+## Split (CMD0 review)
+This L group is split into; the **data pack loader is its own task**:
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-21a | `docs/tasks/CMD-21a-datapack-loader.md` | data pack loader: `pack.mcmeta`, pack_format, registries, tags, load-error handling | M |
+| CMD-21b | `docs/tasks/CMD-21b-function.md` | `/function` `/return` `/test` + function execution/macros | M |
+| CMD-21c | `docs/tasks/CMD-21c-datapack-reload.md` | `/datapack` `/reload` | S |
+
 ## Goal
 Load a data pack's `function/*.mcfunction` files and run them, with `/reload`, command blocks'
 shared engine, `/return`, and the `/datapack` management command. This is the largest V-data

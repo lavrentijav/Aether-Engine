@@ -3,6 +3,14 @@
 Status: 📋 task brief (CMD0) · size: L · core: yes
 Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
 
+## Split (CMD0 review)
+This L group is split into:
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-20a | `docs/tasks/CMD-20a-loot.md` | `/loot` | M |
+| CMD-20b | `docs/tasks/CMD-20b-recipe-advancement.md` | `/recipe` `/advancement` | M |
+| CMD-20c | `docs/tasks/CMD-20c-random-schedule.md` | `/random` `/schedule` | S |
+
 ## Goal
 Data-pack-driven commands: loot tables, recipe unlocking, advancements, random sequences and
 scheduled functions.

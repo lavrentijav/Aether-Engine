@@ -3,6 +3,12 @@
 Status: 📋 task brief (CMD0) · size: L · core: no · plugin: `plugins/essentials-player`
 Needs: `oc/P1`, `oc/CMD-32`
 
+## Split (CMD0 review)
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-38a | `docs/tasks/CMD-38a-player-basics.md` | `/fly /god /speed /feed /heal /repair /hat` | M |
+| CMD-38b | `docs/tasks/CMD-38b-player-info.md` | `/nick /realname /whois /seen /afk /near /getpos /depth /compass /ptime /pweather /suicide /burn /thru /skull /more /condense /exp` | M |
+
 ## Goal
 Personal player utilities from EssentialsX (`/fly`, `/god`, `/speed`, …), on the player/UI API
 (CMD-32).

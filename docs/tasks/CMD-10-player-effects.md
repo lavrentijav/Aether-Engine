@@ -3,6 +3,13 @@
 Status: 📋 task brief (CMD0) · size: L · core: yes
 Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
 
+## Split (CMD0 review)
+This L group is split into:
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-10a | `docs/tasks/CMD-10a-clear-effect-enchant.md` | `/clear` `/effect` `/enchant` | M |
+| CMD-10b | `docs/tasks/CMD-10b-experience-attribute-damage.md` | `/experience` `/xp` `/attribute` `/damage` | M |
+
 ## Goal
 Vanilla commands that change a player's/entity's state: inventory clearing, status effects,
 enchantments, experience, attributes and direct damage. They reuse the existing game layer

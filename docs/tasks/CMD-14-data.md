@@ -3,6 +3,13 @@
 Status: 📋 task brief (CMD0) · size: L · core: yes
 Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
 
+## Split (CMD0 review)
+This L task is split into:
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-14a | `docs/tasks/CMD-14a-data-storage-nbtpath.md` | NBT-path parser + `/data … storage` (get/merge/modify/remove) | M |
+| CMD-14b | `docs/tasks/CMD-14b-data-block-entity.md` | `/data … block` and `/data … entity` + persistence | M |
+
 ## Goal
 Vanilla `/data` over block entities, entities and command storage. This is the command surface for
 NBT storage; if the engine lacks entity/block-entity NBT or command storage, add the minimum here

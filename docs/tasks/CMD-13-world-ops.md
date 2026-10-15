@@ -3,6 +3,13 @@
 Status: 📋 task brief (CMD0) · size: L · core: yes
 Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
 
+## Split (CMD0 review)
+This L group is split into:
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-13a | `docs/tasks/CMD-13a-time-weather-border.md` | `/time` `/weather` `/worldborder` `/setworldspawn` `/defaultgamemode` | M |
+| CMD-13b | `docs/tasks/CMD-13b-gamerule-tick-locate.md` | `/gamerule` `/difficulty` `/tick` `/locate` `/waypoint` | M |
+
 ## Goal
 Vanilla world/environment commands: time, weather, world border, world spawn, gamerules,
 difficulty, tick control, locate, default game mode.

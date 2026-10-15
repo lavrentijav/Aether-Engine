@@ -3,6 +3,12 @@
 Status: 📋 task brief (CMD0) · size: L · core: no · plugin: `plugins/permissions`
 Needs: `oc/P1`, `oc/CMD-02`
 
+## Split (CMD0 review)
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-33a | `docs/tasks/CMD-33a-permissions-nodes.md` | `/lp user|group … permission` and `parent` commands | M |
+| CMD-33b | `docs/tasks/CMD-33b-permissions-meta-editor.md` | meta (prefix/suffix/weight), tracks, web editor, sync/verbose | M |
+
 ## Goal
 A management UI over the core permission groups/model (CMD-02): view/edit a player's or group's
 nodes, groups, inheritance, meta and per-world context, tracks, and a web editor. The core keeps

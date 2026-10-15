@@ -3,6 +3,14 @@
 Status: 📋 task brief (CMD0) · size: L · core: yes
 Needs: `oc/CMD-01`, `oc/P1`
 
+## Split (CMD0 review)
+This L task is split into:
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-32a | `docs/tasks/CMD-32a-player-state.md` | player state, temporary effects/flight/speed, scheduler | M |
+| CMD-32b | `docs/tasks/CMD-32b-window-api.md` | window/container API (menus, paging, click callbacks, `/invsee` windows) | M |
+| CMD-32c | `docs/tasks/CMD-32c-ui-services.md` | UI primitives (title/actionbar/bossbar/sidebar/sign-anvil input) + service lookup | M |
+
 ## Goal
 The host API plugins need for player/UI features (BACKLOG PA1, fed by `docs/design/commands.md` §5):
 temporary effects/flight/speed, container windows over another player's inventory, and the text/UI

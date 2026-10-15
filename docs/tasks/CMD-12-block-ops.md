@@ -3,6 +3,13 @@
 Status: 📋 task brief (CMD0) · size: L · core: yes
 Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
 
+## Split (CMD0 review)
+This L group is split into:
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-12a | `docs/tasks/CMD-12a-setblock-fill-clone.md` | `/setblock` `/fill` `/clone` | M |
+| CMD-12b | `docs/tasks/CMD-12b-fillbiome-place-forceload.md` | `/fillbiome` `/place` `/forceload` | M |
+
 ## Goal
 Vanilla world-editing commands. These write blocks, so they must go through the normal placement
 path (neighbour updates, light, journal). Use the bulk-edit core API (CMD-30) once it has merged;

@@ -3,6 +3,13 @@
 Status: 📋 task brief (CMD0) · size: L · core: yes
 Needs: `oc/CMD-01`, `oc/P1` (the region *model* is a plugin; this is the mechanism it uses)
 
+## Split (CMD0 review)
+This L task is split into:
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-29a | `docs/tasks/CMD-29a-region-index-build.md` | per-chunk region index, build/update, immutable snapshots | M |
+| CMD-29b | `docs/tasks/CMD-29b-region-check-hooks.md` | protection check, hook wiring, bypass | M |
+
 ## Goal
 The hot-path mechanism behind WorldGuard-style regions and GriefPrevention-style claims: a fast
 **per-chunk region index** (R-tree/bucket) and a **protection check** consulted on block break/

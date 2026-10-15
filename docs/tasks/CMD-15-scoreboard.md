@@ -3,6 +3,13 @@
 Status: 📋 task brief (CMD0) · size: L · core: yes
 Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-06`
 
+## Split (CMD0 review)
+This L task is split into:
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-15a | `docs/tasks/CMD-15a-scoreboard-objectives.md` | scoreboard model + `/scoreboard objectives …` | M |
+| CMD-15b | `docs/tasks/CMD-15b-scoreboard-players.md` | `/scoreboard players …` (set/add/remove/reset/get/enable/operation/display) | M |
+
 ## Goal
 The full vanilla scoreboard command, which is also storage the rest of the engine reads
 (`/execute if score`, `/trigger`, sidebar display). Implement the scoreboard model first (objectives,

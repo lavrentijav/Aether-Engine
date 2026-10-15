@@ -3,6 +3,12 @@
 Status: 📋 task brief (CMD0) · size: L → split · core: no · plugin: `plugins/worldedit`
 Needs: `oc/P1`, `oc/CMD-30`, `oc/CMD-06`
 
+## Split (CMD0 review)
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-36a | `docs/tasks/CMD-36a-worldedit-selection.md` | selection, `//set/replace/walls/outline`, `//undo/redo/expand/contract` | M |
+| CMD-36b | `docs/tasks/CMD-36b-worldedit-clipboard.md` | `//copy/cut/paste/rotate/flip/stack/move`, `//schem`, brushes | M |
+
 ## Goal
 Selection, clipboard, brushes and schematics in the familiar `//` command style, on top of the core
 bulk edit API (CMD-30). The core owns the batched writes and journal; this plugin owns selection

@@ -3,6 +3,13 @@
 Status: 📋 task brief (CMD0) · size: L · core: yes
 Needs: `oc/CMD-01`, `oc/P1`
 
+## Split (CMD0 review)
+This L task is split into:
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-30a | `docs/tasks/CMD-30a-bulk-edit-api.md` | `BulkEdit` API, pending-read semantics, one journal revision per commit, undo | M |
+| CMD-30b | `docs/tasks/CMD-30b-bulk-edit-publish.md` | chunk-resend batching, neighbour/light update, per-tick budget | M |
+
 ## Goal
 The mechanism behind WorldEdit-style operations: **batched multi-block writes** with one journal
 operation, batched chunk resends, neighbour/light updates, and undo through the journal. Millions of

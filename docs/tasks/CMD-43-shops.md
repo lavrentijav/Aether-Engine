@@ -3,6 +3,12 @@
 Status: 📋 task brief (CMD0) · size: L · core: no · plugin: `plugins/shops`
 Needs: `oc/P1`, `oc/CMD-42`
 
+## Split (CMD0 review)
+| id | brief | contents | size |
+|---|---|---|---|
+| CMD-43a | `docs/tasks/CMD-43a-shops-chest.md` | `/shop`, sign chest shops, admin shops | M |
+| CMD-43b | `docs/tasks/CMD-43b-auction.md` | `/auction` (`/ah`), `/sell hand\|all` | M |
+
 ## Goal
 Chest shops, an auction house and admin shops on the economy service (CMD-42).
 
