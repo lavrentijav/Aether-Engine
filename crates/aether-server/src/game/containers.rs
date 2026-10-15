@@ -167,30 +167,34 @@ fn decode(b: &[u8]) -> Option<Container> {
 
 /// Load the container at `pos` from the world, or a fresh empty one of `kind`.
 ///
-/// A chest that has never been saved and has never been edited is a naturally
-/// generated one (a dungeon or igloo chest); it is filled from its loot table
-/// on this first open, the way vanilla unpacks a chest's block entity.
+/// A chest is *not* seeded here: vanilla fills a generated chest only when a
+/// player opens it, and miners must not find loot by breaking one. See
+/// [`seed_generated_chest`].
 fn load(world: &DemoWorld, pos: Pos, kind: ContainerKind) -> Container {
-    match world
+    world
         .get_meta(&key(pos))
         .ok()
         .flatten()
         .and_then(|b| decode(&b))
         .filter(|c| c.kind == kind)
-    {
-        Some(c) => c,
-        None => {
-            let mut c = Container::new(kind);
-            if kind == ContainerKind::Chest {
-                for (slot, stack) in
-                    super::loot::seed_generated_chest(world, pos, crate::seed(), c.slots.len())
-                {
-                    c.slots[slot] = Some(Stack::named(&stack.item, stack.count));
-                }
-            }
-            c
-        }
+        .unwrap_or_else(|| Container::new(kind))
+}
+
+/// Fill a naturally generated chest from its loot table on the first player
+/// open, the way vanilla unpacks a chest's `LootTable` block entity. A no-op
+/// for an already-saved chest (a player's, or one already opened).
+pub fn seed_generated_chest(world: &DemoWorld, pos: Pos, seed: u64) {
+    if world.get_meta(&key(pos)).ok().flatten().is_some() {
+        return;
     }
+    let mut c = Container::new(ContainerKind::Chest);
+    let Some(filled) = super::loot::seed_generated_chest(world, pos, seed, c.slots.len()) else {
+        return;
+    };
+    for (slot, stack) in filled {
+        c.slots[slot] = Some(Stack::named(&stack.item, stack.count));
+    }
+    let _ = world.put_meta(&key(pos), &encode(&c));
 }
 
 /// Run `f` over the container at `pos`, loading or creating it as `kind`.

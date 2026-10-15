@@ -1000,23 +1000,33 @@ fn pack_data_dir(worldgen_data: &str) -> Option<PathBuf> {
 /// `LootTable` string in the chest's block entity; it is recorded in
 /// `KNOWN_ISSUES`.
 pub fn generated_chest_table(world: &DemoWorld, pos: (i32, i32, i32)) -> Option<&'static str> {
-    if world
+    let touched = world
         .journal()
         .last_change_at(pos.0, pos.1, pos.2)
         .ok()
         .flatten()
-        .is_some()
-    {
+        .is_some();
+    chest_table_from_blocks(touched, pos, |dx, dy, dz| {
+        crate::game::block_name(world, world.get_block(dx, dy, dz))
+    })
+}
+
+/// The structure-chest decision on its own, so it can be tested without a
+/// world: `touched` says the journal has seen this position (so it is not a
+/// generated chest), and `get` returns a block's name.
+fn chest_table_from_blocks(
+    touched: bool,
+    (x, y, z): (i32, i32, i32),
+    get: impl Fn(i32, i32, i32) -> Option<String>,
+) -> Option<&'static str> {
+    if touched {
         return None;
     }
     let mut igloo = false;
     for dy in -3..=3 {
         for dz in -6..=6 {
             for dx in -6..=6 {
-                let Some(name) = crate::game::block_name(
-                    world,
-                    world.get_block(pos.0 + dx, pos.1 + dy, pos.2 + dz),
-                ) else {
+                let Some(name) = get(x + dx, y + dy, z + dz) else {
                     continue;
                 };
                 match name.as_str() {
@@ -1031,23 +1041,20 @@ pub fn generated_chest_table(world: &DemoWorld, pos: (i32, i32, i32)) -> Option<
 }
 
 /// Roll the loot a freshly generated chest should start with, and where in its
-/// `slots` each stack goes. Empty when the position is not a generated chest or
-/// no pack is configured.
-pub fn seed_generated_chest(
-    world: &DemoWorld,
-    pos: (i32, i32, i32),
+/// `slots` each stack goes. `None` when the position is not a generated chest;
+/// `Some(vec![])` when it is but rolled empty. `tables` is passed in so a test
+/// can supply a pack.
+pub fn generated_chest_loot(
+    tables: &LootTables,
+    id: &str,
     seed: u64,
+    pos: (i32, i32, i32),
     slots: usize,
-) -> Vec<(usize, LootStack)> {
-    let Some(id) = generated_chest_table(world, pos) else {
-        return Vec::new();
-    };
+) -> Option<Vec<(usize, LootStack)>> {
     let ctx = LootContext::default();
-    let Some(stacks) = LootTables::global().roll_seeded(id, seed, pos, &ctx) else {
-        return Vec::new();
-    };
-    if stacks.is_empty() || slots == 0 {
-        return Vec::new();
+    let stacks = tables.roll_seeded(id, seed, pos, &ctx)?;
+    if slots == 0 {
+        return Some(Vec::new());
     }
     let mut rng = Rng::new(seed ^ hash_table(id) ^ hash_pos(pos) ^ 0xA5A5_A5A5);
     let mut used = vec![false; slots];
@@ -1063,7 +1070,20 @@ pub fn seed_generated_chest(
         used[slot] = true;
         out.push((slot, s));
     }
-    out
+    Some(out)
+}
+
+/// Roll the loot a freshly generated chest at `pos` should start with, and
+/// where in its `slots` each stack goes. `None` when the position is not a
+/// generated chest or no pack is configured.
+pub fn seed_generated_chest(
+    world: &DemoWorld,
+    pos: (i32, i32, i32),
+    seed: u64,
+    slots: usize,
+) -> Option<Vec<(usize, LootStack)>> {
+    let id = generated_chest_table(world, pos)?;
+    generated_chest_loot(LootTables::global(), id, seed, pos, slots)
 }
 
 // --- parsing ---------------------------------------------------------------
@@ -2030,6 +2050,77 @@ mod tests {
                 "sheared ewe still dropped wool: {out:?}"
             );
         }
+    }
+
+    /// The generator stores no loot table on a chest, so which one it rolls
+    /// is inferred from the structure around it — and never for a position the
+    /// journal has seen (a player's chest).
+    #[test]
+    fn chest_table_is_inferred_from_the_structure() {
+        use std::collections::HashMap;
+        let empty: HashMap<(i32, i32, i32), String> = HashMap::new();
+        assert_eq!(
+            chest_table_from_blocks(false, (0, 0, 0), |x, y, z| empty.get(&(x, y, z)).cloned()),
+            None
+        );
+
+        let mut dungeon = HashMap::new();
+        dungeon.insert((1, 0, 0), "minecraft:spawner".to_string());
+        let get = |m: &HashMap<(i32, i32, i32), String>| {
+            let m = m.clone();
+            move |x, y, z| m.get(&(x, y, z)).cloned()
+        };
+        assert_eq!(
+            chest_table_from_blocks(false, (0, 0, 0), get(&dungeon)),
+            Some("minecraft:chests/simple_dungeon")
+        );
+        // A touched position is a player's chest, whatever is around it.
+        assert_eq!(
+            chest_table_from_blocks(true, (0, 0, 0), get(&dungeon)),
+            None
+        );
+
+        let mut igloo = HashMap::new();
+        igloo.insert((2, 1, 0), "minecraft:brewing_stand".to_string());
+        igloo.insert((-1, -1, 0), "minecraft:water_cauldron".to_string());
+        assert_eq!(
+            chest_table_from_blocks(false, (0, 0, 0), get(&igloo)),
+            Some("minecraft:chests/igloo_chest")
+        );
+    }
+
+    /// A generated chest's loot is the same every time for one seed and
+    /// position, and lands in distinct in-range slots.
+    #[test]
+    fn generated_chest_loot_is_deterministic() {
+        let Ok(root) = std::env::var("AETHER_VANILLA_PACK") else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let tables = LootTables::open(&root);
+        let a = generated_chest_loot(
+            &tables,
+            "minecraft:chests/simple_dungeon",
+            99,
+            (4, 5, 6),
+            27,
+        )
+        .expect("dungeon table");
+        let b = generated_chest_loot(
+            &tables,
+            "minecraft:chests/simple_dungeon",
+            99,
+            (4, 5, 6),
+            27,
+        )
+        .expect("dungeon table");
+        assert_eq!(a, b);
+        assert!(!a.is_empty());
+        let mut slots: Vec<usize> = a.iter().map(|(s, _)| *s).collect();
+        slots.sort_unstable();
+        slots.dedup();
+        assert_eq!(slots.len(), a.len(), "slots must be distinct");
+        assert!(slots.iter().all(|s| *s < 27));
     }
 
     /// Every table in the pack must parse; the ones that do not are printed.
