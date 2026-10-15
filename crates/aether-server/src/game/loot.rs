@@ -1348,12 +1348,24 @@ fn parse_function_inner(j: &Json, _tags: Option<&TagLoader>) -> Option<Function>
                 .get("count")
                 .map(parse_number)
                 .unwrap_or(NumberProvider::Constant(1.0)),
-            add: j.bool_or("add", true),
+            // Vanilla defaults `add` to false (replace the count).
+            add: j.bool_or("add", false),
         },
-        "minecraft:limit_count" => Function::LimitCount {
-            min: j.get("min").and_then(Json::as_f64).map(|v| v as i32),
-            max: j.get("max").and_then(Json::as_f64).map(|v| v as i32),
-        },
+        "minecraft:limit_count" => {
+            // `LimitCount.CODEC` is `IntRange.CODEC.fieldOf("limit")`, so the
+            // bounds live under `limit`, not at the top level.
+            let limit = j.get("limit");
+            Function::LimitCount {
+                min: limit
+                    .and_then(|l| l.get("min"))
+                    .and_then(Json::as_f64)
+                    .map(|v| v as i32),
+                max: limit
+                    .and_then(|l| l.get("max"))
+                    .and_then(Json::as_f64)
+                    .map(|v| v as i32),
+            }
+        }
         "minecraft:apply_bonus" => Function::ApplyBonus {
             enchantment: with_ns(j.str_of("enchantment").unwrap_or("")),
             formula: match j
@@ -1547,23 +1559,46 @@ mod tests {
     }
 
     #[test]
-    fn set_count_and_limit_count() {
+    fn set_count_defaults_to_replace_and_limit_reads_limit() {
+        // Vanilla `set_count` without `add` replaces the count (base 1 → 5),
+        // rather than adding to it (which would give 6).
         let t = table_from(
-            r#"{
-              "pools": [{"rolls": 2, "entries": [
+            r#"{"pools":[{"rolls":1,"entries":[
+                {"type":"minecraft:item","name":"minecraft:apple",
+                 "functions":[{"function":"minecraft:set_count",
+                    "count":{"type":"minecraft:uniform","min":5,"max":5}}]}]}]}"#,
+        );
+        let mut rng = Rng::new(1);
+        let out = t.roll(&LootContext::default(), &mut rng);
+        assert_eq!(out[0].count, 5, "set_count must replace by default");
+
+        // `limit_count` carries its bounds under `limit`.
+        let t = table_from(
+            r#"{"pools":[{"rolls":1,"entries":[
                 {"type":"minecraft:item","name":"minecraft:apple",
                  "functions":[
-                   {"function":"minecraft:set_count","add":false,
-                    "count":{"type":"minecraft:uniform","min":1,"max":3}},
-                   {"function":"minecraft:limit_count","max":2}]}]}]
-            }"#,
+                   {"function":"minecraft:set_count","count":9},
+                   {"function":"minecraft:limit_count","limit":{"max":4}}]}]}]}"#,
         );
-        let mut rng = Rng::new(2);
-        for _ in 0..1000 {
+        let mut rng = Rng::new(1);
+        assert_eq!(t.roll(&LootContext::default(), &mut rng)[0].count, 4);
+    }
+
+    /// The real melon table clamps its slices to 3..=9 with `limit`.
+    #[test]
+    fn real_melon_limit_count_clamps() {
+        let Ok(root) = std::env::var("AETHER_VANILLA_PACK") else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let tables = LootTables::open(&root);
+        let t = tables.block_table("minecraft:melon").expect("melon table");
+        let mut rng = Rng::new(3);
+        for _ in 0..20_000 {
             let out = t.roll(&LootContext::default(), &mut rng);
-            assert_eq!(out.len(), 2);
             for s in out {
-                assert!((1..=2).contains(&s.count));
+                assert_eq!(s.item, "minecraft:melon_slice");
+                assert!((3..=9).contains(&s.count), "melon slices {}", s.count);
             }
         }
     }
