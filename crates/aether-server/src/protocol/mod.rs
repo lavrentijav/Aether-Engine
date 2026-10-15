@@ -503,6 +503,10 @@ pub enum ServerEvent<'a> {
     /// (see [`scoreboard::ScoreboardOp`]). The neutral source is a plugin's
     /// sidebar; the codec renders it in its own version's dialect.
     Scoreboard(scoreboard::ScoreboardOp),
+    /// The tab list's header and footer, plain text with `§` codes. The core's
+    /// per-player path renders it with the version's `playerlist_header`
+    /// packet.
+    TabHeaderFooter { header: String, footer: String },
 }
 
 /// A game window's kind.

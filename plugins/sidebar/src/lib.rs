@@ -115,14 +115,16 @@ impl NativePlugin for SidebarPlugin {
             Ok(text) => SidebarConfig::parse(&text).map_err(|e| format!("sidebar: {path}: {e}"))?,
             Err(_) => SidebarConfig::builtin(),
         };
-        // An operator may override the rate directly under `[plugins.sidebar]`.
+        // An operator may override a few knobs directly under
+        // `[plugins.sidebar]`: the update rate and the tab-list mirror.
+        let mut cfg = cfg;
         if let Some(hz) = ctx.config.get("update_hz").and_then(|v| v.parse().ok()) {
-            let mut cfg = cfg;
             cfg.update_hz = hz;
-            *self.state.config.write().unwrap() = cfg;
-        } else {
-            *self.state.config.write().unwrap() = cfg;
         }
+        if let Some(tab) = ctx.config.get("tab").and_then(|v| v.parse().ok()) {
+            cfg.tab = tab;
+        }
+        *self.state.config.write().unwrap() = cfg;
 
         // The permission service is optional: the SDK fronts the permission
         // model and fails closed until CMD-01/02 land, so a permission-gated
@@ -146,7 +148,10 @@ impl NativePlugin for SidebarPlugin {
     }
 
     fn on_tick(&mut self, ctx: &mut NativeContext, n: u64) {
-        let hz = self.state.config.read().unwrap().update_hz.max(1);
+        let (hz, tab) = {
+            let cfg = self.state.config.read().unwrap();
+            (cfg.update_hz.max(1), cfg.tab)
+        };
         let period = (20 / hz).max(1) as u64;
         if n % period != 0 {
             return;
@@ -164,6 +169,13 @@ impl NativePlugin for SidebarPlugin {
                 continue;
             };
             ctx.backend.set_sidebar(ctx.id, p.id, &board);
+            if tab {
+                // The same board in the tab list: the first two lines as the
+                // header, the rest as the footer.
+                let (header, footer) = tab_parts(&board);
+                ctx.backend
+                    .set_tab_header_footer(ctx.id, p.id, &header, &footer);
+            }
         }
     }
 
@@ -314,6 +326,12 @@ impl SidebarPlugin {
         *self.state.config.write().unwrap() = cfg;
         Ok(())
     }
+}
+
+/// Split a board into a tab-list header and footer: the title is the header,
+/// the lines are the footer.
+fn tab_parts(board: &SidebarBoard) -> (String, String) {
+    (board.title.clone(), board.lines.join("\n"))
 }
 
 /// The `sidebar@0.1` service, over the plugin's shared state.

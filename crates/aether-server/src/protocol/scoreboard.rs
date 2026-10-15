@@ -115,8 +115,6 @@ pub enum ScoreboardOp {
     },
     /// Remove a score.
     ResetScore { objective: String, entry: String },
-    /// The tab list header and footer, plain text with `§` codes.
-    TabHeaderFooter { header: String, footer: String },
 }
 
 /// The entry name for line `i`: an invisible run of colour codes on the
@@ -551,13 +549,81 @@ pub fn encode(wire: &Wire, op: &ScoreboardOp) -> Vec<PacketOut> {
             p.string(entry);
             vec![p]
         }
-        ScoreboardOp::TabHeaderFooter { header, footer } => {
-            // Encoded by the tab-list codec path, not the scoreboard one; the
-            // sidebar service never sends this op through here.
-            let _ = (header, footer);
-            Vec::new()
-        }
     }
+}
+
+/// The tab-list header/footer packet of one version: its id and how it spells
+/// its two text components.
+#[derive(Debug, Clone, Copy)]
+pub struct TabWire {
+    pub id: i32,
+    pub text: TextForm,
+}
+
+/// The tab-list packet for a protocol, or `None` where the version has none
+/// this server speaks. Ids from the releases' own `minecraft-data`
+/// `playerlist_header` (`message_header` in 1.19.2).
+pub fn tab_for(protocol: i32) -> Option<TabWire> {
+    Some(match protocol {
+        47 => TabWire {
+            id: 0x47,
+            text: TextForm::Json,
+        },
+        755 | 756 => TabWire {
+            id: 0x5e,
+            text: TextForm::Json,
+        },
+        757 | 758 => TabWire {
+            id: 0x5f,
+            text: TextForm::Json,
+        },
+        759 => TabWire {
+            id: 0x60,
+            text: TextForm::Json,
+        },
+        760 => TabWire {
+            id: 0x32,
+            text: TextForm::Json,
+        },
+        761 => TabWire {
+            id: 0x61,
+            text: TextForm::Json,
+        },
+        762 | 763 => TabWire {
+            id: 0x65,
+            text: TextForm::Json,
+        },
+        764 => TabWire {
+            id: 0x68,
+            text: TextForm::Json,
+        },
+        765..=767 => TabWire {
+            id: 0x6a,
+            text: TextForm::Nbt,
+        },
+        768 | 769 => TabWire {
+            id: 0x74,
+            text: TextForm::Nbt,
+        },
+        770..=772 => TabWire {
+            id: 0x73,
+            text: TextForm::Nbt,
+        },
+        // 1.21.9+; the 26.x ids are unverified (see `wire_for`).
+        773..=777 => TabWire {
+            id: 0x78,
+            text: TextForm::Nbt,
+        },
+        _ => return None,
+    })
+}
+
+/// Encode the tab list's header and footer for `wire`.
+pub fn encode_tab(wire: &TabWire, header: &str, footer: &str) -> PacketOut {
+    let mut p = PacketOut::new(wire.id);
+    write_text(&mut p, wire.text, header);
+    write_text(&mut p, wire.text, footer);
+    p
 }
 
 /// Write a text component in `form`.
@@ -1140,6 +1206,33 @@ mod tests {
         assert_eq!(pin.u8().unwrap(), 0, "flags: none set");
         assert_eq!(pin.var_int().unwrap(), 0, "visibility: always");
         assert_eq!(pin.var_int().unwrap(), 0, "collision: always");
+    }
+
+    #[test]
+    fn the_tab_wire_follows_the_text_form() {
+        assert_eq!(tab_for(47).unwrap().id, 0x47);
+        assert_eq!(tab_for(47).unwrap().text, TextForm::Json);
+        assert_eq!(tab_for(760).unwrap().id, 0x32, "1.19.2 renamed the packet");
+        assert_eq!(tab_for(765).unwrap().id, 0x6a);
+        assert_eq!(tab_for(765).unwrap().text, TextForm::Nbt, "1.20.3+");
+        assert_eq!(tab_for(774).unwrap().id, 0x78);
+    }
+
+    #[test]
+    fn tab_text_is_spelled_per_version() {
+        let json = tab_for(47).unwrap();
+        let p = encode_tab(&json, "§6H", "§7F");
+        let mut pin = crate::proto::PacketIn::new(p.body());
+        assert_eq!(pin.var_int().unwrap(), 0x47);
+        assert_eq!(pin.string().unwrap(), "{\"text\":\"§6H\"}");
+        assert_eq!(pin.string().unwrap(), "{\"text\":\"§7F\"}");
+
+        let nbt = tab_for(774).unwrap();
+        let p = encode_tab(&nbt, "H", "F");
+        let mut pin = crate::proto::PacketIn::new(p.body());
+        assert_eq!(pin.var_int().unwrap(), 0x78);
+        assert_eq!(pin.u8().unwrap(), 8, "TAG_String");
+        assert_eq!(pin.u16().unwrap(), 1);
     }
 
     #[test]

@@ -17,6 +17,7 @@ struct Mock {
     extra: Option<PlayerExtra>,
     boards: Mutex<Vec<(u64, SidebarBoard)>>,
     cleared: Mutex<Vec<u64>>,
+    tabs: Mutex<Vec<(u64, String, String)>>,
 }
 
 impl HostBackend for Mock {
@@ -47,9 +48,21 @@ impl HostBackend for Mock {
     fn clear_sidebar(&self, _plugin: &str, player: u64) {
         self.cleared.lock().unwrap().push(player);
     }
+    fn set_tab_header_footer(&self, _plugin: &str, player: u64, header: &str, footer: &str) {
+        self.tabs
+            .lock()
+            .unwrap()
+            .push((player, header.to_string(), footer.to_string()));
+    }
 }
 
 fn setup() -> (Box<dyn NativePlugin>, Arc<Mock>, Arc<ServiceRegistry>) {
+    setup_cfg(BTreeMap::new())
+}
+
+fn setup_cfg(
+    config: BTreeMap<String, String>,
+) -> (Box<dyn NativePlugin>, Arc<Mock>, Arc<ServiceRegistry>) {
     let backend = Arc::new(Mock {
         players: vec![Player {
             id: 7,
@@ -75,7 +88,7 @@ fn setup() -> (Box<dyn NativePlugin>, Arc<Mock>, Arc<ServiceRegistry>) {
         let mut ctx = NativeContext {
             id: "sidebar",
             capabilities: &[],
-            config: &BTreeMap::new(),
+            config: &config,
             services: &services,
             backend: &backend_dyn,
         };
@@ -150,6 +163,19 @@ fn toggling_hides_and_shows_the_sidebar() {
     assert!(svc.toggle(7), "second toggle shows");
     tick(&mut plugin, &backend, &services, 15);
     assert_eq!(backend.boards.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn the_tab_switch_mirrors_the_board_into_the_header_and_footer() {
+    let mut config = BTreeMap::new();
+    config.insert("tab".to_string(), "true".to_string());
+    let (_plugin, backend, _services) = setup_cfg(config);
+    let tabs = backend.tabs.lock().unwrap();
+    assert_eq!(tabs.len(), 1, "one header/footer for the one player");
+    let (player, header, footer) = &tabs[0];
+    assert_eq!(*player, 7);
+    assert_eq!(header, "§6§lAether", "the title is the header");
+    assert!(footer.contains("Steve"), "the lines are the footer");
 }
 
 #[test]

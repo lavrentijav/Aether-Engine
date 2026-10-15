@@ -66,6 +66,9 @@ pub struct PlayerHandle {
     /// The sidebar this client currently shows, so an update can diff against
     /// it and resend only the lines that changed. `None` means hidden.
     sidebar: Mutex<Option<crate::protocol::scoreboard::SidebarBoard>>,
+    /// The tab-list header/footer last sent, so an unchanged pair is not
+    /// resent every tick.
+    tab: Mutex<Option<(String, String)>>,
 }
 
 impl PlayerHandle {
@@ -215,6 +218,25 @@ impl PlayerHandle {
         }
     }
 
+    /// Set this client's tab-list header and footer, resending only when the
+    /// pair actually changes.
+    pub fn set_tab_header_footer(&self, header: &str, footer: &str, world: &dyn BlockSource) {
+        {
+            let mut last = self.tab.lock().unwrap();
+            if last.as_ref() == Some(&(header.to_string(), footer.to_string())) {
+                return;
+            }
+            *last = Some((header.to_string(), footer.to_string()));
+        }
+        self.emit(
+            &ServerEvent::TabHeaderFooter {
+                header: header.to_string(),
+                footer: footer.to_string(),
+            },
+            world,
+        );
+    }
+
     fn render(&self, ev: &ServerEvent, world: &dyn BlockSource) -> Vec<Vec<u8>> {
         let legacy = if self.full() { None } else { ev.legacy() };
         let packets = match ev {
@@ -246,6 +268,14 @@ impl PlayerHandle {
                 Some(wire) => crate::protocol::scoreboard::encode(&wire, op),
                 None => Vec::new(),
             },
+            ServerEvent::TabHeaderFooter { header, footer } => {
+                match crate::protocol::scoreboard::tab_for(self.codec.protocol_id()) {
+                    Some(wire) => vec![crate::protocol::scoreboard::encode_tab(
+                        &wire, header, footer,
+                    )],
+                    None => Vec::new(),
+                }
+            }
             _ => self.codec.encode(legacy.as_ref().unwrap_or(ev), world),
         };
         let threshold = self.outbox.threshold();
@@ -312,6 +342,7 @@ impl Registry {
             tracked: Mutex::new(std::collections::HashSet::new()),
             visibility: Mutex::new(crate::visibility::State::default()),
             sidebar: Mutex::new(None),
+            tab: Mutex::new(None),
         });
         self.players
             .write()

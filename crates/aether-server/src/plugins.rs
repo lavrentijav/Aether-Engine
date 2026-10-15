@@ -212,6 +212,13 @@ mod imp {
             handle.update_sidebar(None, &*self.world);
         }
 
+        fn set_tab_header_footer(&self, _plugin: &str, player: u64, header: &str, footer: &str) {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return;
+            };
+            handle.set_tab_header_footer(header, footer, &*self.world);
+        }
+
         fn player_extra(
             &self,
             _plugin: &str,
