@@ -434,6 +434,7 @@ fn login_and_play(
         &ServerEvent::Chat(format!("{} joined the game", player.name)),
         world,
     );
+    crate::plugins::after_player_join(&handle);
 
     // Now fill out the rest of the view radius. The player is placed and
     // playable by this point, so the remaining columns arrive as scenery
@@ -463,6 +464,7 @@ fn login_and_play(
         &ServerEvent::Chat(format!("{} left the game", player.name)),
         world,
     );
+    crate::plugins::after_player_leave(&handle);
     result
 }
 
@@ -727,8 +729,18 @@ fn play_loop(
                             } else {
                                 (x, y, z)
                             };
-                            let placed =
-                                place_block(handle, registry, world, px, py, pz, b, face, cursor);
+                            let place_name = crate::game::block_name(world, b).unwrap_or_default();
+                            let veto =
+                                crate::plugins::before_block_place(handle, px, py, pz, &place_name);
+                            if let Some(reason) = &veto {
+                                if !reason.is_empty() {
+                                    handle.emit(&ServerEvent::Chat(reason.clone()), world);
+                                }
+                            }
+                            let placed = veto.is_none()
+                                && place_block(
+                                    handle, registry, world, px, py, pz, b, face, cursor,
+                                );
                             if placed && full {
                                 interact::consumed_by_placement(handle, world);
                             } else if !placed {
@@ -817,6 +829,12 @@ fn play_loop(
                     }
                     continue;
                 }
+                if let Some(reason) = crate::plugins::before_chat(handle, &text) {
+                    if !reason.is_empty() {
+                        handle.emit(&ServerEvent::Chat(reason), world);
+                    }
+                    continue;
+                }
                 let line = format!("<{}> {}", handle.name, text);
                 crate::log::info(&format!("[chat] {line}"));
                 let ev = ServerEvent::Chat(line);
@@ -835,6 +853,12 @@ fn play_loop(
                             handle.emit(&ServerEvent::Chat(line), world);
                         }
                     }
+                } else if let Some(reason) =
+                    crate::plugins::before_container_click(handle, window as u32, slot as i32)
+                {
+                    if !reason.is_empty() {
+                        handle.emit(&ServerEvent::Chat(reason), world);
+                    }
                 } else {
                     crate::game::window::click(handle, world, window, slot, button, mode);
                     save_inventory(handle, world);
@@ -850,18 +874,34 @@ fn play_loop(
             ClientEvent::ReleaseUse => interact::release_use(handle, world),
             ClientEvent::SwapHands => interact::swap_hands(handle, world),
             ClientEvent::UseItem { hand, seq } => {
-                interact::use_item(handle, registry, world, hand);
+                let item = handle
+                    .held_item()
+                    .and_then(|id| id.vanilla_name())
+                    .unwrap_or_default();
+                if let Some(reason) = crate::plugins::before_use_item(handle, item) {
+                    if !reason.is_empty() {
+                        handle.emit(&ServerEvent::Chat(reason), world);
+                    }
+                } else {
+                    interact::use_item(handle, registry, world, hand);
+                }
                 ack(handle, world, seq);
             }
             ClientEvent::Interact { target, attack, .. } => {
                 if attack {
-                    crate::game::combat::player_attack(
-                        handle,
-                        target,
-                        registry,
-                        world,
-                        crate::game::now(),
-                    );
+                    if let Some(reason) = crate::plugins::before_attack(handle, target as u64) {
+                        if !reason.is_empty() {
+                            handle.emit(&ServerEvent::Chat(reason), world);
+                        }
+                    } else {
+                        crate::game::combat::player_attack(
+                            handle,
+                            target,
+                            registry,
+                            world,
+                            crate::game::now(),
+                        );
+                    }
                 } else {
                     interact::use_entity(handle, world, target);
                 }
@@ -942,11 +982,30 @@ fn break_block(
     if broken == block_ids::AIR {
         return;
     }
+    let name = crate::game::block_name(world, broken).unwrap_or_default();
+    // A plugin may veto the break; the client predicted it, so put the block
+    // back on their screen and say why.
+    if let Some(reason) = crate::plugins::before_block_break(handle, x, y, z, &name) {
+        if !reason.is_empty() {
+            handle.emit(&ServerEvent::Chat(reason), world);
+        }
+        handle.emit(
+            &ServerEvent::BlockChange {
+                x,
+                y,
+                z,
+                block: broken,
+            },
+            world,
+        );
+        return;
+    }
     let seq = set_and_broadcast(world, registry, handle, x, y, z, block_ids::AIR);
     settle_neighbours(world, registry, handle, x, y, z);
     if handle.full() {
         crate::game::interact::on_broken(handle, registry, world, x, y, z, broken, seq);
     }
+    crate::plugins::after_block_break(handle, x, y, z, &name);
     on_block_broken(handle, registry, world, x, y, z, broken);
 }
 

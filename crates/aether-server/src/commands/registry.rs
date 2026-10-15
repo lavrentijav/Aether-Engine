@@ -8,6 +8,14 @@
 //! Commands that already exist (the history commands, the economy, the gameplay commands in
 //! `game/commands.rs`) are deliberately **not** listed — a command name is answered by exactly one
 //! place, and these names must not be shadowed.
+//!
+//! Plugin commands register here at load (see [`register_plugin`]). The rule is the same one
+//! CMD-00N states for native plugins: **the core owns the vanilla names; a plugin may add new
+//! names only.** A plugin command is resolved through this registry and permission-checked before
+//! the plugin's `on-command` is entered, so it is not a side path around the core's gate.
+
+use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 
 /// A core command that is specified but not implemented yet.
 pub struct Entry {
@@ -550,6 +558,75 @@ pub fn find(name: &str) -> Option<&'static Entry> {
         .find(|e| e.name == name || e.aliases.contains(&name))
 }
 
+/// Whether the **core** owns `name`, implemented or merely specified.
+///
+/// Implemented names live in `super::RESERVED_COMMANDS`; specified-but-unimplemented ones in
+/// [`CORE`]. A plugin may register neither.
+pub fn core_owns(name: &str) -> bool {
+    find(name).is_some() || super::RESERVED_COMMANDS.contains(&name)
+}
+
+/// A command a plugin registered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginEntry {
+    /// The plugin that answers it.
+    pub plugin: String,
+    /// Permission node checked before the command runs.
+    pub node: String,
+    /// Vanilla op level required (0 everyone … 4 owner).
+    pub op: u8,
+}
+
+fn plugin_commands() -> &'static Mutex<BTreeMap<String, PluginEntry>> {
+    static TABLE: OnceLock<Mutex<BTreeMap<String, PluginEntry>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Register a plugin's command.
+///
+/// Refused, with a reason, when the name is a core name (the ownership rule) or is already
+/// registered by another plugin; the caller logs and drops the declaration. Registration is
+/// idempotent per plugin so a reload does not fail on its own entries.
+pub fn register_plugin(name: &str, plugin: &str, node: &str, op: u8) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("a command name is empty".into());
+    }
+    if core_owns(name) {
+        return Err(format!(
+            "`/{name}` is a core command; plugins may add new names only"
+        ));
+    }
+    let mut table = plugin_commands().lock().unwrap();
+    if let Some(existing) = table.get(name) {
+        if existing.plugin == plugin {
+            return Ok(());
+        }
+        return Err(format!(
+            "`/{name}` is already registered by plugin `{}`",
+            existing.plugin
+        ));
+    }
+    table.insert(
+        name.to_string(),
+        PluginEntry {
+            plugin: plugin.to_string(),
+            node: node.to_string(),
+            op: op.min(4),
+        },
+    );
+    Ok(())
+}
+
+/// The plugin command registered under `name`, if any.
+pub fn plugin_command(name: &str) -> Option<PluginEntry> {
+    plugin_commands().lock().unwrap().get(name).cloned()
+}
+
+/// Every plugin command name, for a diagnostic listing.
+pub fn plugin_command_names() -> Vec<String> {
+    plugin_commands().lock().unwrap().keys().cloned().collect()
+}
+
 /// The `/help` listing: one line per group, compact enough to fit in chat.
 pub fn help_lines() -> Vec<String> {
     let mut groups: Vec<&'static str> = Vec::new();
@@ -682,5 +759,29 @@ mod tests {
                 e.group
             );
         }
+    }
+
+    #[test]
+    fn a_plugin_may_not_take_a_core_name() {
+        // Implemented core names...
+        assert!(register_plugin("give", "p", "p.give", 0).is_err());
+        assert!(register_plugin("gamemode", "p", "p.gm", 0).is_err());
+        // ...and specified-but-unimplemented ones (`/stop` is a CMD-09 stub).
+        assert!(register_plugin("stop", "p", "p.stop", 4).is_err());
+        assert!(core_owns("stop") && core_owns("give") && !core_owns("myplugin_cmd"));
+    }
+
+    #[test]
+    fn a_plugin_command_is_registered_with_its_permission() {
+        // A unique name so this cannot collide with another test or a real plugin.
+        let name = "registry_test_op_cmd";
+        assert!(register_plugin(name, "regtest", "regtest.opcmd", 3).is_ok());
+        let entry = plugin_command(name).expect("registered");
+        assert_eq!(entry.plugin, "regtest");
+        assert_eq!(entry.node, "regtest.opcmd");
+        assert_eq!(entry.op, 3);
+        // Re-registering the same plugin's own command is fine; another's is refused.
+        assert!(register_plugin(name, "regtest", "regtest.opcmd", 3).is_ok());
+        assert!(register_plugin(name, "other", "other.x", 0).is_err());
     }
 }
