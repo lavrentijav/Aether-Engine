@@ -14,9 +14,21 @@
 //!   uuid`) clients, behind a trait so tests can mock them;
 //! * `policy` — the hybrid decision table.
 
+pub mod crypto;
 pub mod store;
 
 pub use store::Lock;
+
+/// A shared RSA key for tests.
+///
+/// Generating a 1024-bit key is slow and the tests would do it per case, so
+/// one is generated lazily and reused for the whole test binary.
+#[cfg(test)]
+pub(crate) fn test_key() -> &'static crypto::ServerKey {
+    use std::sync::OnceLock;
+    static KEY: OnceLock<crypto::ServerKey> = OnceLock::new();
+    KEY.get_or_init(crypto::ServerKey::generate)
+}
 
 /// Seconds since the Unix epoch, saturating at the edges.
 pub fn now_secs() -> i64 {

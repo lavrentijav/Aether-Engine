@@ -23,6 +23,13 @@ serde = { workspace = true }
 # Protocol frame compression (zlib), pure Rust so the server keeps building
 # without a C toolchain.
 miniz_oxide = { workspace = true }
+# Online-mode auth: RustCrypto only, no OpenSSL (see `auth::crypto`).
+rsa = "0.9"
+aes = "0.8"
+cfb8 = "0.8"
+cipher = "0.4"
+sha1 = "0.10"
+rand = "0.8"
 postgres = { version = "0.19.10", optional = true }
 
 [target.'cfg(unix)'.dependencies]
