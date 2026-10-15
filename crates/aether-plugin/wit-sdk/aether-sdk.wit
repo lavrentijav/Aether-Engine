@@ -80,13 +80,32 @@ interface commands {
         args: list<arg>,
     }
 
-    /// Register a command spec. Refused on a name clash or a bad spec.
+    /// Resolve `name` and `args` to the effective spec, honouring
+    /// subcommands, so an `on-command` handler can dispatch.
+    record resolution {
+        /// The subcommand name when `args[0]` matched one, else empty.
+        subcommand: string,
+        /// The arguments after any subcommand word.
+        rest: list<string>,
+        /// Parsed `(name, value)` pairs for `rest`.
+        args: list<tuple<string, string>>,
+        /// The effective spec's usage line.
+        usage: string,
+    }
+
+    /// Register a command spec. Refused on a name clash or a bad spec. A spec
+    /// with `parent` set is a subcommand: it is stored under its parent and is
+    /// **not** registered as a top-level command — the parent routes to it.
     register: func(spec: command-spec) -> result<_, string>;
-    /// The usage line for a registered command.
+    /// The usage line for a registered command (empty if unknown).
     usage: func(name: string) -> string;
     /// Parse `args` against the registered spec, returning `(name, value)`
-    /// pairs for the arguments that were supplied.
+    /// pairs for the arguments that were supplied. A first argument that names
+    /// a subcommand is consumed and the rest parsed against that subcommand.
     parse: func(name: string, args: list<string>) -> list<tuple<string, string>>;
+    /// Resolve `name`/`args`, selecting a subcommand when the first argument
+    /// matches one registered under `name`.
+    resolve: func(name: string, args: list<string>) -> resolution;
 }
 
 /// Messages: chat, action bar, title, broadcast and translation, with colour

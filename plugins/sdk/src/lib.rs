@@ -26,7 +26,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use aether_plugin::manifest::{Manifest, PluginTier};
 use aether_plugin::sdk::{
     self, ArgKind, CommandSpec, CommandsService, ConfirmService, CooldownsService, MessagesService,
-    PermissionsService, PlayersService, Pos, SchedulerService, TeleportCause, TitleTimes,
+    PermissionsService, PlayersService, Pos, Resolution, SchedulerService, TeleportCause,
+    TitleTimes,
 };
 use aether_plugin::{
     HostBackend, LogLevel, NativeContext, NativePlugin, NativeRegistration, Player,
@@ -150,13 +151,17 @@ impl NativePlugin for SdkPlugin {
 /// Keyed by `(caller, name)` so two dependents may each register their own
 /// commands without colliding, and so a caller can only parse its own specs.
 ///
-/// Registering also registers the command in the **core** command registry (via
-/// the host backend), so it is dispatched and permission-checked by the core's
-/// single gate — a command reaching the SDK is never a side path around it.
-/// The spec is kept here only for `usage` and `parse`.
+/// A **root** spec (no `parent`) is also registered in the core command
+/// registry (via the host backend), so it is dispatched and permission-checked
+/// by the core's single gate — a command reaching the SDK is never a side path
+/// around it. A **subcommand** (`parent` set) is stored only here, under its
+/// parent, and is reached by `resolve` when the first argument matches — it is
+/// never a top-level command.
 #[derive(Default)]
 struct Commands {
     specs: Mutex<HashMap<(String, String), CommandSpec>>,
+    /// Subcommands by `(caller, parent)` then subcommand name.
+    subs: Mutex<HashMap<(String, String), HashMap<String, CommandSpec>>>,
     backend: Arc<OnceLock<Arc<dyn HostBackend>>>,
 }
 
@@ -164,6 +169,7 @@ impl Commands {
     fn new(backend: Arc<OnceLock<Arc<dyn HostBackend>>>) -> Commands {
         Commands {
             specs: Mutex::new(HashMap::new()),
+            subs: Mutex::new(HashMap::new()),
             backend,
         }
     }
@@ -175,6 +181,18 @@ impl Commands {
     fn register(&self, caller: &str, spec: CommandSpec) -> Result<(), String> {
         if spec.name.is_empty() {
             return Err("command name must not be empty".to_string());
+        }
+        // A subcommand is stored under its parent and never registered at the
+        // top level: the core routes `parent` to the plugin, and `resolve`
+        // picks the subcommand out of the arguments.
+        if let Some(parent) = spec.parent.clone().filter(|p| !p.is_empty()) {
+            let mut subs = self.subs.lock().unwrap();
+            let by_name = subs.entry((caller.to_string(), parent)).or_default();
+            if by_name.contains_key(&spec.name) {
+                return Err(format!("subcommand `{}` is already registered", spec.name));
+            }
+            by_name.insert(spec.name.clone(), spec);
+            return Ok(());
         }
         let key = (caller.to_string(), spec.name.clone());
         // Cheap duplicate check, then release the lock before the host call:
@@ -211,18 +229,40 @@ impl Commands {
         self.get(caller, name).map(|s| s.usage).unwrap_or_default()
     }
 
-    fn parse(&self, caller: &str, name: &str, args: &[String]) -> Vec<(String, String)> {
-        let Some(spec) = self.get(caller, name) else {
-            return Vec::new();
+    /// Resolve `name`/`args` to the effective spec. When `args[0]` names a
+    /// subcommand of `name`, that subcommand and the remaining arguments are
+    /// used; otherwise the root spec and all arguments are.
+    fn resolve(&self, caller: &str, name: &str, args: &[String]) -> Resolution {
+        let Some(root) = self.get(caller, name) else {
+            return Resolution {
+                subcommand: String::new(),
+                rest: args.to_vec(),
+                args: Vec::new(),
+                usage: String::new(),
+            };
         };
-        let mut out = Vec::new();
-        for (declared, value) in spec.args.iter().zip(args.iter()) {
-            if !value_is_valid(declared.kind, value) {
-                continue;
-            }
-            out.push((declared.name.clone(), value.clone()));
+        let sub = args.first().and_then(|first| {
+            self.subs
+                .lock()
+                .unwrap()
+                .get(&(caller.to_string(), name.to_string()))
+                .and_then(|by_name| by_name.get(first))
+                .cloned()
+        });
+        let (subcommand, rest, spec): (String, Vec<String>, CommandSpec) = match sub {
+            Some(sub) => (sub.name.clone(), args[1..].to_vec(), sub),
+            None => (String::new(), args.to_vec(), root),
+        };
+        Resolution {
+            subcommand,
+            args: parse_against(&spec, &rest),
+            rest,
+            usage: spec.usage,
         }
-        out
+    }
+
+    fn parse(&self, caller: &str, name: &str, args: &[String]) -> Vec<(String, String)> {
+        self.resolve(caller, name, args).args
     }
 }
 
@@ -235,6 +275,19 @@ fn command_node(caller: &str, spec: &CommandSpec) -> String {
     }
 }
 
+/// Pair each declared argument with the supplied value, validating the scalar
+/// kinds; extra values and values of the wrong kind are dropped.
+fn parse_against(spec: &CommandSpec, args: &[String]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (declared, value) in spec.args.iter().zip(args.iter()) {
+        if !value_is_valid(declared.kind, value) {
+            continue;
+        }
+        out.push((declared.name.clone(), value.clone()));
+    }
+    out
+}
+
 impl CommandsService for Commands {
     fn register(&self, caller: &str, spec: CommandSpec) -> Result<(), String> {
         Commands::register(self, caller, spec)
@@ -244,6 +297,9 @@ impl CommandsService for Commands {
     }
     fn parse(&self, caller: &str, name: &str, args: &[String]) -> Vec<(String, String)> {
         Commands::parse(self, caller, name, args)
+    }
+    fn resolve(&self, caller: &str, name: &str, args: &[String]) -> Resolution {
+        Commands::resolve(self, caller, name, args)
     }
 }
 
@@ -844,6 +900,119 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn sub(parent: &str, name: &str, usage: &str, args: Vec<(&str, ArgKind)>) -> CommandSpec {
+        let mut s = spec(name, usage, args);
+        s.parent = Some(parent.to_string());
+        s
+    }
+
+    #[test]
+    fn a_subcommand_is_stored_under_its_parent_not_registered_top_level() {
+        let commands = Commands::default();
+        commands
+            .register("p", spec("home", "/home", vec![]))
+            .unwrap();
+        commands
+            .register(
+                "p",
+                sub(
+                    "home",
+                    "set",
+                    "/home set <name>",
+                    vec![("name", ArgKind::Word)],
+                ),
+            )
+            .unwrap();
+        // The root is a top-level command; the subcommand is not.
+        assert!(commands.get("p", "home").is_some());
+        assert!(commands.get("p", "set").is_none());
+        // Resolving the root with the subcommand word selects the subcommand.
+        let r = commands.resolve("p", "home", &["set".to_string(), "base".to_string()]);
+        assert_eq!(r.subcommand, "set");
+        assert_eq!(r.rest, vec!["base".to_string()]);
+        assert_eq!(r.usage, "/home set <name>");
+        assert_eq!(r.args, vec![("name".to_string(), "base".to_string())]);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_the_root_when_no_subcommand_matches() {
+        let commands = Commands::default();
+        commands
+            .register(
+                "p",
+                spec("home", "/home [name]", vec![("name", ArgKind::Word)]),
+            )
+            .unwrap();
+        commands
+            .register(
+                "p",
+                sub(
+                    "home",
+                    "set",
+                    "/home set <name>",
+                    vec![("name", ArgKind::Word)],
+                ),
+            )
+            .unwrap();
+        // An argument that is not a subcommand is a root argument.
+        let r = commands.resolve("p", "home", &["base".to_string()]);
+        assert_eq!(r.subcommand, "");
+        assert_eq!(r.rest, vec!["base".to_string()]);
+        assert_eq!(r.usage, "/home [name]");
+        assert_eq!(r.args, vec![("name".to_string(), "base".to_string())]);
+        // No arguments resolves to the root spec.
+        let r = commands.resolve("p", "home", &[]);
+        assert_eq!(r.subcommand, "");
+        assert!(r.args.is_empty());
+    }
+
+    #[test]
+    fn a_subcommand_never_reaches_the_core_registry() {
+        // A backend recording every core registration.
+        #[derive(Default)]
+        struct Core {
+            registered: StdMutex<Vec<String>>,
+        }
+        impl HostBackend for Core {
+            fn kv_get(&self, _: &str, _: &str) -> Option<Vec<u8>> {
+                None
+            }
+            fn kv_put(&self, _: &str, _: &str, _: &[u8]) {}
+            fn kv_delete(&self, _: &str, _: &str) {}
+            fn kv_list(&self, _: &str, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn log(&self, _: &str, _: LogLevel, _: &str) {}
+            fn config(&self, _: &str, _: &str) -> Option<String> {
+                None
+            }
+            fn supports(&self, _: &str, _: &str) -> bool {
+                false
+            }
+            fn register_command(
+                &self,
+                _plugin: &str,
+                name: &str,
+                _node: &str,
+                _op: u8,
+            ) -> Result<(), String> {
+                self.registered.lock().unwrap().push(name.to_string());
+                Ok(())
+            }
+        }
+        let core = Arc::new(Core::default());
+        let slot = Arc::new(OnceLock::new());
+        let commands = Commands::new(Arc::clone(&slot));
+        let _ = slot.set(core.clone() as Arc<dyn HostBackend>);
+        commands
+            .register("p", spec("home", "/home", vec![]))
+            .unwrap();
+        commands
+            .register("p", sub("home", "set", "/home set", vec![]))
+            .unwrap();
+        assert_eq!(core.registered.lock().unwrap().as_slice(), ["home"]);
     }
 
     #[test]

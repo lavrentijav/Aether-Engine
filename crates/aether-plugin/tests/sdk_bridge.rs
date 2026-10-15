@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use aether_plugin::sdk::{
-    self, CommandSpec, CommandsService, MessagesService, PlayersService, Pos, TeleportCause,
-    TitleTimes,
+    self, CommandSpec, CommandsService, MessagesService, PlayersService, Pos, Resolution,
+    TeleportCause, TitleTimes,
 };
 use aether_plugin::{HostBackend, HostConfig, LogLevel, Player, PluginHost};
 
@@ -70,6 +70,14 @@ impl CommandsService for Recorder {
     }
     fn parse(&self, _: &str, _: &str, _: &[String]) -> Vec<(String, String)> {
         Vec::new()
+    }
+    fn resolve(&self, _: &str, _: &str, args: &[String]) -> Resolution {
+        Resolution {
+            subcommand: String::new(),
+            rest: args.to_vec(),
+            args: Vec::new(),
+            usage: String::new(),
+        }
     }
 }
 

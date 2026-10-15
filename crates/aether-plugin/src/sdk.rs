@@ -35,7 +35,7 @@ pub mod bindings {
     });
 }
 
-pub use bindings::aether::sdk::commands::{Arg, ArgKind, CommandSpec};
+pub use bindings::aether::sdk::commands::{Arg, ArgKind, CommandSpec, Resolution};
 pub use bindings::aether::sdk::messages::TitleTimes;
 pub use bindings::aether::sdk::players::{Pos, TeleportCause};
 pub use bindings::Services;
@@ -72,12 +72,15 @@ pub trait PermissionsService: Send + Sync {
 
 /// The provider-side command service.
 pub trait CommandsService: Send + Sync {
-    /// Register a command spec.
+    /// Register a command spec. A spec with `parent` set is a subcommand and is
+    /// not registered as a top-level command.
     fn register(&self, caller: &str, spec: CommandSpec) -> Result<(), String>;
     /// The usage line for a registered command (empty if unknown).
     fn usage(&self, caller: &str, name: &str) -> String;
-    /// Parse arguments against a registered spec.
+    /// Parse arguments against a registered spec, honouring subcommands.
     fn parse(&self, caller: &str, name: &str, args: &[String]) -> Vec<(String, String)>;
+    /// Resolve `name`/`args` to the effective spec (root or subcommand).
+    fn resolve(&self, caller: &str, name: &str, args: &[String]) -> Resolution;
 }
 
 /// The provider-side message service.
@@ -448,6 +451,21 @@ impl bindings::aether::sdk::commands::Host for StoreData {
             None => {
                 self.service_unavailable(COMMANDS_SERVICE, "parse");
                 Vec::new()
+            }
+        }
+    }
+
+    fn resolve(&mut self, name: String, args: Vec<String>) -> Resolution {
+        match commands(&self.services) {
+            Some(svc) => svc.resolve(&self.plugin, &name, &args),
+            None => {
+                self.service_unavailable(COMMANDS_SERVICE, "resolve");
+                Resolution {
+                    subcommand: String::new(),
+                    rest: args,
+                    args: Vec::new(),
+                    usage: String::new(),
+                }
             }
         }
     }
