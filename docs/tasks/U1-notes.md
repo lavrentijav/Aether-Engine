@@ -90,6 +90,13 @@ verified against the pack and the decompiled `loot` classes and fixed, one commi
 The `KNOWN_ISSUES` text was corrected to say "first access" and to name the
 `entity_properties` predicates left unanswered.
 
+`main` was then merged into `oc/U1` (commit `1c814d6`). `main` had split
+`aether-server` into a library (`src/lib.rs`) plus a one-line binary, so the two
+crate-root accessors the loot code uses (`worldgen_data`, `seed`) and the loot
+warm-up/report moved from `main.rs` to `lib.rs`; the conflict in `containers.rs`
+was resolved to keep `main`'s legacy container-key fallback alongside the
+first-access seeding. `main` is now an ancestor of `oc/U1`.
+
 ## Tests
 
 * Inline (always run): ore-drops fortune III distribution (mean 2.2, P(1)=2/5), the
