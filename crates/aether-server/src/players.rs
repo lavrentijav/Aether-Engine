@@ -70,9 +70,9 @@ pub struct PlayerHandle {
     /// Anti-xray / visibility-culling bookkeeping for this client. See
     /// [`crate::visibility`].
     visibility: Mutex<crate::visibility::State>,
-    /// Did this client load the compat resource pack? `0` unknown, `1` loaded,
-    /// `2` not loaded (declined or failed). Read on every chunk render, so a
-    /// plain atomic rather than a lock. See `compat::pack`.
+    /// Did this client load the resource pack? `0` unknown, `1` loaded, `2` not
+    /// loaded (declined or failed). Read on every chunk render, so a plain
+    /// atomic rather than a lock. See `compat::pack`.
     pack: AtomicU8,
 }
 
@@ -258,18 +258,21 @@ impl PlayerHandle {
     /// Record the client's resource-pack status and report whether this
     /// *newly* turned carriers on (so the caller can re-send the view once).
     ///
-    /// `result` is the protocol's own enum (0 loaded, 1 declined, 2 failed,
-    /// 3/4 in progress, 5 invalid URL). Being `accepted`/`downloaded` is not
-    /// enough: only a `successfully_loaded` client can render a carrier state,
-    /// so anything but `0` keeps — or marks — the player on the plain stand-in.
-    pub fn set_pack_status(&self, result: u8) -> bool {
-        if result == 0 {
-            self.pack.swap(PACK_LOADED, Ordering::Relaxed) == PACK_UNKNOWN
-        } else if matches!(result, 1 | 2 | 5) {
-            self.pack.store(PACK_NOT_LOADED, Ordering::Relaxed);
-            false
-        } else {
-            false
+    /// `status` is the protocol's own enum. Being `accepted`/`downloaded` is
+    /// not enough: only a `successfully_loaded` client can render a carrier
+    /// state, so anything but `Loaded` keeps — or marks — the player on the
+    /// plain stand-in.
+    pub fn set_pack_status(&self, status: crate::protocol::PackStatus) -> bool {
+        use crate::protocol::PackStatus;
+        match status {
+            PackStatus::Loaded => self.pack.swap(PACK_LOADED, Ordering::Relaxed) == PACK_UNKNOWN,
+            PackStatus::Declined | PackStatus::Failed | PackStatus::InvalidUrl => {
+                self.pack.store(PACK_NOT_LOADED, Ordering::Relaxed);
+                false
+            }
+            // Accepted/downloaded are in-progress; an unknown value changes
+            // nothing.
+            _ => false,
         }
     }
 
@@ -507,20 +510,31 @@ mod tests {
 
         // After `successfully_loaded`: the carrier state this release draws the
         // real block on.
+        use crate::protocol::PackStatus;
         let loaded = handle(codec);
-        assert!(loaded.set_pack_status(0), "the first load is a transition");
-        assert!(!loaded.set_pack_status(0), "a repeat load is not");
+        assert!(
+            loaded.set_pack_status(PackStatus::Loaded),
+            "the first load is a transition"
+        );
+        assert!(
+            !loaded.set_pack_status(PackStatus::Loaded),
+            "a repeat load is not"
+        );
         assert!(loaded.pack_loaded());
         assert_eq!(block_change_state(&loaded), carrier_wire as i32);
 
         // Accepted-but-not-loaded, and declined, both stay on the stand-in.
-        for result in [3u8, 4, 1, 2] {
+        for status in [
+            PackStatus::Accepted,
+            PackStatus::Downloaded,
+            PackStatus::Declined,
+            PackStatus::Failed,
+            PackStatus::InvalidUrl,
+            PackStatus::Unknown,
+        ] {
             let h = handle(codec);
-            h.set_pack_status(result);
-            assert!(
-                !h.pack_loaded(),
-                "result {result} is not successfully_loaded"
-            );
+            h.set_pack_status(status);
+            assert!(!h.pack_loaded(), "{status:?} is not successfully_loaded");
             assert_ne!(block_change_state(&h), carrier_wire as i32);
         }
     }
@@ -529,7 +543,7 @@ mod tests {
     fn a_release_with_no_generated_pack_is_never_remapped() {
         // 1.8.9 has no carrier table, so even a loaded pack changes nothing.
         let h = handle(codec_for(47).unwrap());
-        h.set_pack_status(0);
+        h.set_pack_status(crate::protocol::PackStatus::Loaded);
         assert!(h.pack_loaded());
         assert!(h.pack_table().is_none());
     }

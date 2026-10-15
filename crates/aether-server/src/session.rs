@@ -601,8 +601,11 @@ fn play_loop(
         // moment it loads the pack the whole view is re-sent with carriers —
         // and until then (or after a decline) the plain stand-in stands.
         if handle.codec.resource_pack_status_id() == Some(pkt.id) {
-            let result = PacketIn::new(&pkt.data).var_int().unwrap_or(3) as u8;
-            if handle.set_pack_status(result) {
+            let status = match PacketIn::new(&pkt.data).var_int() {
+                Ok(v) => protocol::PackStatus::from_wire(v),
+                Err(_) => protocol::PackStatus::Unknown,
+            };
+            if handle.set_pack_status(status) {
                 streamer.center(last_chunk, true);
             }
             continue;

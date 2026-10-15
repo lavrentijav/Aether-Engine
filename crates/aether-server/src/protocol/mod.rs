@@ -536,6 +536,45 @@ pub enum MetaValue {
     Pose(i32),
 }
 
+/// How a client got on with a resource pack it was offered.
+///
+/// The wire value is a small VarInt in every release that reports one. It is
+/// kept as an enum rather than the raw number so the server cannot silently
+/// misread it — a VarInt of 256 cast to a `u8` is `0`, or "loaded".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackStatus {
+    /// The client downloaded and applied the pack.
+    Loaded,
+    /// The client refused it.
+    Declined,
+    /// The download failed.
+    Failed,
+    /// The client accepted the offer and is downloading.
+    Accepted,
+    /// The download finished and is being applied.
+    Downloaded,
+    /// The URL the server gave was invalid.
+    InvalidUrl,
+    /// A value this server does not know; treated as "not loaded".
+    Unknown,
+}
+
+impl PackStatus {
+    /// Read the wire VarInt. Anything outside the known range is
+    /// [`PackStatus::Unknown`], never an out-of-range `u8`.
+    pub fn from_wire(value: i32) -> Self {
+        match value {
+            0 => PackStatus::Loaded,
+            1 => PackStatus::Declined,
+            2 => PackStatus::Failed,
+            3 => PackStatus::Accepted,
+            4 => PackStatus::Downloaded,
+            5 => PackStatus::InvalidUrl,
+            _ => PackStatus::Unknown,
+        }
+    }
+}
+
 /// What a client asked for, parsed out of its version's packets.
 pub enum ClientEvent {
     /// Updated position and/or look.
@@ -623,12 +662,10 @@ pub enum ClientEvent {
     PickBlock { x: i32, y: i32, z: i32 },
     /// Where the client got to with the resource pack it was offered.
     ///
-    /// The value is the protocol's own enum: `0` successfully loaded, `1`
-    /// declined, `2` failed download, `3` accepted, `4` downloaded, `5`
-    /// invalid URL. Only `0` means the compat pack's carrier blocks are safe
-    /// to send; anything else — including never reporting at all — leaves the
-    /// plain stand-in in place. See `compat::pack`.
-    ResourcePackStatus(u8),
+    /// Only [`PackStatus::Loaded`] means the compat pack's carrier blocks are
+    /// safe to send; anything else — including never reporting at all — leaves
+    /// the plain stand-in in place. See `compat::pack`.
+    ResourcePackStatus(PackStatus),
     /// Anything this server does not act on (keep-alive replies, animations,
     /// ...).
     Ignored,
