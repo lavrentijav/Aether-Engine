@@ -86,6 +86,10 @@ pub struct PlayerState {
     /// Bumped on every window update the server sends.
     pub state_id: i32,
     pub cursor: Option<Stack>,
+    /// The item a creative client is carrying between slots, shadowed from
+    /// its slot reports so a substituted item moved through the cursor keeps
+    /// its real identity and count. See `session::record_slot_change`.
+    pub creative_carry: Option<crate::protocol::compat::items::Carried>,
     pub drag: Option<Drag>,
     pub xp_total: i32,
     /// Where they come back after dying.
@@ -121,6 +125,7 @@ impl PlayerState {
             window_counter: 1,
             state_id: 1,
             cursor: None,
+            creative_carry: None,
             drag: None,
             xp_total: 0,
             spawn: (8.5, 80.0, 8.5),
@@ -132,6 +137,16 @@ impl PlayerState {
     /// Whether the server is in charge of this player's survival.
     pub fn survival(&self) -> bool {
         self.mode == GameMode::Survival
+    }
+
+    /// Forget the item shadowed on the creative cursor.
+    ///
+    /// Called wherever the cursor is emptied behind the client's back — death
+    /// drops the inventory, respawn and closing a window hand the cursor back —
+    /// so a stand-in conjured after the item is gone cannot be resolved to the
+    /// real item it once stood for. See `session::record_slot_change`.
+    pub fn clear_creative_shadow(&mut self) {
+        self.creative_carry = None;
     }
 
     /// A fresh window id.
@@ -384,5 +399,39 @@ mod tests {
         assert_eq!(p.xp_level().0, 1);
         p.xp_total = 352; // level 15 starts at 315 + 37 = 352 total → level 16
         assert_eq!(p.xp_level().0, 16);
+    }
+
+    #[test]
+    fn death_clears_the_creative_shadow_so_a_stand_in_is_not_conjured() {
+        // F3: the shadow is only set by a slot report, so death — which drops
+        // the whole inventory — must clear it, or a stand-in reported after
+        // respawn would resolve to the real item that no longer exists.
+        // `combat::die`, `combat::respawn` and `game::window::close` all call
+        // `clear_creative_shadow`, which is the step this test drives.
+        use crate::protocol::compat::items::{table_for, Carried, Resolution};
+        let spear = aether_world::ItemTypeId::vanilla("minecraft:iron_spear").unwrap();
+        let trident = aether_world::ItemTypeId::vanilla("minecraft:trident").unwrap();
+        let table = table_for(767).unwrap(); // 1.21.1
+        let shown = table.engine(table.wire(spear).unwrap().id).unwrap();
+        assert_eq!(shown, trident, "the spear is shown as a trident");
+
+        let mut p = PlayerState::new(GameMode::Creative);
+        // Pick the spear up: the shadow is set.
+        let (_, carry) = table.resolve_change(None, Some((spear, 1)), p.creative_carry);
+        p.creative_carry = carry;
+        assert_eq!(
+            p.creative_carry,
+            Some(Carried {
+                item: spear,
+                count: 1
+            })
+        );
+        // Die: the inventory is dropped and the shadow with it.
+        p.clear_creative_shadow();
+        assert_eq!(p.creative_carry, None);
+        // Respawn, report a trident into an empty slot: a genuine creation,
+        // not the spear conjured from the dropped one.
+        let (res, _) = table.resolve_change(Some((shown, 1)), None, p.creative_carry);
+        assert_eq!(res, Resolution::Apply(Some((trident, 1))));
     }
 }

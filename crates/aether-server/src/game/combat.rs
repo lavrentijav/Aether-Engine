@@ -217,6 +217,9 @@ pub fn die(
         let mut st = target.game();
         st.window = None;
         st.absorption = 0.0;
+        // The inventory is gone, so the creative cursor shadow must go too: a
+        // stand-in reported after death must not resolve to the dropped item.
+        st.clear_creative_shadow();
         let mut items: Vec<Stack> = st.cursor.take().into_iter().collect();
         st.xp_total = 0;
         let mut inv = target.inventory();
@@ -503,6 +506,7 @@ pub fn respawn(
         st.hurt_cooldown = 60;
         st.eating = None;
         st.digging = None;
+        st.clear_creative_shadow();
         (st.mode, st.spawn)
     };
     entities::reset_tracking(handle);

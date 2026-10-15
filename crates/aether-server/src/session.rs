@@ -1555,20 +1555,13 @@ fn record_slot_change(
     item: Option<aether_world::ItemTypeId>,
     count: u8,
 ) {
-    // An item the client was shown as a *substitute* comes back as the
-    // substitute; the slot's real item wins (see the compat item layer). A
-    // genuinely different report stands as what the player put there. This is
-    // what stops a creative client laundering a spear into a real trident by
-    // moving the slot around.
-    let item = match (item, slot) {
-        (Some(reported), s) if s >= 0 => {
-            let real = handle.inventory().get(s as usize).map(|st| st.item);
-            match real {
-                Some(real) => Some(handle.codec.resolve_reported_item(real, reported)),
-                None => Some(reported),
-            }
-        }
-        _ => item,
+    let Some((item, count)) =
+        resolve_creative_report(handle, world, slot, item.map(|item| (item, count)))
+    else {
+        // The server refused the click — honouring it would have converted one
+        // real item into another (a merge of wire look-alikes). The window was
+        // resynced, so the client reverts; nothing changes here.
+        return;
     };
     let change = handle.set_creative_slot(slot, item, count);
     if change.is_noop() {
@@ -1599,6 +1592,88 @@ fn record_slot_change(
         );
     }
     save_inventory(handle, world);
+}
+
+/// Resolve a creative slot report against the server's authoritative window.
+///
+/// The wire id a client sends for an item it was shown as a *substitute* is
+/// the stand-in's, and says nothing about whether the client means the real
+/// item or the genuine item of that id. The server therefore resolves it from
+/// what it still holds — the slot it is replacing, the shadow the client is
+/// carrying, and (in the no-table fallback) a codec's own rule — so a stand-in
+/// a client *moves* keeps the real item it stands for, while a *creation* with
+/// no source stands as the genuine item the wire id names. The decision itself
+/// is pure and lives in `compat::items`; this only gathers the state and keeps
+/// the resulting shadow.
+///
+/// A version with no item table (1.21.11 and later, whose ids are the engine's
+/// own, so nothing is ever a stand-in) trusts the report as before, still
+/// honouring a codec's own same-slot rule.
+fn resolve_creative_report(
+    handle: &crate::players::PlayerHandle,
+    world: &DemoWorld,
+    slot: i16,
+    reported: Option<(aether_world::ItemTypeId, u8)>,
+) -> Option<(Option<aether_world::ItemTypeId>, u8)> {
+    let table = protocol::compat::items::table_for(handle.codec.protocol_id());
+    let Some(table) = table else {
+        let item = match (reported, slot) {
+            (Some((r, _)), s) if s >= 0 => match handle.inventory().get(s as usize) {
+                Some(real) => Some(handle.codec.resolve_reported_item(real.item, r)),
+                None => Some(r),
+            },
+            (Some((r, _)), _) => Some(r),
+            (None, _) => None,
+        };
+        let count = reported.map_or(0, |(_, c)| c);
+        return Some((item, count));
+    };
+
+    // Snapshot before the move: what the slot holds and the shadow the client
+    // is carrying. Neither the cursor nor the other slots are consulted — the
+    // shadow is the *single* source a move may draw on, so one item can never
+    // feed two placements. Lock order is the game state, then the inventory
+    // (see `PlayerHandle`).
+    let (previous, carried) = {
+        let st = handle.game();
+        let inv = handle.inventory();
+        let previous = if slot >= 0 {
+            inv.get(slot as usize).map(|s| (s.item, s.count))
+        } else {
+            None
+        };
+        (previous, st.creative_carry)
+    };
+
+    let (resolution, carried) = table.resolve_change(reported, previous, carried);
+    // The server's own cursor is the shadow: keep them the same so a window
+    // resync shows the client the item the server believes it carries. Without
+    // this, a rejected click would resync an *empty* cursor and the client would
+    // silently drop the stack it is carrying, while the shadow still held it —
+    // then the next click would destroy it.
+    {
+        let mut st = handle.game();
+        st.creative_carry = carried;
+        st.cursor = carried.map(|c| crate::inventory::Stack {
+            item: c.item,
+            count: c.count,
+            uid: aether_world::journal::ledger::mint_uid(),
+            damage: 0,
+            potion: None,
+        });
+    }
+    match resolution {
+        protocol::compat::items::Resolution::Apply(Some((item, count))) => {
+            Some((Some(item), count))
+        }
+        protocol::compat::items::Resolution::Apply(None) => Some((None, 0)),
+        protocol::compat::items::Resolution::Reject => {
+            // Show the client the server's view again (the slot it kept and the
+            // cursor it is really carrying), reverting its optimistic merge.
+            handle.sync_inventory(world);
+            None
+        }
+    }
 }
 
 /// Persist a player's inventory into the world's KV store.

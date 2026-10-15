@@ -1137,6 +1137,8 @@ pub fn close(handle: &PlayerHandle, world: &DemoWorld) {
             back.push(c);
         }
         st.drag = None;
+        // The cursor is handed back, so its creative shadow goes with it.
+        st.clear_creative_shadow();
         let mut inv = handle.inventory();
         for i in 1..=4 {
             if let Some(s) = inv.take_slot(i) {
