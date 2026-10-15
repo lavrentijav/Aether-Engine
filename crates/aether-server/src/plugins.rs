@@ -242,15 +242,23 @@ mod imp {
             )
         }
 
-        fn history_item_chain(&self, _plugin: &str, uid: u64, depth: u32) -> Vec<HistoryEvent> {
-            match self
-                .world
-                .journal()
-                .item_chain(journal::ItemUid(uid), depth as usize)
-            {
-                Ok(events) => events.iter().map(|e| to_event(&self.world, e)).collect(),
-                Err(_) => Vec::new(),
-            }
+        fn history_item_chain(
+            &self,
+            _plugin: &str,
+            uid: u64,
+            depth: u32,
+            before: Option<u64>,
+            limit: u32,
+        ) -> HistoryPage {
+            page_of(
+                &self.world,
+                self.world.journal().item_chain(
+                    journal::ItemUid(uid),
+                    depth as usize,
+                    before,
+                    limit as usize,
+                ),
+            )
         }
 
         fn history_container_log(

@@ -36,27 +36,59 @@ prefix read of its own entries.
   numbers down from the cursor, and it stops the moment `limit` matches are
   found: newest first, bounded work per page.
 
+All four index walks are **lazy and reverse** (`scan_prefix_each_rev`): the
+backend's prefix iterator is double-ended, so the newest entries are read first
+and the scan stops after `limit` matches — the index is never materialised, and
+`last_block_change_at`/`last_change_at` decode only candidate keys.
+
 Pages are newest-first and the cursor is a **sequence number**, so paging is
 deterministic regardless of wall clock, and an append between two pages shows
-up as a newer page rather than reordering an older one. `limit` is clamped to
-`MAX_PAGE` (1000) so no caller can ask for the whole journal in one call.
+up as a newer page rather than reordering an older one.
+
+## Bounded work per call
+
+History queries run on the tick thread, and a WASM plugin's query runs under the
+plugin host's lock, so **no single call is unbounded**:
+
+* `limit` is clamped to `MAX_PAGE` (1000).
+* An unrestricted sweep stops early on the window's **lower time bound**: the
+  journal is time-ordered, so once an event's `at_ms` falls below `since_ms`
+  every older event does too and the walk ends instead of scanning the journal.
+  It also yields a cursor after `MAX_SCAN` (50 000) probes.
+* An object query yields a cursor after `MAX_INDEX_PROBE` (100 000) keys, so a
+  very busy column or an extremely active player cannot hold the lock for an
+  unbounded time either.
+
+A caller that wants the whole result pages with the returned cursor.
 
 ## Worldgen-original
 
-`is_worldgen_original(x, y, z)` is true when `last_change_at` finds no event
-for the position: the generator is deterministic, so a block nobody journalled
-is exactly what the seed made. A block a player placed, broke and replaced is
-reported **false** — the journal remembers the touch even though the current
-block reads as natural. That is the check a survival server needs before paying
-for a block, and what the `rewards`/`stats` plugins (PM2/CMD-47) read.
+`is_worldgen_original(x, y, z)` is true when `last_block_change_at` finds no
+**block change** for the position — `BlockSet` events only. The generator is
+deterministic, so a block nobody edited is exactly what the seed made. A block a
+player placed, broke and replaced is reported **false** — the journal remembers
+the edit even though the current block reads as natural. Item events that merely
+sit at the coordinates (a dropped item, a chest opening there) do **not** count
+as a change to the block, so a natural diamond mined and dropped on the spot is
+still original. That is the check a survival server needs before paying for a
+block, and what the `rewards`/`stats` plugins (PM2/CMD-47) read.
+
+## Container log, across chunks
+
+A container's access log is the item events whose container place is that block.
+The column index is written for **both ends** of an item move, so a transfer
+that leaves the chest for another chunk is found under the source chest as well
+as a deposit that lands in it (`EventBody::indexed_positions`).
 
 ## Provenance
 
-`item_chain(root, depth)` walks the item index backwards through `item_derive`
-(a craft/smelt output and its consumed ingredients) and `item_merge` (a stack
-topped up from another) up to `depth` generations, cycle-safe, and returns the
-events oldest-first. `item_move` links nothing: the same instance in a new
-place is not a new item.
+`item_chain(root, depth, before, limit)` walks the item index backwards through
+`item_derive` (a craft/smelt output and its consumed ingredients) and
+`item_merge` (a stack topped up from another) up to `depth` generations,
+cycle-safe, and returns a **page** — newest first, with a cursor. `depth` is
+clamped to `MAX_CHAIN_DEPTH` (16) and the walk stops after a bounded number of
+visits, so an id with a huge history is still bounded. `item_move` links
+nothing: the same instance in a new place is not a new item.
 
 ## Capability
 
@@ -83,21 +115,19 @@ names through the world registry. Unknown event-kind names in a window select
   world may be wiped (storage-v2 amendment 2, no migration), and the index is
   derived and can be rebuilt in a future pass if a server needs it.
 * A time window has no time index: a sweep resolves the head and walks
-  sequence numbers down, stopping at `limit` matches or the window's lower
-  time bound. Object queries (block/container/player/item) use their index and
-  never do this.
-* `history_page` with an actor but also an area/time filter reads that actor's
-  whole index per page. Fine for one operator's tool; a hot path can add a
-  paged index cursor later.
+  sequence numbers down, stopping at `limit` matches, the lower time bound, or
+  `MAX_SCAN`. Object queries (block/container/player/item) use their index.
 
 ## Tests
 
 * `crates/aether-world/src/journal/history.rs` — block history order and
-  paging, worldgen-original, window predicates, item index, provenance chain,
-  container log.
+  paging, worldgen-original (ignoring item events), window predicates and the
+  lower-time-bound early exit, item index, provenance chain (clamp + paging),
+  container log (including a cross-chunk move), player stream.
 * `crates/aether-plugin/src/sdk.rs` — the bridge forwards the caller id and the
   page, and answers the neutral value with no provider.
-* `plugins/sdk/src/lib.rs` — the `history.read` gate admits and refuses.
+* `plugins/sdk/src/lib.rs` — the `history.read` gate admits and refuses; the
+  `history.read` gate end to end through a WASM dependent in `plugins/sdk/tests/e2e.rs`.
 * `crates/aether-server/src/plugins.rs` — uuid split, window mapping (including
   an unknown kind), place rendering.
 * `crates/aether-plugin/tests/wit_world.rs` — the SDK services world still

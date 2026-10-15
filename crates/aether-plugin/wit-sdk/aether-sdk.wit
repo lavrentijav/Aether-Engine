@@ -288,15 +288,17 @@ interface history {
         kinds: list<string>,
     }
 
-    /// The whole timeline of the block at `(x,y,z)`, newest first, paged.
+    /// The whole timeline of the block at `(x,y,z)` — only block changes,
+    /// newest first, paged.
     block-history: func(x: s32, y: s32, z: s32, before: option<u64>, limit: u32) -> page;
-    /// Whether nobody has ever changed the block at `(x,y,z)`.
+    /// Whether nobody has ever **changed the block** at `(x,y,z)`. Item events
+    /// at the coordinates (a drop, a chest opened) do not count.
     worldgen-original: func(x: s32, y: s32, z: s32) -> bool;
     /// Events matching `window`, newest first, paged.
     events: func(window: window, before: option<u64>, limit: u32) -> page;
-    /// The provenance chain of item `uid`, oldest first, up to `depth`
-    /// generations.
-    item-chain: func(uid: u64, depth: u32) -> list<event>;
+    /// The provenance chain of item `uid`, newest first, paged; `depth` is
+    /// clamped by the provider.
+    item-chain: func(uid: u64, depth: u32, before: option<u64>, limit: u32) -> page;
     /// Who accessed the container at `(x,y,z)`, newest first, paged.
     container-log: func(x: s32, y: s32, z: s32, before: option<u64>, limit: u32) -> page;
     /// One player's event stream, newest first, paged.

@@ -26,9 +26,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use aether_plugin::manifest::{Manifest, PluginTier};
 use aether_plugin::sdk::{
-    self, ArgKind, CommandSpec, CommandsService, ConfirmService, CooldownsService, HistoryEvent,
-    HistoryPage, HistoryService, HistoryWindow, MessagesService, PermissionsService,
-    PlayersService, Pos, Resolution, SchedulerService, TeleportCause, TitleTimes,
+    self, ArgKind, CommandSpec, CommandsService, ConfirmService, CooldownsService, HistoryPage,
+    HistoryService, HistoryWindow, MessagesService, PermissionsService, PlayersService, Pos,
+    Resolution, SchedulerService, TeleportCause, TitleTimes,
 };
 use aether_plugin::{
     HostBackend, LogLevel, NativeContext, NativePlugin, NativeRegistration, Player,
@@ -463,11 +463,19 @@ impl HistoryService for History {
         self.backend.history_events(caller, window, before, limit)
     }
 
-    fn item_chain(&self, caller: &str, uid: u64, depth: u32) -> Vec<HistoryEvent> {
+    fn item_chain(
+        &self,
+        caller: &str,
+        uid: u64,
+        depth: u32,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage {
         if self.deny(caller, "item-chain") {
-            return Vec::new();
+            return sdk::empty_history_page();
         }
-        self.backend.history_item_chain(caller, uid, depth)
+        self.backend
+            .history_item_chain(caller, uid, depth, before, limit)
     }
 
     fn container_log(
@@ -1566,7 +1574,10 @@ mod tests {
             .events
             .is_empty());
         assert!(!denied.worldgen_original("outsider", 1, 2, 3));
-        assert!(denied.item_chain("outsider", 1, 1).is_empty());
+        assert!(denied
+            .item_chain("outsider", 1, 1, None, 10)
+            .events
+            .is_empty());
         assert!(denied
             .container_log("outsider", 1, 2, 3, None, 10)
             .events

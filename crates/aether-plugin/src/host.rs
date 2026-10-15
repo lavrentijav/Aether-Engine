@@ -125,14 +125,16 @@ pub trait HostBackend: Send + Sync {
         crate::sdk::empty_history_page()
     }
 
-    /// The provenance chain of item `uid`, oldest first.
+    /// The provenance chain of item `uid`, newest first, paged.
     fn history_item_chain(
         &self,
         _plugin: &str,
         _uid: u64,
         _depth: u32,
-    ) -> Vec<crate::sdk::HistoryEvent> {
-        Vec::new()
+        _before: Option<u64>,
+        _limit: u32,
+    ) -> crate::sdk::HistoryPage {
+        crate::sdk::empty_history_page()
     }
 
     /// Who accessed the container at `(x, y, z)`, newest first.

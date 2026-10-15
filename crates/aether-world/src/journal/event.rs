@@ -374,6 +374,36 @@ impl EventBody {
             }
         }
     }
+
+    /// Every block position this event should be recorded under in the
+    /// journal's **column** index.
+    ///
+    /// A block change touches exactly its own block. An item event touches
+    /// **both** ends of its movement when they differ: a chest-to-chest or
+    /// chest-to-ground move must be findable from either end, or a container's
+    /// access log would miss every transfer whose other end lay in a different
+    /// chunk. A merge carries no place and indexes nothing.
+    pub fn indexed_positions(&self) -> Vec<(i32, i32, i32)> {
+        match self {
+            EventBody::BlockSet { x, y, z, .. } => vec![(*x, *y, *z)],
+            EventBody::ItemMint { to, .. } => to.position().into_iter().collect(),
+            EventBody::ItemMove { from, to, .. } => {
+                let mut out = Vec::with_capacity(2);
+                if let Some(p) = from.position() {
+                    out.push(p);
+                }
+                if let Some(p) = to.position() {
+                    if !out.contains(&p) {
+                        out.push(p);
+                    }
+                }
+                out
+            }
+            EventBody::ItemDestroy { from, .. } => from.position().into_iter().collect(),
+            EventBody::ItemDerive { to, .. } => to.position().into_iter().collect(),
+            EventBody::ItemMerge { .. } | EventBody::Custom { .. } => Vec::new(),
+        }
+    }
 }
 
 /// One immutable entry in the log.

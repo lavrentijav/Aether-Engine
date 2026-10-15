@@ -216,6 +216,27 @@ impl Window {
 /// for the whole journal in one call.
 pub const MAX_PAGE: usize = 1000;
 
+/// The deepest item-provenance walk a single `item_chain` call will take, in
+/// generations. Clamped rather than trusted: a caller-supplied depth is an
+/// unbounded-work knob otherwise.
+pub const MAX_CHAIN_DEPTH: usize = 16;
+
+/// How many index entries (item events across all generations) one
+/// `item_chain` call will read before stopping. Bounds the walk even when a
+/// single uid has a very long history.
+const MAX_CHAIN_VISIT: usize = 100_000;
+
+/// How many sequence numbers one unrestricted page will probe before handing
+/// back a cursor and letting the caller continue. A time/area window with no
+/// index has to walk sequence numbers; this keeps any single call — and so any
+/// single hold of the server's plugin lock — bounded.
+const MAX_SCAN: u64 = 50_000;
+
+/// How many index keys one object query (block/container/player/item) will
+/// probe before handing back a cursor. Bounds a page of a very busy column or
+/// a very active player the same way [`MAX_SCAN`] bounds a sweep.
+const MAX_INDEX_PROBE: u64 = 100_000;
+
 fn clamp_limit(limit: usize) -> usize {
     limit.min(MAX_PAGE)
 }
@@ -224,8 +245,10 @@ impl<B: KvBackend> Journal<B> {
     /// The `limit` newest events matching `window`, newest first.
     ///
     /// `before` is the cursor returned by the previous page; `None` starts at
-    /// the head. When a single actor is named the actor index is walked;
-    /// otherwise sequence numbers are walked down from the cursor.
+    /// the head. When a single actor is named the actor index is walked
+    /// backwards; otherwise sequence numbers are walked down from the cursor,
+    /// bounding each call and stopping early once the journal's time-ordered
+    /// sequence passes below the window.
     pub fn history_page(
         &self,
         window: &Window,
@@ -240,19 +263,19 @@ impl<B: KvBackend> Journal<B> {
         match window.actor {
             // A named actor uses their index, so the sweep is that player's
             // history rather than everyone's.
-            Some(a) => {
-                let seqs = self.index_seqs_below(&super::actor_prefix(a), 17, cursor)?;
-                self.page_from_seqs(seqs, window, limit)
-            }
-            None => self.scan_down(cursor, window, limit, |_| true),
+            Some(a) => self.reverse_index_page(&super::actor_prefix(a), 17, cursor, limit, &|e| {
+                window.matches(e)
+            }),
+            None => self.scan_down(cursor, window, limit),
         }
     }
 
     /// The full timeline of the block at `(x, y, z)`, newest first.
     ///
-    /// Walks the column's index backwards and stops after `limit` hits at this
-    /// exact position, so the cost is the number of edits to the column after
-    /// the cursor — never a scan of the whole journal.
+    /// Only **block changes** appear: an item dropped at the coordinates or a
+    /// container opened there is not part of the block's history. Walks the
+    /// column's index backwards and stops after `limit` hits at this exact
+    /// position, so the cost is that column's edits, never the whole journal.
     pub fn block_history(
         &self,
         x: i32,
@@ -261,14 +284,19 @@ impl<B: KvBackend> Journal<B> {
         before: Option<u64>,
         limit: usize,
     ) -> Result<Page, StorageError> {
-        self.positional_page(x, z, before, limit, &|e| e.position() == Some((x, y, z)))
+        let limit = clamp_limit(limit);
+        let cursor = before.unwrap_or(u64::MAX);
+        self.reverse_index_page(&column_prefix(x >> 4, z >> 4), 9, cursor, limit, &|e| {
+            matches!(e.body, super::EventBody::BlockSet { .. }) && e.position() == Some((x, y, z))
+        })
     }
 
     /// The container access log for the block at `(x, y, z)`, newest first.
     ///
-    /// An item event names the container as a place, so the log is the item
-    /// events in that column whose container place is this block — the chest's
-    /// own column index, not the world's history.
+    /// An item event names the container as a place, and the event is indexed
+    /// under **both** ends of its movement, so a transfer that leaves this
+    /// chest for another chunk is found here as well as a deposit that lands
+    /// in it.
     pub fn container_log(
         &self,
         x: i32,
@@ -277,23 +305,28 @@ impl<B: KvBackend> Journal<B> {
         before: Option<u64>,
         limit: usize,
     ) -> Result<Page, StorageError> {
-        self.positional_page(x, z, before, limit, &|e| e.body.touches_container(x, y, z))
+        let limit = clamp_limit(limit);
+        let cursor = before.unwrap_or(u64::MAX);
+        self.reverse_index_page(&column_prefix(x >> 4, z >> 4), 9, cursor, limit, &|e| {
+            e.body.touches_container(x, y, z)
+        })
     }
 
-    /// Whether nobody has ever changed the block at `(x, y, z)`.
+    /// Whether nobody has ever **changed the block** at `(x, y, z)`.
     ///
     /// This is the "worldgen-original" question a survival server asks before
     /// paying for a block: a diamond placed, broken and replaced by a player is
     /// not original even though it now reads as diamond, because the journal
-    /// records that someone touched it.
+    /// records that someone edited it. Item events at the coordinates — a drop,
+    /// a chest opening — do not count as a change to the block.
     pub fn is_worldgen_original(&self, x: i32, y: i32, z: i32) -> Result<bool, StorageError> {
-        Ok(self.last_change_at(x, y, z)?.is_none())
+        Ok(self.last_block_change_at(x, y, z)?.is_none())
     }
 
     /// One actor's events, newest first, paged.
     ///
-    /// Reads the actor index, so this is that player's history and not a walk
-    /// of everyone's.
+    /// Reads the actor index backwards, so this is that player's history and
+    /// not a walk of everyone's, and stops after `limit` events.
     pub fn player_events(
         &self,
         actor: ActorId,
@@ -301,18 +334,14 @@ impl<B: KvBackend> Journal<B> {
         limit: usize,
     ) -> Result<Page, StorageError> {
         let limit = clamp_limit(limit);
-        if limit == 0 {
-            return Ok(Page::empty());
-        }
         let cursor = before.unwrap_or(u64::MAX);
-        let seqs = self.index_seqs_below(&super::actor_prefix(actor), 17, cursor)?;
-        self.decode_page(seqs, limit)
+        self.reverse_index_page(&super::actor_prefix(actor), 17, cursor, limit, &|_| true)
     }
 
     /// One item instance's events, newest first, paged.
     ///
-    /// Reads the item index, so this is that instance's whole timeline rather
-    /// than a journal scan.
+    /// Reads the item index backwards, so this is that instance's whole
+    /// timeline rather than a journal scan.
     pub fn item_events(
         &self,
         uid: ItemUid,
@@ -320,171 +349,80 @@ impl<B: KvBackend> Journal<B> {
         limit: usize,
     ) -> Result<Page, StorageError> {
         let limit = clamp_limit(limit);
-        if limit == 0 {
-            return Ok(Page::empty());
-        }
         let cursor = before.unwrap_or(u64::MAX);
-        let seqs = self.index_seqs_below(&item_prefix(uid), 9, cursor)?;
-        self.decode_page(seqs, limit)
+        self.reverse_index_page(&item_prefix(uid), 9, cursor, limit, &|_| true)
     }
 
-    /// The provenance chain of item `root`, oldest first, walked backwards
-    /// through derives and merges up to `depth` generations.
+    /// The provenance chain of item `root`, newest first, paged, walked
+    /// backwards through derives and merges up to `depth` generations.
     ///
-    /// The result is every event for the root and for the instances it was
-    /// made from (a craft's ingredients, a stack a merge drew from), so a
-    /// reader can answer "where did #51 come from" without a loop of its own.
-    /// Cycle-safe: an instance is visited once however many edges reach it.
-    pub fn item_chain(&self, root: ItemUid, depth: usize) -> Result<Vec<Event>, StorageError> {
-        let mut seen_uids: HashSet<ItemUid> = HashSet::new();
-        let mut seen_seqs: HashSet<u64> = HashSet::new();
-        let mut out: Vec<Event> = Vec::new();
-        let mut frontier = vec![root];
-        seen_uids.insert(root);
-        // `depth` generations of ancestors: depth 0 is the root alone.
-        for _ in 0..=depth {
-            if frontier.is_empty() {
-                break;
-            }
-            let mut next = Vec::new();
-            for uid in frontier.drain(..) {
-                for (k, _) in self.backend.scan_prefix(&item_prefix(uid))? {
-                    if k.len() < 17 {
-                        continue;
-                    }
-                    let seq = u64::from_be_bytes(k[9..17].try_into().unwrap());
-                    if !seen_seqs.insert(seq) {
-                        continue;
-                    }
-                    let Some(e) = self.get(seq)? else { continue };
-                    for linked in linked_uids(&e, uid) {
-                        if seen_uids.insert(linked) {
-                            next.push(linked);
-                        }
-                    }
-                    out.push(e);
-                }
-            }
-            frontier = next;
-        }
-        out.sort_by_key(|e| e.seq);
-        Ok(out)
-    }
-
-    // -- internals ---------------------------------------------------------
-
-    /// A page over one column, keeping only events `accept` selects.
-    fn positional_page(
+    /// The chain is every event for the root and for the instances it was made
+    /// from (a craft's ingredients, a stack a merge drew from), so a reader
+    /// answers "where did #51 come from" without a loop of its own. Cycle-safe:
+    /// an instance is visited once however many edges reach it.
+    ///
+    /// `depth` is clamped to [`MAX_CHAIN_DEPTH`] and `before`/`limit` page the
+    /// result like any other query, so no single call is unbounded.
+    pub fn item_chain(
         &self,
-        x: i32,
-        z: i32,
+        root: ItemUid,
+        depth: usize,
         before: Option<u64>,
         limit: usize,
-        accept: &dyn Fn(&Event) -> bool,
     ) -> Result<Page, StorageError> {
         let limit = clamp_limit(limit);
         if limit == 0 {
             return Ok(Page::empty());
         }
         let cursor = before.unwrap_or(u64::MAX);
-        let keys = self.backend.scan_prefix(&column_prefix(x >> 4, z >> 4))?;
+        let depth = depth.min(MAX_CHAIN_DEPTH);
+
+        let mut seen_uids: HashSet<ItemUid> = HashSet::new();
+        let mut seen_seqs: HashSet<u64> = HashSet::new();
+        let mut seqs: Vec<u64> = Vec::new();
+        let mut frontier = vec![root];
+        seen_uids.insert(root);
+        let mut visited = 0usize;
+        // `depth` generations of ancestors: depth 0 is the root alone.
+        for _ in 0..=depth {
+            if frontier.is_empty() || visited >= MAX_CHAIN_VISIT {
+                break;
+            }
+            let mut next = Vec::new();
+            for uid in frontier.drain(..) {
+                let mut layer: Vec<u64> = Vec::new();
+                self.backend
+                    .scan_prefix_each(&item_prefix(uid), &mut |k, _| {
+                        visited += 1;
+                        if k.len() >= 17 {
+                            let seq = u64::from_be_bytes(k[9..17].try_into().unwrap());
+                            if seen_seqs.insert(seq) {
+                                layer.push(seq);
+                            }
+                        }
+                        // Keep going until the whole walk's budget is spent.
+                        Ok(visited < MAX_CHAIN_VISIT)
+                    })?;
+                for seq in layer {
+                    let Some(e) = self.get(seq)? else { continue };
+                    for linked in linked_uids(&e, uid) {
+                        if seen_uids.insert(linked) {
+                            next.push(linked);
+                        }
+                    }
+                    seqs.push(seq);
+                }
+            }
+            frontier = next;
+        }
+
+        seqs.sort_unstable_by(|a, b| b.cmp(a));
         let mut events = Vec::new();
         let mut next = None;
-        for (k, _) in keys.iter().rev() {
-            if k.len() < 17 {
-                continue;
-            }
-            let seq = u64::from_be_bytes(k[9..17].try_into().unwrap());
+        for seq in seqs {
             if seq >= cursor {
                 continue;
             }
-            let Some(e) = self.get(seq)? else { continue };
-            if accept(&e) {
-                events.push(e);
-                if events.len() == limit {
-                    next = Some(seq);
-                    break;
-                }
-            }
-        }
-        Ok(Page { events, next })
-    }
-
-    /// Walk sequence numbers below `cursor`, newest first, keeping the first
-    /// `limit` that match `window` and the extra predicate.
-    fn scan_down(
-        &self,
-        cursor: u64,
-        window: &Window,
-        limit: usize,
-        extra: impl Fn(&Event) -> bool,
-    ) -> Result<Page, StorageError> {
-        let mut events = Vec::new();
-        let mut seq = cursor;
-        while events.len() < limit && seq > 0 {
-            seq -= 1;
-            let Some(e) = self.get(seq)? else { continue };
-            if window.matches(&e) && extra(&e) {
-                events.push(e);
-            }
-        }
-        let next = if events.len() == limit && seq > 0 {
-            Some(seq)
-        } else {
-            None
-        };
-        Ok(Page { events, next })
-    }
-
-    /// The sequence numbers under `prefix` that are below `cursor`, ascending.
-    fn index_seqs_below(
-        &self,
-        prefix: &[u8],
-        seq_at: usize,
-        cursor: u64,
-    ) -> Result<Vec<u64>, StorageError> {
-        let mut seqs = Vec::new();
-        for (k, _) in self.backend.scan_prefix(prefix)? {
-            if k.len() < seq_at + 8 {
-                continue;
-            }
-            let seq = u64::from_be_bytes(k[seq_at..seq_at + 8].try_into().unwrap());
-            if seq < cursor {
-                seqs.push(seq);
-            }
-        }
-        Ok(seqs)
-    }
-
-    /// Build a newest-first page from ascending `seqs`, applying `window`.
-    fn page_from_seqs(
-        &self,
-        seqs: Vec<u64>,
-        window: &Window,
-        limit: usize,
-    ) -> Result<Page, StorageError> {
-        let mut events = Vec::new();
-        let mut next = None;
-        for &seq in seqs.iter().rev() {
-            let Some(e) = self.get(seq)? else { continue };
-            // The actor condition is already satisfied by the index; the rest
-            // of the window still applies.
-            if window.matches(&e) {
-                events.push(e);
-                if events.len() == limit {
-                    next = Some(seq);
-                    break;
-                }
-            }
-        }
-        Ok(Page { events, next })
-    }
-
-    /// Decode the newest `limit` of ascending `seqs`, newest first.
-    fn decode_page(&self, seqs: Vec<u64>, limit: usize) -> Result<Page, StorageError> {
-        let mut events = Vec::new();
-        let mut next = None;
-        for &seq in seqs.iter().rev() {
             let Some(e) = self.get(seq)? else { continue };
             events.push(e);
             if events.len() == limit {
@@ -492,6 +430,99 @@ impl<B: KvBackend> Journal<B> {
                 break;
             }
         }
+        Ok(Page { events, next })
+    }
+
+    // -- internals ---------------------------------------------------------
+
+    /// A newest-first page drawn lazily from a descending index scan.
+    ///
+    /// `seq_at` is the byte offset of the 8-byte sequence number in an index
+    /// key; the scan visits keys newest-first and stops as soon as `limit`
+    /// events that satisfy `accept` and lie below `cursor` have been read, so
+    /// the whole index is never materialised. It also stops after [`MAX_INDEX_PROBE`]
+    /// keys — handing back a cursor — so a caller can never make one call (and
+    /// so one hold of the server's plugin lock) run for an unbounded time.
+    fn reverse_index_page(
+        &self,
+        prefix: &[u8],
+        seq_at: usize,
+        cursor: u64,
+        limit: usize,
+        accept: &dyn Fn(&Event) -> bool,
+    ) -> Result<Page, StorageError> {
+        if limit == 0 {
+            return Ok(Page::empty());
+        }
+        let mut events = Vec::new();
+        let mut next = None;
+        let mut probed: u64 = 0;
+        self.backend.scan_prefix_each_rev(prefix, &mut |k, _| {
+            if k.len() < seq_at + 8 {
+                return Ok(true);
+            }
+            let seq = u64::from_be_bytes(k[seq_at..seq_at + 8].try_into().unwrap());
+            if seq >= cursor {
+                return Ok(true);
+            }
+            probed += 1;
+            let e = match self.get(seq)? {
+                Some(e) => e,
+                None => return Ok(true),
+            };
+            if accept(&e) {
+                events.push(e);
+                if events.len() == limit {
+                    next = Some(seq);
+                    return Ok(false);
+                }
+            }
+            if probed >= MAX_INDEX_PROBE {
+                // Bounded call: hand back a cursor and continue on the next.
+                next = Some(seq);
+                return Ok(false);
+            }
+            Ok(true)
+        })?;
+        Ok(Page { events, next })
+    }
+
+    /// Walk sequence numbers below `cursor`, newest first, keeping the first
+    /// `limit` that match `window`.
+    ///
+    /// Stops early on two conditions: the journal is ordered by sequence and,
+    /// in practice, by time, so once an event's `at_ms` falls below the
+    /// window's `since_ms` every earlier event does too and the walk ends; and
+    /// after [`MAX_SCAN`] probes it yields a cursor so the caller resumes
+    /// rather than this call running unbounded under, say, the plugin lock.
+    fn scan_down(&self, cursor: u64, window: &Window, limit: usize) -> Result<Page, StorageError> {
+        let mut events = Vec::new();
+        let mut next = None;
+        let mut seq = cursor;
+        let mut probed: u64 = 0;
+        while events.len() < limit && seq > 0 {
+            seq -= 1;
+            probed += 1;
+            let Some(e) = self.get(seq)? else { continue };
+            // Time is monotonic in sequence, so a match below the lower bound
+            // means everything older is below it too.
+            if window.since_ms != 0 && e.at_ms < window.since_ms {
+                return Ok(Page { events, next: None });
+            }
+            if window.matches(&e) {
+                events.push(e);
+            }
+            if probed >= MAX_SCAN && events.len() < limit {
+                // Bounded call: hand back a cursor and continue on the next.
+                next = Some(seq);
+                break;
+            }
+        }
+        let next = if events.len() == limit && seq > 0 {
+            Some(seq)
+        } else {
+            next
+        };
         Ok(Page { events, next })
     }
 }
@@ -757,16 +788,70 @@ mod tests {
         )
         .unwrap();
 
-        let chain = j.item_chain(sword, 2).unwrap();
+        let chain = j.item_chain(sword, 2, None, 100).unwrap();
         let uids: Vec<ItemUid> = chain
+            .events
             .iter()
             .filter_map(|e| e.body.item_uids().first().copied())
             .collect();
         assert!(uids.contains(&sword), "output in chain");
         assert!(uids.contains(&ingot), "ingredient in chain");
         assert!(uids.contains(&ore), "source in chain");
-        // Oldest first, so the root can be read last.
-        assert!(chain.windows(2).all(|w| w[0].seq <= w[1].seq));
+        // Newest first, like every other page.
+        assert!(chain.events.windows(2).all(|w| w[0].seq >= w[1].seq));
+    }
+
+    #[test]
+    fn item_chain_clamps_depth_and_pages() {
+        let j = journal();
+        // A chain long enough to page with limit 1.
+        let mut uids = Vec::new();
+        for i in 0..4u64 {
+            uids.push(ItemUid(i + 1));
+        }
+        for i in 0..uids.len() {
+            let from = if i == 0 { vec![] } else { vec![uids[i - 1]] };
+            let body = if from.is_empty() {
+                EventBody::ItemMint {
+                    uid: uids[i],
+                    item: ItemTypeId::vanilla("minecraft:stick").unwrap(),
+                    count: 1,
+                    to: Place::Nowhere,
+                }
+            } else {
+                EventBody::ItemDerive {
+                    uid: uids[i],
+                    item: ItemTypeId::vanilla("minecraft:stick").unwrap(),
+                    count: 1,
+                    to: Place::Nowhere,
+                    from,
+                }
+            };
+            j.append_at(alice(), body, i as u64).unwrap();
+        }
+        // Ask for a depth far past the clamp and a page of one.
+        let first = j.item_chain(*uids.last().unwrap(), 9999, None, 1).unwrap();
+        assert_eq!(first.events.len(), 1);
+        assert!(first.next.is_some(), "more than one event in the chain");
+        // Paging yields the rest, newest first, with no repeats.
+        let mut seen = vec![first.events[0].seq];
+        let mut cursor = first.next;
+        while let Some(c) = cursor {
+            let page = j
+                .item_chain(*uids.last().unwrap(), 9999, Some(c), 1)
+                .unwrap();
+            for e in &page.events {
+                assert!(!seen.contains(&e.seq), "event repeated across pages");
+                seen.push(e.seq);
+            }
+            cursor = page.next;
+            if page.events.is_empty() {
+                break;
+            }
+        }
+        // Depth 0 reaches only the root, so just its own event.
+        let root_only = j.item_chain(*uids.last().unwrap(), 0, None, 100).unwrap();
+        assert_eq!(root_only.events.len(), 1);
     }
 
     #[test]
@@ -837,5 +922,135 @@ mod tests {
         assert_eq!(log.events.len(), 2, "{:?}", log.events);
         assert_eq!(log.events[0].actor, bob(), "newest first");
         assert_eq!(log.events[1].actor, alice());
+    }
+
+    #[test]
+    fn container_log_sees_a_transfer_across_chunks() {
+        // The chest sits in one chunk, the destination in another; the move
+        // must be indexed under both ends, or the source chest would miss it.
+        let j = journal();
+        let (cx, cy, cz) = (10, 64, 10);
+        let uid = ItemUid(9);
+        let dest = (cx + 64, cy, cz); // a different chunk
+        let s = j
+            .append_at(
+                alice(),
+                EventBody::ItemMove {
+                    uid,
+                    from: Place::Container {
+                        x: cx,
+                        y: cy,
+                        z: cz,
+                        slot: 3,
+                    },
+                    to: Place::Container {
+                        x: dest.0,
+                        y: dest.1,
+                        z: dest.2,
+                        slot: 0,
+                    },
+                    count: 1,
+                },
+                1,
+            )
+            .unwrap();
+        // The source chest's log sees the outgoing move.
+        let log = j.container_log(cx, cy, cz, None, 10).unwrap();
+        assert_eq!(log.events.len(), 1, "{:?}", log.events);
+        assert_eq!(log.events[0].seq, s);
+        // And the destination's log sees the incoming one.
+        let log = j.container_log(dest.0, dest.1, dest.2, None, 10).unwrap();
+        assert_eq!(log.events.len(), 1);
+        assert_eq!(log.events[0].seq, s);
+    }
+
+    #[test]
+    fn block_history_and_worldgen_ignore_item_events_at_the_position() {
+        let j = journal();
+        let uid = ItemUid(5);
+        // An item lands at (1, 64, 1): not a change to the block.
+        j.append_at(
+            alice(),
+            EventBody::ItemMove {
+                uid,
+                from: Place::Inventory {
+                    owner: alice(),
+                    slot: 0,
+                },
+                to: Place::Ground { x: 1, y: 64, z: 1 },
+                count: 1,
+            },
+            1,
+        )
+        .unwrap();
+        assert!(
+            j.is_worldgen_original(1, 64, 1).unwrap(),
+            "a dropped item does not edit the block"
+        );
+        assert!(j.block_history(1, 64, 1, None, 10).unwrap().is_empty());
+
+        // A real block change at the same position *is* reported.
+        let s = j.append_at(bob(), block(1, 64, 1, STONE, AIR), 2).unwrap();
+        assert!(!j.is_worldgen_original(1, 64, 1).unwrap());
+        let page = j.block_history(1, 64, 1, None, 10).unwrap();
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.events[0].seq, s);
+    }
+
+    #[test]
+    fn player_events_reads_the_actor_index_and_pages() {
+        let j = journal();
+        for i in 0..5 {
+            j.append_at(alice(), block(i, 64, 0, DIRT, STONE), i as u64)
+                .unwrap();
+        }
+        // Bob's events must not appear in Alice's stream.
+        j.append_at(bob(), block(9, 64, 9, DIRT, STONE), 99)
+            .unwrap();
+
+        let first = j.player_events(alice(), None, 2).unwrap();
+        assert_eq!(first.events.len(), 2);
+        assert!(first.events.iter().all(|e| e.actor == alice()));
+        let cursor = first.next.expect("more pages");
+        let second = j.player_events(alice(), Some(cursor), 2).unwrap();
+        assert_eq!(second.events.len(), 2);
+        assert!(second.events[0].seq < first.events[1].seq, "no overlap");
+        let third = j.player_events(alice(), second.next, 2).unwrap();
+        assert_eq!(third.events.len(), 1);
+        assert!(third.next.is_none(), "exhausted");
+    }
+
+    #[test]
+    fn an_actor_window_pages_across_the_index() {
+        // `history_page` with an actor uses the same index, so its cursor must
+        // not drop or repeat events across pages.
+        let j = journal();
+        for i in 0..4 {
+            j.append_at(alice(), block(i, 64, 0, DIRT, STONE), i as u64)
+                .unwrap();
+        }
+        let w = Window::new().actor(alice()).since(1);
+        let first = j.history_page(&w, None, 2).unwrap();
+        assert_eq!(first.events.len(), 2);
+        let second = j.history_page(&w, first.next, 2).unwrap();
+        assert_eq!(second.events.len(), 1, "events at 1,2,3: page 2 holds one");
+        assert!(second.events[0].seq < first.events[1].seq);
+        assert!(second.next.is_none());
+    }
+
+    #[test]
+    fn a_time_window_stops_at_its_lower_bound() {
+        // The journal is time-ordered, so a sweep below `since_ms` must stop
+        // rather than walking the whole history.
+        let j = journal();
+        for i in 0..5 {
+            j.append_at(alice(), block(i, 64, 0, DIRT, STONE), (i as u64) * 1_000)
+                .unwrap();
+        }
+        let w = Window::new().since(2_000);
+        let page = j.history_page(&w, None, 100).unwrap();
+        assert_eq!(page.events.len(), 3, "events at 2000, 3000, 4000");
+        assert!(page.next.is_none(), "the lower bound ends the sweep");
+        assert!(page.events.iter().all(|e| e.at_ms >= 2_000));
     }
 }

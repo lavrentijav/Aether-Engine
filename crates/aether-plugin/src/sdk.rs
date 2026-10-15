@@ -211,8 +211,17 @@ pub trait HistoryService: Send + Sync {
         before: Option<u64>,
         limit: u32,
     ) -> HistoryPage;
-    /// The provenance chain of item `uid`, oldest first.
-    fn item_chain(&self, caller: &str, uid: u64, depth: u32) -> Vec<HistoryEvent>;
+    /// The provenance chain of item `uid`, newest first, paged. `depth` names
+    /// how many generations of ingredients to follow and is clamped by the
+    /// provider.
+    fn item_chain(
+        &self,
+        caller: &str,
+        uid: u64,
+        depth: u32,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage;
     /// Who accessed the container at `(x, y, z)`, newest first.
     fn container_log(
         &self,
@@ -816,12 +825,12 @@ impl bindings::aether::sdk::history::Host for StoreData {
         }
     }
 
-    fn item_chain(&mut self, uid: u64, depth: u32) -> Vec<HistoryEvent> {
+    fn item_chain(&mut self, uid: u64, depth: u32, before: Option<u64>, limit: u32) -> HistoryPage {
         match history(&self.services) {
-            Some(svc) => svc.item_chain(&self.plugin, uid, depth),
+            Some(svc) => svc.item_chain(&self.plugin, uid, depth, before, limit),
             None => {
                 self.service_unavailable(HISTORY_SERVICE, "item-chain");
-                Vec::new()
+                empty_history_page()
             }
         }
     }
@@ -1052,9 +1061,16 @@ mod tests {
             self.note(caller);
             empty_history_page()
         }
-        fn item_chain(&self, caller: &str, _uid: u64, _depth: u32) -> Vec<HistoryEvent> {
+        fn item_chain(
+            &self,
+            caller: &str,
+            _uid: u64,
+            _depth: u32,
+            _before: Option<u64>,
+            _limit: u32,
+        ) -> HistoryPage {
             self.note(caller);
-            Vec::new()
+            empty_history_page()
         }
         fn container_log(
             &self,
@@ -1108,7 +1124,9 @@ mod tests {
         let page = history::Host::block_history(&mut s, 1, 2, 3, None, 10);
         assert!(page.events.is_empty() && page.next.is_none());
         assert!(!history::Host::worldgen_original(&mut s, 1, 2, 3));
-        assert!(history::Host::item_chain(&mut s, 1, 1).is_empty());
+        assert!(history::Host::item_chain(&mut s, 1, 1, None, 10)
+            .events
+            .is_empty());
         let logged = backend.log.lock().unwrap();
         assert!(
             logged.iter().any(|l| l.contains("sdk.history")),
