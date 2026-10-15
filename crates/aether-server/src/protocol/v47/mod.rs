@@ -27,7 +27,7 @@ impl ProtocolCodec for Codec {
         47
     }
 
-    legacy_codec_item_hooks!(47, 0x19);
+    legacy_codec_item_hooks!(47, 0x19, true);
 
     fn read_login_start(&self, s: &mut Conn) -> io::Result<Option<String>> {
         // Login Start (0x00): username.

@@ -98,7 +98,7 @@ impl ProtocolCodec for Codec {
         PROTOCOL
     }
 
-    legacy_codec_item_hooks!(PROTOCOL, 0x23);
+    legacy_codec_item_hooks!(PROTOCOL, 0x23, false);
 
     fn read_login_start(&self, s: &mut Conn) -> io::Result<Option<String>> {
         // Login Start: the username comes first. Whatever follows it in this

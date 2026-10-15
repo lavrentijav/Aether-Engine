@@ -93,7 +93,7 @@ impl ProtocolCodec for Codec {
         PROTOCOL
     }
 
-    legacy_codec_item_hooks!(PROTOCOL, 0x21);
+    legacy_codec_item_hooks!(PROTOCOL, 0x21, false);
 
     fn supports(&self, protocol: i32) -> bool {
         protocol == PROTOCOL

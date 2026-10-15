@@ -782,8 +782,11 @@ pub(crate) fn legacy_item_table(protocol: i32) -> Option<&'static compat::items:
 /// layer, and this one macro installs all three so no codec repeats the
 /// binding:
 ///
-/// * [`ProtocolCodec::initial_hotbar`] seeds the server's inventory with
-///   [`STARTER_HOTBAR`], which the client is then handed so it can build;
+/// * [`ProtocolCodec::initial_hotbar`] — only for a codec that actually sends
+///   the hotbar to the client (`$hotbar`); for the 1.17–1.20.1 codecs, which
+///   do not, it stays empty. Seeding the *server* inventory for a client that
+///   was never handed those items would make `held_item` fictional and change
+///   which block the placement path thinks is held;
 /// * [`ProtocolCodec::block_for_item`] says which block a held item places —
 ///   the placement packet names only the hand, so the server must already know
 ///   what is in it;
@@ -793,8 +796,11 @@ pub(crate) fn legacy_item_table(protocol: i32) -> Option<&'static compat::items:
 ///   that reports the pack status, so the session can turn the compat pack's
 ///   carriers on for a client that loaded it.
 macro_rules! legacy_codec_item_hooks {
-    ($proto:expr, $status:expr) => {
+    ($proto:expr, $status:expr, $hotbar:expr) => {
         fn initial_hotbar(&self) -> Vec<(String, u8)> {
+            if !$hotbar {
+                return Vec::new();
+            }
             super::STARTER_HOTBAR
                 .iter()
                 .map(|(name, count)| ((*name).to_owned(), *count))
@@ -1050,16 +1056,22 @@ mod tests {
             let table =
                 legacy_item_table(proto).unwrap_or_else(|| panic!("no compat table for {proto}"));
 
-            // The starter hotbar is as long as the shared list, and every entry
-            // resolves to a real wire id on this release.
+            // The starter hotbar is seeded only for a codec that sends it to
+            // the client — 1.8.9 does, 1.17–1.20.1 do not (they rely on the
+            // creative menu), so theirs stays empty and the placement path
+            // keeps its stone fallback.
             let hotbar = c.initial_hotbar();
-            assert_eq!(hotbar.len(), STARTER_HOTBAR.len(), "{proto}");
-            for (name, count) in &hotbar {
-                assert!(*count > 0, "{proto}: {name} with no count");
-                assert!(
-                    table.wire(crate::inventory::item(name)).is_some(),
-                    "{proto}: {name} has no stand-in"
-                );
+            if proto == 47 {
+                assert_eq!(hotbar.len(), STARTER_HOTBAR.len(), "{proto}");
+                for (name, count) in &hotbar {
+                    assert!(*count > 0, "{proto}: {name} with no count");
+                    assert!(
+                        table.wire(crate::inventory::item(name)).is_some(),
+                        "{proto}: {name} has no stand-in"
+                    );
+                }
+            } else {
+                assert!(hotbar.is_empty(), "{proto} must not seed a hotbar");
             }
 
             // The held block item decides what a placement places.

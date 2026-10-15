@@ -584,6 +584,25 @@ mod tests {
     }
 
     #[test]
+    fn a_codec_that_sends_no_hotbar_seeds_nothing() {
+        // Review 1 minor: 1.17–1.20.1 never send the hotbar, so seeding the
+        // server inventory would make `held_item` fictional and let the
+        // placement path prefer a block the client was never given. Their
+        // `initial_hotbar` is empty, so nothing is seeded and placement keeps
+        // its own fallback.
+        let codec = codec_for(763).unwrap();
+        let h = handle(codec);
+        h.seed_hotbar(&codec.initial_hotbar());
+        assert!(h.held_item().is_none(), "nothing was handed out");
+
+        // 1.8.9 does send it, so it is seeded.
+        let v47 = codec_for(47).unwrap();
+        let h = handle(v47);
+        h.seed_hotbar(&v47.initial_hotbar());
+        assert!(h.held_item().is_some());
+    }
+
+    #[test]
     fn a_release_with_no_generated_pack_is_never_remapped() {
         // 1.8.9 has no carrier table, so even a loaded compat pack changes
         // nothing.
