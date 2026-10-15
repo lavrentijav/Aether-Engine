@@ -1730,12 +1730,34 @@ mod tests {
     #[test]
     fn a_menu_slot_count_matches_every_shape() {
         for (shape, n) in [
+            (MenuShape::Chest1, 9),
+            (MenuShape::Chest2, 18),
             (MenuShape::Chest3, 27),
+            (MenuShape::Chest4, 36),
+            (MenuShape::Chest5, 45),
             (MenuShape::Chest6, 54),
             (MenuShape::Dispenser, 9),
             (MenuShape::Hopper, 5),
         ] {
             assert_eq!(shape.slot_count(), n, "{shape:?}");
         }
+    }
+
+    #[test]
+    fn every_chest_shape_maps_to_a_distinct_menu() {
+        // The six chest row counts must open six different menus; sharing one
+        // would size the window wrong.
+        let six = [
+            MenuShape::Chest1,
+            MenuShape::Chest2,
+            MenuShape::Chest3,
+            MenuShape::Chest4,
+            MenuShape::Chest5,
+            MenuShape::Chest6,
+        ];
+        let mut menus: Vec<Menu> = six.iter().map(|s| s.menu()).collect();
+        menus.sort_by_key(|m| format!("{m:?}"));
+        menus.dedup();
+        assert_eq!(menus.len(), 6, "{six:?}");
     }
 }

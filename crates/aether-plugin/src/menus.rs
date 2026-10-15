@@ -24,9 +24,17 @@ use crate::service::ServiceRegistry;
 /// picks the nearest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MenuLayout {
+    /// A generic container of 9 slots (1 row).
+    Chest1,
+    /// A generic container of 18 slots (2 rows).
+    Chest2,
     /// A single chest, 27 slots (3 rows).
     #[default]
     Chest3,
+    /// A generic container of 36 slots (4 rows).
+    Chest4,
+    /// A generic container of 45 slots (5 rows).
+    Chest5,
     /// A double chest, 54 slots (6 rows).
     Chest6,
     /// A dispenser/dropper, 9 slots (a 3×3 grid).
@@ -39,19 +47,27 @@ impl MenuLayout {
     /// How many menu slots the window has.
     pub fn slot_count(self) -> u32 {
         match self {
+            MenuLayout::Chest1 => 9,
+            MenuLayout::Chest2 => 18,
             MenuLayout::Chest3 => 27,
+            MenuLayout::Chest4 => 36,
+            MenuLayout::Chest5 => 45,
             MenuLayout::Chest6 => 54,
             MenuLayout::Dispenser => 9,
             MenuLayout::Hopper => 5,
         }
     }
 
-    /// The layout a `rows` value names, or `None` for an unsupported size.
-    /// Rows are `1..=6`; only 3 and 6 have a chest menu id, so a 1/2/4/5-row
-    /// menu is refused rather than silently drawn at the wrong size.
+    /// The chest layout for a `rows` value, `1..=6`, or `None` for anything
+    /// else. Every size from 1 to 6 rows has its own protocol menu id
+    /// (`generic_9x1` … `generic_9x6`).
     pub fn from_rows(rows: u8) -> Option<MenuLayout> {
         match rows {
+            1 => Some(MenuLayout::Chest1),
+            2 => Some(MenuLayout::Chest2),
             3 => Some(MenuLayout::Chest3),
+            4 => Some(MenuLayout::Chest4),
+            5 => Some(MenuLayout::Chest5),
             6 => Some(MenuLayout::Chest6),
             _ => None,
         }
@@ -61,6 +77,10 @@ impl MenuLayout {
     pub fn parse(s: &str) -> Option<MenuLayout> {
         match s.to_ascii_lowercase().as_str() {
             "chest" | "chest3" | "3" => Some(MenuLayout::Chest3),
+            "chest1" | "1" => Some(MenuLayout::Chest1),
+            "chest2" | "2" => Some(MenuLayout::Chest2),
+            "chest4" | "4" => Some(MenuLayout::Chest4),
+            "chest5" | "5" => Some(MenuLayout::Chest5),
             "large_chest" | "large-chest" | "chest6" | "6" => Some(MenuLayout::Chest6),
             "dispenser" => Some(MenuLayout::Dispenser),
             "hopper" => Some(MenuLayout::Hopper),
@@ -363,10 +383,19 @@ mod tests {
     }
 
     #[test]
-    fn only_three_and_six_rows_have_a_chest_menu() {
-        assert_eq!(MenuLayout::from_rows(3), Some(MenuLayout::Chest3));
-        assert_eq!(MenuLayout::from_rows(6), Some(MenuLayout::Chest6));
-        for bad in [0, 1, 2, 4, 5, 7] {
+    fn every_chest_row_count_from_one_to_six_has_a_layout() {
+        for (rows, layout, slots) in [
+            (1, MenuLayout::Chest1, 9),
+            (2, MenuLayout::Chest2, 18),
+            (3, MenuLayout::Chest3, 27),
+            (4, MenuLayout::Chest4, 36),
+            (5, MenuLayout::Chest5, 45),
+            (6, MenuLayout::Chest6, 54),
+        ] {
+            assert_eq!(MenuLayout::from_rows(rows), Some(layout), "{rows} rows");
+            assert_eq!(layout.slot_count(), slots, "{rows} rows");
+        }
+        for bad in [0, 7, 255] {
             assert_eq!(MenuLayout::from_rows(bad), None, "{bad} rows");
         }
     }

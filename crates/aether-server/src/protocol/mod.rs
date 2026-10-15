@@ -505,9 +505,17 @@ pub enum ServerEvent<'a> {
 pub enum Menu {
     /// 3×3 crafting.
     Crafting,
-    /// A single chest, 27 slots.
+    /// A generic container of 9 slots (1 row).
+    Chest1,
+    /// A generic container of 18 slots (2 rows).
+    Chest2,
+    /// A single chest, 27 slots (3 rows).
     Chest,
-    /// A double chest, 54 slots.
+    /// A generic container of 36 slots (4 rows).
+    Chest4,
+    /// A generic container of 45 slots (5 rows).
+    Chest5,
+    /// A double chest, 54 slots (6 rows).
     LargeChest,
     /// A furnace.
     Furnace,

@@ -74,7 +74,11 @@ const RELEASES = [
 function menus(release) {
   const shift = ['v1_20_2', 'v1_20_4', 'v1_20_5'].includes(release) ? -1 : 0
   return {
+    generic_9x1: 0,
+    generic_9x2: 1,
     generic_9x3: 2,
+    generic_9x4: 3,
+    generic_9x5: 4,
     generic_9x6: 5,
     generic_3x3: 6,
     brewing_stand: 11 + shift,
@@ -168,6 +172,8 @@ for (const [mod, ver, proto] of RELEASES) {
     o('    pub const COMPONENT_CUSTOM_NAME: i32 = 0;')
     o('    pub const COMPONENT_LORE: i32 = 0;')
     o('    pub const COMPONENT_POTION_CONTENTS: i32 = 0;')
+    o('    pub const COMPONENT_ENCHANTMENT_GLINT_OVERRIDE: i32 = 0;')
+    o('    pub const COMPONENT_CUSTOM_MODEL_DATA: i32 = 0;')
     o('')
   } else {
     const comps = {}
@@ -177,6 +183,8 @@ for (const [mod, ver, proto] of RELEASES) {
     o(`    pub const COMPONENT_CUSTOM_NAME: i32 = ${comps['custom_name']};`)
     o(`    pub const COMPONENT_LORE: i32 = ${comps['lore']};`)
     o(`    pub const COMPONENT_POTION_CONTENTS: i32 = ${comps['potion_contents']};`)
+    o(`    pub const COMPONENT_ENCHANTMENT_GLINT_OVERRIDE: i32 = ${comps['enchantment_glint_override']};`)
+    o(`    pub const COMPONENT_CUSTOM_MODEL_DATA: i32 = ${comps['custom_model_data']};`)
     o('')
   }
 
@@ -229,7 +237,11 @@ for (const [mod, ver, proto] of RELEASES) {
   }
 
   const m = menus(mod)
+  o(`    pub const MENU_GENERIC_9X1: i32 = ${m.generic_9x1};`)
+  o(`    pub const MENU_GENERIC_9X2: i32 = ${m.generic_9x2};`)
   o(`    pub const MENU_GENERIC_9X3: i32 = ${m.generic_9x3};`)
+  o(`    pub const MENU_GENERIC_9X4: i32 = ${m.generic_9x4};`)
+  o(`    pub const MENU_GENERIC_9X5: i32 = ${m.generic_9x5};`)
   o(`    pub const MENU_GENERIC_9X6: i32 = ${m.generic_9x6};`)
   o(`    pub const MENU_GENERIC_3X3: i32 = ${m.generic_3x3};`)
   o(`    pub const MENU_BREWING_STAND: i32 = ${m.brewing_stand};`)

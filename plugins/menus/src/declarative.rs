@@ -312,10 +312,19 @@ actions = ["[economy] take 100", "[give] diamond_sword 1", "[close]"]
     }
 
     #[test]
-    fn rows_decide_the_layout_and_only_3_or_6_are_allowed() {
-        let three = "name=\"a\"\nrows=3\n[[item]]\nslot=0\nmaterial=\"stone\"\n";
-        assert_eq!(parse_str(three).unwrap().layout, MenuLayout::Chest3);
-        let bad = "name=\"a\"\nrows=5\n[[item]]\nslot=0\nmaterial=\"stone\"\n";
+    fn rows_one_through_six_pick_the_chest_layout() {
+        for (rows, layout) in [
+            (1, MenuLayout::Chest1),
+            (2, MenuLayout::Chest2),
+            (3, MenuLayout::Chest3),
+            (4, MenuLayout::Chest4),
+            (5, MenuLayout::Chest5),
+            (6, MenuLayout::Chest6),
+        ] {
+            let text = format!("name=\"a\"\nrows={rows}\n[[item]]\nslot=0\nmaterial=\"stone\"\n");
+            assert_eq!(parse_str(&text).unwrap().layout, layout, "{rows} rows");
+        }
+        let bad = "name=\"a\"\nrows=7\n[[item]]\nslot=0\nmaterial=\"stone\"\n";
         assert!(parse_str(bad).is_err());
     }
 

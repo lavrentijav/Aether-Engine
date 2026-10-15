@@ -26,7 +26,11 @@ pub use bindings::Services;
 
 fn layout(l: Layout) -> MenuLayout {
     match l {
+        Layout::Chest1 => MenuLayout::Chest1,
+        Layout::Chest2 => MenuLayout::Chest2,
         Layout::Chest3 => MenuLayout::Chest3,
+        Layout::Chest4 => MenuLayout::Chest4,
+        Layout::Chest5 => MenuLayout::Chest5,
         Layout::Chest6 => MenuLayout::Chest6,
         Layout::Dispenser => MenuLayout::Dispenser,
         Layout::Hopper => MenuLayout::Hopper,

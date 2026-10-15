@@ -13,7 +13,11 @@ use crate::protocol::{GameMode, Menu, MetaValue, ServerEvent};
 /// `minecraft:menu` registry ids.
 fn menu_id(v: &Version, m: Menu) -> i32 {
     match m {
+        Menu::Chest1 => v.menu_chest1,
+        Menu::Chest2 => v.menu_chest2,
         Menu::Chest => v.menu_chest,
+        Menu::Chest4 => v.menu_chest4,
+        Menu::Chest5 => v.menu_chest5,
         Menu::LargeChest => v.menu_double_chest,
         Menu::Crafting => v.menu_crafting,
         Menu::Furnace => v.menu_furnace,

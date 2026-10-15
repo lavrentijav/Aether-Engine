@@ -270,7 +270,11 @@ mod imp {
         use crate::game::player::MenuShape as S;
         use aether_plugin::menus::MenuLayout as L;
         match layout {
+            L::Chest1 => S::Chest1,
+            L::Chest2 => S::Chest2,
             L::Chest3 => S::Chest3,
+            L::Chest4 => S::Chest4,
+            L::Chest5 => S::Chest5,
             L::Chest6 => S::Chest6,
             L::Dispenser => S::Dispenser,
             L::Hopper => S::Hopper,

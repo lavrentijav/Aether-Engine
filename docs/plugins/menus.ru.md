@@ -72,9 +72,9 @@ click_condition = "balance>=100"
 actions = ["[economy] take 100", "[give] minecraft:diamond_sword 1", "[close]"]
 ```
 
-* **Раскладки:** `chest`/`chest3` (27 слотов), `large_chest`/`chest6` (54),
-  `dispenser` (9), `hopper` (5). `rows` принимает только 3 или 6 — у прочих
-  размеров нет id меню в протоколе.
+* **Раскладки:** универсальные сундуки `chest1` … `chest6` (от 9 до 54
+  слотов, 1–6 рядов по девять; `chest`/`chest3` — 27, `large_chest`/`chest6` —
+  54), `dispenser` (9) и `hopper` (5). `rows = 1..=6` выбирает нужный размер.
 * **Предмет:** `material`/`item`, `count`, `name`, `lore`, `glint`, `model`.
   Материал без `minecraft:` получает префикс; неизвестный предмет рисуется
   барьером, а не исчезает.

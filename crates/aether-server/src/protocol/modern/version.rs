@@ -259,7 +259,14 @@ pub struct Version {
     /// [`ItemTables`]). Private: callers go through the methods on this type.
     item_ids: OnceLock<ItemTables>,
     pub entity_types: &'static [(&'static str, u16)],
+    /// The generic container menus, `generic_9x1` … `generic_9x6` (1 to 6
+    /// nine-wide rows). `menu_chest` is the 3-row one and `menu_double_chest`
+    /// the 6-row one, kept by their old names for the paths that name them.
+    pub menu_chest1: i32,
+    pub menu_chest2: i32,
     pub menu_chest: i32,
+    pub menu_chest4: i32,
+    pub menu_chest5: i32,
     pub menu_double_chest: i32,
     pub menu_crafting: i32,
     pub menu_furnace: i32,
@@ -274,6 +281,15 @@ pub struct Version {
     /// stack carries one line naming the real item, so a player can tell a
     /// stand-in from the genuine article.
     pub component_lore: i32,
+    /// This version's id of the `minecraft:enchantment_glint_override` data
+    /// component (a boolean): a menu item's `glint`. Unused pre-1.20.5, where
+    /// the glint rides in the NBT `Enchantments` tag instead.
+    pub component_glint_override: i32,
+    /// This version's id of the `minecraft:custom_model_data` data component.
+    /// Zero pre-1.20.5, where the value rides in the NBT `CustomModelData`
+    /// tag; the component's stream form changed at 1.21.4 (see
+    /// `modern::play::write_custom_model_data`).
+    pub component_custom_model_data: i32,
     pub particle_explosion: i32,
     pub particle_explosion_emitter: i32,
     pub registries: Registries,
@@ -535,7 +551,11 @@ macro_rules! version {
             damage_types: &[],
             item_ids: OnceLock::new(),
             entity_types: super::gen::$m::ENTITY_TYPES,
+            menu_chest1: super::gen::$m::MENU_GENERIC_9X1,
+            menu_chest2: super::gen::$m::MENU_GENERIC_9X2,
             menu_chest: super::gen::$m::MENU_GENERIC_9X3,
+            menu_chest4: super::gen::$m::MENU_GENERIC_9X4,
+            menu_chest5: super::gen::$m::MENU_GENERIC_9X5,
             menu_double_chest: super::gen::$m::MENU_GENERIC_9X6,
             menu_crafting: super::gen::$m::MENU_CRAFTING,
             menu_furnace: super::gen::$m::MENU_FURNACE,
@@ -546,6 +566,8 @@ macro_rules! version {
             component_custom_name: super::gen::$m::COMPONENT_CUSTOM_NAME,
             component_potion_contents: super::gen::$m::COMPONENT_POTION_CONTENTS,
             component_lore: super::gen::$m::COMPONENT_LORE,
+            component_glint_override: super::gen::$m::COMPONENT_ENCHANTMENT_GLINT_OVERRIDE,
+            component_custom_model_data: super::gen::$m::COMPONENT_CUSTOM_MODEL_DATA,
             particle_explosion: super::gen::$m::PARTICLE_EXPLOSION,
             particle_explosion_emitter: super::gen::$m::PARTICLE_EXPLOSION_EMITTER,
             registries: $reg,
@@ -598,7 +620,11 @@ macro_rules! legacy_version {
             damage_types: super::legacy_gen::$m::DAMAGE_TYPES,
             item_ids: OnceLock::new(),
             entity_types: super::legacy_gen::$m::ENTITY_TYPES,
+            menu_chest1: super::legacy_gen::$m::MENU_GENERIC_9X1,
+            menu_chest2: super::legacy_gen::$m::MENU_GENERIC_9X2,
             menu_chest: super::legacy_gen::$m::MENU_GENERIC_9X3,
+            menu_chest4: super::legacy_gen::$m::MENU_GENERIC_9X4,
+            menu_chest5: super::legacy_gen::$m::MENU_GENERIC_9X5,
             menu_double_chest: super::legacy_gen::$m::MENU_GENERIC_9X6,
             menu_crafting: super::legacy_gen::$m::MENU_CRAFTING,
             menu_furnace: super::legacy_gen::$m::MENU_FURNACE,
@@ -609,6 +635,8 @@ macro_rules! legacy_version {
             component_custom_name: super::legacy_gen::$m::COMPONENT_CUSTOM_NAME,
             component_lore: super::legacy_gen::$m::COMPONENT_LORE,
             component_potion_contents: super::legacy_gen::$m::COMPONENT_POTION_CONTENTS,
+            component_glint_override: super::legacy_gen::$m::COMPONENT_ENCHANTMENT_GLINT_OVERRIDE,
+            component_custom_model_data: super::legacy_gen::$m::COMPONENT_CUSTOM_MODEL_DATA,
             particle_explosion: super::legacy_gen::$m::PARTICLE_EXPLOSION,
             particle_explosion_emitter: super::legacy_gen::$m::PARTICLE_EXPLOSION_EMITTER,
             registries: Registries::None,
@@ -706,6 +734,22 @@ mod tests {
         assert_eq!(V1_21_6.menu_brewing_stand, 11);
         assert_eq!(V1_21_8.menu_brewing_stand, 11);
         assert_eq!(V1_21_9.menu_brewing_stand, 11);
+    }
+
+    #[test]
+    fn the_generic_chest_menus_are_one_through_six_rows() {
+        // `generic_9x1` … `generic_9x6` register first and are unchanged
+        // across every release from 1.20.2 on, so a menu of any row count
+        // opens the same id on every codec. `chest` is generic_9x3 and
+        // `double_chest` generic_9x6, kept under their old names.
+        for v in [&V1_20_2, &V1_20_5, &V1_21_1, &V1_21_5, &V1_21_11, &V26_3] {
+            assert_eq!(v.menu_chest1, 0, "{}", v.name);
+            assert_eq!(v.menu_chest2, 1, "{}", v.name);
+            assert_eq!(v.menu_chest, 2, "{}", v.name);
+            assert_eq!(v.menu_chest4, 3, "{}", v.name);
+            assert_eq!(v.menu_chest5, 4, "{}", v.name);
+            assert_eq!(v.menu_double_chest, 5, "{}", v.name);
+        }
     }
 
     #[test]

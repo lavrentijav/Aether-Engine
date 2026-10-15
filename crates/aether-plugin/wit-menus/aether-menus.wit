@@ -8,10 +8,14 @@
 package aether:menus@0.1.0;
 
 interface menus {
-    /// The window shape. Only shapes whose protocol menu id the engine has are
-    /// offered.
+    /// The window shape. Every generic chest size (1–6 nine-wide rows) has a
+    /// protocol menu id, as do the dispenser (3×3) and hopper (5) grids.
     enum layout {
+        chest1,
+        chest2,
         chest3,
+        chest4,
+        chest5,
         chest6,
         dispenser,
         hopper,

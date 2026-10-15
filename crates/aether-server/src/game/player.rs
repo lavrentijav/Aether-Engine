@@ -60,8 +60,16 @@ pub enum WindowKind {
 /// different size picks the nearest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuShape {
+    /// A generic container of 9 slots (1 row).
+    Chest1,
+    /// A generic container of 18 slots (2 rows).
+    Chest2,
     /// A single chest, 27 slots (3 rows).
     Chest3,
+    /// A generic container of 36 slots (4 rows).
+    Chest4,
+    /// A generic container of 45 slots (5 rows).
+    Chest5,
     /// A double chest, 54 slots (6 rows).
     Chest6,
     /// A dispenser/dropper, 9 slots (a 3×3 grid).
@@ -74,7 +82,11 @@ impl MenuShape {
     /// How many menu slots the window has.
     pub fn slot_count(self) -> usize {
         match self {
+            MenuShape::Chest1 => 9,
+            MenuShape::Chest2 => 18,
             MenuShape::Chest3 => 27,
+            MenuShape::Chest4 => 36,
+            MenuShape::Chest5 => 45,
             MenuShape::Chest6 => 54,
             MenuShape::Dispenser => 9,
             MenuShape::Hopper => 5,
@@ -84,7 +96,11 @@ impl MenuShape {
     /// The protocol menu registry entry to open it with.
     pub fn menu(self) -> crate::protocol::Menu {
         match self {
+            MenuShape::Chest1 => crate::protocol::Menu::Chest1,
+            MenuShape::Chest2 => crate::protocol::Menu::Chest2,
             MenuShape::Chest3 => crate::protocol::Menu::Chest,
+            MenuShape::Chest4 => crate::protocol::Menu::Chest4,
+            MenuShape::Chest5 => crate::protocol::Menu::Chest5,
             MenuShape::Chest6 => crate::protocol::Menu::LargeChest,
             MenuShape::Dispenser => crate::protocol::Menu::Dispenser,
             MenuShape::Hopper => crate::protocol::Menu::Hopper,
@@ -94,7 +110,12 @@ impl MenuShape {
     /// The default title, for a menu that gives none.
     pub fn default_title(self) -> &'static str {
         match self {
-            MenuShape::Chest3 | MenuShape::Chest6 => "Menu",
+            MenuShape::Chest1
+            | MenuShape::Chest2
+            | MenuShape::Chest3
+            | MenuShape::Chest4
+            | MenuShape::Chest5
+            | MenuShape::Chest6 => "Menu",
             MenuShape::Dispenser => "Dispenser",
             MenuShape::Hopper => "Hopper",
         }

@@ -71,9 +71,10 @@ click_condition = "balance>=100"
 actions = ["[economy] take 100", "[give] minecraft:diamond_sword 1", "[close]"]
 ```
 
-* **Layouts:** `chest`/`chest3` (27 slots), `large_chest`/`chest6` (54),
-  `dispenser` (9), `hopper` (5). `rows` accepts 3 or 6 only — the other sizes
-  have no protocol menu id.
+* **Layouts:** the generic chest menus `chest1` … `chest6` (9 to 54 slots,
+  1–6 nine-wide rows; `chest`/`chest3` is 27 and `large_chest`/`chest6` is 54),
+  `dispenser` (9) and `hopper` (5). `rows = 1..=6` picks the matching chest
+  size.
 * **Item:** `material`/`item`, `count`, `name`, `lore`, `glint`, `model`.
   A material without `minecraft:` gets the prefix; an unknown item is drawn as
   a barrier rather than vanishing.
