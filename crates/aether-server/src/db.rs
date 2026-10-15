@@ -511,10 +511,15 @@ mod live {
     /// `information_schema.columns` and altering the mismatched columns is the
     /// only way a running deployment heals.
     fn migrate(c: &mut Client) -> Result<(), String> {
+        // Scoped to the current schema: `information_schema.columns` spans
+        // every schema the role can see, so without this an `aether_events`
+        // in another schema would contribute rows and plan spurious or wrong
+        // alters. The sink always creates and uses the table in
+        // `current_schema()`, which is what an unqualified name resolves to.
         let rows = c
             .query(
                 "SELECT column_name, udt_name FROM information_schema.columns \
-                 WHERE table_name = 'aether_events'",
+                 WHERE table_name = 'aether_events' AND table_schema = current_schema()",
                 &[],
             )
             .map_err(|e| e.to_string())?;
