@@ -84,6 +84,14 @@
     - **Sections are not re-hidden.** A section that becomes hidden after being revealed stays real on the client until the column is next streamed — the player already saw it, so there is no leak, but its blocks are back on the client.
     - **There is no spectator mode**, so `hidden_fill = "air"` falls back to stone for a survival player (and the module applies to every game mode); `/visibility off` (operator-only) is the admin bypass.
 
+17. **Online / hybrid authentication is new and only partially verified.** The `[auth]` module implements Mojang's encryption handshake (server RSA-1024 keypair, AES/CFB8, the signed server-id SHA-1), the `hasJoined` and profile-API calls (`reqwest` over rustls, no OpenSSL), the durable premium-name lock store and the hybrid decision table, all covered by unit tests with a mocked API and a local mock HTTP server. No live premium client was available, so:
+    - The pre-1.19 clients and the 1.19.x salt/signature variants are implemented from the protocol description; the `1.19`/`1.19.2` `should_authenticate` field is sent `false` and the response's trailing signature is ignored.
+    - Skin/cape properties are forwarded to the **modern** Player Info packet (1.21.11/26.x) only; the older codecs still send an empty property list, so a premium skin renders as the default there.
+    - Operator and whitelist entries still name a player (`name` or `name@address`); they cannot name a uuid yet.
+    - Offline uuids remain this engine's FNV derivation (`aether_api::player::offline_uuid`), not vanilla's MD5 `OfflinePlayer:<name>`; that is pre-existing and unchanged here, and it means a world keyed by the engine's offline uuid does not match one keyed by a vanilla offline server's.
+    - `/aether auth migrate <name>` moves the saved player-state and inventory blobs from a name's offline uuid to its locked premium uuid (never overwriting existing premium data); it does not move position-keyed block containers, chests or the journal.
+    - `cargo deny` ignores `RUSTSEC-2023-0071` (the `rsa` crate's unpatched Marvin timing side channel) — the standard login exposure every RustCrypto-based server has; a dependency swap would mean OpenSSL, which the task forbids.
+
 ### B. Known Deviations Registry (Phase 1 — accepted on purpose)
 These are **not bugs** in Phase 1 — they are documented, temporary compatibility gaps that must be recorded in the engine config and closed in Phase 2.
 
