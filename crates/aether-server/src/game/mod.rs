@@ -16,6 +16,7 @@ pub mod effects;
 pub mod entities;
 pub mod fluids;
 pub mod interact;
+pub mod loot;
 pub mod mobs;
 pub mod player;
 pub mod provenance;
