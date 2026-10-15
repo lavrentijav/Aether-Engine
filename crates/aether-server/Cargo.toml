@@ -23,6 +23,15 @@ serde = { workspace = true }
 # Protocol frame compression (zlib), pure Rust so the server keeps building
 # without a C toolchain.
 miniz_oxide = { workspace = true }
+# Online-mode auth: RustCrypto only, no OpenSSL (see `auth::crypto`).
+rsa = "0.9"
+aes = "0.8"
+cfb8 = "0.8"
+cipher = "0.4"
+sha1 = "0.10"
+rand = "0.8"
+# The Mojang session-server/profile-API calls. rustls, never OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 # The WebAssembly plugin host. Optional so `--no-default-features` builds the
 # server without Wasmtime's compile cost and dependency tree.
 aether-plugin = { workspace = true, optional = true }

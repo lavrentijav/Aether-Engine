@@ -12,15 +12,27 @@ allow = [
     "Zlib",
     "0BSD",
     "BSL-1.0",
-    # `encoding_rs` (via the Wasmtime component model) is
-    # `(Apache-2.0 OR MIT) AND BSD-3-Clause`; the BSD clause is permissive and
-    # imposes nothing beyond attribution.
+    # Pulled in by rustls / ring through the online-mode HTTP client, and by
+    # `subtle` under `rsa`.
+    "ISC",
+    "CDLA-Permissive-2.0",
+    # `encoding_rs` (via the Wasmtime component model) and `subtle` (under
+    # `rsa`) are BSD-3-Clause: permissive, attribution only.
     "BSD-3-Clause",
 ]
 confidence-threshold = 0.8
 
 [advisories]
 # Defaults: deny known vulnerabilities, warn on unmaintained/yanked.
+ignore = [
+    # RUSTSEC-2023-0071 (Marvin timing side channel) in the RustCrypto `rsa`
+    # crate has no patched release. Online-mode login is the only user of a
+    # private-key operation, and the task requires RustCrypto with no OpenSSL.
+    # The exposure is the standard one every Minecraft server has; the
+    # mitigation is to keep login attempts rate-limited and the world's
+    # operator list bound, not a dependency swap.
+    "RUSTSEC-2023-0071",
+]
 
 [bans]
 multiple-versions = "warn"

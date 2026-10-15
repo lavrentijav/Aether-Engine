@@ -164,6 +164,7 @@ pub fn dispatch(
         "audit" => audit(world),
         "cache" => cache(world),
         "help" | "?" => help(&args, handle),
+        "aether" => aether_admin(&args, handle, world),
         // Everything else is a fallback. Plugin commands are resolved through
         // the registry here — **after** every core name has been offered, and
         // with the same permission gate — so they can never shadow a core
@@ -193,6 +194,77 @@ fn fallback(cmd: &str, args: &[&str], handle: &PlayerHandle) -> Reply {
         };
     }
     stub(cmd, handle)
+}
+
+/// `/aether <subcommand>` — server administration that does not belong to any
+/// other command.
+///
+/// Today only `auth migrate` (AU1): moving an offline player's saved state to
+/// the Mojang uuid they now own. Migration is deliberately manual — the
+/// server cannot know a fresh online login is the same person as an old
+/// offline one.
+fn aether_admin(args: &[&str], handle: &PlayerHandle, world: &DemoWorld) -> Reply {
+    if !crate::is_operator(handle) {
+        return Reply::one("You do not have permission to run this command.");
+    }
+    match args {
+        ["auth", "migrate", name] => migrate_offline_player(name, world),
+        _ => Reply::one("Usage: /aether auth migrate <name>"),
+    }
+}
+
+/// Move a name's saved player state and inventory from its offline uuid to
+/// the premium uuid the lock table records.
+///
+/// An existing premium record is never overwritten: if the player has already
+/// played online, their new data is the truth and the old offline blob is left
+/// where it is.
+fn migrate_offline_player(name: &str, world: &DemoWorld) -> Reply {
+    let Some(lock) = crate::auth::store::get_by_name(world, name) else {
+        return Reply::one(format!(
+            "`{name}` is not a locked premium name; nothing to migrate."
+        ));
+    };
+    let offline = aether_api::player::offline_uuid(name);
+    if offline == lock.uuid {
+        return Reply::one(format!(
+            "`{name}` already keys on its premium uuid {}; nothing to migrate.",
+            crate::auth::api::hyphenated_uuid(lock.uuid)
+        ));
+    }
+    let pairs = [
+        (
+            crate::game::player::key(offline),
+            crate::game::player::key(lock.uuid),
+        ),
+        (
+            crate::inventory::key(offline),
+            crate::inventory::key(lock.uuid),
+        ),
+    ];
+    let mut moved = 0;
+    let mut skipped = 0;
+    for (from, to) in pairs {
+        if world.get_meta(&to).ok().flatten().is_some() {
+            skipped += 1;
+            continue;
+        }
+        if let Ok(Some(blob)) = world.get_meta(&from) {
+            if world.put_meta(&to, &blob).is_ok() {
+                moved += 1;
+            }
+        }
+    }
+    Reply::one(format!(
+        "migrated {moved} record(s) for `{name}` from offline uuid {} to premium uuid {}{}.",
+        crate::auth::api::hyphenated_uuid(offline),
+        crate::auth::api::hyphenated_uuid(lock.uuid),
+        if skipped > 0 {
+            format!(" ({skipped} left untouched: the premium uuid already has data)")
+        } else {
+            String::new()
+        }
+    ))
 }
 
 /// Whether `handle` may run a command needing `op`.

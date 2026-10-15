@@ -509,6 +509,7 @@ mod tests {
                 uuid,
                 name.into(),
                 None,
+                Vec::new(),
                 &Codec,
                 &client,
                 PosLook {

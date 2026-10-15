@@ -236,6 +236,87 @@ impl Default for VisibilityConfig {
     }
 }
 
+/// `[auth]` settings: who may claim a name.
+///
+/// The server has always run offline: a name is just a claim. In `online`
+/// mode every client must complete Mojang's encryption handshake. In `hybrid`
+/// offline play stays open to everyone; only a name that has completed online
+/// auth **on this server** is locked and must authenticate. See
+/// [`crate::auth`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// Which authentication policy to run under.
+    pub mode: AuthMode,
+    /// Base URL of the session server (`hasJoined`).
+    pub session_server: String,
+    /// Base URL of the profile API (name → uuid lookup).
+    pub profile_api: String,
+    /// How long a Mojang HTTP call may take before it counts as a failure.
+    pub lookup_timeout_ms: u64,
+    /// What `hybrid` does when the profile API cannot be reached.
+    pub on_lookup_failure: LookupFailure,
+    /// Login attempts allowed per address per minute. `0` disables the limit.
+    ///
+    /// Each attempt can cost a Mojang lookup and a connection thread, so this
+    /// bounds how fast a scanner can drive outbound calls or park threads.
+    pub login_rate_per_min: u32,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            mode: AuthMode::Offline,
+            session_server: "https://sessionserver.mojang.com".to_string(),
+            profile_api: "https://api.mojang.com".to_string(),
+            lookup_timeout_ms: 3000,
+            on_lookup_failure: LookupFailure::Offline,
+            login_rate_per_min: 10,
+        }
+    }
+}
+
+/// The authentication policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    /// Anyone may join under any name, as before. No Mojang traffic.
+    #[default]
+    Offline,
+    /// Every client must complete the encryption handshake and `hasJoined`.
+    Online,
+    /// Locked names require online auth; everyone else may join offline.
+    Hybrid,
+}
+
+impl std::str::FromStr for AuthMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "offline" => Ok(AuthMode::Offline),
+            "online" => Ok(AuthMode::Online),
+            "hybrid" => Ok(AuthMode::Hybrid),
+            other => Err(format!(
+                "`{other}` is not an auth mode — use offline, online or hybrid"
+            )),
+        }
+    }
+}
+
+/// What `hybrid` does when the profile API is unreachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LookupFailure {
+    /// Admit the player offline, as if the name were not premium. Favours
+    /// availability; someone whose name *is* locked may still be refused by
+    /// the lock itself.
+    #[default]
+    Offline,
+    /// Refuse the login. Favours not letting a premium name be squatted while
+    /// the API is down.
+    Deny,
+}
+
 /// `[plugins.<id>]`: what the operator decides about one plugin.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -281,6 +362,8 @@ pub struct Config {
     pub resource_pack: ResourcePackConfig,
     /// Optional anti-xray / visibility culling.
     pub visibility: VisibilityConfig,
+    /// Authentication policy.
+    pub auth: AuthConfig,
     /// Optional history mirror.
     pub database: DatabaseConfig,
     /// WebAssembly plugins: the directory and the per-plugin overrides.
@@ -534,6 +617,19 @@ url = ""
 hash = ""
 required = false
 
+[auth]
+# Who may claim a name. "offline" (default): anyone may join under any name.
+# "online": every client must complete Mojang's encryption handshake. "hybrid":
+# a name that belongs (or has ever belonged) to a premium account is locked to
+# it and must pass online auth; everyone else joins offline. Locked names are
+# remembered in the world store.
+mode = "offline"
+session_server = "https://sessionserver.mojang.com"
+profile_api = "https://api.mojang.com"
+lookup_timeout_ms = 3000     # how long a Mojang HTTP call may take
+on_lookup_failure = "offline" # hybrid, API unreachable: "offline" or "deny"
+login_rate_per_min = 10      # login attempts per address per minute; 0 disables
+
 [database]
 # Mirror the world history into PostgreSQL for querying (needs
 # `--features postgres`). Leave url empty to disable. The mirror is derived
@@ -658,6 +754,40 @@ mod tests {
         assert_eq!(radius(-5).clamped_view_radius(), 1);
         assert_eq!(radius(100).clamped_view_radius(), 12);
         assert_eq!(radius(8).clamped_view_radius(), 8);
+    }
+
+    #[test]
+    fn auth_defaults_to_offline_and_parses_every_mode() {
+        let cfg = Config::default();
+        assert_eq!(cfg.auth.mode, AuthMode::Offline, "offline is the default");
+        assert_eq!(cfg.auth.session_server, "https://sessionserver.mojang.com");
+        assert_eq!(cfg.auth.profile_api, "https://api.mojang.com");
+        assert_eq!(cfg.auth.lookup_timeout_ms, 3000);
+        assert_eq!(cfg.auth.on_lookup_failure, LookupFailure::Offline);
+
+        for (text, want) in [
+            ("offline", AuthMode::Offline),
+            ("online", AuthMode::Online),
+            ("hybrid", AuthMode::Hybrid),
+        ] {
+            let cfg: Config = toml::from_str(&format!("[auth]\nmode = \"{text}\"\n")).unwrap();
+            assert_eq!(cfg.auth.mode, want);
+        }
+        "offline".parse::<AuthMode>().unwrap();
+        assert!("sideways".parse::<AuthMode>().is_err());
+    }
+
+    #[test]
+    fn the_auth_section_parses_a_hybrid_deny_setup() {
+        let cfg: Config = toml::from_str(
+            "[auth]\nmode = \"hybrid\"\nsession_server = \"http://localhost:9\"\n\
+             profile_api = \"http://localhost:8\"\nlookup_timeout_ms = 250\n\
+             on_lookup_failure = \"deny\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.auth.mode, AuthMode::Hybrid);
+        assert_eq!(cfg.auth.lookup_timeout_ms, 250);
+        assert_eq!(cfg.auth.on_lookup_failure, LookupFailure::Deny);
     }
 
     #[test]
