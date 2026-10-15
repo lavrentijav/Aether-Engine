@@ -359,6 +359,29 @@ impl Menus {
         self.state.lock().unwrap().registry.get(name).cloned()
     }
 
+    /// The menu an `open_commands` entry opens, if any.
+    fn menu_for_command(&self, command: &str) -> Option<MenuDefinition> {
+        self.state
+            .lock()
+            .unwrap()
+            .registry
+            .values()
+            .find(|d| d.open_commands.iter().any(|c| c == command))
+            .cloned()
+    }
+
+    /// Every `(command, menu)` pair a declarative file asked for, for the
+    /// plugin to register with the core command registry.
+    fn open_command_bindings(&self) -> Vec<(String, MenuDefinition)> {
+        let mut out = Vec::new();
+        for def in self.state.lock().unwrap().registry.values() {
+            for cmd in &def.open_commands {
+                out.push((cmd.clone(), def.clone()));
+            }
+        }
+        out
+    }
+
     /// Insert/replace the declarative registry, keeping any menu a live
     /// instance is currently showing.
     fn install_menus(&self, menus: Vec<MenuDefinition>) {
@@ -464,6 +487,27 @@ impl Default for MenusPlugin {
     }
 }
 
+impl MenusPlugin {
+    /// Register a declarative menu's `open_commands` with the core command
+    /// registry, so `/shop` is dispatched and permission-checked like any
+    /// other command. A core name or a duplicate is refused (logged) by the
+    /// registry, never shadowed.
+    fn register_open_commands(&self, ctx: &mut NativeContext) {
+        for (cmd, def) in self.inner.open_command_bindings() {
+            let node = def
+                .permission
+                .clone()
+                .unwrap_or_else(|| format!("plugin.menus.menu.{}", def.name));
+            if let Err(e) = ctx.backend.register_command("menus", &cmd, &node, 0) {
+                ctx.log(
+                    LogLevel::Warn,
+                    &format!("menu `{}`: command `{cmd}` not registered: {e}", def.name),
+                );
+            }
+        }
+    }
+}
+
 impl NativePlugin for MenusPlugin {
     fn init(&mut self, ctx: &mut NativeContext) -> Result<(), String> {
         let _ = self.inner.backend.set(Arc::clone(ctx.backend));
@@ -473,6 +517,7 @@ impl NativePlugin for MenusPlugin {
         let loaded = declarative::load(ctx);
         let names: Vec<String> = loaded.iter().map(|d| d.name.clone()).collect();
         self.inner.install_menus(loaded);
+        self.register_open_commands(ctx);
         // Register the exported service.
         menus::register_menus(ctx.services, self.inner.clone())?;
         ctx.log(
@@ -493,39 +538,45 @@ impl NativePlugin for MenusPlugin {
         name: &str,
         args: &[String],
     ) -> Option<aether_plugin::bindings::aether::plugin::types::CommandResult> {
-        match name {
+        let def = match name {
             "menu" => {
                 let Some(menu_name) = args.first() else {
                     return Some(lines(vec!["Usage: /menu <name>".to_string()]));
                 };
-                let Some(def) = self.inner.named_menu(menu_name) else {
-                    return Some(lines(vec![format!("No menu named `{menu_name}`.")]));
-                };
-                if let Some(node) = &def.permission {
-                    let allowed = self
-                        .inner
-                        .services()
-                        .and_then(|s| sdk::permissions(s))
-                        .map(|svc| svc.check("menus", p, node))
-                        .unwrap_or(false);
-                    if !allowed {
-                        return Some(lines(vec!["You may not open that menu.".to_string()]));
+                match self.inner.named_menu(menu_name) {
+                    Some(def) => def,
+                    None => {
+                        return Some(lines(vec![format!("No menu named `{menu_name}`.")]));
                     }
                 }
-                Some(match self.inner.open_internal("menus", p, &def) {
-                    Ok(()) => lines(Vec::new()),
-                    Err(e) => lines(vec![e]),
-                })
             }
             "menus" if args.first().map(String::as_str) == Some("reload") => {
                 let loaded = declarative::load(_ctx);
                 let n = loaded.len();
                 self.inner.install_menus(loaded);
-                Some(lines(vec![format!("Reloaded {n} menu(s).")]))
+                self.register_open_commands(_ctx);
+                return Some(lines(vec![format!("Reloaded {n} menu(s).")]));
             }
-            "menus" => Some(lines(vec!["Usage: /menus reload".to_string()])),
-            _ => None,
+            "menus" => return Some(lines(vec!["Usage: /menus reload".to_string()])),
+            // A declarative menu's own `open_commands` entry.
+            _ => self.inner.menu_for_command(name)?,
+        };
+        // Permission is checked before the window opens.
+        if let Some(node) = &def.permission {
+            let allowed = self
+                .inner
+                .services()
+                .and_then(|s| sdk::permissions(s))
+                .map(|svc| svc.check("menus", p, node))
+                .unwrap_or(false);
+            if !allowed {
+                return Some(lines(vec!["You may not open that menu.".to_string()]));
+            }
         }
+        Some(match self.inner.open_internal("menus", p, &def) {
+            Ok(()) => lines(Vec::new()),
+            Err(e) => lines(vec![e]),
+        })
     }
 
     fn on_menu_click(
@@ -734,5 +785,38 @@ mod tests {
         let m = Menus::default();
         assert_eq!(m.expand("Hi %player%!", &player()), "Hi Steve!");
         assert_eq!(m.expand("%unknown%", &player()), "%unknown%");
+    }
+
+    #[test]
+    fn a_declarative_menu_loads_opens_and_acts() {
+        let rec = Arc::new(Rec::default());
+        let m = menus_with(rec.clone());
+        let def = declarative::parse_str(
+            r#"
+name = "shop"
+title = "&6Shop"
+layout = "chest6"
+open_commands = ["shop"]
+permission = "shop.use"
+
+[[item]]
+slot = 0
+material = "emerald"
+name = "&aBuy"
+actions = ["[message] &aBought!", "[close]"]
+"#,
+        )
+        .unwrap();
+        m.install_menus(vec![def]);
+
+        // The open command resolves to the menu.
+        let def = m.menu_for_command("shop").expect("bound command");
+        assert_eq!(def.layout, aether_plugin::menus::MenuLayout::Chest6);
+        m.open("menus", &player(), &def).unwrap();
+        let id = rec.opened.lock().unwrap()[0].0;
+
+        m.handle_click(&player(), id, 0, 0, 0);
+        assert_eq!(rec.messages.lock().unwrap().as_slice(), ["&aBought!"]);
+        assert_eq!(rec.closed.lock().unwrap().as_slice(), [id]);
     }
 }

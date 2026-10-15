@@ -61,11 +61,11 @@ macro_rules! requires {
 /// Ergonomic re-exports: the SDK service modules, the host import, the shared
 /// event types, the frozen `Guest` trait and the `export!` macro.
 pub mod prelude {
+    pub use crate::bindings::aether::menus::menus;
     pub use crate::bindings::aether::plugin::host;
     pub use crate::bindings::aether::plugin::types::{
         CommandResult, Decision, LogLevel, ManifestAck, Player,
     };
-    pub use crate::bindings::aether::menus::menus;
     pub use crate::bindings::aether::sdk::{
         commands, config, confirm, cooldowns, messages, permissions, players, scheduler,
     };
