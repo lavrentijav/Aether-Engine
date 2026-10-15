@@ -147,6 +147,16 @@ name = "aether-telemetry"
 version = "0.1.0"
 
 [[package]]
+name = "aether-webadmin-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-api",
+ "aether-plugin",
+ "aether-world",
+ "aether-worldgen",
+]
+
+[[package]]
 name = "aether-world"
 version = "0.1.0"
 dependencies = [

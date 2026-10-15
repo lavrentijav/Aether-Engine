@@ -1,0 +1,25 @@
+[package]
+name = "aether-webadmin-plugin"
+description = "WEB2: read-only admin web interface — top-down map tiles and a journal time machine, served from the plugin."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "aether_webadmin"
+
+[dependencies]
+# The world facade and its journal: the map samples blocks through it and the
+# time machine replays the journal over its baseline.
+aether-api = { workspace = true, default-features = false }
+aether-world = { workspace = true, default-features = false }
+aether-worldgen = { workspace = true }
+# The host trait a native plugin implements. The map/time-machine logic does not
+# depend on it — the plugin wrapper is thin so the modules stay testable alone.
+aether-plugin = { workspace = true }
+
+[lints]
+workspace = true

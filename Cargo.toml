@@ -19,6 +19,9 @@ members = [
     # plugins call. Native plugins are compiled into the server, so this one is
     # a workspace member unlike the WASM examples.
     "plugins/sdk",
+    # WEB2: the admin web interface — read-only map tiles and a journal time
+    # machine. Native plugin (tier N), trusted-by-install like the SDK.
+    "plugins/webadmin",
 ]
 
 # The example plugins are separate WebAssembly components: they target
