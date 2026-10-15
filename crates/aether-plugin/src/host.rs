@@ -87,6 +87,34 @@ pub trait HostBackend: Send + Sync {
     fn capabilities(&self, _plugin: &str) -> Vec<String> {
         Vec::new()
     }
+
+    /// Replace a player's sidebar. The core diffs the board against what the
+    /// player already shows and writes only the packets that changed, so a
+    /// caller may hand over the whole board every update. The default does
+    /// nothing, so a host (or a test) without a scoreboard still satisfies the
+    /// trait.
+    fn set_sidebar(&self, _plugin: &str, _player: u64, _board: &crate::sidebar::SidebarBoard) {}
+
+    /// Hide a player's sidebar. The default does nothing.
+    fn clear_sidebar(&self, _plugin: &str, _player: u64) {}
+
+    /// The extra per-player facts a sidebar can show (position, world, ping,
+    /// health, level). The default is `None`: a host that cannot answer simply
+    /// leaves those placeholders empty.
+    fn player_extra(&self, _plugin: &str, _player: u64) -> Option<crate::sidebar::PlayerExtra> {
+        None
+    }
+
+    /// Ticks per second, for `%tps%`. The default is the ideal 20.
+    fn server_tps(&self, _plugin: &str) -> f64 {
+        20.0
+    }
+
+    /// The configured player-slot cap, for `%max%`. The default is the vanilla
+    /// default.
+    fn max_players(&self, _plugin: &str) -> u32 {
+        20
+    }
 }
 
 /// Sandbox and scheduling limits for the whole host.

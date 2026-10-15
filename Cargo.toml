@@ -19,6 +19,9 @@ members = [
     # plugins call. Native plugins are compiled into the server, so this one is
     # a workspace member unlike the WASM examples.
     "plugins/sdk",
+    # The sidebar, as a native plugin: it composes a per-player scoreboard from
+    # config and placeholders and asks the core to draw it.
+    "plugins/sidebar",
 ]
 
 # The example plugins are separate WebAssembly components: they target
