@@ -100,6 +100,27 @@ fn tripwire_wire_connects_to_a_facing_hook() {
 }
 
 #[test]
+fn two_adjacent_hooks_do_not_attach() {
+    // F3: vanilla's `bl5 &= j > 1` — a line needs at least one wire between the
+    // hooks. Two back-to-back hooks (no wire) must not latch attached.
+    let engine = Redstone::new();
+    let mut w = MemWorld::new();
+    let a = p(0, 0, 0);
+    let b = p(1, 0, 0);
+    w.put(p(-1, 0, 0), "minecraft:stone");
+    w.put(p(2, 0, 0), "minecraft:stone");
+    w.put(a, "minecraft:tripwire_hook[facing=east]");
+    w.put(b, "minecraft:tripwire_hook[facing=west]");
+    for pos in [p(-1, 0, 0), p(2, 0, 0), a, b] {
+        engine.on_placed(&mut w, pos);
+    }
+
+    assert_eq!(props::get(w.state(a), "attached"), Some("false"));
+    assert_eq!(props::get(w.state(b), "attached"), Some("false"));
+    assert_eq!(props::get(w.state(a), "powered"), Some("false"));
+}
+
+#[test]
 fn removing_a_powered_wire_releases_both_hooks() {
     // F1: `TripWireBlock.affectNeighborsAfterRemoval` recomputes the line with
     // the removed wire substituted at its distance `i`, so the scan reaches the

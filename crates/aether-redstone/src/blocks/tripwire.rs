@@ -270,8 +270,9 @@ fn calculate_state(
         }
     }
 
-    // A line needs at least one wire between the hooks (`bl5 &= j > 1` is added
-    // in a later commit).
+    // `bl5 &= j > 1`: a line needs at least one wire between the hooks, so two
+    // adjacent hooks are not considered attached to each other.
+    attached &= j > 1;
     let powered = any_powered && attached;
 
     if j > 0 {
