@@ -192,6 +192,28 @@ conservation — over the **wire** multiset, since a same-wire merge converts a
 disguised stack's real identity into the slot's item (the client cannot see the
 difference, so only the wire view is conserved).
 
+## Round-7 fix (J10-fix16)
+
+Owner decision: real-item conservation wins over the wire view. A merge of two
+stacks whose real items differ but whose wire id is equal — a disguised stack
+onto its genuine look-alike, either direction, any stackability — is now
+**refused** (`Resolution::Reject`): the slot and the cursor are left as they
+were and the session resyncs the window so the client reverts. An *unstackable*
+look-alike pair (a spear shown as a trident onto a genuine trident) cannot
+merge, so the client swaps; that swap is allowed (both real items survive).
+
+`session::resolve_creative_report` returns `None` on reject and calls
+`sync_inventory`; `record_slot_change` writes nothing.
+
+Property test: the conjure menu now includes genuine wire-colliding items
+(`oak_planks`, `leather`) alongside the seeded engine-only ones
+(`pale_oak_planks`, `white_harness`, `iron_spear`), and the oracle is now a
+direct conservation check — the server's real multiset (slots + shadow) never
+shrinks and grows only by spending a conjure credit. Reverting the reject makes
+it fail with "the server gained 53 of oak_planks with no conjure" (the exact
+round-5 transmutation). The model resyncs on reject and conjures onto an empty
+cursor.
+
 ## Left / interface note for the J5 (J9) agent
 
 The per-move logic keys off `compat::items::table_for(handle.codec.protocol_id())`.

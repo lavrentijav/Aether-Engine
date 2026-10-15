@@ -1434,7 +1434,14 @@ fn record_slot_change(
     item: Option<aether_world::ItemTypeId>,
     count: u8,
 ) {
-    let (item, count) = resolve_creative_report(handle, slot, item.map(|item| (item, count)));
+    let Some((item, count)) =
+        resolve_creative_report(handle, world, slot, item.map(|item| (item, count)))
+    else {
+        // The server refused the click — honouring it would have converted one
+        // real item into another (a merge of wire look-alikes). The window was
+        // resynced, so the client reverts; nothing changes here.
+        return;
+    };
     let change = handle.set_creative_slot(slot, item, count);
     if change.is_noop() {
         return;
@@ -1483,9 +1490,10 @@ fn record_slot_change(
 /// honouring a codec's own same-slot rule.
 fn resolve_creative_report(
     handle: &crate::players::PlayerHandle,
+    world: &DemoWorld,
     slot: i16,
     reported: Option<(aether_world::ItemTypeId, u8)>,
-) -> (Option<aether_world::ItemTypeId>, u8) {
+) -> Option<(Option<aether_world::ItemTypeId>, u8)> {
     let table = protocol::compat::items::table_for(handle.codec.protocol_id());
     let Some(table) = table else {
         let item = match (reported, slot) {
@@ -1497,7 +1505,7 @@ fn resolve_creative_report(
             (None, _) => None,
         };
         let count = reported.map_or(0, |(_, c)| c);
-        return (item, count);
+        return Some((item, count));
     };
 
     // Snapshot before the move: what the slot holds and the shadow the client
@@ -1517,10 +1525,21 @@ fn resolve_creative_report(
     };
 
     let (resolution, carried) = table.resolve_change(reported, previous, carried);
-    handle.game().creative_carry = carried;
     match resolution {
-        protocol::compat::items::Resolution::Apply(Some((item, count))) => (Some(item), count),
-        protocol::compat::items::Resolution::Apply(None) => (None, 0),
+        protocol::compat::items::Resolution::Apply(Some((item, count))) => {
+            handle.game().creative_carry = carried;
+            Some((Some(item), count))
+        }
+        protocol::compat::items::Resolution::Apply(None) => {
+            handle.game().creative_carry = carried;
+            Some((None, 0))
+        }
+        protocol::compat::items::Resolution::Reject => {
+            // Keep the shadow as it was (the cursor is untouched) and show the
+            // client the server's view again, reverting its optimistic merge.
+            handle.sync_inventory(world);
+            None
+        }
     }
 }
 

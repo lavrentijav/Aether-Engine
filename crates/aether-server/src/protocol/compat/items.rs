@@ -162,6 +162,12 @@ pub enum Resolution {
     /// Write this stack, `(item, count)`, or `None` for an empty slot, into the
     /// reported slot.
     Apply(Option<(ItemTypeId, u8)>),
+    /// Refuse the report and leave the slot and the cursor as they were. The
+    /// caller resyncs the window so the client reverts. Used when honouring the
+    /// click would convert one **real** item into a different one (a merge of
+    /// two look-alikes that only share a wire id), which is not acceptable even
+    /// though the client cannot see the difference.
+    Reject,
 }
 
 impl ItemTable {
@@ -177,33 +183,29 @@ impl ItemTable {
     /// stand-in or the genuine item it hides, and the server never sees the
     /// client's cursor directly. It therefore:
     ///
-    /// * if the report is **reconciled** with the carried shadow — same wire id
-    ///   and a count the shadow could have carried (no more than it held, or the
-    ///   cursor merged into a slot that shows the same item *on the wire*) —
-    ///   the report is that stack being placed. Whether the slot's item is the
-    ///   same real item or merely a different real item that shares its wire id
-    ///   (a disguised stack onto a genuine one), the slot **keeps its own
-    ///   authoritative item** and only what was *added* is consumed from the
-    ///   cursor, so a genuine stack is never swapped away for a stand-in. A slot
-    ///   showing a *different* wire id is a swap: the replaced stack goes to the
-    ///   cursor;
+    /// * **refuses** a report that would combine two stacks whose real items
+    ///   differ but whose wire id is equal — a disguised stack onto its genuine
+    ///   look-alike, in either direction. The client sees one kind and either
+    ///   merges or swaps them; merging would have to convert one real item into
+    ///   the other, which is refused even though it is invisible. An
+    ///   *unstackable* look-alike pair (a spear shown as a trident onto a
+    ///   genuine trident) cannot merge — the client swaps — so that swap is
+    ///   allowed, and it preserves both real items;
+    /// * if the report is **reconciled** with the carried shadow and the real
+    ///   items agree (or the slot is empty or a different wire id), resolves it
+    ///   as a placement, a merge of one real item, a swap, or a creation as
+    ///   before;
     /// * if it is not reconciled but the slot already shows the same wire id and
     ///   the count did not grow, keeps the slot's own real item (a re-send/echo)
-    ///   and **discards** the shadow (the report is not the shadow's item, so the
-    ///   cursor is not what the server thought);
+    ///   and **discards** the shadow;
     /// * otherwise treats the report as a **swap or creation** with a cursor the
     ///   server does not know: the slot takes the genuine reported item, and
     ///   whatever the slot held moves to the cursor (N4).
     ///
-    /// A client can put a creative-menu item on its cursor with no packet, so
-    /// the shadow can be stale. A report the shadow cannot explain — a count
-    /// above what it carried into an empty or foreign slot, i.e. the client
-    /// conjured a stand-in-wire item the server never had — **invalidates** the
-    /// shadow rather than materialising the engine-only item (round 4): the
-    /// genuine reported item is written, never more of the stand-in than was
-    /// carried. A same-wire report with **no** shadow keeps the slot's real item
-    /// (the echo guard restored from before N1, scoped to the no-carry case so
-    /// it cannot swallow a genuine swap).
+    /// The **real-item multiset is conserved**: no report ever converts one real
+    /// item into another. Items move (cursor ↔ slot) and are created (a creative
+    /// client conjures a genuine item) or destroyed (a slot is emptied), but a
+    /// merge of look-alikes is refused and the client resynced.
     pub fn resolve_change(
         &self,
         report: Option<(ItemTypeId, u8)>,
@@ -221,24 +223,40 @@ impl ItemTable {
                 (Resolution::Apply(None), carry)
             }
             Some((r_item, r_count)) => {
-                if let Some(c) = carried.filter(|c| self.reconciles(*c, r_item, r_count, previous))
-                {
+                let placing = carried.filter(|c| self.reconciles(*c, r_item, r_count, previous));
+
+                if let Some((p_item, p_count)) = previous {
+                    // What real item the client is trying to write into the
+                    // slot: the carried one if we know it, else the wire's own.
+                    let incoming = placing.map_or(r_item, |c| c.item);
+                    if self.same_wire(p_item, incoming) && p_item != incoming {
+                        // Look-alikes: the slot and the incoming item share a
+                        // wire id but are different real items.
+                        if self.wire_stacks(incoming) {
+                            // Stackable as shown: the client merged them.
+                            // Refuse; the client reverts on resync.
+                            return (Resolution::Reject, carried);
+                        }
+                        // Unstackable as shown: the client swapped two
+                        // look-alikes. Both real items survive the swap.
+                        return match placing {
+                            Some(c) => (
+                                Resolution::Apply(Some((c.item, c.count))),
+                                Some(Carried {
+                                    item: p_item,
+                                    count: p_count,
+                                }),
+                            ),
+                            None => (Resolution::Apply(Some((p_item, p_count))), carried),
+                        };
+                    }
+                }
+
+                if let Some(c) = placing {
                     // The client placed the carried stack into this slot.
                     let (slot_item, carry) = match previous {
-                        // A merge. The client cannot tell a stand-in from the
-                        // real item it shares a wire id with: when that item is
-                        // *stackable* it piles the two look-alikes together, so
-                        // the slot keeps its own authoritative item and only
-                        // what was added is consumed from the cursor (a
-                        // disguised stack onto a genuine one must not swap the
-                        // genuine stack away — round 5). A same real item is
-                        // always a merge. Two *unstackable* look-alikes (a spear
-                        // shown as a trident onto a genuine trident) are a swap,
-                        // handled below.
-                        Some((p_item, p_count))
-                            if self.same_wire(p_item, r_item)
-                                && (p_item == c.item || self.wire_stacks(c.item)) =>
-                        {
+                        // Same real item: merge, consuming only what was added.
+                        Some((p_item, p_count)) if p_item == c.item => {
                             let consumed = r_count.saturating_sub(p_count);
                             let left = c.count.saturating_sub(consumed);
                             (
@@ -249,9 +267,8 @@ impl ItemTable {
                                 }),
                             )
                         }
-                        // A different item on the wire: the client swapped the
-                        // slot's stack with its cursor, so the replaced stack
-                        // goes to the cursor.
+                        // A different wire id: a swap, the replaced stack goes
+                        // to the cursor.
                         Some((p_item, p_count)) => (
                             c.item,
                             Some(Carried {
@@ -275,15 +292,8 @@ impl ItemTable {
                 }
                 // The report does not match the shadow. If it is the slot's own
                 // wire id *and* the count did not grow, the client re-sent the
-                // slot (or only shrank it): keep the real item already there. A
-                // grown count is a merge from a cursor the server never
-                // shadowed, not an echo, so it falls through to the swap below.
-                //
-                // The shadow is *discarded* either way: the report is not the
-                // shadow's item, so the client's cursor is not what the server
-                // thought — it replaced the cursor behind the server's back. A
-                // stale shadow must not survive to re-materialise the engine-only
-                // item later (round 4).
+                // slot (or only shrank it): keep the real item already there and
+                // discard the stale shadow.
                 if let Some(p) =
                     previous.filter(|(p, pc)| self.same_wire(*p, r_item) && r_count <= *pc)
                 {
@@ -517,28 +527,36 @@ mod tests {
     }
 
     /// Drive a random sequence of creative window actions against a faithful
-    /// client model and check the server never loses a real item or diverges on
-    /// a slot.
+    /// client model and check the server never loses, fabricates or transmutes
+    /// a real item.
     ///
     /// The model makes every action a *real* client gesture: a pick-up empties
     /// an occupied slot, a full placement fills an empty one, a single-item
-    /// placement (a right-click) moves one, a swap exchanges the cursor and an
-    /// occupied slot, and a **conjure onto the cursor** puts a genuine menu item
-    /// on the cursor with no packet (N4) — the case the old model could not
-    /// reach because its cursor was always shadowed. There is no "echo" op: a
-    /// client only reports a slot after a click that changed it.
+    /// placement (a right-click) moves one, a left-click merges two same-wire
+    /// *stackable* stacks (the slot keeping its own real item) or swaps two
+    /// different/unstackable ones, and a conjure puts a genuine menu item on an
+    /// empty cursor with no packet. A report the server refuses
+    /// ([`Resolution::Reject`]) is resynced: the client reverts to the server's
+    /// slots and cursor.
+    ///
+    /// The menu *includes* genuine items whose wire id collides with a stand-in
+    /// (`oak_planks`, `leather`), so a conjured genuine item can meet a seeded
+    /// look-alike (`pale_oak_planks`, a horse harness) and drive the reject path.
     ///
     /// Invariants after every server-visible action:
     ///
     /// * `server == client` — every slot holds the same real item and count;
-    /// * the server's slots plus its cursor shadow hold every *disguised* item
-    ///   the client does (a real item can never be lost to the disguise);
-    /// * a disguised item on the client's cursor is mirrored in the shadow;
-    /// * with no conjures, the whole multiset is conserved (N3, count included).
+    /// * the *engine-only* items the client seeds (a spear, pale_oak_planks, a
+    ///   horse harness) are conserved between the server's slots-plus-shadow and
+    ///   the client's slots-plus-cursor — a merge must never convert one into
+    ///   its genuine look-alike;
+    /// * with no conjures, the **whole real multiset** is conserved across
+    ///   slots-plus-cursor, and so is the wire multiset.
     fn run_reports(seed: u64, steps: usize, allow_creation: bool) {
         let t = &V1_21_1;
         let spear = id("minecraft:iron_spear");
         let pale = id("minecraft:pale_oak_planks");
+        let harness = id("minecraft:white_harness");
         if shown_as(t, spear).is_none() || shown_as(t, pale).is_none() {
             return;
         }
@@ -550,9 +568,7 @@ mod tests {
         };
         let max_of = crate::game::tables::max_stack_id;
         // The multiset of *wire* items across slots plus the cursor: what the
-        // client can actually see. A same-wire merge converts a disguised
-        // stack's real identity into the slot's item, so the *real* multiset is
-        // not conserved, but the wire view a pure move preserves exactly is.
+        // client can actually see.
         let wire_multi = |slots: &[Option<(ItemTypeId, u8)>], cur: Option<(ItemTypeId, u8)>| {
             let mut m = std::collections::BTreeMap::new();
             for (it, c) in slots.iter().flatten().chain(cur.iter()) {
@@ -561,47 +577,40 @@ mod tests {
             m
         };
 
-        // Menu items whose wire id does *not* collide with a stand-in. A
-        // conjured item that shares a stand-in's wire id and a count the stale
-        // shadow can cover is the documented *indistinguishable* residual (the
-        // bytes equal a legitimate move), so the model does not conjure one;
-        // the wire-colliding genuine items below are seeded instead, which is
-        // where the merge bug lives.
+        // Genuine items, including ones whose wire id collides with a stand-in
+        // (`oak_planks` with pale_oak_planks, `leather` with a harness), so a
+        // conjured genuine item can meet a seeded look-alike.
         let menu = [
             id("minecraft:diamond"),
             id("minecraft:stick"),
             id("minecraft:cobblestone"),
             id("minecraft:apple"),
+            id("minecraft:oak_planks"),
+            id("minecraft:leather"),
         ];
-        for m in menu {
-            assert!(!t.stand_in_wire(t.wire(m).unwrap().id), "menu item {m:?}");
-        }
-
-        // A stand-in that changes stackability: a horse harness (stack 1) is
-        // shown to these clients as leather (stack 64), so the client stacks it
-        // as leather and must merge, not swap.
-        let harness = id("minecraft:white_harness");
         assert_eq!(shown_as(t, harness), Some(id("minecraft:leather")));
 
         let n = 9;
         let mut client: Vec<Option<(ItemTypeId, u8)>> = vec![None; n];
         client[0] = Some((spear, 1));
+        client[1] = Some((harness, 1));
         client[2] = Some((id("minecraft:diamond"), 10));
         client[4] = Some((pale, 64));
-        // Genuine items whose wire id a stand-in also uses (`oak_planks` with
-        // pale_oak_planks, `trident` with the spear, `leather` with a harness):
-        // the client sees the carried disguised stack and such a slot as one
-        // kind and merges them.
         client[6] = Some((id("minecraft:oak_planks"), 11));
-        client[8] = Some((id("minecraft:trident"), 1));
-        client[1] = Some((harness, 1));
         client[7] = Some((id("minecraft:leather"), 16));
+        client[8] = Some((id("minecraft:trident"), 1));
+        // The server starts holding exactly what the client does.
+        let mut server = client.clone();
         let mut cursor: Option<(ItemTypeId, u8)> = None;
         let initial_wire = wire_multi(&client, cursor);
 
-        let mut server = client.clone();
         let mut shadow: Option<Carried> = None;
         let mut rng = seed | 1;
+        // Genuine items the client has conjured but the server has not yet
+        // recorded — placed across later reports. The server's real items may
+        // grow only by spending this credit, and never shrink.
+        let mut conjure_credit: std::collections::BTreeMap<ItemTypeId, u64> =
+            std::collections::BTreeMap::new();
 
         for step in 0..steps {
             let s = (xorshift(&mut rng) as usize) % n;
@@ -651,11 +660,15 @@ mod tests {
                     cursor = Some((item, count - 1));
                     sent = true;
                 }
-                // Conjure a genuine menu item onto the cursor (no packet). It
-                // replaces whatever the client was carrying, so the server's
-                // shadow — if any — is now stale (N4, round 4).
-                8 if allow_creation => {
-                    cursor = Some((menu[(xorshift(&mut rng) as usize) % menu.len()], 64));
+                // Conjure a genuine menu item onto the cursor (no packet). The
+                // cursor must be empty: a creative client returns what it holds
+                // before taking a fresh copy, and conjuring over a shadowed item
+                // would make the server's shadow stale in an untrackable way.
+                8 if allow_creation && cursor.is_none() => {
+                    let item = menu[(xorshift(&mut rng) as usize) % menu.len()];
+                    let n = max_of(item) as u64;
+                    *conjure_credit.entry(item).or_insert(0) += n;
+                    cursor = Some((item, n as u8));
                 }
                 _ => {}
             }
@@ -666,32 +679,60 @@ mod tests {
                 continue;
             }
 
+            let server_before = multiset(&server, shadow.map(|c| (c.item, c.count)));
             let report = client[s].map(|(item, count)| (shown(item), count));
             let (res, carry) = t.resolve_change(report, server[s], shadow);
-            server[s] = match res {
-                Resolution::Apply(stack) => stack,
-            };
-            shadow = carry;
+            match res {
+                Resolution::Apply(stack) => {
+                    server[s] = stack;
+                    shadow = carry;
+                }
+                Resolution::Reject => {
+                    // The server refused the click and resynced the window: the
+                    // client reverts to the server's slots and cursor, so any
+                    // conjured item it was carrying is discarded.
+                    client = server.clone();
+                    cursor = shadow.map(|c| (c.item, c.count));
+                    conjure_credit.clear();
+                }
+            }
+            let server_after = multiset(&server, shadow.map(|c| (c.item, c.count)));
+
+            // The core invariant: the server's real items (slots plus its cursor
+            // shadow) never shrink, and grow only by a genuine item the client
+            // conjured (spending its credit). Every move, merge, swap or removal
+            // leaves the real multiset exactly as it was — so a look-alike merge
+            // that converted a pale_oak_planks into an oak_planks (or a harness
+            // into leather) would fail here, and so would any fabricated item.
+            let mut items: Vec<ItemTypeId> = server_before
+                .keys()
+                .chain(server_after.keys())
+                .copied()
+                .collect();
+            items.sort_unstable();
+            items.dedup();
+            for item in items {
+                let before = server_before.get(&item).copied().unwrap_or(0);
+                let after = server_after.get(&item).copied().unwrap_or(0);
+                assert!(
+                    after >= before,
+                    "step {step}: the server lost {} of {item:?} without a removal",
+                    before - after
+                );
+                let growth = after - before;
+                if growth > 0 {
+                    let credit = conjure_credit.get(&item).copied().unwrap_or(0);
+                    assert!(
+                        growth <= credit,
+                        "step {step}: the server gained {growth} of {item:?} with no conjure"
+                    );
+                    *conjure_credit.get_mut(&item).unwrap() -= growth;
+                }
+            }
 
             // Every slot holds the same real item and count on both sides.
             assert_eq!(server, client, "step {step}: server slots diverged");
 
-            // Every *engine-only* item (a spear or pale_oak_planks, which the
-            // client's creative menu cannot make) the client holds must be on
-            // the server too — in a slot or in the cursor shadow. The shadow is
-            // the only place the server tracks the cursor, so this is where a
-            // loss or a fabrication of such an item shows up (N3, count
-            // included). A genuinely conjured menu item's remainder on the
-            // cursor is the client's own secret and is not checked.
-            let server_side = multiset(&server, shadow.map(|c| (c.item, c.count)));
-            let client_side = multiset(&client, cursor);
-            for item in [spear, pale] {
-                assert_eq!(
-                    server_side.get(&item).copied().unwrap_or(0),
-                    client_side.get(&item).copied().unwrap_or(0),
-                    "step {step}: the server lost a {item:?}"
-                );
-            }
             // A disguised item on the client's cursor is mirrored in the shadow.
             if let Some((item, count)) = cursor {
                 if t.wire(item).is_some_and(|w| w.disguised) {
@@ -703,11 +744,7 @@ mod tests {
                 }
             }
 
-            // With no conjures, a pure move conserves the whole *wire*
-            // multiset — every item the client can see, count included. (The
-            // real multiset is not conserved because a same-wire merge converts
-            // a disguised stack into the slot's item, but the client cannot see
-            // the difference, so the wire view must not change.)
+            // With no conjures, the whole wire multiset is conserved too.
             if !allow_creation {
                 assert_eq!(
                     wire_multi(&client, cursor),
@@ -1015,6 +1052,7 @@ mod tests {
         let (res, carry) = t.resolve_change(Some((shown, 1)), slot10, carried);
         match res {
             Resolution::Apply(i) => slot10 = i,
+            Resolution::Reject => panic!("an unstackable look-alike swap is allowed"),
         }
         carried = carry;
         assert_eq!(slot10, Some((spear, 1)), "the spear must land in slot 10");
@@ -1080,6 +1118,7 @@ mod tests {
         let (res, carry) = t.resolve_change(Some((diamond, 1)), slot9, None);
         slot9 = match res {
             Resolution::Apply(s) => s,
+            Resolution::Reject => panic!("a different-wire swap is allowed"),
         };
         assert_eq!(slot9, Some((diamond, 1)), "the diamond lands in the slot");
         assert_eq!(carry, held(spear, 1), "the spear goes to the cursor");
@@ -1169,70 +1208,66 @@ mod tests {
     }
 
     #[test]
-    fn a_disguised_stack_merging_onto_a_genuine_same_wire_stack_keeps_its_count() {
-        // Round 5: the client cannot tell pale_oak_planks from oak_planks (same
-        // wire id), so it right-click-merges a carried stack of 74
-        // pale_oak_planks onto a genuine oak_planks stack of 11, filling the
-        // slot to 64. The old merge/swap selection treated the different *real*
-        // items as a swap and lost 53 of the 74 carried. The slot must keep its
-        // authoritative item and consume exactly the added amount.
+    fn a_disguised_stack_merging_onto_a_genuine_look_alike_is_rejected() {
+        // Owner decision (round 7): the client cannot tell pale_oak_planks from
+        // oak_planks (same wire id), so it right-click-merges a carried stack of
+        // 74 pale_oak_planks onto a genuine oak_planks stack of 11. Honouring it
+        // would convert 53 real pale_oak_planks into oak_planks — item
+        // transmutation, invisible but unacceptable. The merge is refused; the
+        // cursor keeps its stack and the slot keeps its own.
         let pale = id("minecraft:pale_oak_planks");
         let oak = id("minecraft:oak_planks");
         let t = &V1_21_1;
         assert_eq!(shown_as(t, pale), Some(oak), "pale shows as oak");
 
-        // The cursor carries 74 pale_oak_planks (the shadow is the real item).
-        let carried = held(pale, 74);
-        // The slot holds 11 genuine oak_planks; the client reports oak × 64.
-        let (res, carry) = t.resolve_change(Some((oak, 64)), Some((oak, 11)), carried);
-        assert_eq!(
-            res,
-            Resolution::Apply(Some((oak, 64))),
-            "the slot keeps its genuine oak_planks, filled to 64"
-        );
+        let (res, carry) = t.resolve_change(Some((oak, 64)), Some((oak, 11)), held(pale, 74));
+        assert_eq!(res, Resolution::Reject, "the look-alike merge is refused");
         assert_eq!(
             carry,
-            held(pale, 21),
-            "exactly 53 of the 74 were consumed, 21 remain the real item"
+            held(pale, 74),
+            "the cursor keeps its stack; nothing is consumed"
         );
     }
 
     #[test]
-    fn a_stackability_changing_stand_in_still_merges() {
-        // Round 6: the client stacks by the item it is *shown*. A horse harness
-        // (stack 1) is shown as leather (stack 64), so the client sees a
-        // stackable leather and merges it onto a leather slot. Judging by the
-        // *real* item's stack size (1) made the server swap, materialising 17
-        // harnesses out of one and stranding the slot's leather.
+    fn a_stackability_changing_stand_in_look_alike_merge_is_rejected() {
+        // Round 7: a horse harness (real stack 1) is shown as leather (stack
+        // 64), so the client sees a stackable leather and merges it onto a
+        // leather slot. That would convert the harness into leather; it is
+        // refused regardless of stackability.
         let harness = id("minecraft:white_harness");
         let leather = id("minecraft:leather");
         let t = &V1_21_1;
         assert_eq!(shown_as(t, harness), Some(leather));
-        assert_eq!(crate::game::tables::max_stack_id(harness), 1, "real: 1");
-        assert_eq!(crate::game::tables::max_stack_id(leather), 64, "shown: 64");
 
-        // The cursor carries one harness; the slot holds 16 leather; the client
-        // reports the merged leather × 17.
         let (res, carry) =
             t.resolve_change(Some((leather, 17)), Some((leather, 16)), held(harness, 1));
-        assert_eq!(
-            res,
-            Resolution::Apply(Some((leather, 17))),
-            "the slot keeps its leather, filled to 17"
-        );
-        assert_eq!(carry, None, "the one harness was merged in");
+        assert_eq!(res, Resolution::Reject);
+        assert_eq!(carry, held(harness, 1), "the harness stays on the cursor");
     }
 
     #[test]
-    fn a_disguised_stack_merging_fully_onto_a_genuine_stack_leaves_nothing_carried() {
-        // The smaller merge the old predicate rejected: 1 pale_oak_planks onto
-        // 11 genuine oak_planks → 12, nothing left on the cursor.
+    fn the_reverse_look_alike_merge_is_also_rejected() {
+        // Either direction: a genuine oak_planks stack merged onto a pale slot.
         let pale = id("minecraft:pale_oak_planks");
         let oak = id("minecraft:oak_planks");
         let t = &V1_21_1;
-        let (res, carry) = t.resolve_change(Some((oak, 12)), Some((oak, 11)), held(pale, 1));
-        assert_eq!(res, Resolution::Apply(Some((oak, 12))));
-        assert_eq!(carry, None, "the whole carried stack was merged in");
+        let (res, _) = t.resolve_change(Some((oak, 12)), Some((pale, 11)), held(oak, 1));
+        assert_eq!(res, Resolution::Reject);
+    }
+
+    #[test]
+    fn an_unstackable_look_alike_still_swaps_rather_than_rejects() {
+        // A spear shown as a trident cannot be *merged* with a genuine trident
+        // (both stack to 1), so the client swaps them — which preserves both
+        // real items and is allowed.
+        let spear = id("minecraft:iron_spear");
+        let trident = id("minecraft:trident");
+        let t = &V1_21_1;
+        let shown = shown_as(t, spear).unwrap();
+        let (res, carry) = t.resolve_change(Some((shown, 1)), Some((trident, 1)), held(spear, 1));
+        assert_eq!(res, Resolution::Apply(Some((spear, 1))));
+        assert_eq!(carry, held(trident, 1));
     }
 
     #[test]
