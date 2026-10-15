@@ -87,6 +87,51 @@ pub trait HostBackend: Send + Sync {
     fn capabilities(&self, _plugin: &str) -> Vec<String> {
         Vec::new()
     }
+
+    // --- virtual menus (the core window API) --------------------------------
+    //
+    // The native `plugins/menus` host calls these to draw server-invented
+    // windows. The core guarantees a click on one never moves an item; the
+    // backend only translates the neutral menu item into a window slot. A host
+    // with no window support (a test, a stripped build) answers the neutral
+    // value, so the menus plugin degrades rather than panics.
+
+    /// Open a virtual menu window for `player` (a session entity id). `items`
+    /// not in `0..layout.slot_count()` are ignored. Returns whether a window
+    /// was opened.
+    fn open_menu(
+        &self,
+        _plugin: &str,
+        _player: u64,
+        _menu: u64,
+        _title: &str,
+        _layout: crate::menus::MenuLayout,
+        _items: &[crate::menus::MenuItem],
+    ) -> bool {
+        false
+    }
+
+    /// Replace one slot of an open menu, or clear it with `None`.
+    fn set_menu_slot(
+        &self,
+        _plugin: &str,
+        _player: u64,
+        _menu: u64,
+        _slot: u32,
+        _item: Option<&crate::menus::MenuItem>,
+    ) -> bool {
+        false
+    }
+
+    /// Close an open menu.
+    fn close_menu(&self, _plugin: &str, _player: u64, _menu: u64) {}
+
+    /// Run `command` (without the leading slash) for a player, or on the
+    /// console when `player` is `None`; returns the reply lines. Used by the
+    /// menus `[command]`/`[console]` actions.
+    fn run_command(&self, _plugin: &str, _player: Option<u64>, _command: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Sandbox and scheduling limits for the whole host.
@@ -1032,6 +1077,12 @@ impl PluginHost {
         // imports none of the SDK interfaces (the frozen `@0.1.0` ones
         // included) is unaffected.
         crate::sdk::Services::add_to_linker::<_, HasSelf<_>>(&mut linker, |d: &mut StoreData| d)?;
+        // The menus service interface, so a WASM dependent that imports it
+        // links and its calls forward to the native menus provider.
+        crate::menus_svc::Services::add_to_linker::<_, HasSelf<_>>(
+            &mut linker,
+            |d: &mut StoreData| d,
+        )?;
 
         let memory = self.config.memory_mib.saturating_mul(1024 * 1024);
         let limits = StoreLimitsBuilder::new()

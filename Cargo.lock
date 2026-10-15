@@ -76,6 +76,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-menus-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-plugin",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "aether-net"
 version = "0.1.0"
 
@@ -124,6 +133,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "aether-api",
+ "aether-menus-plugin",
  "aether-plugin",
  "aether-sdk-plugin",
  "aether-world",

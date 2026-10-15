@@ -21,4 +21,8 @@ world dependent {
     import aether:sdk/scheduler@0.1.0;
     import aether:sdk/cooldowns@0.1.0;
     import aether:sdk/confirm@0.1.0;
+
+    /// The shared menus service (native `plugins/menus`). Opening a menu is
+    /// one call; the core keeps every click out of the player's inventory.
+    import aether:menus/menus@0.1.0;
 }

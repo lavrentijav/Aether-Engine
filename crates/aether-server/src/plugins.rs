@@ -188,6 +188,116 @@ mod imp {
                 .cloned()
                 .unwrap_or_default()
         }
+
+        // --- virtual menus --------------------------------------------------
+
+        fn open_menu(
+            &self,
+            _plugin: &str,
+            player: u64,
+            menu: u64,
+            title: &str,
+            layout: aether_plugin::menus::MenuLayout,
+            items: &[aether_plugin::menus::MenuItem],
+        ) -> bool {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return false;
+            };
+            let shape = menu_shape(layout);
+            let mut slots: Vec<Option<crate::inventory::Stack>> = vec![None; shape.slot_count()];
+            for it in items {
+                if let Some(cell) = slots.get_mut(it.slot as usize) {
+                    *cell = menu_stack(it);
+                }
+            }
+            crate::game::window::open_menu(&handle, &self.world, menu, shape, title, slots);
+            true
+        }
+
+        fn set_menu_slot(
+            &self,
+            _plugin: &str,
+            player: u64,
+            menu: u64,
+            slot: u32,
+            item: Option<&aether_plugin::menus::MenuItem>,
+        ) -> bool {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return false;
+            };
+            // Only update a menu that is still the one open; a late update must
+            // not touch whatever window replaced it.
+            if crate::game::window::open_menu_id(&handle) != Some(menu) {
+                return false;
+            }
+            let stack = item.and_then(menu_stack);
+            crate::game::window::set_menu_slot(&handle, &self.world, slot as usize, stack);
+            true
+        }
+
+        fn close_menu(&self, _plugin: &str, player: u64, menu: u64) {
+            if let Some(handle) = self.registry.by_entity(player as i32) {
+                crate::game::window::close_menu(&handle, &self.world, menu);
+            }
+        }
+
+        fn run_command(&self, _plugin: &str, player: Option<u64>, command: &str) -> Vec<String> {
+            // Console dispatch is a separate facility (CMD-07); until it lands
+            // a `[console]` action is a no-op rather than a silent player run.
+            let Some(id) = player else {
+                crate::log::warn(&format!(
+                    "menus: `[console] {command}` ignored (no console dispatch yet)"
+                ));
+                return Vec::new();
+            };
+            let Some(handle) = self.registry.by_entity(id as i32) else {
+                return Vec::new();
+            };
+            let text = if command.starts_with('/') {
+                command.to_owned()
+            } else {
+                format!("/{command}")
+            };
+            match crate::commands::dispatch(&text, &handle, &self.registry, &self.world) {
+                Some(reply) => reply.0,
+                None => Vec::new(),
+            }
+        }
+    }
+
+    /// Map a neutral menu layout onto the server's window shape.
+    fn menu_shape(layout: aether_plugin::menus::MenuLayout) -> crate::game::player::MenuShape {
+        use crate::game::player::MenuShape as S;
+        use aether_plugin::menus::MenuLayout as L;
+        match layout {
+            L::Chest3 => S::Chest3,
+            L::Chest6 => S::Chest6,
+            L::Dispenser => S::Dispenser,
+            L::Hopper => S::Hopper,
+        }
+    }
+
+    /// Translate a neutral menu item into a display-only server stack, or
+    /// `None` for an empty slot. An item the world's registry does not know is
+    /// drawn as a barrier rather than dropped, so a slot never silently
+    /// vanishes and shifts the menu around it.
+    fn menu_stack(item: &aether_plugin::menus::MenuItem) -> Option<crate::inventory::Stack> {
+        if item.item.is_empty() || item.count == 0 {
+            return None;
+        }
+        let id = match aether_world::ItemTypeId::vanilla(&item.item) {
+            Some(id) => id,
+            None => crate::inventory::item("minecraft:barrier"),
+        };
+        let count = item.count.clamp(1, 64) as u8;
+        Some(crate::inventory::Stack::menu_item(
+            id,
+            count,
+            item.name.clone(),
+            item.lore.clone(),
+            item.glint,
+            item.model,
+        ))
     }
 
     static HOST: OnceLock<Mutex<PluginHost>> = OnceLock::new();
@@ -292,31 +402,41 @@ mod imp {
     /// rather than a `.wasm` file. Loading it before the on-disk discovery is
     /// what lets a WASM dependent's `requires` be satisfied.
     fn install_native(host: &mut PluginHost, cfg: &Arc<Config>, grant_sink: &Arc<ServerBackend>) {
-        let registration = aether_sdk_plugin::registration();
-        let id = registration.manifest.id.clone();
-        let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
-        if !entry.enabled() {
-            crate::log::info(&format!("plugin `{id}` disabled by config"));
-            return;
-        }
-        let file = ManifestFile {
-            // Native plugins are compiled in; there is no directory.
-            dir: std::path::PathBuf::new(),
-            manifest: registration.manifest,
-        };
-        // The SDK asks the operator for no host capabilities of its own; a
-        // service method still checks its *caller's* capabilities.
-        let caps = effective_capabilities(&file.manifest.capabilities, &entry.capabilities);
-        match host.add_native(&file, &caps, &entry.config, (registration.new)()) {
-            Ok(()) => {
-                grant_sink
-                    .granted
-                    .lock()
-                    .unwrap()
-                    .insert(id.clone(), caps.clone());
-                crate::log::info(&format!("plugin     : {id} (native SDK)"));
+        // Order matters: the SDK first, so a dependent's `requires` resolve
+        // before it loads. Menus register no services others require yet.
+        let registrations = [
+            aether_sdk_plugin::registration(),
+            aether_menus_plugin::registration(),
+        ];
+        for registration in registrations {
+            let id = registration.manifest.id.clone();
+            let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
+            if !entry.enabled() {
+                crate::log::info(&format!("plugin `{id}` disabled by config"));
+                continue;
             }
-            Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
+            let file = ManifestFile {
+                // Native plugins are compiled in; there is no directory.
+                dir: std::path::PathBuf::new(),
+                manifest: registration.manifest,
+            };
+            // A native plugin asks the operator for no host capabilities of
+            // its own; a service method still checks its *caller's*.
+            let caps = effective_capabilities(&file.manifest.capabilities, &entry.capabilities);
+            match host.add_native(&file, &caps, &entry.config, (registration.new)()) {
+                Ok(()) => {
+                    grant_sink
+                        .granted
+                        .lock()
+                        .unwrap()
+                        .insert(id.clone(), caps.clone());
+                    // Route the plugin's declared commands through the core
+                    // registry, with the same ownership check as any other.
+                    register_commands(&file.manifest);
+                    crate::log::info(&format!("plugin     : {id} (native)"));
+                }
+                Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
+            }
         }
     }
 
