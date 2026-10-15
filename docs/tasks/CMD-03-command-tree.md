@@ -8,8 +8,9 @@ Replace the hand-written `match cmd { … }` dispatchers with a **Brigadier-styl
 tree of literal and argument nodes, one parser that walks text against it, one suggestion engine
 for tab-completion, and one execution path. This is the spine all other CMD tasks build on.
 Existing commands must keep answering identically (same words, same replies) — port them onto the
-tree in this task or expose a compatibility shim; do not break `/gamemode`, `/give`, `/lookup`,
-economy, etc.
+tree in this task. **There must be exactly one dispatcher after this task**: every command that
+works today is migrated onto the tree here, and the old name-`match` paths are deleted in the same
+task. No parallel old path is allowed — a command name is answered by the tree and nothing else.
 
 Vanilla reference: `com.mojang.brigadier` — `CommandDispatcher`, `LiteralArgumentBuilder`,
 `RequiredArgumentBuilder`, `StringReader`, `CommandContext`, `SharedSuggestionProvider`. Re-implement
@@ -37,21 +38,38 @@ built once (lazy static / `OnceLock`) and shared read-only.
   ("Unknown or incomplete command", "Incorrect argument for command").
 - `execute`/`return`/`function` chaining is CMD-22/CMD-21; the parser only needs the node kinds.
 
+## Existing commands to migrate (must all work through the tree)
+
+Every command the server answers today becomes a tree node in this task. The bodies may stay in
+their modules, but the *dispatch* moves to the tree; the leftover `match cmd` arms and the flat
+`COMMANDS` list are removed.
+
+| from | commands |
+|---|---|
+| `commands/mod.rs` (history) | `/inspect` `/i` `/lookup` `/l` `/rollback` `/rb` `/page` `/pg` `/inv` `/inventory` `/stash` `/audit` `/cache` |
+| `game/commands.rs` | `/gamemode` `/gm` `/time` `/give` `/summon` `/killall` `/kill` `/spawn` `/tp` `/block` `/food` `/heal` `/visibility` |
+| `economy/commands.rs` | `/balance` `/bal` `/money` `/pay` `/sell` `/market` `/buy` `/listings` `/unlist` `/econ` |
+| CMD0b stub registry | every core command in `commands/registry.rs` becomes a tree node that answers `not implemented yet (CMD-<id>)` and enforces its node/op level |
+
+`/help` from CMD0b is replaced by the tree-driven `/help` (CMD-05, a later task); until then it
+stays and lists the tree.
+
+The not-yet-implemented commands from `registry.rs` are registered on the tree now so completion and
+permissions are correct from day one, even before their CMD task lands.
+
 ## Suggestions
 - walk the partially-typed token to the deepest matching node; suggest its literal children
   (prefix-filtered) and its argument type's suggestions (entity names, block ids, item ids, …).
 - keep suggestions cheap; providers get the read-only world/snapshot, no locks.
 
-## Existing commands
-Move the bodies behind executors (or keep the old match as a post-tree fallback during the
-transition, but a single command name must not be answered twice). The registry from CMD0b
-(`commands/registry.rs`) becomes tree nodes for not-yet-implemented commands.
-
 ## Files
 - new `crates/aether-server/src/commands/tree.rs` (+ `tree/suggest.rs` if large).
-- `crates/aether-server/src/commands/mod.rs`: `dispatch` becomes `tree::execute(...)`.
-- `crates/aether-server/src/game/commands.rs`, `economy/commands.rs`: wrappers that register their
-  verbs on the tree (bodies unchanged where possible).
+- `crates/aether-server/src/commands/mod.rs`: `dispatch` becomes `tree::execute(...)`; the old
+  `match` and `usage()` fallback go away.
+- `crates/aether-server/src/game/commands.rs`, `economy/commands.rs`: bodies wrapped as executors,
+  registered on the tree (bodies unchanged where possible).
+- `crates/aether-server/src/protocol/commands.rs`: the flat `COMMANDS` `const` is deleted; the
+  Declare Commands packet (CMD-04) is generated from the tree instead.
 
 ## Edge cases to test explicitly
 - exact command match, alias match, and case-sensitivity (vanilla is case-sensitive for literals).
@@ -61,8 +79,27 @@ transition, but a single command name must not be answered twice). The registry 
 - recursion depth / a tree with 200+ nodes builds once and parses in microseconds (add a bench).
 - a node whose requirement fails is *not* suggested and returns "Unknown or incomplete command"
   to unprivileged callers (vanilla hides it), unless the command brief says otherwise.
+- **no old path remains:** a test asserts `commands/mod.rs`, `game/commands.rs` and
+  `economy/commands.rs` contain no `match` on the command name and no second dispatcher.
+
+## Migration tests (one per migrated command, must still pass)
+
+For **every** name in the table above, a test that runs it through `tree::execute` and asserts the
+reply is byte-identical to the previous behaviour:
+
+- **history:** `/inspect` toggles and toggles back; `/lookup`/`/rollback` with a filter return the
+  same lines; `/page` before a lookup says "nothing to page"; `/inv`, `/stash`, `/audit`, `/cache`
+  produce their existing output; aliases `/i /l /rb /pg` route identically.
+- **game:** `/gamemode creative` on an op works and a non-op is denied; `/gm s`; `/time set day`
+  and `/time` query; `/give stone 3`; `/summon`; `/killall`; `/kill` self; `/spawn`; `/tp x y z`
+  and `/tp player`; `/block x y z`; `/food`; `/heal`; `/visibility` toggles.
+- **economy:** with the economy disabled the existing "economy is not enabled" reply is unchanged;
+  `/balance`, `/bal`, `/money`, `/listings` route identically; `/econ` permission-gated.
+- **aliases and permission parity:** each alias maps to the same node; the op-level gate is
+  enforced by the tree, not by the body.
 
 ## Done criteria
-- All currently-working commands answer through the tree with byte-identical replies.
+- All currently-working commands answer through the tree with byte-identical replies; the migration
+  tests above pass; no second dispatcher remains.
 - Unit tests per node kind + the edge cases above; a criterion bench for parse/suggest.
 - fmt / clippy `-D warnings` / `cargo-locked test`.
