@@ -449,7 +449,11 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
             if c.kind == ContainerKind::BrewingStand {
                 tick_brewing(c, &mut dirty, &mut idle);
             } else {
-                tick_furnace(c, &mut dirty, &mut idle);
+                // Which cooking method applies is the block's own (furnace,
+                // smoker or blast furnace); the recipe carries its cooking
+                // time and experience.
+                let method = super::recipes::method_for_state(world.get_block(pos.0, pos.1, pos.2));
+                tick_furnace(c, method, &mut dirty, &mut idle);
             }
             if dirty {
                 let _ = world.put_meta(&key(pos), &encode(c));
@@ -467,10 +471,17 @@ pub fn tick_furnaces(world: &DemoWorld) -> Vec<Pos> {
 }
 
 /// One furnace's tick: fuel burning down, the input cooking to the output, and
-/// the stored experience.
-fn tick_furnace(c: &mut Container, dirty: &mut bool, idle: &mut bool) {
+/// the stored experience. The recipe — its result, count, cooking time and
+/// experience — comes from `recipes::cook` for the block's own method.
+fn tick_furnace(
+    c: &mut Container,
+    method: super::recipes::Cook,
+    dirty: &mut bool,
+    idle: &mut bool,
+) {
     let input = c.slots[0].as_ref().map(|s| s.item);
-    let result = input.and_then(super::tables::smelt_id);
+    let recipe = input.and_then(|i| super::recipes::cook(method, i));
+    let result = recipe.map(|r| r.result);
     let output_ok = result.is_some_and(|r| match &c.slots[2] {
         None => true,
         Some(o) => o.item == r && o.count < o.max_stack(),
@@ -497,11 +508,13 @@ fn tick_furnace(c: &mut Container, dirty: &mut bool, idle: &mut bool) {
         }
     }
     if c.burn > 0 && output_ok {
+        let done = recipe.map_or(200, |r| r.ticks);
         c.cook += 1;
         *dirty = true;
-        if c.cook >= 200 {
+        if c.cook >= done {
             c.cook = 0;
             let r = result.expect("output_ok implies a result");
+            let count = recipe.map_or(1, |r| r.count);
             if let Some(input) = &mut c.slots[0] {
                 input.count -= 1;
                 if input.count == 0 {
@@ -509,14 +522,12 @@ fn tick_furnace(c: &mut Container, dirty: &mut bool, idle: &mut bool) {
                 }
             }
             match &mut c.slots[2] {
-                Some(o) => o.count += 1,
-                None => c.slots[2] = Some(Stack::new(r, 1)),
+                Some(o) => o.count = o.count.saturating_add(count),
+                None => c.slots[2] = Some(Stack::new(r, count)),
             }
-            // The smelted item's experience waits in the furnace until a
+            // The cooked item's experience waits in the furnace until a
             // player takes the output.
-            if let Some(item) = input {
-                c.xp += item.vanilla_name().map_or(0.0, super::tables::smelt_xp);
-            }
+            c.xp += recipe.map_or(0.0, |r| r.xp);
         }
     } else if c.cook > 0 {
         c.cook = c.cook.saturating_sub(2);
