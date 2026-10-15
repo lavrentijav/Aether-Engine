@@ -198,13 +198,9 @@ fn load_with(
     let mut c = Container::new(kind);
     if kind == ContainerKind::Chest {
         if let Some(id) = super::loot::generated_chest_table(world, pos) {
-            if let Some(filled) = super::loot::generated_chest_loot(
-                tables,
-                id,
-                crate::seed(),
-                pos,
-                c.slots.len(),
-            ) {
+            if let Some(filled) =
+                super::loot::generated_chest_loot(tables, id, crate::seed(), pos, c.slots.len())
+            {
                 for (slot, stack) in filled {
                     c.slots[slot] = Some(Stack::named(&stack.item, stack.count));
                 }
@@ -633,7 +629,10 @@ mod tests {
         // A later access re-derives the same loot, so nothing is voided.
         let second = load_with(&world, (x, y, z), ContainerKind::Chest, &tables);
         let shape = |c: &Container| -> Vec<Option<(aether_world::ItemTypeId, u8)>> {
-            c.slots.iter().map(|s| s.as_ref().map(|s| (s.item, s.count))).collect()
+            c.slots
+                .iter()
+                .map(|s| s.as_ref().map(|s| (s.item, s.count)))
+                .collect()
         };
         assert_eq!(shape(&first), shape(&second));
 

@@ -1914,7 +1914,11 @@ mod tests {
         for (k, c) in counts.iter().enumerate() {
             assert!(*c > 0, "count {k} never occurred: {counts:?}");
         }
-        let mean: f64 = counts.iter().enumerate().map(|(k, c)| k as f64 * *c as f64).sum::<f64>()
+        let mean: f64 = counts
+            .iter()
+            .enumerate()
+            .map(|(k, c)| k as f64 * *c as f64)
+            .sum::<f64>()
             / 120_000.0;
         assert!((mean - 1.5).abs() < 0.05, "mean was {mean}");
     }
