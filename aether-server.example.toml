@@ -66,6 +66,7 @@ queue_depth = 100000    # events that may wait before submissions are dropped
 # component. Empty disables plugins. See docs/design/plugins.md.
 dir = ""             # e.g. "plugins"
 budget_ms = 5        # per-call time budget before a running plugin is interrupted
+tick_budget_ms = 25  # shared budget for all plugins across one tick
 memory_mib = 64      # per-plugin linear-memory cap
 max_faults = 5       # traps before the host disables a plugin
 

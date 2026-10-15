@@ -158,6 +158,9 @@ pub struct PluginsConfig {
     pub dir: String,
     /// Per-call time budget in milliseconds (epoch interruption).
     pub budget_ms: u64,
+    /// Shared time budget in milliseconds, spent by all plugins across one
+    /// tick. Once it is gone no further plugin runs until the next tick.
+    pub tick_budget_ms: u64,
     /// Per-plugin memory cap in mebibytes.
     pub memory_mib: u64,
     /// Traps a plugin may take before the host disables it.
@@ -172,6 +175,7 @@ impl Default for PluginsConfig {
         PluginsConfig {
             dir: String::new(),
             budget_ms: 5,
+            tick_budget_ms: 25,
             memory_mib: 64,
             max_faults: 5,
             plugins: std::collections::BTreeMap::new(),
@@ -481,6 +485,7 @@ queue_depth = 100000    # events that may wait before submissions are dropped
 # component. Empty disables plugins. See docs/design/plugins.md.
 dir = ""             # e.g. "plugins"
 budget_ms = 5        # per-call time budget before a running plugin is interrupted
+tick_budget_ms = 25  # shared budget for all plugins across one tick
 memory_mib = 64      # per-plugin linear-memory cap
 max_faults = 5       # traps before the host disables a plugin
 

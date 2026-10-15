@@ -140,6 +140,7 @@ mod imp {
         });
         let host_config = HostConfig {
             budget_ms: cfg.plugins.budget_ms.max(1),
+            tick_budget_ms: cfg.plugins.tick_budget_ms.max(1),
             memory_mib: cfg.plugins.memory_mib.max(1),
             max_faults: cfg.plugins.max_faults.max(1),
             ..HostConfig::default()

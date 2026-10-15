@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
@@ -45,6 +45,11 @@ pub trait HostBackend: Send + Sync {
 pub struct HostConfig {
     /// Per-call time budget, in milliseconds. Enforced with epoch interruption.
     pub budget_ms: u64,
+    /// Shared time budget, in milliseconds, spent by **all** plugins across
+    /// one server tick. Once it is gone no further plugin is called until the
+    /// next tick, so a plugin (or many) cannot stall the tick even when each
+    /// individual call stays inside `budget_ms`.
+    pub tick_budget_ms: u64,
     /// Per-plugin linear-memory cap, in mebibytes.
     pub memory_mib: u64,
     /// How many times a plugin may trap before the host disables it.
@@ -59,6 +64,7 @@ impl Default for HostConfig {
     fn default() -> Self {
         HostConfig {
             budget_ms: 5,
+            tick_budget_ms: 25,
             memory_mib: 64,
             max_faults: 5,
             init_fuel: 100_000_000,
@@ -222,6 +228,12 @@ pub struct PluginHost {
     config: HostConfig,
     backend: Arc<dyn HostBackend>,
     plugins: Vec<LoadedPlugin>,
+    /// When the current tick's shared budget runs out. `None` until the first
+    /// [`on_tick`]; before any tick there is no tick to overrun, so calls are
+    /// bounded only by the per-call budget. Reset by every [`on_tick`].
+    tick_deadline: Option<Instant>,
+    /// The shared budget as a duration, kept beside the deadline.
+    tick_budget: Duration,
 }
 
 impl PluginHost {
@@ -242,12 +254,39 @@ impl PluginHost {
                 ticker.increment_epoch();
             })
             .map_err(|e| Error::new(format!("cannot start the epoch ticker: {e}")))?;
+        let tick_budget = Duration::from_millis(config.tick_budget_ms.max(1));
         Ok(PluginHost {
             engine,
             config,
             backend,
             plugins: Vec::new(),
+            tick_deadline: None,
+            tick_budget,
         })
+    }
+
+    /// Reset the shared tick budget. Called at the start of every server tick,
+    /// before any plugin for that tick runs.
+    fn begin_tick(&mut self) {
+        self.tick_deadline = Some(Instant::now() + self.tick_budget);
+    }
+
+    /// The epoch deadline, in milliseconds, for the next plugin call: the
+    /// per-call budget, further capped by what is left of the shared tick
+    /// budget. **Zero means the tick's budget is spent** and no further plugin
+    /// should run this tick.
+    fn call_budget_ms(&self) -> u64 {
+        let per_call = self.config.budget_ms.max(1);
+        match self.tick_deadline {
+            // No tick has run yet: there is no window to spend.
+            None => per_call,
+            Some(deadline) => {
+                let remaining = deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis() as u64;
+                per_call.min(remaining)
+            }
+        }
     }
 
     /// Instantiate one plugin. `capabilities` is the effective grant (already
@@ -393,9 +432,14 @@ impl PluginHost {
             if !self.plugins[i].receives(event) {
                 continue;
             }
-            self.plugins[i]
-                .store
-                .set_epoch_deadline(self.config.budget_ms.max(1));
+            let ms = self.call_budget_ms();
+            if ms == 0 {
+                // The tick's shared budget is gone: no plugin runs again this
+                // tick. This is what bounds the *aggregate* cost, not just one
+                // call.
+                continue;
+            }
+            self.plugins[i].store.set_epoch_deadline(ms);
             let r = {
                 let pl = &mut self.plugins[i];
                 f(pl)
@@ -419,9 +463,11 @@ impl PluginHost {
             if !self.plugins[i].receives(event) {
                 continue;
             }
-            self.plugins[i]
-                .store
-                .set_epoch_deadline(self.config.budget_ms.max(1));
+            let ms = self.call_budget_ms();
+            if ms == 0 {
+                continue;
+            }
+            self.plugins[i].store.set_epoch_deadline(ms);
             let r = {
                 let pl = &mut self.plugins[i];
                 f(pl)
@@ -550,8 +596,10 @@ impl PluginHost {
 
     // --- tick and commands ---------------------------------------------
 
-    /// `on-tick`: call subscribed plugins when `n` is on their period.
+    /// `on-tick`: reset the shared tick budget, then call subscribed plugins
+    /// when `n` is on their period.
     pub fn on_tick(&mut self, n: u64) {
+        self.begin_tick();
         for i in 0..self.plugins.len() {
             if !self.plugins[i].receives(manifest::EVENT_ON_TICK) {
                 continue;
@@ -560,9 +608,11 @@ impl PluginHost {
             if n % period != 0 {
                 continue;
             }
-            self.plugins[i]
-                .store
-                .set_epoch_deadline(self.config.budget_ms.max(1));
+            let ms = self.call_budget_ms();
+            if ms == 0 {
+                continue;
+            }
+            self.plugins[i].store.set_epoch_deadline(ms);
             let r = {
                 let pl = &mut self.plugins[i];
                 pl.bindings.call_on_tick(&mut pl.store, n)
@@ -580,9 +630,11 @@ impl PluginHost {
             if !self.plugins[i].receives(event) || !self.plugins[i].manifest.serves_command(name) {
                 continue;
             }
-            self.plugins[i]
-                .store
-                .set_epoch_deadline(self.config.budget_ms.max(1));
+            let ms = self.call_budget_ms();
+            if ms == 0 {
+                continue;
+            }
+            self.plugins[i].store.set_epoch_deadline(ms);
             let r = {
                 let pl = &mut self.plugins[i];
                 pl.bindings.call_on_command(&mut pl.store, p, name, args)

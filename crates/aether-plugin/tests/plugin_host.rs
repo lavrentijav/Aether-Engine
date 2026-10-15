@@ -255,6 +255,38 @@ fn a_trapping_plugin_does_not_stop_the_others() {
 }
 
 #[test]
+fn the_shared_tick_budget_bounds_all_plugins_together() {
+    // The per-call budget catches one runaway call; without a *shared* budget
+    // a hook with many plugins still adds up to several ticks. With it, once
+    // the tick's budget is spent no further plugin runs, so the whole hook
+    // stays near one budget.
+    let backend = Arc::new(TestBackend::default());
+    let config = HostConfig {
+        budget_ms: 40,
+        tick_budget_ms: 40,
+        ..HostConfig::default()
+    };
+    let mut h = PluginHost::new(config, backend.clone()).unwrap();
+    for i in 0..6 {
+        let id = format!("spin{i}");
+        let (m, caps, cfg) = recorder(&id, 0, &["on-tick"], &[], &[("spin", "on-tick")]);
+        h.add(&m, &caps, &cfg).unwrap();
+    }
+    let start = Instant::now();
+    h.on_tick(1);
+    let took = start.elapsed();
+    assert_eq!(
+        backend.ending_with(":on-tick").len(),
+        1,
+        "only the first plugin should run before the shared budget is spent"
+    );
+    assert!(
+        took < Duration::from_millis(300),
+        "the shared budget should keep the whole hook near one tick, took {took:?}"
+    );
+}
+
+#[test]
 fn a_plugin_that_overruns_its_budget_is_interrupted() {
     let backend = Arc::new(TestBackend::default());
     let config = HostConfig {
