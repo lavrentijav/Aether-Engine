@@ -318,6 +318,62 @@ impl EventBody {
             EventBody::Custom { tag, .. } => *tag,
         }
     }
+
+    /// The stable kind name, the same spelling [`EVENT_KINDS`] records. A
+    /// custom body has no core name and reads as [`EVENT_KIND_UNKNOWN`]'s.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            EventBody::BlockSet { .. } => "block_set",
+            EventBody::ItemMint { .. } => "item_mint",
+            EventBody::ItemMove { .. } => "item_move",
+            EventBody::ItemDestroy { .. } => "item_destroy",
+            EventBody::ItemDerive { .. } => "item_derive",
+            EventBody::ItemMerge { .. } => "item_merge",
+            EventBody::Custom { .. } => EVENT_KIND_UNKNOWN.1,
+        }
+    }
+
+    /// Every item instance this body refers to, for the journal's item index.
+    ///
+    /// The index is what turns "the whole history of item #51" from a scan of
+    /// the journal into a prefix read: one entry per (uid, seq). A merge names
+    /// both stacks so both timelines show it; a derive names its output and
+    /// every source it consumed, so provenance follows backwards.
+    pub fn item_uids(&self) -> Vec<ItemUid> {
+        match self {
+            EventBody::ItemMint { uid, .. }
+            | EventBody::ItemMove { uid, .. }
+            | EventBody::ItemDestroy { uid, .. } => vec![*uid],
+            EventBody::ItemMerge { into, from, .. } => vec![*into, *from],
+            EventBody::ItemDerive { uid, from, .. } => {
+                let mut v = Vec::with_capacity(from.len() + 1);
+                v.push(*uid);
+                v.extend_from_slice(from);
+                v
+            }
+            EventBody::BlockSet { .. } | EventBody::Custom { .. } => Vec::new(),
+        }
+    }
+
+    /// Whether this event touches the container at `(x, y, z)`.
+    ///
+    /// An item event names the container as a [`Place::Container`] on either
+    /// side (a move out has it as `from`, a deposit has it as `to`), so a
+    /// container's access log is the item events whose container place is that
+    /// block. A merge carries no place and so is not attributed to a container.
+    pub fn touches_container(&self, x: i32, y: i32, z: i32) -> bool {
+        match self {
+            EventBody::ItemMint { to, .. } => to.is_container_at(x, y, z),
+            EventBody::ItemMove { from, to, .. } => {
+                from.is_container_at(x, y, z) || to.is_container_at(x, y, z)
+            }
+            EventBody::ItemDestroy { from, .. } => from.is_container_at(x, y, z),
+            EventBody::ItemDerive { to, .. } => to.is_container_at(x, y, z),
+            EventBody::ItemMerge { .. } | EventBody::BlockSet { .. } | EventBody::Custom { .. } => {
+                false
+            }
+        }
+    }
 }
 
 /// One immutable entry in the log.
@@ -362,6 +418,14 @@ impl Place {
             Place::Ground { x, y, z } | Place::Container { x, y, z, .. } => Some((*x, *y, *z)),
             Place::Inventory { .. } | Place::Nowhere => None,
         }
+    }
+
+    /// Whether this is the container block at `(x, y, z)`.
+    pub fn is_container_at(&self, x: i32, y: i32, z: i32) -> bool {
+        matches!(
+            self,
+            Place::Container { x: cx, y: cy, z: cz, .. } if *cx == x && *cy == y && *cz == z
+        )
     }
 }
 

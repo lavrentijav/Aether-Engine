@@ -51,6 +51,7 @@
 //! a deletion, and it is why a rollback can itself be rolled back.
 
 pub mod event;
+pub mod history;
 pub mod ledger;
 pub mod sink;
 
@@ -61,6 +62,7 @@ pub use event::{
     ActorId, DecodeError, DestroyReason, Event, EventBody, ItemUid, Place, DESTROY_REASONS,
     EVENT_KINDS, EVENT_KIND_UNKNOWN,
 };
+pub use history::{Area, Page, Window};
 pub use ledger::{install_allocator, Anomaly, Balance, Ledger, UidAllocator};
 pub use sink::{BatchConfig, BatchingSink, EventSink, SinkStats};
 
@@ -72,6 +74,11 @@ use std::sync::Mutex;
 const K_EVENT: u8 = b'E';
 const K_COLUMN: u8 = b'X';
 const K_ACTOR: u8 = b'P';
+/// Item index: `uid(8) seq(8)` -> empty; "this item instance was involved at
+/// seq". Like the column and actor indexes it holds no payload, so the whole
+/// history of one item is a prefix scan of its own entries rather than a walk
+/// of the journal.
+const K_ITEM: u8 = b'I';
 /// Key written by earlier versions: the last sequence number used. Read only,
 /// to resume a journal that predates [`K_RESERVED`].
 const K_HEAD: &[u8] = b"H";
@@ -122,6 +129,20 @@ fn actor_key(actor: ActorId, seq: u64) -> [u8; 25] {
     let mut k = [0u8; 25];
     k[..17].copy_from_slice(&actor_prefix(actor));
     k[17..].copy_from_slice(&seq.to_be_bytes());
+    k
+}
+
+fn item_prefix(uid: ItemUid) -> [u8; 9] {
+    let mut k = [0u8; 9];
+    k[0] = K_ITEM;
+    k[1..].copy_from_slice(&uid.0.to_be_bytes());
+    k
+}
+
+fn item_key(uid: ItemUid, seq: u64) -> [u8; 17] {
+    let mut k = [0u8; 17];
+    k[..9].copy_from_slice(&item_prefix(uid));
+    k[9..].copy_from_slice(&seq.to_be_bytes());
     k
 }
 
@@ -413,6 +434,12 @@ impl<B: KvBackend> Journal<B> {
             self.backend.put(&column_key(x >> 4, z >> 4, seq), &[])?;
         }
         self.backend.put(&actor_key(actor, seq), &[])?;
+        // One entry per item instance the event names, so an item's whole
+        // history is a prefix read of its own entries. A block event names
+        // none and writes none.
+        for uid in e.body.item_uids() {
+            self.backend.put(&item_key(uid, seq), &[])?;
+        }
         // After the durable write, never before: the mirror must not be able
         // to show an event the journal does not have.
         if let Some(sink) = &self.sink {
