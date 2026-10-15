@@ -17,7 +17,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use aether_ops::{
-    Dashboard, InventoryView, ItemView, OpsService, PlayerEntry, PlayerProfile, RegionStat,
+    Dashboard, InventoryView, ItemView, MapMark, MapOverlay, OpsService, PlayerEntry,
+    PlayerProfile, RegionStat,
 };
 use aether_world::KvBackend;
 use serde::{Deserialize, Serialize};
@@ -28,8 +29,6 @@ use crate::session::DemoWorld;
 
 /// Ticks kept in the MSPT window (five seconds at twenty TPS).
 const TICK_WINDOW: usize = 100;
-/// Sample region activity once a second.
-pub const SAMPLE_EVERY: u64 = 20;
 /// Chunks per region side, as a shift (vanilla's region-file grid: 32×32).
 const REGION_CHUNK_SHIFT: i32 = 5;
 /// Blocks per chunk side, as a shift.
@@ -143,8 +142,12 @@ fn memory_mib() -> (u64, u64) {
     }
 }
 
-/// Sample per-region activity into the rolling heat map. Called once a second
-/// from the tick loop; every source it reads is a snapshot.
+/// Sample per-region activity into the rolling heat map.
+///
+/// Runs on its **own** thread (see [`spawn_sampler`]), never the tick thread,
+/// and reads each source through a `for_each` hook that holds the lock for the
+/// walk instead of building a `Vec` per store — so a big scheduled-tick queue
+/// costs no allocation and cannot stall a tick.
 pub fn sample() {
     fn add(
         fresh: &mut HashMap<(i32, i32), RegionStat>,
@@ -166,28 +169,28 @@ pub fn sample() {
     }
 
     let mut fresh: HashMap<(i32, i32), RegionStat> = HashMap::new();
-    for p in crate::game::entities::positions() {
+    crate::game::entities::for_each_named(&mut |_kind, p| {
         add(
             &mut fresh,
             region_of_block(p.x.floor() as i32, p.z.floor() as i32),
             |r| r.entities += 1,
         );
-    }
-    for p in crate::game::containers::loaded_positions() {
+    });
+    crate::game::containers::for_each_position(&mut |p| {
         add(&mut fresh, region_of_block(p.0, p.2), |r| {
             r.block_entities += 1
         });
-    }
-    for p in crate::game::blockticks::pending_positions() {
+    });
+    crate::game::blockticks::for_each_pending(&mut |p| {
         add(&mut fresh, region_of_block(p.0, p.2), |r| {
             r.block_updates += 1
         });
-    }
-    for p in crate::game::fluids::pending_positions() {
+    });
+    crate::game::fluids::for_each_pending(&mut |p| {
         add(&mut fresh, region_of_block(p.0, p.2), |r| {
             r.block_updates += 1
         });
-    }
+    });
     let sends: HashMap<(i32, i32), u32> =
         std::mem::take(&mut *metrics().chunk_sends.lock().unwrap());
     for (key, n) in sends {
@@ -223,6 +226,18 @@ pub fn sample() {
         }
         regions.insert(key, r);
     }
+}
+
+/// Start the background sampler: one cheap tick per second, off the tick
+/// thread so a large pending-tick queue can never delay the game loop.
+pub fn spawn_sampler() {
+    std::thread::Builder::new()
+        .name("web-sampler".into())
+        .spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            sample();
+        })
+        .expect("failed to start the live-ops sampler");
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +552,44 @@ impl OpsService for ServerOps {
             // the page is stable when it lands.
             ender: Vec::new(),
         })
+    }
+
+    fn overlay(&self) -> MapOverlay {
+        let players = self
+            .registry
+            .snapshot()
+            .into_iter()
+            .map(|h| {
+                let p = h.pos();
+                MapMark {
+                    kind: "player".to_string(),
+                    name: h.name.clone(),
+                    x: p.x,
+                    y: p.y,
+                    z: p.z,
+                }
+            })
+            .collect();
+        let mut entities = Vec::new();
+        crate::game::entities::for_each_named(&mut |kind, p| {
+            entities.push(MapMark {
+                kind: kind.to_string(),
+                name: kind.to_string(),
+                x: p.x,
+                y: p.y,
+                z: p.z,
+            });
+        });
+        MapOverlay { players, entities }
+    }
+
+    fn actor_name(&self, uuid: u128) -> Option<String> {
+        if let Some(h) = self.registry.by_uuid(uuid) {
+            return Some(h.name.clone());
+        }
+        load_profile(&self.world, uuid)
+            .map(|p| p.name)
+            .filter(|n| !n.is_empty())
     }
 }
 

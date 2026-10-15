@@ -82,8 +82,14 @@ host.add_native(&file, &caps, &config, Box::new(plugin))?;
 ## Конфиг
 
 `WebAdminConfig`: `tile_px` (по умолчанию 128), `y_min`/`y_max` (по умолчанию −64…319),
-опциональный `token` и `history_limit`. Плагин читает `bind` и `token` из своей секции
-`[plugins.webadmin]`; токен попадает в общий `Auth`, а `/webadmin token` выдаёт одноразовый.
+опциональный `token` и `history_limit`. Плагин читает их из своей секции `[plugins.webadmin]`, а
+также лимиты против DoS: `bind`, `token`, `max_conns` (по умолчанию 32), `max_per_ip` (8),
+`request_deadline_ms` (10000), `rate_per_sec` (50) и `rate_burst` (100). Токен попадает в общий
+`Auth`, а `/webadmin token` выдаёт одноразовый.
+
+Полная таблица защиты — в [docs/webadmin.ru.md](../../docs/webadmin.ru.md) (лимиты соединений,
+ограниченный пул потоков, лимиты строки/заголовков/тела, дедлайн запроса, рейт-лимит дорогих
+эндпоинтов и клампы `/changes`).
 
 ## Тесты
 

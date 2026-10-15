@@ -203,10 +203,12 @@ fn entities() -> &'static Mutex<Vec<Entity>> {
     E.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Every non-player entity's position, for the live-ops sampler. A snapshot
-/// copy, taken at most once a second, never on the tick's hot path.
-pub fn positions() -> Vec<Vector3> {
-    entities().lock().unwrap().iter().map(|e| e.pos()).collect()
+/// Call `f` for every non-player entity's `(type_name, position)` while
+/// holding the entity lock — the sampler avoids the per-call `Vec` copy.
+pub fn for_each_named(f: &mut dyn FnMut(&'static str, Vector3)) {
+    for e in entities().lock().unwrap().iter() {
+        f(e.type_name(), e.pos());
+    }
 }
 
 /// Entity ids for everything that is not a player.

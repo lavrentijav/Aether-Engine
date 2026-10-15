@@ -10,6 +10,7 @@
 //! Both traits are implemented for [`aether_api::World`] in this module, so in
 //! practice a caller shares `Arc<World<_, _>>` and coerces it to either view.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use aether_world::journal::{ActorId, Event};
@@ -31,33 +32,42 @@ pub trait MapSource: Send + Sync {
     /// Highest world Y the map samples (inclusive).
     fn y_max(&self) -> i32;
 
-    /// The topmost non-air block of a column as `(id, y, water_depth)`.
+    /// Whether `id` is air, resolved through the world's own name registry.
     ///
-    /// `water_depth` is the number of water blocks directly above the floor,
-    /// so the renderer can tint deep water; it is 0 for a dry surface.
-    fn surface(&self, x: i32, z: i32) -> Option<(BlockStateId, i32, i32)> {
-        let mut y = self.y_max();
-        let min = self.y_min();
-        while y >= min {
+    /// The single name authority: a modded world's registry is what decides,
+    /// and the global fallback is only used for an id the world does not know.
+    fn is_air(&self, id: BlockStateId) -> bool {
+        let name = self.block_name(id).unwrap_or_else(|| block_name_of(id));
+        is_air_state(&name)
+    }
+
+    /// The topmost non-air block of a column within `[y_min, y_max]`, as
+    /// `(id, y, water_depth)`. `water_depth` is the number of water blocks
+    /// directly above the floor, so deep water can be tinted; `0` when dry.
+    ///
+    /// The default scans with [`MapSource::block`]; [`aether_api::World`]
+    /// overrides it to snapshot the whole column once (one column latch, one
+    /// cache read lock) rather than a lock per block.
+    fn surface_in(
+        &self,
+        x: i32,
+        z: i32,
+        y_min: i32,
+        y_max: i32,
+    ) -> Option<(BlockStateId, i32, i32)> {
+        let mut y = y_max;
+        while y >= y_min {
             let id = self.block(x, y, z);
-            let air = self
-                .block_name(id)
-                .map(|n| is_air_state(&n))
-                .unwrap_or(id == BlockStateId::AIR);
-            if !air {
-                // Count a water column's depth above the floor tile.
+            if !self.is_air(id) {
                 let mut depth = 0;
-                if let Some(name) = self.block_name(id) {
-                    if name.starts_with("minecraft:water") || name == "minecraft:water" {
-                        let mut d = y;
-                        while d >= min {
-                            let below = self.block(x, d, z);
-                            if self.block_name(below).as_deref() == Some("minecraft:water") {
-                                d -= 1;
-                                depth += 1;
-                            } else {
-                                break;
-                            }
+                if self.is_water(id) {
+                    let mut d = y;
+                    while d >= y_min {
+                        if self.is_water(self.block(x, d, z)) {
+                            d -= 1;
+                            depth += 1;
+                        } else {
+                            break;
                         }
                     }
                 }
@@ -66,6 +76,18 @@ pub trait MapSource: Send + Sync {
             y -= 1;
         }
         None
+    }
+
+    /// The topmost non-air block of a column in the source's own band.
+    fn surface(&self, x: i32, z: i32) -> Option<(BlockStateId, i32, i32)> {
+        self.surface_in(x, z, self.y_min(), self.y_max())
+    }
+
+    /// Whether `id` is water (state name based, like air).
+    fn is_water(&self, id: BlockStateId) -> bool {
+        self.block_name(id)
+            .unwrap_or_else(|| block_name_of(id))
+            .starts_with("minecraft:water")
     }
 }
 
@@ -130,6 +152,50 @@ where
 
     fn y_max(&self) -> i32 {
         319
+    }
+
+    /// One column snapshot (one latch, one cache read lock) instead of a lock
+    /// per block; names are memoised per distinct state so the registry lock
+    /// is taken a handful of times per column, not once per cell.
+    fn surface_in(
+        &self,
+        x: i32,
+        z: i32,
+        y_min: i32,
+        y_max: i32,
+    ) -> Option<(BlockStateId, i32, i32)> {
+        let column = aether_api::World::column_snapshot(self, x, z, y_min, y_max);
+        if column.is_empty() {
+            return None;
+        }
+        let mut memo: HashMap<BlockStateId, (bool, bool)> = HashMap::new();
+        let classify = |id: BlockStateId, memo: &mut HashMap<BlockStateId, (bool, bool)>| {
+            *memo.entry(id).or_insert_with(|| {
+                let name = self.block_name(id).unwrap_or_else(|| block_name_of(id));
+                (is_air_state(&name), name.starts_with("minecraft:water"))
+            })
+        };
+        for (i, &id) in column.iter().enumerate().rev() {
+            let (air, water) = classify(id, &mut memo);
+            if air {
+                continue;
+            }
+            let mut depth = 0;
+            if water {
+                let mut j = i;
+                while j > 0 {
+                    let below = column[j - 1];
+                    if classify(below, &mut memo).1 {
+                        j -= 1;
+                        depth += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            return Some((id, y_min + i as i32, depth));
+        }
+        None
     }
 }
 

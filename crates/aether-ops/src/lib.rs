@@ -147,6 +147,26 @@ pub struct InventoryView {
     pub ender: Vec<ItemView>,
 }
 
+/// One thing drawn on the map overlay: a player or a non-player entity.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MapMark {
+    /// A stable category: `player`, `mob`, or the entity type name.
+    pub kind: String,
+    /// A human label (the player name, or the entity type).
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+/// Live overlay of everything currently in the world: online players and
+/// non-player entities. Empty when nothing is running.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct MapOverlay {
+    pub players: Vec<MapMark>,
+    pub entities: Vec<MapMark>,
+}
+
 /// Live, read-only live-ops state.
 ///
 /// Every method is cheap and must not block the tick: implementations read
@@ -167,6 +187,19 @@ pub trait OpsService: Send + Sync {
     /// One player's inventory by UUID hex or name, live when online and from
     /// the saved store when off. `None` if the player is unknown.
     fn inventory(&self, id: &str) -> Option<InventoryView>;
+
+    /// Live map overlay: online players and non-player entities with their
+    /// positions. A snapshot; the default is empty.
+    fn overlay(&self) -> MapOverlay {
+        MapOverlay::default()
+    }
+
+    /// The display name for an actor uuid, from the single player registry
+    /// (the online list, else the persisted profile store). `None` when the
+    /// uuid is unknown, so the caller falls back to the hex form.
+    fn actor_name(&self, _uuid: u128) -> Option<String> {
+        None
+    }
 }
 
 /// A sized handle to an [`OpsService`], so the plugin host's `Arc<T>`-shaped

@@ -57,6 +57,7 @@ fn map_time_machine_and_history_end_to_end() {
         y_max: 8,
         token: Some("test".to_string()),
         history_limit: 100,
+        ..WebAdminConfig::default()
     };
     let admin = WebAdmin::with_config(world.clone(), world, cfg);
 
@@ -228,6 +229,47 @@ impl aether_ops::OpsService for MockOps {
             ender: Vec::new(),
         })
     }
+    fn overlay(&self) -> aether_ops::MapOverlay {
+        aether_ops::MapOverlay {
+            players: vec![aether_ops::MapMark {
+                kind: "player".to_string(),
+                name: "Alice".to_string(),
+                x: 8.0,
+                y: 64.0,
+                z: 8.0,
+            }],
+            entities: vec![aether_ops::MapMark {
+                kind: "minecraft:cow".to_string(),
+                name: "minecraft:cow".to_string(),
+                x: 9.0,
+                y: 64.0,
+                z: 9.0,
+            }],
+        }
+    }
+    fn actor_name(&self, uuid: u128) -> Option<String> {
+        (uuid == 0xaaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaau128).then(|| "Alice".to_string())
+    }
+}
+
+#[test]
+fn overlay_and_names_come_from_the_ops_service() {
+    let world = Arc::new(World::new(MemStore::new(), FlatGenerator::classic()));
+    let cfg = WebAdminConfig {
+        token: Some("test".to_string()),
+        ..WebAdminConfig::default()
+    };
+    let ops = aether_ops::OpsHandle(Arc::new(MockOps));
+    // The plugin builds these adapters; here we build them the same way to
+    // exercise `/overlay` and the name-resolved history.
+    let admin = WebAdmin::with_config(world.clone(), world, cfg)
+        .with_ops(ops.clone())
+        .with_overlay(Arc::new(aether_webadmin::OpsOverlay(ops.clone())))
+        .with_names(Arc::new(aether_webadmin::OpsNames(ops.clone())));
+
+    let overlay = json(&admin, "/overlay", &[]);
+    assert!(overlay.contains("Alice"), "{overlay}");
+    assert!(overlay.contains("minecraft:cow"), "{overlay}");
 }
 
 #[test]

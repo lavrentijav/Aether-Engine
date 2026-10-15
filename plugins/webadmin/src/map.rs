@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 use aether_world::BlockStateId;
 
 use crate::color;
-use crate::source::{block_name_of, MapSource};
+use crate::source::MapSource;
 
 /// Default tile edge, in pixels (and thus columns at zoom 0).
 pub const DEFAULT_TILE_PX: u32 = 128;
@@ -44,11 +44,36 @@ impl TileKey {
     }
 
     /// The block column at the tile's north-west corner.
+    ///
+    /// `None` when `tx`/`tz` is out of the guarded range, so a hostile or
+    /// mistaken coordinate cannot overflow `i32` and wrap a tile across the
+    /// world (or panic a connection thread in debug).
+    pub fn checked_origin(&self, px: u32) -> Option<(i32, i32)> {
+        let span = px as i32 * blocks_per_pixel(self.zoom);
+        let x = self.tx.checked_mul(span)?;
+        let z = self.tz.checked_mul(span)?;
+        if !(MIN_TILE_COORD..=MAX_TILE_COORD).contains(&self.tx)
+            || !(MIN_TILE_COORD..=MAX_TILE_COORD).contains(&self.tz)
+        {
+            return None;
+        }
+        Some((x, z))
+    }
+
+    /// The block column at the tile's north-west corner, saturating on
+    /// overflow. Prefer [`TileKey::checked_origin`] at a trust boundary.
     pub fn origin(&self, px: u32) -> (i32, i32) {
         let span = px as i32 * blocks_per_pixel(self.zoom);
-        (self.tx * span, self.tz * span)
+        (self.tx.saturating_mul(span), self.tz.saturating_mul(span))
     }
 }
+
+/// Tile coordinates are clamped to this range: at the coarsest zoom a tile is
+/// `128 * 2^6 = 8192` blocks, so `2^20` tiles already spans far past the world
+/// and leaves ample room before `i32` overflow.
+pub const MAX_TILE_COORD: i32 = 1 << 20;
+/// See [`MAX_TILE_COORD`].
+pub const MIN_TILE_COORD: i32 = -MAX_TILE_COORD;
 
 /// How many block columns one pixel covers at `zoom`.
 pub fn blocks_per_pixel(zoom: u8) -> i32 {
@@ -196,65 +221,42 @@ impl MapRenderer {
     }
 
     /// The surface of the column at `(x, z)` in the configured band.
+    ///
+    /// Delegates to the source's batch `surface_in`, so a `World` renders a
+    /// whole column under one latch and one cache read lock instead of a lock
+    /// per block.
     pub fn surface(&self, x: i32, z: i32) -> Option<Surface> {
-        // A bounded scan rather than `MapSource::surface`, so the renderer's
-        // configured band wins and a mock need not implement the default.
-        let mut y = self.y_max;
-        while y >= self.y_min {
-            let id = self.source.block(x, y, z);
-            let name = self
-                .source
-                .block_name(id)
-                .unwrap_or_else(|| block_name_of(id));
-            if !crate::source::is_air_state(&name) {
-                let is_water = name.starts_with("minecraft:water");
-                let mut depth = 0;
-                if is_water {
-                    let mut d = y;
-                    while d >= self.y_min {
-                        let below = self.source.block(x, d, z);
-                        let bn = self
-                            .source
-                            .block_name(below)
-                            .unwrap_or_else(|| block_name_of(below));
-                        if bn.starts_with("minecraft:water") {
-                            d -= 1;
-                            depth += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                return Some(Surface {
-                    id,
-                    y,
-                    water_depth: depth,
-                    is_water,
-                });
-            }
-            y -= 1;
-        }
-        None
+        let (id, y, water_depth) = self.source.surface_in(x, z, self.y_min, self.y_max)?;
+        let is_water = self.source.is_water(id);
+        Some(Surface {
+            id,
+            y,
+            water_depth,
+            is_water,
+        })
     }
 
     fn render_uncached(&self, key: TileKey) -> Tile {
         let px = self.tile_px;
         let bpp = blocks_per_pixel(key.zoom);
-        let (ox, oz) = key.origin(px);
         let mut rgba = vec![0u8; (px * px * 4) as usize];
         let mut surface_y = vec![i16::MIN; (px * px) as usize];
-        for pz in 0..px {
-            for pix in 0..px {
-                let x = ox + pix as i32 * bpp;
-                let z = oz + pz as i32 * bpp;
-                let Some(s) = self.surface(x, z) else {
-                    continue;
-                };
-                let idx = (pz * px + pix) as usize;
-                surface_y[idx] = s.y.clamp(i16::MIN as i32 + 1, i16::MAX as i32) as i16;
-                let shade = self.shade_factor(&surface_y, px, pix, pz, s.y);
-                let c = s.color(shade);
-                rgba[idx * 4..idx * 4 + 4].copy_from_slice(&c);
+        // A coordinate outside the guarded range renders as an empty tile
+        // rather than wrapping; the HTTP layer rejects it earlier anyway.
+        if let Some((ox, oz)) = key.checked_origin(px) {
+            for pz in 0..px {
+                for pix in 0..px {
+                    let x = ox + pix as i32 * bpp;
+                    let z = oz + pz as i32 * bpp;
+                    let Some(s) = self.surface(x, z) else {
+                        continue;
+                    };
+                    let idx = (pz * px + pix) as usize;
+                    surface_y[idx] = s.y.clamp(i16::MIN as i32 + 1, i16::MAX as i32) as i16;
+                    let shade = self.shade_factor(&surface_y, px, pix, pz, s.y);
+                    let c = s.color(shade);
+                    rgba[idx * 4..idx * 4 + 4].copy_from_slice(&c);
+                }
             }
         }
         Tile {
@@ -390,5 +392,20 @@ mod tests {
         let deep = r.surface(1, 0).unwrap();
         let c = deep.color(1.0);
         assert!(c[2] > c[0], "deep water stays blue: {c:?}");
+    }
+
+    #[test]
+    fn out_of_range_tile_coordinates_do_not_overflow() {
+        // The coarsest zoom spans 8192 blocks per tile; at i32::MAX this would
+        // overflow `tx * span`. It must be refused, not wrapped or panicked.
+        let key = TileKey::new(MAX_ZOOM, i32::MAX, i32::MAX);
+        assert!(key.checked_origin(128).is_none());
+        // A render of such a key yields an empty tile rather than a panic.
+        let r = MapRenderer::new(mock()).with_tile_px(2);
+        let t = r.render(key);
+        assert_eq!(t.pixel(0, 0), [0, 0, 0, 0]);
+        // In-range coordinates still resolve.
+        let ok = TileKey::new(0, 3, -4);
+        assert_eq!(ok.checked_origin(4), Some((12, -16)));
     }
 }

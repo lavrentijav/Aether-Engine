@@ -109,9 +109,32 @@ the in-engine profiler is a later task.
 * Read-only: the HTTP layer has no route that could write the world, and the `ops` service trait has
   no method that could.
 * The token comparison is length-checked and byte-accumulated, not an early-exit `==`.
-* Responses carry `Cache-Control: no-store`; the cookie is `HttpOnly; SameSite=Strict`.
+* Responses carry `Cache-Control: no-store`; the cookie is `HttpOnly; SameSite=Strict`. A token
+  presented as `?token=` on a page request is upgraded to that cookie so the page's own JS fetches
+  are authenticated too.
 * No secrets in git: `token` is operator config (a sample file has none), and the one-time token is
   generated from `/dev/urandom` at runtime.
+
+### DoS limits
+
+The socket layer bounds what one client can do, so the console cannot be trivially starved even if
+the operator binds it beyond loopback:
+
+| limit | default | config | what it stops |
+|-------|---------|--------|---------------|
+| global connections | 32 | `max_conns` | a thread/memory flood from many sockets |
+| per-IP connections | 8 | `max_per_ip` | one address opening unbounded sockets |
+| worker pool | bounded (≤16 workers, bounded queue) | — | unbounded thread growth; over-capacity connections get `503` |
+| request line | 8 KiB | fixed | an endless request line |
+| header count / size | 64 / 16 KiB | fixed | an endless header stream |
+| body | 64 KiB | fixed | an oversized login form |
+| request deadline | 10 s | `request_deadline_ms` | slowloris (one byte per read); the victim gets `408` |
+| expensive-endpoint rate | 50/s, burst 100 | `rate_per_sec`, `rate_burst` | hammering `/tile`, `/tile_at`, `/history`, `/changes`, `/player`; over-rate gets `429` |
+| `/changes` radius / results / scan | 256 blocks / 4096 rows / 100 k events | fixed | one query over an unbounded area or journal |
+
+`/tile_at` tiles are cached by `(tile, at)`, so scrubbing the time slider does not recompute the same
+replayed tile; live tile rendering snapshots a whole column under one lock instead of locking per
+block.
 
 ## Limits
 

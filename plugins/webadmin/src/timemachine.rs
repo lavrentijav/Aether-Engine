@@ -16,13 +16,25 @@
 //! read from the live world.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use aether_world::journal::{ActorId, EventBody};
 use aether_world::{BlockStateId, StorageError};
 
 use crate::map::{blocks_per_pixel, Surface, Tile, TileKey};
 use crate::source::{block_name_of, is_air_state, HistorySource, MapSource};
+
+/// The largest horizontal radius `/changes` will scan, in blocks. Guards the
+/// `(2r/16)^2`-column loop against a single hostile query.
+pub const MAX_CHANGE_RADIUS: u32 = 256;
+/// The most events `/changes` will examine in one request, before it stops
+/// early and returns what it has.
+pub const MAX_CHANGE_SCAN: usize = 100_000;
+/// The most rows `/changes` will return.
+pub const MAX_CHANGE_RESULTS: usize = 4_096;
+/// Replayed tiles kept in the time machine's cache.
+const MAX_TIME_CACHE: usize = 256;
 
 /// One change to one block, as the history pages present it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +79,11 @@ pub struct TimeMachine {
     source: Arc<dyn MapSource>,
     y_min: i32,
     y_max: i32,
+    /// Replayed tiles, keyed by `(tile, at)`. The live tile cache is in
+    /// [`crate::map::MapRenderer`]; this one caches the *time-travelled*
+    /// tiles, which are far more expensive (a journal scan per pixel) and so
+    /// must not be recomputed on every scrub step.
+    cache: RwLock<HashMap<(TileKey, u64), Arc<Tile>>>,
 }
 
 impl TimeMachine {
@@ -77,6 +94,7 @@ impl TimeMachine {
             source,
             y_min,
             y_max,
+            cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -134,6 +152,10 @@ impl TimeMachine {
 
     /// The block changes in a horizontal radius at or after `since_ms`, oldest
     /// first, capped at `limit` (the newest `limit` in the window).
+    ///
+    /// The radius is clamped to [`MAX_CHANGE_RADIUS`] and the scan is bounded
+    /// by [`MAX_CHANGE_SCAN`] events, so one request cannot walk an unbounded
+    /// area or an unbounded journal.
     pub fn changes_in_area(
         &self,
         x: i32,
@@ -143,13 +165,20 @@ impl TimeMachine {
         until_ms: u64,
         limit: usize,
     ) -> Result<Vec<ChangeRecord>, StorageError> {
-        let r = radius as i64;
+        let r = radius.min(MAX_CHANGE_RADIUS) as i64;
+        let limit = limit.clamp(1, MAX_CHANGE_RESULTS);
+        let budget = MAX_CHANGE_SCAN.max(limit * 32);
         let (cx0, cx1) = ((x as i64 - r) >> 4, (x as i64 + r) >> 4);
         let (cz0, cz1) = ((z as i64 - r) >> 4, (z as i64 + r) >> 4);
         let mut out = Vec::new();
-        for ccx in cx0..=cx1 {
+        let mut scanned = 0usize;
+        'scan: for ccx in cx0..=cx1 {
             for ccz in cz0..=cz1 {
                 for e in self.history.column_events(ccx as i32, ccz as i32)? {
+                    if scanned >= budget {
+                        break 'scan;
+                    }
+                    scanned += 1;
                     if e.at_ms < since_ms || e.at_ms > until_ms {
                         continue;
                     }
@@ -235,23 +264,51 @@ impl TimeMachine {
     }
 
     /// Render a tile as of `at`, with the same geometry as [`crate::map`].
-    pub fn tile_at(&self, key: TileKey, at: AtSeq, tile_px: u32) -> Result<Tile, StorageError> {
+    ///
+    /// Replayed tiles are cached by `(tile, at)`: a scrub re-requests the same
+    /// tiles repeatedly, and each is a journal scan per pixel, so recomputing
+    /// them would be the map's costliest path.
+    pub fn tile_at(
+        &self,
+        key: TileKey,
+        at: AtSeq,
+        tile_px: u32,
+    ) -> Result<Arc<Tile>, StorageError> {
+        if let Some(t) = self.cache.read().unwrap().get(&(key, at.0)) {
+            return Ok(Arc::clone(t));
+        }
+        let tile = Arc::new(self.render_tile_at(key, at, tile_px)?);
+        let mut cache = self.cache.write().unwrap();
+        if cache.len() >= MAX_TIME_CACHE {
+            cache.clear();
+        }
+        cache.insert((key, at.0), Arc::clone(&tile));
+        Ok(tile)
+    }
+
+    /// How many replayed tiles are cached.
+    pub fn cached_tiles(&self) -> usize {
+        self.cache.read().unwrap().len()
+    }
+
+    fn render_tile_at(&self, key: TileKey, at: AtSeq, tile_px: u32) -> Result<Tile, StorageError> {
         let px = tile_px.max(1);
         let bpp = blocks_per_pixel(key.zoom);
-        let (ox, oz) = key.origin(px);
         let mut rgba = vec![0u8; (px * px * 4) as usize];
         let mut surface_y = vec![i16::MIN; (px * px) as usize];
-        for pz in 0..px {
-            for pix in 0..px {
-                let x = ox + pix as i32 * bpp;
-                let z = oz + pz as i32 * bpp;
-                let Some(s) = self.surface_at(x, z, at)? else {
-                    continue;
-                };
-                let idx = (pz * px + pix) as usize;
-                surface_y[idx] = s.y.clamp(i16::MIN as i32 + 1, i16::MAX as i32) as i16;
-                let c = s.color(1.0);
-                rgba[idx * 4..idx * 4 + 4].copy_from_slice(&c);
+        if let Some((ox, oz)) = key.checked_origin(px) {
+            for pz in 0..px {
+                for pix in 0..px {
+                    let x = ox + pix as i32 * bpp;
+                    let z = oz + pz as i32 * bpp;
+                    let Some(s) = self.surface_at(x, z, at)? else {
+                        continue;
+                    };
+                    let idx = (pz * px + pix) as usize;
+                    surface_y[idx] = s.y.clamp(i16::MIN as i32 + 1, i16::MAX as i32) as i16;
+                    let c = s.color(1.0);
+                    rgba[idx * 4..idx * 4 + 4].copy_from_slice(&c);
+                }
             }
         }
         Ok(Tile {
@@ -424,5 +481,45 @@ mod tests {
             .tile_at(TileKey::new(0, 0, 0), AtSeq(u64::MAX), 2)
             .unwrap();
         assert_eq!(now.pixel(0, 0), [125, 125, 125, 255]);
+    }
+
+    #[test]
+    fn replayed_tiles_are_cached() {
+        let w = flat();
+        let _ = set(&w, ALICE, 0, 3, 0, ids::STONE);
+        let t = tm(w).with_height_range(0, 8);
+        assert_eq!(t.cached_tiles(), 0);
+        let _ = t.tile_at(TileKey::new(0, 0, 0), AtSeq(0), 2).unwrap();
+        assert_eq!(t.cached_tiles(), 1, "a replayed tile is cached");
+        // A second request for the same (tile, time) uses the cache.
+        let _ = t.tile_at(TileKey::new(0, 0, 0), AtSeq(0), 2).unwrap();
+        assert_eq!(t.cached_tiles(), 1);
+        // A different time is a different cache entry.
+        let _ = t.tile_at(TileKey::new(0, 0, 0), AtSeq(1), 2).unwrap();
+        assert_eq!(t.cached_tiles(), 2);
+    }
+
+    #[test]
+    fn changes_radius_and_scan_are_clamped() {
+        let w = flat();
+        for i in 0..10 {
+            let _ = w.journal().append(
+                ALICE,
+                EventBody::BlockSet {
+                    x: i,
+                    y: 4,
+                    z: 0,
+                    from: ids::AIR,
+                    to: ids::STONE,
+                },
+            );
+        }
+        let t = tm(w);
+        // A giant radius and limit do not run away; the result is bounded.
+        let out = t
+            .changes_in_area(0, 0, u32::MAX, 0, u64::MAX, usize::MAX)
+            .unwrap();
+        assert!(out.len() <= MAX_CHANGE_RESULTS);
+        assert_eq!(out.len(), 10);
     }
 }

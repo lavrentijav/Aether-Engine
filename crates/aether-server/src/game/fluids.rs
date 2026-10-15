@@ -274,16 +274,11 @@ fn queue() -> &'static Mutex<Scheduler<Pos>> {
     Q.get_or_init(|| Mutex::new(Scheduler::new()))
 }
 
-/// Positions with a scheduled fluid tick still pending, for the live-ops
-/// sampler. Read at most once a second.
-pub fn pending_positions() -> Vec<Pos> {
-    queue()
-        .lock()
-        .unwrap()
-        .entries()
-        .into_iter()
-        .map(|(_, p)| p)
-        .collect()
+/// Call `f` for every pending fluid-tick position, without the `Vec` copy.
+pub fn for_each_pending(f: &mut dyn FnMut(Pos)) {
+    for (_, p) in queue().lock().unwrap().entries() {
+        f(p);
+    }
 }
 
 fn schedule(pos: Pos, delay: u64) {

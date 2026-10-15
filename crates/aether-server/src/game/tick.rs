@@ -45,9 +45,6 @@ pub fn start(registry: SharedRegistry, world: Arc<DemoWorld>) {
                 let took = start.elapsed();
                 super::SLOWEST_TICK_US.fetch_max(took.as_micros() as u64, Ordering::Relaxed);
                 crate::web::record_tick(took.as_micros() as u64);
-                if super::now() % crate::web::SAMPLE_EVERY == 0 {
-                    crate::web::sample();
-                }
                 std::thread::sleep(TICK.saturating_sub(took));
             }
         })

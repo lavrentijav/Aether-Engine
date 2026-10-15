@@ -118,9 +118,11 @@ fn active() -> &'static Mutex<HashSet<Pos>> {
     M.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Every block position with a loaded container, for the live-ops sampler.
-pub fn loaded_positions() -> Vec<Pos> {
-    all().lock().unwrap().keys().copied().collect()
+/// Call `f` for every loaded container's position, without the `Vec` copy.
+pub fn for_each_position(f: &mut dyn FnMut(Pos)) {
+    for &p in all().lock().unwrap().keys() {
+        f(p);
+    }
 }
 
 /// Key for the container at a block position.

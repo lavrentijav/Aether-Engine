@@ -38,6 +38,7 @@ pub mod source;
 pub mod timemachine;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use aether_api::World;
 use aether_ops::{OpsHandle, SERVICE, VERSION};
@@ -49,10 +50,50 @@ use aether_world::KvBackend;
 use aether_worldgen::ChunkGenerator;
 
 pub use auth::{Auth, COOKIE, ONE_TIME_TTL};
-pub use http::{Mark, Overlay, OverlaySource, Request, Response, Server, WebAdmin, WebAdminConfig};
+pub use http::{
+    EmptyOverlay, Mark, NameResolver, Overlay, OverlaySource, Request, Response, Server, WebAdmin,
+    WebAdminConfig,
+};
 pub use map::{MapRenderer, Surface, Tile, TileKey};
 pub use source::{HistorySource, HistoryView, MapSource, MapView};
 pub use timemachine::{AtSeq, BlockChange, ChangeRecord, TimeMachine};
+
+use aether_ops::MapMark;
+
+/// The live overlay, read from the server's `ops` service so the map shows
+/// online players and non-player entities.
+pub struct OpsOverlay(pub OpsHandle);
+
+impl OverlaySource for OpsOverlay {
+    fn overlay(&self) -> Overlay {
+        let o = self.0.get().overlay();
+        let conv = |v: Vec<MapMark>, kind: &'static str| {
+            v.into_iter()
+                .map(|m| Mark {
+                    kind,
+                    name: m.name,
+                    x: m.x,
+                    y: m.y,
+                    z: m.z,
+                })
+                .collect()
+        };
+        Overlay {
+            players: conv(o.players, "player"),
+            entities: conv(o.entities, "entity"),
+        }
+    }
+}
+
+/// Player-name resolution, delegating to the server's single player registry
+/// (online list, else the persisted profile store).
+pub struct OpsNames(pub OpsHandle);
+
+impl NameResolver for OpsNames {
+    fn name(&self, actor: aether_world::journal::ActorId) -> Option<String> {
+        self.0.get().actor_name(actor.0)
+    }
+}
 
 /// The default bind address, matching the WEB brief.
 pub const DEFAULT_BIND: &str = "127.0.0.1:8090";
@@ -203,10 +244,23 @@ impl NativePlugin for WebAdminPlugin {
             y_max: self.y_max,
             token,
             history_limit: self.history_limit,
+            max_conns: cfg_usize(ctx, "max_conns", WebAdminConfig::default().max_conns, 1),
+            max_per_ip: cfg_usize(ctx, "max_per_ip", WebAdminConfig::default().max_per_ip, 1),
+            request_deadline: Duration::from_millis(cfg_usize(
+                ctx,
+                "request_deadline_ms",
+                WebAdminConfig::default().request_deadline.as_millis() as usize,
+                10,
+            ) as u64),
+            rate_per_sec: cfg_f64(ctx, "rate_per_sec", WebAdminConfig::default().rate_per_sec),
+            rate_burst: cfg_f64(ctx, "rate_burst", WebAdminConfig::default().rate_burst),
         };
         let mut admin = WebAdmin::with_config(map_source, history_source, config);
         if let Some(ops) = ops {
-            admin = admin.with_ops((*ops).clone());
+            admin = admin
+                .with_ops((*ops).clone())
+                .with_overlay(Arc::new(OpsOverlay((*ops).clone())))
+                .with_names(Arc::new(OpsNames((*ops).clone())));
         }
         self.auth = Some(Arc::clone(admin.auth()));
         self.map = Some(admin.map_handle());
@@ -309,10 +363,27 @@ impl NativePlugin for WebAdminPlugin {
     }
 }
 
+/// A `usize` from `[plugins.webadmin]`, clamped to at least `min`.
+fn cfg_usize(ctx: &NativeContext, key: &str, default: usize, min: usize) -> usize {
+    ctx.config
+        .get(key)
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
+        .max(min)
+}
+
+/// An `f64` from `[plugins.webadmin]`; `0` (or a bad value) disables a rate.
+fn cfg_f64(ctx: &NativeContext, key: &str, default: f64) -> f64 {
+    ctx.config
+        .get(key)
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(default)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn manifest_requires_ops_and_serves_webadmin() {
         let m = manifest();
