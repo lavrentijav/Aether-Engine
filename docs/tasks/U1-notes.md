@@ -58,27 +58,51 @@ verified against the pack and the decompiled `loot` classes and fixed, one commi
 * **fix3** — `limit_count` reads its bounds under `limit`; `set_count` defaults `add` to
   false.
 * **fix4** — `binomial_with_bonus_count` runs `level + extra` rounds, each adding one.
-* **fix5** — `entity_properties` evaluates `components` and `type_specific`, so sheep
-  wool (colour + sheared) and slime/magma pools resolve; still fails closed for
-  `vehicle`/`equipment`/`nbt`.
-* **fix6** — a generated chest is filled only when a player opens it, never on break,
-  hopper contact or audit.
+* **fix5** — `entity_properties` evaluates `components` and `type_specific`, so a sheep's
+  wool (colour + sheared) resolves; it still fails closed and records for
+  `vehicle`/`equipment`/`nbt` and `type_specific` ranges, so slime/magma (not engine
+  mobs) remain unanswered.
+* **fix6** — a generated chest is filled only when a player opens it, never on break or
+  audit. *(Superseded by fix11: vanilla fills on any first access, including a hopper's.)*
 * **fix8** — `enchanted_count_increase` grows by `round(level * getFloat)`.
 * **fix9** — unknown conditions/functions/no-op functions and skipped entry types are
   recorded; root-level `functions` are parsed and applied.
 * **fix10** — a `loot_table` reference cycle is cut instead of recursing without bound.
 
+## Round-2 review fixes (U1-fix11 …)
+
+`docs/tasks/U1-review-2.md` re-checked the round-1 fixes and the whole change.
+
+* **fix11 (N1)** — seeding a generated chest moved back into `containers::load`, so the
+  *first access* (an open, a hopper draw, or a break) fills it, matching vanilla's
+  `unpackLootTable` on first `getItem`/`removeItem`/`isEmpty`. fix6's player-only rule both
+  diverged from vanilla and let a hopper's first touch void the loot (empty cache/meta).
+* **fix12** — four loot-engine corrections:
+  * **N2** `enchanted_count_increase` `limit` caps the total stack (`limitSize`), not the
+    bonus; absent `limit` = no cap.
+  * **N3** a constant number provider is `round`, not `floor`.
+  * **N4** the fail-closed predicate keys (`equipment`, `vehicle`, unknown flags,
+    `match_tool`/`type_specific` fields) are recorded, so the startup report and this
+    note are accurate.
+  * **S1** `explosion_decay` decays per item; **S2** an inline `loot_table` `value`
+    object is parsed in place.
+
+The `KNOWN_ISSUES` text was corrected to say "first access" and to name the
+`entity_properties` predicates left unanswered.
+
 ## Tests
 
 * Inline (always run): ore-drops fortune III distribution (mean 2.2, P(1)=2/5), the
-  enchanted-count-increase distribution (1/6, 1/3, 1/3, 1/6), zombie looting,
-  expand/weighting semantics, root-level functions, tag expansion, the structure→table
-  decision, a reference cycle, and determinism of a seeded chest roll.
+  enchanted-count-increase distribution (1/6, 1/3, 1/3, 1/6) and its total cap, constants
+  rounding, per-item explosion decay, zombie looting, expand/weighting semantics,
+  root-level functions, tag expansion, inline tables, the structure→table decision, a
+  reference cycle, a generated chest seeded on first access (throwaway world), and
+  determinism of a seeded chest roll.
 * Pack-gated on `AETHER_VANILLA_PACK` (skips without it): real diamond-ore silk/fortune,
   real short-grass seed rate (0.125), real wheat binomial bonus, real melon `limit`,
   real sheep wool by colour/shear, real creeper music disc, real fishing junk, real
-  zombie drops, a real chest rolled twice, the unsupported-construct record, and
-  **all 1,324 pack loot tables parse**.
+  inline equipment table, real zombie drops, a real chest rolled twice, the
+  unsupported-construct record, and **all 1,324 pack loot tables parse**.
 
 ## Left
 
