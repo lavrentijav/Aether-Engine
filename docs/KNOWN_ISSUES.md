@@ -5,7 +5,7 @@
 > Current problems, engineering risks, and the **Known Deviations Registry** (Phase 1
 > compatibility gaps that are accepted on purpose).
 >
-> Last reviewed: 2026-10-14
+> Last reviewed: 2026-10-15
 
 ---
 
@@ -67,7 +67,7 @@
 
 11. **The journal keeps every event forever.** Loading a column no longer replays its whole history (per-column checkpoints), but the history itself still grows without bound on disk; grouped revisions and packed cold segments are the plan (ROADMAP, Phase 1 "History at scale"). Fluid flow is written without a journal entry, so in a sub-chunk rebuilt after a generator change, flowing water resets to what the generator made until something disturbs it.
 
-12. **Item provenance has known blind spots.** A stack that merges into one already in a slot ends there (its uid is destroyed and the other's count grows), so that hop has no *derived from* edge; events are per click, not per operation, until revisions group them; the economy still journals its own moves with uids of their own beside the real ones; items in inventories from before this change were never minted, so their first event reads as an anomaly in `/audit`; fights and trades between players are not recorded yet.
+12. **Item provenance still has blind spots, but the merge hop is tracked now.** Journal format **v4** records a stack topping up another as an `item_merge` that names the source uid (before, the arriving uid was destroyed and the destination's count simply grew, so the hop had no source at all), and a destroy carries a `reason` byte (consumed, despawn, crafted, creative replace, …) so a disappearance says why. A split is a mint of the new identity plus a move of the source, and `item_derive` is reserved for a real output (craft/smelt/brew) from its consumed ingredients. What remains: events are per click, not per operation, until revisions group them; the economy still journals its own moves with uids of their own beside the real ones; items in inventories from before the uid change were never minted, so their first event reads as an anomaly in `/audit`; and fights and trades between players are not recorded yet.
 
 13. ~~**1.20.2 through 1.20.4 cannot connect.**~~ **Fixed:** protocols 764–765 are served by their own codecs (`protocol/v764` 1.20.2, `protocol/v765` 1.20.3/1.20.4), built on the 1.20.1 (763) NBT blob. Like 1.20.1 they send the whole registry set as one blob — but with an **anonymous root**, and in the **configuration phase** 1.20.2 introduced rather than inside Play Login. Columns are wrapped in 1.20.2's **chunk-batch** flow-control packets, and 1.20.3's differences are pinned in its own module (System Chat as an NBT component, the UUID on the resource-pack packet, game event 13 for "wait for chunks", and the moved `minecraft:player` entity-type id). 1.20.2 also reordered the Unload Chunk packet to Z-before-X, which its module follows. As with the 1.20.1 codec, the registry blob stays minimal (dimension type, biome, chat type). Verified by encode/decode tests only; no live client of these versions was available.
 
