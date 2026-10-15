@@ -1,0 +1,21 @@
+# Manifest for the GriefPrevention-style claims plugin (CMD-35). See crates/aether-plugin/src/manifest.rs.
+id = "claims"
+name = "Claims"
+version = "0.1.0"
+api = "0.1"
+# native: a Rust crate in this workspace, linked in-process (CMD-00N).
+# No .wasm entry: the loader calls it directly, no WASM boundary.
+priority = 20
+
+capabilities = ["log", "config", "supports", "storage.kv", "world.read"]
+
+subscribe = [
+    "before-block-break",
+    "before-block-place",
+    "before-use-item",
+    "before-container-click",
+    "on-command",
+    "after-player-join",
+]
+
+commands = ["claim", "trust", "untrust", "abandonclaim", "abandonallclaims", "claimslist"]

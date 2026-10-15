@@ -1,0 +1,44 @@
+# Manifest for the moderation plugin (CMD-41). See crates/aether-plugin/src/manifest.rs.
+id = "moderation"
+name = "Moderation"
+version = "0.1.0"
+api = "0.1"
+# native: a Rust crate in this workspace, linked in-process (CMD-00N).
+# No .wasm entry: the loader calls it directly, no WASM boundary.
+priority = 60
+
+capabilities = ["log", "config", "supports", "players", "storage.kv", "scheduler"]
+
+subscribe = [
+    "before-chat",
+    "on-command",
+    "after-player-join",
+    "after-player-leave",
+    "after-entity-death",
+]
+
+commands = [
+    "mute",
+    "tempmute",
+    "unmute",
+    "warn",
+    "warnings",
+    "delwarn",
+    "tempban",
+    "tempbanip",
+    "banip",
+    "jail",
+    "unjail",
+    "setjail",
+    "vanish",
+    "v",
+    "sudo",
+    "freeze",
+    "clearchat",
+    "slowmode",
+    "staffchat",
+    "sc",
+    "report",
+    "reports",
+    "history",
+]

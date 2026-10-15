@@ -25,19 +25,31 @@ These come straight from the spec and are what makes Aether *Aether*:
 ### Core or plugin?
 The engine core is for what every server needs and what must be fast: world model, storage and
 journal, worldgen, physics, the tick, vanilla mechanics, redstone, light, the protocol and the compat
-layer. **Features that are optional for a server and not performance-critical are written as
-plugins** on the plugin API ([`docs/design/plugins.md`](docs/design/plugins.md)), not in the core:
-economy and shops, rewards, stashes, kits, chat/moderation tools, admin UIs, integrations with web
-services, custom game modes, custom enchantments/items, minigames.
+layer. **Features that are optional for a server are not written in the core**; they are written as
+plugins on the plugin API ([`docs/design/plugins.md`](docs/design/plugins.md)). There are two plugin
+tiers:
+
+- **Native plugin** — a Rust crate under `plugins/<name>/` in this workspace, linked **in-process**
+  on the same plugin API/events as a WASM plugin but with **no boundary and full speed**. Use it for
+  optional features that are **performance-sensitive or deeply integrated** with engine data:
+  permissions store + `/lp`, regions/claims model and checks, WorldEdit, history commands
+  (`/co`, `/restore`), the profiler, moderation, essentials-teleport/player/inv.
+- **WASM plugin** — a sandboxed component (Wasmtime), untrusted third-party style, for optional and
+  **not** performance-critical features: economy, shops, chat formatting, social, fun, integrations,
+  stats.
 
 Rules of thumb:
-- *Would a vanilla-like server run without it?* Yes → plugin.
-- *Is it on the per-tick hot path (runs for every block/entity/packet)?* Yes → core, with a plugin
-  event or registry hook if behaviour must be customisable.
+- *Would a vanilla-like server run without it?* Yes → plugin (native or WASM by the next rule).
+- *Is it optional but performance-sensitive or deeply integrated?* → **native plugin**.
+- *Is it optional, not performance-critical, and safe to sandbox?* → **WASM plugin**.
+- *Is it on the per-tick hot path (runs for every block/entity/packet) or needed by every server?*
+  → core, **with no policy**: the core runs a fixed hook and the decision lives in a plugin. A
+  mechanism an operator could want to change is policy, and policy is never core.
 - *Does it need data the plugin API does not expose?* Extend the API (a new event, registry or host
   import, versioned and behind `supports()`), do not move the feature into the core.
-- Built-ins that already exist and are optional (economy, `/stash`, rewards) migrate to plugins; the
-  core keeps only the service interface they implement.
+- The core must build and run with **every** plugin disabled. Built-ins that already exist and are
+  optional (economy, `/stash`, rewards) migrate to plugins; the core keeps only the service
+  interface they implement.
 
 ### Workflow
 1. Fork and branch from the default branch: `git checkout -b feature/short-description`.

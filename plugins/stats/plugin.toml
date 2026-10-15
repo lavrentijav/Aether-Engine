@@ -1,0 +1,13 @@
+# Manifest for the stats plugin (CMD-47). See crates/aether-plugin/src/manifest.rs.
+id = "stats"
+name = "Stats"
+version = "0.1.0"
+api = "0.1"
+entry = "stats.wasm"
+priority = 50
+
+capabilities = ["log", "config", "supports", "storage.kv", "players", "history.read"]
+
+subscribe = ["on-command"]
+
+commands = ["stats", "leaderboard", "lb", "playtime"]
