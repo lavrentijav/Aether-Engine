@@ -200,7 +200,7 @@ fn apply(a: Action, registry: &SharedRegistry, world: &DemoWorld) {
             registry.broadcast_tracking(
                 shooter,
                 &ServerEvent::Sound {
-                    name: "minecraft:entity.skeleton.shoot",
+                    name: "minecraft:entity.skeleton.shoot".into(),
                     category: 5,
                     x: from.x,
                     y: from.y,

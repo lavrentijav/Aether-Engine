@@ -88,6 +88,11 @@ pub trait HostBackend: Send + Sync {
         Vec::new()
     }
 
+    /// Play a named sound to one player, for a menu's `[sound]` action. The
+    /// default does nothing, so a host with no world (a test) still satisfies
+    /// the trait; the server plays it through the core sound event.
+    fn play_sound(&self, _plugin: &str, _player: u64, _name: &str) {}
+
     // --- virtual menus (the core window API) --------------------------------
     //
     // The native `plugins/menus` host calls these to draw server-invented

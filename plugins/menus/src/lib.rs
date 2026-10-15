@@ -270,9 +270,11 @@ impl Menus {
                     }
                     self.handle_close(player, menu);
                 }
-                MenuAction::Sound(_name) => {
-                    // The host has no sound import yet; the action is accepted
-                    // and ignored rather than failing the whole click.
+                MenuAction::Sound(name) => {
+                    let name = self.expand(name, player);
+                    if let Some(b) = self.backend() {
+                        b.play_sound("menus", player.id, &name);
+                    }
                 }
                 MenuAction::EconomyTake(_amount) => {
                     // Economy is an optional service; with none registered the
@@ -617,6 +619,7 @@ mod tests {
         closed: StdMutex<Vec<u64>>,
         commands: StdMutex<Vec<String>>,
         messages: StdMutex<Vec<String>>,
+        sounds: StdMutex<Vec<String>>,
         /// Pretend world state: a click on a menu must leave this untouched.
         inventory: StdMutex<Vec<i32>>,
     }
@@ -654,6 +657,9 @@ mod tests {
         }
         fn send_message(&self, _: &str, _: u64, text: &str) {
             self.messages.lock().unwrap().push(text.to_string());
+        }
+        fn play_sound(&self, _: &str, _: u64, name: &str) {
+            self.sounds.lock().unwrap().push(name.to_string());
         }
         fn run_command(&self, _: &str, _: Option<u64>, cmd: &str) -> Vec<String> {
             self.commands.lock().unwrap().push(cmd.to_string());
@@ -778,6 +784,27 @@ mod tests {
             .unwrap();
         m.handle_click(&player(), id, 0, 0, 0);
         assert_eq!(rec.messages.lock().unwrap().as_slice(), ["hi"]);
+    }
+
+    #[test]
+    fn a_sound_action_plays_through_the_host() {
+        let rec = Arc::new(Rec::default());
+        let m = menus_with(rec.clone());
+        let def = MenuBuilder::new("s")
+            .button(
+                0,
+                "minecraft:bell",
+                "Ding",
+                vec![MenuAction::Sound("minecraft:block.note_block.bell".into())],
+            )
+            .build();
+        m.open("caller", &player(), &def).unwrap();
+        let id = rec.opened.lock().unwrap()[0].0;
+        m.handle_click(&player(), id, 0, 0, 0);
+        assert_eq!(
+            rec.sounds.lock().unwrap().as_slice(),
+            ["minecraft:block.note_block.bell"]
+        );
     }
 
     #[test]

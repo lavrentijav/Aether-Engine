@@ -550,7 +550,7 @@ fn throw_potion(
     registry.broadcast_except(
         handle.entity_id,
         &ServerEvent::Sound {
-            name: sound,
+            name: sound.into(),
             category: 7,
             x: p.x,
             y: p.y,
@@ -619,7 +619,7 @@ pub fn release_use(handle: &PlayerHandle, world: &DemoWorld) {
     if let Some(r) = super::registry() {
         r.broadcast(
             &ServerEvent::Sound {
-                name: "minecraft:entity.arrow.shoot",
+                name: "minecraft:entity.arrow.shoot".into(),
                 category: 7,
                 x: p.x,
                 y: p.y,

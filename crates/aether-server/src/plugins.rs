@@ -241,6 +241,20 @@ mod imp {
             }
         }
 
+        /// Play a menu sound to one player, through the core sound event. The
+        /// name is taken verbatim (a bare name gets `minecraft:`), so a plugin
+        /// can name any sound event the client knows.
+        fn play_sound(&self, _plugin: &str, player: u64, name: &str) {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return;
+            };
+            let p = handle.pos();
+            handle.emit(
+                &crate::protocol::ServerEvent::sound_at(name.to_string(), p.x, p.y, p.z),
+                &*self.world,
+            );
+        }
+
         fn run_command(&self, _plugin: &str, player: Option<u64>, command: &str) -> Vec<String> {
             // Console dispatch is a separate facility (CMD-07); until it lands
             // a `[console]` action is a no-op rather than a silent player run.

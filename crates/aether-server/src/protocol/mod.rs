@@ -12,6 +12,7 @@
 //! 1.21 viewer, from the same source of truth.
 
 use aether_world::{BlockStateId, ItemTypeId};
+use std::borrow::Cow;
 use std::io;
 
 use crate::players::{PlayerHandle, PosLook};
@@ -489,8 +490,12 @@ pub enum ServerEvent<'a> {
         knockback: Option<(f64, f64, f64)>,
     },
     /// A sound at a position, by its `minecraft:` sound event name.
+    ///
+    /// The name is a `Cow` so the game's own literals stay borrows on the hot
+    /// path while a plugin-chosen name (a menu's `[sound]` action) can be
+    /// carried as an owned string.
     Sound {
-        name: &'static str,
+        name: Cow<'static, str>,
         category: u8,
         x: f64,
         y: f64,
@@ -498,6 +503,33 @@ pub enum ServerEvent<'a> {
         volume: f32,
         pitch: f32,
     },
+}
+
+impl ServerEvent<'_> {
+    /// A sound at a player's position, with the usual menu volume and pitch.
+    /// A name without a namespace gets the `minecraft:` prefix.
+    pub fn sound_at(
+        name: impl Into<Cow<'static, str>>,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> ServerEvent<'static> {
+        let name = name.into();
+        let name = if name.contains(':') {
+            name
+        } else {
+            Cow::Owned(format!("minecraft:{name}"))
+        };
+        ServerEvent::Sound {
+            name,
+            category: 0, // master
+            x,
+            y,
+            z,
+            volume: 1.0,
+            pitch: 1.0,
+        }
+    }
 }
 
 /// A game window's kind.
