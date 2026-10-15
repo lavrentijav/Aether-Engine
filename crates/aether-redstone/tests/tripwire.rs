@@ -98,3 +98,74 @@ fn tripwire_wire_connects_to_a_facing_hook() {
     assert_eq!(props::get(w.state(wire), "east"), Some("true"));
     assert_eq!(props::get(w.state(wire), "north"), Some("false"));
 }
+
+#[test]
+fn removing_a_powered_wire_releases_both_hooks() {
+    // F1: `TripWireBlock.affectNeighborsAfterRemoval` recomputes the line with
+    // the removed wire substituted at its distance `i`, so the scan reaches the
+    // far hook and both ends are re-derived. Vanilla keeps both powered for the
+    // 10-tick recheck, then releases both. The engine used to leave the far hook
+    // stuck `powered`/`attached` forever.
+    let (engine, mut w, a, wire, b) = line();
+    w.set_entities(wire, 1);
+    engine.on_entity_inside(&mut w, wire);
+    assert_eq!(props::get(w.state(a), "powered"), Some("true"));
+    assert_eq!(props::get(w.state(b), "powered"), Some("true"));
+
+    engine.set_block(
+        &mut w,
+        wire,
+        aether_world::BlockStateId::AIR,
+        SetBlockFlags::PLACE,
+    );
+
+    // The 10-tick recheck runs; both hooks must release.
+    w.run(&engine, 10);
+    assert_eq!(
+        props::get(w.state(a), "powered"),
+        Some("false"),
+        "near hook must release"
+    );
+    assert_eq!(
+        props::get(w.state(b), "powered"),
+        Some("false"),
+        "far hook must release"
+    );
+    assert_eq!(
+        props::get(w.state(b), "attached"),
+        Some("false"),
+        "far hook must detach"
+    );
+    assert_eq!(
+        signal(&w, b, Direction::Up),
+        0,
+        "far hook must stop emitting"
+    );
+
+    // And it stays off.
+    w.run(&engine, 100);
+    assert_eq!(props::get(w.state(b), "powered"), Some("false"));
+}
+
+#[test]
+fn removing_an_unpowered_wire_detaches_the_far_hook() {
+    // With no entity, removing the wire must detach both hooks after the 10-tick
+    // recheck (the old bug left the far one attached permanently).
+    let (engine, mut w, a, wire, b) = line();
+    assert_eq!(props::get(w.state(b), "attached"), Some("true"));
+
+    engine.set_block(
+        &mut w,
+        wire,
+        aether_world::BlockStateId::AIR,
+        SetBlockFlags::PLACE,
+    );
+
+    w.run(&engine, 10);
+    assert_eq!(props::get(w.state(a), "attached"), Some("false"));
+    assert_eq!(
+        props::get(w.state(b), "attached"),
+        Some("false"),
+        "far hook must detach"
+    );
+}
