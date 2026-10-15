@@ -66,10 +66,11 @@ pub mod prelude {
         CommandResult, Decision, LogLevel, ManifestAck, Player,
     };
     pub use crate::bindings::aether::sdk::{
-        commands, config, confirm, cooldowns, messages, permissions, players, scheduler,
+        commands, config, confirm, cooldowns, messages, permissions, placeholders, players,
+        scheduler,
     };
-    /// The sidebar service, so a dependent can put lines on a player's panel
-    /// and feed placeholders (`%economy_balance%`).
+    /// The sidebar service, so a dependent can override a line or toggle a
+    /// player's panel.
     pub use crate::bindings::aether::sidebar::sidebar;
     pub use crate::bindings::{export, Guest};
 }

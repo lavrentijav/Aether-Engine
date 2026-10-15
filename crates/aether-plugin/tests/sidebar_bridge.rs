@@ -1,18 +1,18 @@
 //! The sidebar bridge, end to end: a real WASM dependent
-//! (`tests/fixtures/sidebar/sidebar.wasm`) calls `aether:sidebar` imports and
-//! the host forwards them to the registered provider.
+//! (`tests/fixtures/sidebar/sidebar.wasm`) calls the `aether:sidebar` imports
+//! and the host forwards them to the registered provider.
 //!
 //! This is the integration the unit tests cannot reach: it proves a dependent's
-//! `sidebar.register-placeholder`, `set-placeholder`, `set-line`, `toggle` (and
-//! friends) cross the component boundary once and land on the provider with the
-//! caller's id attached. The provider here is a mock (the real one is
-//! `plugins/sidebar`), but the path through the host linker and the bridge is
-//! the same.
+//! `set-line`, `clear-line`, `toggle` (and friends) cross the component
+//! boundary once and land on the provider. The provider here is a mock (the
+//! real one is `plugins/sidebar`), but the path through the host linker and the
+//! bridge is the same. The shared placeholder service the same fixture drives
+//! is covered by `placeholders_bridge.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use aether_plugin::sidebar::{self, PlaceholderFn, SidebarService};
+use aether_plugin::sidebar::{self, SidebarService};
 use aether_plugin::{HostBackend, HostConfig, LogLevel, Player, PluginHost};
 
 fn fixtures() -> PathBuf {
@@ -31,7 +31,7 @@ impl HostBackend for Backend {
     fn kv_list(&self, _: &str, _: &str) -> Vec<String> {
         Vec::new()
     }
-    fn log(&self, _: &str, _: Level, _: &str) {}
+    fn log(&self, _: &str, _: LogLevel, _: &str) {}
     fn config(&self, _: &str, _: &str) -> Option<String> {
         None
     }
@@ -39,13 +39,10 @@ impl HostBackend for Backend {
         false
     }
 }
-use LogLevel as Level;
 
 /// Records every sidebar call the bridge forwards.
 #[derive(Default)]
 struct Recorder {
-    declared: Mutex<Vec<(String, String)>>,
-    values: Mutex<Vec<(String, String, u64, String)>>,
     lines: Mutex<Vec<(u64, usize, String)>>,
     cleared: Mutex<Vec<(u64, usize)>>,
     shown: Mutex<Vec<u64>>,
@@ -54,22 +51,6 @@ struct Recorder {
 }
 
 impl SidebarService for Recorder {
-    fn register_placeholder(&self, _name: String, _provider: PlaceholderFn) -> bool {
-        false
-    }
-    fn register_placeholder_name(&self, caller: &str, name: String) -> bool {
-        self.declared
-            .lock()
-            .unwrap()
-            .push((caller.to_string(), name));
-        false
-    }
-    fn set_placeholder_value(&self, caller: &str, name: String, player: u64, value: String) {
-        self.values
-            .lock()
-            .unwrap()
-            .push((caller.to_string(), name, player, value));
-    }
     fn set_line(&self, player: u64, index: usize, text: String) {
         self.lines.lock().unwrap().push((player, index, text));
     }
@@ -111,21 +92,13 @@ fn a_wasm_dependent_drives_the_sidebar_through_the_host() {
 
     let result = h.on_command(&player(), "sid", &[]).unwrap();
     assert!(result.handled);
-    assert_eq!(result.lines, vec!["shown=true replaced=false".to_string()]);
+    // The sidebar provider answers `toggle`; the placeholder service is absent,
+    // so its calls are neutral (`replaced=false`, `resolve` returns the text).
+    assert_eq!(
+        result.lines,
+        vec!["shown=true replaced=false resolved=b=%balance%".to_string()]
+    );
 
-    assert_eq!(
-        recorder.declared.lock().unwrap().as_slice(),
-        [("sid".to_string(), "balance".to_string())]
-    );
-    assert_eq!(
-        recorder.values.lock().unwrap().as_slice(),
-        [(
-            "sid".to_string(),
-            "balance".to_string(),
-            42,
-            "1234".to_string()
-        )]
-    );
     assert_eq!(
         recorder.lines.lock().unwrap().as_slice(),
         [(42, 3, "line three".to_string())]
@@ -137,7 +110,7 @@ fn a_wasm_dependent_drives_the_sidebar_through_the_host() {
 }
 
 #[test]
-fn the_bridge_is_neutral_when_no_sidebar_provider_is_registered() {
+fn the_sidebar_bridge_is_neutral_when_no_provider_is_registered() {
     // No provider: the import is still satisfied by the linker (so the plugin
     // loads), but every call is refused and answers the neutral value.
     let backend = Arc::new(Backend);
@@ -147,5 +120,8 @@ fn the_bridge_is_neutral_when_no_sidebar_provider_is_registered() {
         .unwrap();
     let result = h.on_command(&player(), "sid", &[]).unwrap();
     assert!(result.handled);
-    assert_eq!(result.lines, vec!["shown=false replaced=false".to_string()]);
+    assert_eq!(
+        result.lines,
+        vec!["shown=false replaced=false resolved=b=%balance%".to_string()]
+    );
 }

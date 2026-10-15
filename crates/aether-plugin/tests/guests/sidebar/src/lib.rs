@@ -1,9 +1,10 @@
-//! A test-only plugin that exercises the `aether:sidebar` import.
+//! A test-only plugin that exercises the `aether:sdk/placeholders` and
+//! `aether:sidebar` imports.
 //!
-//! `/sid` drives every sidebar-service call, so the host bridge can be tested
+//! `/sid` drives every call on both services, so the host bridges can be tested
 //! end to end: the guest's calls must cross the component boundary and land on
-//! the registered `SidebarService` provider with the caller's id and the right
-//! arguments.
+//! the registered `PlaceholdersService` / `SidebarService` providers with the
+//! caller's id and the right arguments.
 //!
 //! Built once into `tests/fixtures/sidebar/sidebar.wasm`; see the fixture
 //! README for the recipe.
@@ -13,10 +14,16 @@ wit_bindgen::generate!({
     // The guest world includes a foreign world and imports foreign
     // interfaces, so every imported interface is generated here.
     generate_all,
-    path: ["../../../wit", "../../../wit-sidebar", "wit"],
+    path: [
+        "../../../wit",
+        "../../../wit-sidebar",
+        "../../../wit-sdk",
+        "wit",
+    ],
 });
 
 use aether::plugin::types as types;
+use aether::sdk::placeholders;
 use aether::sidebar::sidebar;
 
 struct Sid;
@@ -37,9 +44,11 @@ impl Guest for Sid {
                 lines: Vec::new(),
             };
         }
-        // Feed a placeholder and put a line on the panel, then toggle.
-        let replaced = sidebar::register_placeholder("balance");
-        sidebar::set_placeholder("balance", &p, "1234");
+        // Feed a placeholder through the shared registry...
+        let replaced = placeholders::register("balance");
+        placeholders::set("balance", &p, "1234");
+        let resolved = placeholders::resolve(&p, "b=%balance%");
+        // ...put a line on the panel, then toggle.
         sidebar::set_line(&p, 3, "line three");
         sidebar::clear_line(&p, 3);
         let shown = sidebar::toggle(&p);
@@ -47,7 +56,7 @@ impl Guest for Sid {
         sidebar::hide(&p);
         types::CommandResult {
             handled: true,
-            lines: vec![format!("shown={shown} replaced={replaced}")],
+            lines: vec![format!("shown={shown} replaced={replaced} resolved={resolved}")],
         }
     }
 

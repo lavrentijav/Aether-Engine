@@ -1,41 +1,41 @@
 //! The sidebar plugin: the panel on the right of every player's screen.
 //!
 //! A native plugin (tier N, per `docs/design/plugins.md`). It composes a
-//! [`SidebarBoard`] for each online player from `config.toml`, resolves the
-//! `%placeholder%` tokens, and hands the board to the core, which draws it in
-//! that client's own protocol and resends only the lines that changed. The
-//! plugin never builds packets and never touches the scoreboard store.
+//! [`SidebarBoard`] for each online player from `config.toml` and hands the
+//! board to the core, which draws it in that client's own protocol and resends
+//! only the lines that changed. The plugin never builds packets and never
+//! touches the scoreboard store.
 //!
 //! **Where the pieces live.** The *mechanism* — the scoreboard packets, the
 //! per-protocol differences and the flicker-free diff — is core
-//! (`crates/aether-server`). The *policy* — the layouts, their conditions, the
-//! placeholder values and the update rate — is here. That split is why the
-//! plugin can be disabled, rebooted or replaced without the core noticing, and
-//! why a 1.8 and a 1.21 client get the same board in their own dialects.
+//! (`crates/aether-server`). The *policy* — the layouts, their conditions and
+//! the update rate — is here. The `%placeholders%` themselves are shared with
+//! menus and chat, so their registry is the SDK's `sdk.placeholders` service,
+//! which this plugin **requires**; it resolves each line through that service.
 //!
-//! It publishes a `sidebar@0.1` service, so any other plugin can register a
-//! placeholder (`%economy_balance%`) or override a line.
+//! It publishes a `sidebar@0.1` service, so another plugin can override a line
+//! or toggle a player's panel.
 
 pub mod config;
-pub mod placeholders;
+pub mod text;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use aether_plugin::manifest::{CommandDecl, Manifest, PluginTier};
+use aether_plugin::placeholders::{placeholders, PlaceholdersService};
 use aether_plugin::sdk::{self, PermissionsService};
-use aether_plugin::sidebar::{self, PlaceholderFn, PlaceholderQuery, SidebarBoard, SidebarService};
+use aether_plugin::sidebar::{self, SidebarBoard, SidebarService};
 use aether_plugin::{LogLevel, NativeContext, NativePlugin, NativeRegistration, Player};
 
 use config::SidebarConfig;
-use placeholders::Placeholders;
 
 /// The most lines a sidebar can show; mirrored by the core.
 pub const MAX_LINES: usize = 15;
 
 /// The plugin manifest. It subscribes to the tick (rate-limited internally to
 /// `update_hz`) and to joins and leaves so per-player state does not outlive a
-/// session.
+/// session. It requires the SDK's placeholders service.
 pub fn manifest() -> Manifest {
     Manifest {
         id: "sidebar".to_string(),
@@ -58,7 +58,7 @@ pub fn manifest() -> Manifest {
         tick_period: 1,
         deny_on_fault: false,
         tier: PluginTier::Native,
-        requires: Vec::new(),
+        requires: vec!["sdk.placeholders@0.1".to_string()],
     }
 }
 
@@ -73,11 +73,13 @@ pub fn registration() -> NativeRegistration {
 /// The state the plugin and its service share.
 struct State {
     config: RwLock<SidebarConfig>,
-    placeholders: RwLock<Placeholders>,
     /// Per-player line overrides set through the service.
     overrides: Mutex<HashMap<u64, HashMap<usize, String>>>,
     /// Players who turned their sidebar off with `/sidebar toggle`.
     hidden: Mutex<HashSet<u64>>,
+    /// The shared placeholder registry, resolved once at `init` (the manifest
+    /// requires it, so it is present).
+    placeholders: OnceLock<Arc<dyn PlaceholdersService>>,
     /// The permission service, resolved once at `init`; absent until the SDK
     /// (or another provider) is present.
     permissions: OnceLock<Option<Arc<dyn PermissionsService>>>,
@@ -87,9 +89,9 @@ impl Default for State {
     fn default() -> Self {
         State {
             config: RwLock::new(SidebarConfig::builtin()),
-            placeholders: RwLock::new(Placeholders::default()),
             overrides: Mutex::new(HashMap::new()),
             hidden: Mutex::new(HashSet::new()),
+            placeholders: OnceLock::new(),
             permissions: OnceLock::new(),
         }
     }
@@ -124,10 +126,13 @@ impl NativePlugin for SidebarPlugin {
         if let Some(tab) = ctx.config.get("tab").and_then(|v| v.parse().ok()) {
             cfg.tab = tab;
         }
-        if let Some("server") = ctx.config.get("clock").map(|s| s.as_str()) {
-            cfg.clock = config::ClockMode::Server;
-        }
         *self.state.config.write().unwrap() = cfg;
+
+        // The placeholders service is required (the host refused the load if
+        // it were absent); a missing provider here is a contract violation.
+        let svc = placeholders(ctx.services)
+            .ok_or("sidebar requires `sdk.placeholders@0.1`, but it is not registered")?;
+        let _ = self.state.placeholders.set(svc);
 
         // The permission service is optional: the SDK fronts the permission
         // model and fails closed until CMD-01/02 land, so a permission-gated
@@ -159,22 +164,23 @@ impl NativePlugin for SidebarPlugin {
         if n % period != 0 {
             return;
         }
+        let Some(svc) = self.state.placeholders.get().cloned() else {
+            return;
+        };
         let players = ctx.backend.online_players(ctx.id);
-        let max = ctx.backend.max_players(ctx.id);
-        let tps = ctx.backend.server_tps(ctx.id);
         for p in &players {
             if self.state.hidden.lock().unwrap().contains(&p.id) {
                 // Hide once; the core's diff makes a repeat a no-op.
                 ctx.backend.clear_sidebar(ctx.id, p.id);
                 continue;
             }
-            let Some(board) = self.board_for(ctx, p, players.len(), max, tps) else {
+            let Some(board) = self.board_for(ctx, p, &*svc) else {
                 continue;
             };
             ctx.backend.set_sidebar(ctx.id, p.id, &board);
             if tab {
-                // The same board in the tab list: the first two lines as the
-                // header, the rest as the footer.
+                // The same board in the tab list: the title is the header, the
+                // lines are the footer.
                 let (header, footer) = tab_parts(&board);
                 ctx.backend
                     .set_tab_header_footer(ctx.id, p.id, &header, &footer);
@@ -246,32 +252,17 @@ impl SidebarPlugin {
         &self,
         ctx: &NativeContext,
         p: &Player,
-        online: usize,
-        max_players: u32,
-        tps: f64,
+        svc: &dyn PlaceholdersService,
     ) -> Option<SidebarBoard> {
-        let extra = ctx.backend.player_extra(ctx.id, p.id);
         let cfg = self.state.config.read().unwrap();
-        let q = PlaceholderQuery {
-            player: p.id,
-            name: p.name.clone(),
-            extra: extra.clone(),
-            online,
-            max_players,
-            tps,
-            time: ctx.backend.world_time(ctx.id),
-            unix_time: unix_now(),
-            clock_server: cfg.clock == config::ClockMode::Server,
-        };
-        let layout = self.pick_layout(&cfg, ctx.id, p, &q)?;
+        let layout = self.pick_layout(&cfg, ctx.id, p, svc)?;
         let overrides = self.state.overrides.lock().unwrap();
         let player_overrides = overrides.get(&p.id);
-        let placeholders = self.state.placeholders.read().unwrap();
-        let title = placeholders::colorize(&placeholders.resolve(&cfg.title, &q));
+        let title = text::colorize(&svc.resolve(ctx.id, p, &cfg.title));
         let mut lines = Vec::with_capacity(layout.lines.len());
         for (i, line) in layout.lines.iter().enumerate() {
             let raw = player_overrides.and_then(|m| m.get(&i)).unwrap_or(line);
-            lines.push(placeholders::colorize(&placeholders.resolve(raw, &q)));
+            lines.push(text::colorize(&svc.resolve(ctx.id, p, raw)));
         }
         Some(SidebarBoard { title, lines })
     }
@@ -282,10 +273,9 @@ impl SidebarPlugin {
         cfg: &'a SidebarConfig,
         caller: &str,
         p: &Player,
-        q: &PlaceholderQuery,
+        svc: &dyn PlaceholdersService,
     ) -> Option<&'a config::Layout> {
         let perms = self.state.permissions.get().and_then(|p| p.clone());
-        let placeholders = self.state.placeholders.read().unwrap();
         let mut best: Option<&config::Layout> = None;
         for layout in &cfg.layout {
             if !layout.permission.is_empty() {
@@ -298,16 +288,16 @@ impl SidebarPlugin {
                 }
             }
             if !layout.world.is_empty() {
-                let world = q.extra.as_ref().map(|e| e.world.as_str()).unwrap_or("");
-                if world != layout.world {
+                // `%world%` stays literal when the host cannot answer, so the
+                // condition simply fails to match.
+                if svc.resolve(caller, p, "%world%") != layout.world {
                     continue;
                 }
             }
-            if !layout.placeholder.is_empty() {
-                let value = placeholders.resolve(&layout.placeholder, q);
-                if value != layout.equals {
-                    continue;
-                }
+            if !layout.placeholder.is_empty()
+                && svc.resolve(caller, p, &layout.placeholder) != layout.equals
+            {
+                continue;
             }
             match best {
                 Some(b) if b.priority >= layout.priority => {}
@@ -337,38 +327,10 @@ fn tab_parts(board: &SidebarBoard) -> (String, String) {
     (board.title.clone(), board.lines.join("\n"))
 }
 
-/// The current Unix time in seconds, for the server clock.
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 /// The `sidebar@0.1` service, over the plugin's shared state.
 struct SidebarSvc(Arc<State>);
 
 impl SidebarService for SidebarSvc {
-    fn register_placeholder(&self, name: String, provider: PlaceholderFn) -> bool {
-        self.0
-            .placeholders
-            .write()
-            .unwrap()
-            .register(name, provider)
-    }
-
-    fn register_placeholder_name(&self, _caller: &str, name: String) -> bool {
-        self.0.placeholders.write().unwrap().declare(name)
-    }
-
-    fn set_placeholder_value(&self, _caller: &str, name: String, player: u64, value: String) {
-        self.0
-            .placeholders
-            .write()
-            .unwrap()
-            .set_value(name, player, value);
-    }
-
     fn set_line(&self, player: u64, index: usize, text: String) {
         if index >= MAX_LINES {
             return;

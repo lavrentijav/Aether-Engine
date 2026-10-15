@@ -1,33 +1,19 @@
 /// The Aether **sidebar** service, package `aether:sidebar@0.1`.
 ///
 /// The sidebar plugin publishes this service; any plugin — native or WASM —
-/// imports it to put text on a player's panel or to feed a placeholder that a
-/// config line can use (`%economy_balance%`, `%rank_prefix%`).
-///
-/// **Why values and not callbacks.** A component cannot hand the host a
-/// closure, and the frozen `aether:plugin@0.1.0` world has no placeholder
-/// callback export. So a WASM provider *declares* a placeholder name and
-/// *pushes* its value per player (`set-placeholder`), typically on its own
-/// tick, and the sidebar reads the last value when it draws. That is the same
-/// policy/value split the native closure takes, one crossing per push.
+/// imports it to override a line or toggle a player's panel. The *lines*
+/// themselves are composed from config and `%placeholders%`, and the
+/// placeholder registry is shared with menus and chat — it lives in the SDK's
+/// `placeholders` service (`aether:sdk/placeholders@0.1`), not here.
 ///
 /// The package is versioned independently of the frozen plugin world; adding a
 /// function here is additive (a component requests a subset), a breaking
 /// change bumps it (`aether:sidebar@0.2`).
 package aether:sidebar@0.1.0;
 
-/// The sidebar a plugin may set lines on and feed placeholders for.
+/// The sidebar a plugin may override a line on and toggle.
 interface sidebar {
     use aether:plugin/types@0.1.0.{player};
-
-    /// Declare a placeholder name (without the `%`) this plugin will fill with
-    /// `set-placeholder`, so `%name%` resolves instead of staying literal.
-    /// Returns whether a provider already existed.
-    register-placeholder: func(name: string) -> bool;
-
-    /// Set `name`'s value for `p`. Implies `register-placeholder`. The last
-    /// value wins; the sidebar does not cache it beyond the next redraw.
-    set-placeholder: func(name: string, p: player, value: string);
 
     /// Override line `index` (0 is the top, up to 14) for `p`, replacing the
     /// config line until `clear-line`.

@@ -223,14 +223,14 @@ mod imp {
             &self,
             _plugin: &str,
             player: u64,
-        ) -> Option<aether_plugin::sidebar::PlayerExtra> {
+        ) -> Option<aether_plugin::placeholders::PlayerExtra> {
             let handle = self.registry.by_entity(player as i32)?;
             let pos = handle.pos();
             let (health, _food) = {
                 let game = handle.game();
                 (game.health, game.food)
             };
-            Some(aether_plugin::sidebar::PlayerExtra {
+            Some(aether_plugin::placeholders::PlayerExtra {
                 // The measured keep-alive round trip; `0` until the first
                 // reply.
                 ping: handle.ping() as i32,

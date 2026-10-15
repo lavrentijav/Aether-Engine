@@ -19,26 +19,11 @@ pub struct SidebarConfig {
     pub update_hz: u32,
     /// Whether to mirror the same board into the tab-list header/footer.
     pub tab: bool,
-    /// What `%time%` shows: the world clock (`world`, default) or the server
-    /// wall clock (`server`). `%world_time%` and `%server_time%` always name
-    /// one explicitly.
-    pub clock: ClockMode,
     /// What to do when the vanilla `/scoreboard` already owns the sidebar slot:
     /// `override` (default) or `yield`.
     pub mode: SidebarMode,
     /// The layouts, tried highest `priority` first.
     pub layout: Vec<Layout>,
-}
-
-/// What `%time%` means.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum ClockMode {
-    /// The in-game world time (`0..24000`), shown as a wall clock.
-    #[default]
-    World,
-    /// The server's own wall clock, in UTC.
-    Server,
 }
 
 /// The sidebar-vs-vanilla policy.
@@ -101,7 +86,6 @@ impl SidebarConfig {
             title: "&6&lAether".to_string(),
             update_hz: 4,
             tab: false,
-            clock: ClockMode::World,
             mode: SidebarMode::Override,
             layout: vec![Layout {
                 priority: 0,

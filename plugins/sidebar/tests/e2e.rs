@@ -1,13 +1,49 @@
 //! The sidebar plugin driven through the real host trait with a recording
-//! backend: what reaches the core is what these tests check.
+//! backend and a stub placeholders service: what reaches the core is what these
+//! tests check.
+//!
+//! The placeholder *runtime* (built-ins, caching) is the SDK plugin's, tested
+//! there; these tests use a small stub that only substitutes the tokens the
+//! sidebar's own composition is asserted on.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use aether_plugin::sidebar::{sidebar, PlayerExtra, SidebarBoard};
+use aether_plugin::placeholders::{self, PlaceholderFn, PlaceholdersService, PlayerExtra};
+use aether_plugin::sidebar::{sidebar, SidebarBoard};
 use aether_plugin::{HostBackend, LogLevel, NativeContext, NativePlugin, Player, ServiceRegistry};
 
 use aether_sidebar_plugin::registration;
+
+/// A stub placeholders service: substitutes a few built-ins and any pushed
+/// value, leaving everything else literal.
+#[derive(Default)]
+struct MockPlaceholders {
+    values: Mutex<HashMap<String, String>>,
+}
+
+impl PlaceholdersService for MockPlaceholders {
+    fn register(&self, _caller: &str, _name: String, _provider: PlaceholderFn) -> bool {
+        false
+    }
+    fn register_name(&self, _caller: &str, _name: String) -> bool {
+        false
+    }
+    fn set_value(&self, _caller: &str, name: String, _player: u64, value: String) {
+        self.values.lock().unwrap().insert(name, value);
+    }
+    fn resolve(&self, _caller: &str, p: &Player, text: &str) -> String {
+        let mut out = text.to_string();
+        for (name, value) in self.values.lock().unwrap().iter() {
+            out = out.replace(&format!("%{name}%"), value);
+        }
+        out.replace("%player%", &p.name)
+            .replace("%online%", "1")
+            .replace("%max%", "20")
+            .replace("%ping%", "42")
+            .replace("%world%", "minecraft:overworld")
+    }
+}
 
 /// A backend that answers a fixed player view and records what the plugin
 /// pushes.
@@ -82,6 +118,9 @@ fn setup_cfg(
         ..Mock::default()
     });
     let services = Arc::new(ServiceRegistry::new());
+    // The sidebar requires the shared placeholders service; register a stub.
+    placeholders::register_placeholders(&services, Arc::new(MockPlaceholders::default()))
+        .expect("register placeholders");
     let backend_dyn: Arc<dyn HostBackend> = backend.clone();
     let mut plugin = (registration().new)();
     {
@@ -134,14 +173,14 @@ fn a_tick_pushes_one_board_with_placeholders_resolved() {
 }
 
 #[test]
-fn the_service_can_register_a_placeholder_and_override_a_line() {
+fn a_line_override_is_resolved_through_the_placeholders_service() {
     let (mut plugin, backend, services) = setup();
     backend.boards.lock().unwrap().clear();
-    let svc = sidebar(&services).expect("service registered");
-    svc.register_placeholder(
-        "test".to_string(),
-        Arc::new(|_q: &aether_plugin::sidebar::PlaceholderQuery| Some("VALUE".to_string())),
-    );
+    // A value fed through the shared service, then an overridden line using it.
+    placeholders::placeholders(&services)
+        .expect("placeholders registered")
+        .set_value("test", "test".to_string(), 7, "VALUE".to_string());
+    let svc = sidebar(&services).expect("sidebar registered");
     svc.set_line(7, 0, "%test%".to_string());
     tick(&mut plugin, &backend, &services, 10);
     let boards = backend.boards.lock().unwrap();

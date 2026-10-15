@@ -102,10 +102,14 @@ pub trait HostBackend: Send + Sync {
     /// core resends only when the pair changes. The default does nothing.
     fn set_tab_header_footer(&self, _plugin: &str, _player: u64, _header: &str, _footer: &str) {}
 
-    /// The extra per-player facts a sidebar can show (position, world, ping,
-    /// health, level). The default is `None`: a host that cannot answer simply
-    /// leaves those placeholders empty.
-    fn player_extra(&self, _plugin: &str, _player: u64) -> Option<crate::sidebar::PlayerExtra> {
+    /// The extra per-player facts a placeholder can show (position, world,
+    /// ping, health, level). The default is `None`: a host that cannot answer
+    /// simply leaves those placeholders empty.
+    fn player_extra(
+        &self,
+        _plugin: &str,
+        _player: u64,
+    ) -> Option<crate::placeholders::PlayerExtra> {
         None
     }
 
