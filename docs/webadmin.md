@@ -2,21 +2,25 @@
 
 > **Read this in other languages:** [Русский 🇷🇺](webadmin.ru.md)
 >
-> Stage **WEB1** of [`tasks/QUEUE-WEB-admin.md`](tasks/QUEUE-WEB-admin.md): a read-only HTTP
-> server inside the plugin for live ops. The map and the time slider are WEB2; relations are WEB3.
+> Stages **WEB1** (live ops) and **WEB2** (map + journal time machine) of
+> [`tasks/QUEUE-WEB-admin.md`](tasks/QUEUE-WEB-admin.md): one read-only HTTP server inside the
+> plugin. Relations are WEB3.
 
 The web admin is a **native plugin** (tier N): compiled into `aether-server`, enabled and disabled
 like any other plugin, and linked in-process so it can read live game state without a serialization
-boundary. It writes nothing — there is no world write from the web in this stage.
+boundary. It writes nothing — there is no world write from the web in these stages. One HTTP router
+serves the live-ops pages (dashboard, regions, players/inventories) and the map/time-machine pages;
+the plugin README (`plugins/webadmin/README.md`) has the WEB2 detail.
 
 ## Architecture
 
 ```
 aether-server ── publishes ──▶ plugin host service registry ──▶ plugins/webadmin
-   │  `ops@0.1` (ServerOps, crates/aether-ops trait)                 │
-   │  TPS/MSPT · memory · players · regions · profiles/inventories   │  HTTP/1.1 (std::net)
-   ▼                                                                  ▼
- game tick ── samples ──▶ crates/aether-server/src/web.rs      plain HTML + small inline JS
+   │  `ops@0.1` (ServerOps, crates/aether-ops trait)                 │   one HTTP router:
+   │  TPS/MSPT · memory · players · regions · profiles/inventories   │   live ops + map + time
+   │                                                                 │   plain HTML + small JS
+   ▼  also attaches the live World (install_native) ────────────────▶  map + journal replay
+ game tick ── samples ──▶ crates/aether-server/src/web.rs
 ```
 
 * `crates/aether-ops` — the **one** shared crate: the `OpsService` trait and its serialisable
@@ -49,16 +53,36 @@ cookie after the login form, or directly as `?token=` (handy for `curl`).
 
 ## Pages
 
+The plugin is the single HTTP router for both WEB1 (live ops) and WEB2 (map + time machine).
+
 | Path | What it shows |
 |------|---------------|
+| `/login` (GET/POST) | The token login form; a valid token sets the cookie and redirects to `/`. |
 | `/` | **Dashboard**: TPS, MSPT (mean and slowest), players online/max, memory, uptime, ticks, columns sent. Auto-refreshes every 2 s from `/api/…`. |
 | `/regions` | **Heaviest regions**: a ranked table and a coloured heat grid, one cell per 32×32-chunk region. |
 | `/players` | Every known player: state, address, first/last seen, playtime. |
-| `/player?id=<uuid\|name>` | Profile: first/last seen, playtime, addresses seen, and live position/health/food/mode when online. |
+| `/profile?id=<uuid\|name>` | Profile: first/last seen, playtime, addresses seen, and live position/health/food/mode when online. |
 | `/inventory?id=<uuid\|name>` | **Inventory viewer**: live when online, from the saved store when offline; main inventory + hotbar + offhand, armour, the held slot. |
 | `/api/dashboard`, `/api/regions`, `/api/players`, `/api/player?id=`, `/api/inventory?id=` | The same data as JSON. |
+| `/map` | **Map**: top-down tiles, pan/zoom, a live player/entity overlay, and a journal time slider (WEB2). |
+
+### Map and time machine (WEB2)
+
+| Path | What it returns |
+|------|-----------------|
+| `/map`, `/app.js` | The map page and its script (pan/zoom, click-a-block history, time slider, overlay). |
+| `/info`, `/head` | Tile size / zoom / height band / sequence head. |
+| `/tile?zoom&tx&tz` | A raw RGBA tile of the live world. |
+| `/tile_at?zoom&tx&tz&at=<seq>` | The same tile replayed at a past sequence number — the "time slider". |
+| `/surface?x&z[&at]` | The column's top block. |
+| `/history?x&y&z` | Every change to one block, oldest first. |
+| `/changes?x&z&r[&since&until]` | Block changes in a radius over a time window. |
+| `/player?id=<uuid>[&since&until&x&z&r&limit]` | One player's place/break/take/put history. |
+| `/overlay` | Live player/entity marks. |
 
 Everything is read-only. Unknown routes are 404; non-`GET` requests other than `POST /login` are 405.
+A browser asking for a page without a token gets the login form; a request the page's own JS makes
+(`/api/…`, `/tile…`) gets a plain `401`.
 
 ## The region metrics — what is sampled and what is not
 

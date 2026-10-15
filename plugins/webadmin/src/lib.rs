@@ -1,146 +1,235 @@
-//! The Aether web admin, as a native plugin.
+//! The admin web interface, as a native plugin (tier N).
 //!
-//! A read-only, local HTTP server inside the server process: a dashboard
-//! (TPS/MSPT/players/memory), the heaviest regions (per-region tick-cost
-//! sample plus a heat grid), and players with live inventory and profile
-//! views. It is the "WEB1" stage of [`docs/tasks/QUEUE-WEB-admin.md`]; the map
-//! and time machine are WEB2.
+//! One read-only HTTP server inside the server process, serving two stages of
+//! [`docs/tasks/QUEUE-WEB-admin.md`]:
 //!
-//! The plugin owns no game data: it resolves the server's `ops@0.1` service
-//! from the plugin host (declared in `plugin.toml`'s `requires`) and renders
-//! what it returns. It never writes the world. Binding, the port and the token
-//! are operator config (`[plugins.webadmin]`); no secret is compiled in.
+//! * **WEB1 — live ops**: a dashboard (TPS/MSPT, memory, players), the
+//!   heaviest regions (a sampled per-region tick-cost ranking and a heat
+//!   grid), a players list with live/saved inventories and per-player
+//!   profiles, behind a token login (`/webadmin token`).
+//! * **WEB2 — map + time machine**: top-down block-colour tiles cached and
+//!   re-rendered on change, a journal "time slider" (per-block history, an
+//!   area's changes over a window, and tiles *as they were*), and per-player
+//!   place/break/take/put history.
 //!
-//! ```toml
-//! [plugins.webadmin]
-//! enabled = true
-//! bind = "127.0.0.1:8090"   # default
-//! token = "…"               # optional; else use `/webadmin token`
-//! ```
+//! The crate is split so the interesting parts do not need the plugin host or
+//! the server: [`color`] (the map palette), [`source`] (the two read-only world
+//! views), [`map`], [`timemachine`], [`playerhist`], [`pages`] and
+//! [`http`] are self-contained. The plugin wrapper ([`WebAdminPlugin`]) owns
+//! only the server lifecycle, the token command and tile invalidation.
+//!
+//! Everything is **read-only**: no route, no function and no plugin hook here
+//! writes a block, an item or a file.
+//!
+//! ## Wiring
+//!
+//! The server attaches the live [`aether_api::World`] at construction
+//! ([`WebAdminPlugin::with_world`]) and publishes the live-ops service
+//! (`ops@0.1`, the [`aether_ops`] trait) which the plugin resolves in `init`.
+//! See `crates/aether-server/src/plugins.rs`.
 
-mod auth;
-mod http;
-mod pages;
+pub mod auth;
+pub mod color;
+pub mod http;
+pub mod map;
+pub mod pages;
+pub mod playerhist;
+pub mod source;
+pub mod timemachine;
 
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
-use aether_ops::{OpsHandle, OpsService, SERVICE, VERSION};
+use aether_api::World;
+use aether_ops::{OpsHandle, SERVICE, VERSION};
 use aether_plugin::manifest::{CommandDecl, Manifest, PluginTier};
 use aether_plugin::{
-    CommandResult, LogLevel, NativeContext, NativePlugin, NativeRegistration, Player,
+    CommandResult, Decision, LogLevel, NativeContext, NativePlugin, NativeRegistration, Player,
 };
+use aether_world::KvBackend;
+use aether_worldgen::ChunkGenerator;
 
-use auth::Auth;
+pub use auth::{Auth, COOKIE, ONE_TIME_TTL};
+pub use http::{Mark, Overlay, OverlaySource, Request, Response, Server, WebAdmin, WebAdminConfig};
+pub use map::{MapRenderer, Surface, Tile, TileKey};
+pub use source::{HistorySource, HistoryView, MapSource, MapView};
+pub use timemachine::{AtSeq, BlockChange, ChangeRecord, TimeMachine};
 
-/// The default bind address: loopback only.
+/// The default bind address, matching the WEB brief.
 pub const DEFAULT_BIND: &str = "127.0.0.1:8090";
 
-/// The plugin's manifest, as code (a native plugin is compiled in).
-pub fn registration() -> NativeRegistration {
-    NativeRegistration {
-        manifest: Manifest {
-            id: "webadmin".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            api: "0.1".to_string(),
-            entry: String::new(),
-            tier: PluginTier::Native,
-            name: "Web admin".to_string(),
-            // Services first, then gameplay plugins; exact value is not
-            // critical as it subscribes to no events.
-            priority: 10,
-            capabilities: Vec::new(),
-            subscribe: Vec::new(),
-            commands: vec![CommandDecl::Detailed {
-                name: "webadmin".to_string(),
-                node: "webadmin.command".to_string(),
-                op: 3,
-            }],
-            requires: vec![format!("{SERVICE}@{VERSION}")],
-            tick_period: 1,
-            deny_on_fault: false,
-        },
-        new: || Box::new(WebAdmin::default()),
+/// The plugin manifest. Native tier: no `.wasm` entry, compiled in.
+///
+/// It requires the live-ops service (`ops@0.1`) the server publishes, so the
+/// dashboard is present; it subscribes to the block events so the map cache
+/// invalidates, and to `on-command` for `/webadmin token`.
+pub fn manifest() -> Manifest {
+    Manifest {
+        id: "webadmin".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        api: "0.1".to_string(),
+        entry: String::new(),
+        name: "Admin web".to_string(),
+        // After gameplay plugins: the web only observes.
+        priority: 10,
+        capabilities: Vec::new(),
+        subscribe: vec![
+            "on-command".to_string(),
+            "after-block-break".to_string(),
+            "before-block-place".to_string(),
+        ],
+        commands: vec![CommandDecl::Detailed {
+            name: "webadmin".to_string(),
+            node: "webadmin.command".to_string(),
+            op: 3,
+        }],
+        requires: vec![format!("{SERVICE}@{VERSION}")],
+        tick_period: 1,
+        deny_on_fault: false,
+        tier: PluginTier::Native,
     }
 }
 
-/// The running plugin.
-#[derive(Default)]
-struct WebAdmin {
-    ops: Option<Arc<OpsHandle>>,
-    auth: Option<Arc<Auth>>,
-    bind: Option<SocketAddr>,
-    shutdown: Option<Arc<AtomicBool>>,
-    thread: Option<std::thread::JoinHandle<()>>,
+/// A build-time registration with no world attached. A server with a live
+/// world should build a [`WebAdminPlugin::with_world`] instead.
+pub fn registration() -> NativeRegistration {
+    NativeRegistration {
+        manifest: manifest(),
+        new: || Box::new(WebAdminPlugin::default()),
+    }
 }
 
-impl NativePlugin for WebAdmin {
+/// The native plugin wrapper: server lifecycle, the `/webadmin token` command
+/// and, when a world is attached, the running [`WebAdmin`].
+///
+/// The host gives a native plugin no world handle, by design, so the server
+/// attaches the world at construction and this wrapper forwards block-change
+/// events into the tile cache.
+pub struct WebAdminPlugin {
+    map_source: Option<Arc<dyn MapSource>>,
+    history_source: Option<Arc<dyn HistorySource>>,
+    server: Option<Server>,
+    map: Option<Arc<MapRenderer>>,
+    auth: Option<Arc<Auth>>,
+    bind: String,
+    tile_px: u32,
+    y_min: i32,
+    y_max: i32,
+    history_limit: usize,
+}
+
+impl Default for WebAdminPlugin {
+    fn default() -> Self {
+        Self {
+            map_source: None,
+            history_source: None,
+            server: None,
+            map: None,
+            auth: None,
+            bind: DEFAULT_BIND.to_string(),
+            tile_px: map::DEFAULT_TILE_PX,
+            y_min: -64,
+            y_max: 319,
+            history_limit: 500,
+        }
+    }
+}
+
+impl WebAdminPlugin {
+    /// Wrap a live world. The server calls this in `install_native`; the plugin
+    /// serves it once it initialises.
+    pub fn with_world<B, G>(world: Arc<World<B, G>>) -> Self
+    where
+        B: KvBackend + Send + Sync + 'static,
+        G: ChunkGenerator + Send + Sync + 'static,
+    {
+        let map_source: Arc<dyn MapSource> = world.clone();
+        let history_source: Arc<dyn HistorySource> = world;
+        Self {
+            map_source: Some(map_source),
+            history_source: Some(history_source),
+            ..Self::default()
+        }
+    }
+
+    /// Drop the map tiles that contain `(x, z)`.
+    fn invalidate(&mut self, x: i32, z: i32) {
+        if let Some(map) = &self.map {
+            map.invalidate(x, z);
+        }
+    }
+}
+
+impl NativePlugin for WebAdminPlugin {
     fn init(&mut self, ctx: &mut NativeContext) -> Result<(), String> {
-        let ops = ctx
-            .services
-            .get::<OpsHandle>(SERVICE, VERSION)
-            .ok_or_else(|| {
-                format!("the live-ops service `{SERVICE}@{VERSION}` is not registered")
-            })?;
+        // Operator config overrides the constructor default.
+        if let Some(bind) = ctx.config.get("bind") {
+            self.bind = bind.clone();
+        }
+        let token = ctx.config.get("token").cloned().filter(|t| !t.is_empty());
 
-        let bind_text = ctx
-            .config
-            .get("bind")
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_BIND.to_string());
-        let bind: SocketAddr = bind_text
-            .parse()
-            .map_err(|e| format!("invalid `bind` address `{bind_text}`: {e}"))?;
-
-        let auth = Arc::new(Auth::new(ctx.config.get("token").cloned()));
-        if auth.has_config_token() {
-            ctx.log(LogLevel::Info, "token from config");
-        } else {
+        let (Some(map_source), Some(history_source)) =
+            (self.map_source.take(), self.history_source.take())
+        else {
+            // Without a world there is nothing to draw or report. This is the
+            // state a `registration()` install is in until the server attaches
+            // one; it is not an error, so the plugin still loads.
             ctx.log(
-                LogLevel::Info,
-                "no token configured; run `/webadmin token` in game to get a one-time token",
+                LogLevel::Warn,
+                "webadmin loaded without a world: the map and live ops are disabled until \
+                 the server attaches one (install_native)",
+            );
+            return Ok(());
+        };
+
+        let addr = self
+            .bind
+            .parse()
+            .map_err(|e| format!("invalid webadmin bind `{}`: {e}", self.bind))?;
+
+        // The live-ops counters, published by the server. The manifest
+        // `requires` it, so it is normally present; treat absence as
+        // "dashboard disabled" rather than refusing the whole plugin.
+        let ops: Option<Arc<OpsHandle>> = ctx.services.get::<OpsHandle>(SERVICE, VERSION);
+        if ops.is_none() {
+            ctx.log(
+                LogLevel::Warn,
+                &format!("live-ops service `{SERVICE}@{VERSION}` missing: dashboard disabled"),
             );
         }
 
-        // Register the command in the core registry so `/webadmin` is routed
-        // to the plugin's `on_command` through the one permission gate.
+        let config = WebAdminConfig {
+            tile_px: self.tile_px,
+            y_min: self.y_min,
+            y_max: self.y_max,
+            token,
+            history_limit: self.history_limit,
+        };
+        let mut admin = WebAdmin::with_config(map_source, history_source, config);
+        if let Some(ops) = ops {
+            admin = admin.with_ops((*ops).clone());
+        }
+        self.auth = Some(Arc::clone(admin.auth()));
+        self.map = Some(admin.map_handle());
+
+        // Register the command through the core registry so `/webadmin` goes
+        // through the one permission gate.
         ctx.backend
             .register_command(ctx.id, "webadmin", "webadmin.command", 3)?;
 
-        let listener =
-            TcpListener::bind(bind).map_err(|e| format!("cannot bind web admin to {bind}: {e}"))?;
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let thread = {
-            let ops = Arc::clone(&ops);
-            let auth = Arc::clone(&auth);
-            let shutdown = Arc::clone(&shutdown);
-            std::thread::Builder::new()
-                .name("webadmin".into())
-                .spawn(move || serve(listener, ops, auth, shutdown))
-                .map_err(|e| format!("cannot start web admin thread: {e}"))?
-        };
-
-        ctx.log(LogLevel::Info, &format!("listening on http://{bind}/"));
-        self.ops = Some(ops);
-        self.auth = Some(auth);
-        self.bind = Some(bind);
-        self.shutdown = Some(shutdown);
-        self.thread = Some(thread);
+        let server = admin
+            .serve(addr)
+            .map_err(|e| format!("cannot bind webadmin on {}: {e}", self.bind))?;
+        ctx.log(
+            LogLevel::Info,
+            &format!("web admin listening on {}", server.url()),
+        );
+        self.server = Some(server);
         Ok(())
     }
 
     fn shutdown(&mut self, _ctx: &mut NativeContext) {
-        if let Some(flag) = self.shutdown.take() {
-            flag.store(true, Ordering::SeqCst);
-            // Unblock `accept` with a throwaway connection.
-            if let Some(addr) = self.bind {
-                let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(200));
-            }
-        }
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
+        if let Some(mut server) = self.server.take() {
+            server.stop();
         }
     }
 
@@ -160,7 +249,7 @@ impl NativePlugin for WebAdmin {
                 lines: vec!["You must be an operator to run this command.".into()],
             });
         }
-        let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+        let sub = args.first().map(String::as_str).unwrap_or("status");
         let lines = match (sub, &self.auth) {
             ("token", Some(auth)) => {
                 let token = auth.issue_one_time();
@@ -168,20 +257,16 @@ impl NativePlugin for WebAdmin {
                 vec![
                     format!("Web admin one-time token: {token}"),
                     format!(
-                        "Valid {} minutes. Open http://{}/ and paste it.",
+                        "Valid {} minutes. Open {} and paste it.",
                         auth::ONE_TIME_TTL.as_secs() / 60,
-                        self.bind
-                            .map(|b| b.to_string())
-                            .unwrap_or_else(|| DEFAULT_BIND.into())
+                        self.bind,
                     ),
                 ]
             }
-            ("status", Some(_)) => vec![format!(
-                "Web admin on http://{}/ ({}).",
-                self.bind
-                    .map(|b| b.to_string())
-                    .unwrap_or_else(|| DEFAULT_BIND.into()),
-                if self.auth.as_ref().is_some_and(|a| a.has_config_token()) {
+            ("status", Some(auth)) => vec![format!(
+                "Web admin on http://{} ({}).",
+                self.bind,
+                if auth.has_config_token() {
                     "token from config"
                 } else {
                     "run /webadmin token for a one-time token"
@@ -194,107 +279,34 @@ impl NativePlugin for WebAdmin {
             lines,
         })
     }
-}
 
-/// The accept loop; one short-lived thread per connection.
-fn serve(listener: TcpListener, ops: Arc<OpsHandle>, auth: Arc<Auth>, shutdown: Arc<AtomicBool>) {
-    for stream in listener.incoming() {
-        if shutdown.load(Ordering::SeqCst) {
-            break;
-        }
-        match stream {
-            Ok(stream) => {
-                let ops = Arc::clone(&ops);
-                let auth = Arc::clone(&auth);
-                let _ = std::thread::Builder::new()
-                    .name("webadmin-conn".into())
-                    .spawn(move || handle_conn(stream, ops, auth));
-            }
-            Err(e) => {
-                // A transient accept error (EMFILE, etc.) must not end the
-                // server silently; log it through the plugin's own logger is
-                // not available here, so keep going.
-                let _ = e;
-            }
-        }
+    fn after_block_break(
+        &mut self,
+        _ctx: &mut NativeContext,
+        _p: &Player,
+        x: i32,
+        _y: i32,
+        z: i32,
+        _block: &str,
+    ) {
+        self.invalidate(x, z);
     }
-}
 
-fn handle_conn(mut stream: TcpStream, ops: Arc<OpsHandle>, auth: Arc<Auth>) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-
-    let Some((head, mut body)) = read_head(&mut stream) else {
-        return;
-    };
-    let want = content_length(&head);
-    while body.len() < want && body.len() < http::MAX_BODY {
-        use std::io::Read;
-        let mut tmp = [0u8; 4096];
-        match stream.read(&mut tmp) {
-            Ok(0) => break,
-            Ok(n) => body.extend_from_slice(&tmp[..n]),
-            Err(_) => break,
-        }
+    fn before_block_place(
+        &mut self,
+        _ctx: &mut NativeContext,
+        _p: &Player,
+        x: i32,
+        _y: i32,
+        z: i32,
+        _block: &str,
+    ) -> Decision {
+        // Invalidate before the write lands: the next tile request rebuilds
+        // from the world, which by then holds the new block. A cancelled place
+        // merely costs one unnecessary rebuild.
+        self.invalidate(x, z);
+        Decision::Allow
     }
-    let Some(req) = http::parse_request(&head, body) else {
-        let _ = write_response(&mut stream, &http::Response::text(400, "bad request"));
-        return;
-    };
-    let response = http::route(&req, ops.get() as &dyn OpsService, &auth);
-    let _ = write_response(&mut stream, &response);
-}
-
-/// Read through the end of the header block (`\r\n\r\n`), returning the head
-/// and whatever body bytes arrived with it.
-fn read_head(stream: &mut TcpStream) -> Option<(Vec<u8>, Vec<u8>)> {
-    use std::io::Read;
-    let mut buf = Vec::with_capacity(1024);
-    let mut tmp = [0u8; 2048];
-    loop {
-        match stream.read(&mut tmp) {
-            Ok(0) => return None,
-            Ok(n) => {
-                buf.extend_from_slice(&tmp[..n]);
-                if let Some(pos) = find(&buf, b"\r\n\r\n") {
-                    let split = pos + 4;
-                    let body = buf.split_off(split);
-                    return Some((buf, body));
-                }
-                if buf.len() > http::MAX_HEAD {
-                    return None;
-                }
-            }
-            Err(_) => return None,
-        }
-    }
-}
-
-fn write_response(stream: &mut TcpStream, response: &http::Response) -> std::io::Result<()> {
-    use std::io::Write;
-    stream.write_all(&response.encode())?;
-    stream.flush()
-}
-
-/// The `Content-Length` value from a raw head, or zero.
-fn content_length(head: &[u8]) -> usize {
-    let text = String::from_utf8_lossy(head);
-    for line in text.split("\r\n") {
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("content-length") {
-                return v.trim().parse().unwrap_or(0);
-            }
-        }
-    }
-    0
-}
-
-/// Find `needle` in `haystack`.
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 #[cfg(test)]
@@ -302,25 +314,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_declares_the_service_and_command() {
-        let m = registration().manifest;
+    fn manifest_requires_ops_and_serves_webadmin() {
+        let m = manifest();
         assert_eq!(m.id, "webadmin");
         assert_eq!(m.tier, PluginTier::Native);
         assert_eq!(m.requires, vec!["ops@0.1".to_string()]);
         assert!(m.serves_command("webadmin"));
-        assert!(!m.serves_command("give"));
-    }
-
-    #[test]
-    fn finds_the_header_terminator() {
-        assert_eq!(find(b"abc\r\n\r\ndef", b"\r\n\r\n"), Some(3));
-        assert_eq!(find(b"abc", b"\r\n\r\n"), None);
-    }
-
-    #[test]
-    fn reads_content_length_case_insensitively() {
-        let head = b"POST /login HTTP/1.1\r\ncontent-length: 7\r\n\r\n";
-        assert_eq!(content_length(head), 7);
-        assert_eq!(content_length(b"GET / HTTP/1.1\r\n\r\n"), 0);
+        assert!(m.subscribes("on-command"));
+        assert!(m.subscribes("after-block-break"));
+        assert!(m.subscribes("before-block-place"));
     }
 }

@@ -53,7 +53,7 @@ fn layout(title: &str, body: &str, script: &str) -> String {
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
 <title>{t} · Aether web admin</title><style>{css}</style></head><body>\
 <header><b>Aether</b> <a href=\"/\">Dashboard</a> <a href=\"/regions\">Regions</a> \
-<a href=\"/players\">Players</a><span class=\"muted\" style=\"margin-left:auto\">read-only</span></header>\
+<a href=\"/players\">Players</a> <a href=\"/map\">Map</a><span class=\"muted\" style=\"margin-left:auto\">read-only</span></header>\
 <main>{body}</main>{script}</body></html>",
         t = esc(title),
         css = STYLE,
@@ -241,7 +241,7 @@ pub fn players(ops: &dyn OpsService) -> String {
             "<span class=\"muted\">offline</span>"
         };
         h.push_str(&format!(
-            "<tr><td><a href=\"/player?id={uuid}\">{name}</a></td><td>{state}</td>\
+            "<tr><td><a href=\"/profile?id={uuid}\">{name}</a></td><td>{state}</td>\
 <td class=\"muted\">{ip}</td><td class=\"muted\">{first}</td><td class=\"muted\">{last}</td>\
 <td>{play}</td><td><a href=\"/inventory?id={uuid}\">inventory</a></td></tr>",
             uuid = esc(&p.uuid),
@@ -313,7 +313,7 @@ pub fn inventory(v: &InventoryView) -> String {
     let state = if v.online { "live" } else { "saved" };
     let mut body = format!(
         "<h1>{name} · inventory <span class=\"muted\">({state})</span></h1>\
-<p class=\"muted\"><a href=\"/player?id={uuid}\">profile</a> · read-only</p>",
+<p class=\"muted\"><a href=\"/profile?id={uuid}\">profile</a> · read-only</p>",
         name = esc(&v.name),
         uuid = esc(&v.uuid),
         state = state,
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn players_links_to_profile_and_inventory() {
         let html = players(&Mock);
-        assert!(html.contains("/player?id="));
+        assert!(html.contains("/profile?id="));
         assert!(html.contains("/inventory?id="));
         assert!(html.contains("Steve"));
     }

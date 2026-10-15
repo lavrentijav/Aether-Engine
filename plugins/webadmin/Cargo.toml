@@ -1,6 +1,6 @@
 [package]
 name = "aether-webadmin-plugin"
-description = "Aether web admin: a native plugin that serves a read-only live-ops dashboard, heaviest regions, player profiles and inventories over plain HTTP on the local interface."
+description = "Aether admin web interface: a native plugin serving a read-only live-ops dashboard, heaviest regions, player profiles and inventories, a top-down map and a journal time machine."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,13 +9,19 @@ repository.workspace = true
 authors.workspace = true
 
 [lib]
-name = "aether_webadmin_plugin"
+name = "aether_webadmin"
 
 [dependencies]
-# The native-plugin trait, manifest and service registry, and the shared
-# `NativeContext` this plugin is initialised with.
+# The world facade and its journal: the map samples blocks through it and the
+# time machine replays the journal over its baseline.
+aether-api = { workspace = true, default-features = false }
+aether-world = { workspace = true, default-features = false }
+aether-worldgen = { workspace = true }
+# The host trait a native plugin implements. The map/time-machine logic does not
+# depend on it — the plugin wrapper is thin so the modules stay testable alone.
 aether-plugin = { workspace = true }
-# The live-ops shape the server publishes as `ops@0.1`.
+# The live-ops shape the server publishes as `ops@0.1`: the dashboard, region
+# and player/inventory views the web pages render.
 aether-ops = { workspace = true }
 serde_json = { workspace = true }
 

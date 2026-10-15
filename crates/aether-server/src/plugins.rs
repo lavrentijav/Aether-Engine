@@ -242,7 +242,7 @@ mod imp {
         {
             crate::log::warn(&format!("ops service not registered: {e}"));
         }
-        install_native(&mut host, cfg, &grant_sink);
+        install_native(&mut host, cfg, &grant_sink, world);
         for file in discover(Path::new(&cfg.plugins.dir)) {
             let id = file.manifest.id.clone();
             let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
@@ -298,14 +298,20 @@ mod imp {
             .collect()
     }
 
-    /// Add the compiled-in native plugins. Today just the SDK.
+    /// Add the compiled-in native plugins: the SDK service host, then the
+    /// admin web interface.
     ///
     /// A native plugin is a plugin like any other — same manifest, enable
     /// flag and load error handling — except that it is compiled in and
     /// reaches the host through the in-process [`PluginHost::add_native`]
     /// rather than a `.wasm` file. Loading it before the on-disk discovery is
     /// what lets a WASM dependent's `requires` be satisfied.
-    fn install_native(host: &mut PluginHost, cfg: &Arc<Config>, grant_sink: &Arc<ServerBackend>) {
+    fn install_native(
+        host: &mut PluginHost,
+        cfg: &Arc<Config>,
+        grant_sink: &Arc<ServerBackend>,
+        world: &Arc<DemoWorld>,
+    ) {
         // The SDK is a service provider; it asks the operator for no host
         // capabilities of its own, but a service method still checks its
         // *caller's* capabilities.
@@ -335,10 +341,10 @@ mod imp {
             }
         }
 
-        // The web admin `requires` the live-ops service, which `install`
-        // publishes before this runs, so it can come after the SDK or without
-        // it.
-        let registration = aether_webadmin_plugin::registration();
+        // The admin web interface. It resolves the live-ops service (published
+        // by `install` above) and the server attaches the live world here — the
+        // plugin host gives a native plugin no world handle, by design.
+        let registration = aether_webadmin::registration();
         let id = registration.manifest.id.clone();
         let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
         if !entry.enabled() {
@@ -350,7 +356,10 @@ mod imp {
             dir: std::path::PathBuf::new(),
             manifest: registration.manifest,
         };
-        match host.add_native(&file, &caps, &entry.config, (registration.new)()) {
+        let plugin = Box::new(aether_webadmin::WebAdminPlugin::with_world(Arc::clone(
+            world,
+        )));
+        match host.add_native(&file, &caps, &entry.config, plugin) {
             Ok(()) => crate::log::info(&format!("plugin     : {id} (native web admin)")),
             Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
         }

@@ -160,8 +160,11 @@ version = "0.1.0"
 name = "aether-webadmin-plugin"
 version = "0.1.0"
 dependencies = [
+ "aether-api",
  "aether-ops",
  "aether-plugin",
+ "aether-world",
+ "aether-worldgen",
  "serde_json",
 ]
 
