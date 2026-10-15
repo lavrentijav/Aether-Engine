@@ -5,11 +5,11 @@
 #   InventoryHandling   = true   -> /inventory /changeslot /useitem
 #   EntityHandling      = true   -> entities
 #
-# [ChatBot.AutoRelog] is on (1 s delay, network interruptions only): under AU1
-# hybrid auth `_alpha_01` is a premium name, so a fresh offline attempt is
-# offered Mojang encryption, dropped, and admitted offline on the reconnect
-# (the server's same-address fallback). Without AutoRelog the first connection
-# of every scenario fails. See auth.sh / last-run.md.
+# The account is the dedicated bot `_aether_bot1` (MCC_ACCOUNT, default): it has
+# no Mojang profile, so hybrid auth admits it offline directly — no encryption
+# offer and no AutoRelog workaround needed. The operator rights it needs for
+# /gamemode, /give, /tp, /time come from a server-side operator entry bound to
+# this machine's address (`_aether_bot1@<MCC source IP>`); see last-run.md.
 #
 # send <cmd>  — a line starting with '/' goes to the server; unknown server
 #               commands are forwarded, so use "/send /help" for server help.
@@ -46,7 +46,7 @@
 # read-only) checks the PostgreSQL aether_events_named view for a session.
 #
 # auth.sh (separate, login-layer) checks AU1 hybrid admission with a raw login
-# probe: invalid names refused, the per-IP login rate limit and its recovery,
-# and that offline play / `_alpha_01` still get in. It is not an MCC scenario
-# because an offline client cannot answer the encryption offer, and the rate
-# limit needs logins much faster than an MCC process can start.
+# probe: the bot name is not premium, invalid names refused, the per-IP login
+# rate limit and its recovery, and that offline play / the bot still get in.
+# It is not an MCC scenario because the rate limit needs logins much faster
+# than an MCC process can start.

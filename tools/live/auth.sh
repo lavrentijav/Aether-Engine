@@ -6,7 +6,13 @@
 # complete Mojang's encryption handshake, and the rate limit needs logins far
 # faster than an MCC process can start.
 #
+# The account under test is the dedicated bot `_aether_bot1`
+# (MCC_ACCOUNT, default), which has **no** Mojang profile: hybrid auth admits
+# it offline directly. The owner's real premium account is no longer used.
+#
 # Checks (one PASS|FAIL line each):
+#   bot-name-not-premium     api.mojang.com has no profile for the bot name,
+#                            so the server never offers it encryption (404).
 #   invalid-name-space       a name with a space is refused "Invalid username."
 #   invalid-name-long        a 20-char name is refused "Invalid username."
 #   invalid-name-short       a 2-char name is refused "Invalid username."
@@ -15,14 +21,14 @@
 #                            reported.
 #   login-rate-recovery      after the window, a login is admitted again.
 #   offline-open             a fresh, non-premium name joins offline.
-#   operator-offline-admitted  `_alpha_01` (offline) is still admitted (MCC).
+#   bot-admitted             the bot joins offline via MCC (the real client).
 #
 # Usage: auth.sh [mc_version]     (default 1.21.11; only for the MCC check)
 #
 # The rate-limit burst intentionally exhausts this client's per-IP budget, so
 # the script waits out the server's login window (60 s) before measuring it and
-# again before the recovery probe; the budget is then low enough for the two
-# checks that follow.
+# again before the recovery probe; the budget is then low enough for the later
+# checks.
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,6 +37,7 @@ PROBE="$HERE/auth-probe.py"
 HOST="${MCC_HOST:-fi2.walk.boykisser.online}"
 PORT="${MCC_PORT:-25565}"
 PROTO="${MCC_PROTOCOL:-774}"      # 1.21.11
+BOT="${MCC_ACCOUNT:-_aether_bot1}"
 BURST_CAP="${AUTH_BURST_CAP:-25}"
 WINDOW_WAIT="${AUTH_WINDOW_WAIT:-62}"   # > the server's 60 s login window
 VER="${1:-1.21.11}"
@@ -41,6 +48,18 @@ fail() { echo "FAIL auth $1 $2"; FAILED=1; }
 
 # One raw login; prints "<status>\t<detail>".
 login() { python3 "$PROBE" login "$HOST" "$PORT" "$1" "$PROTO"; }
+
+# 0. The bot name must not be a premium (Mojang) name, or a hybrid server
+# would offer it encryption and an offline client could not answer. 404 (or
+# 204) from the profile API means "not premium".
+code="$(curl -s -m 10 -o /dev/null -w '%{http_code}' "https://api.mojang.com/users/profiles/minecraft/$BOT" || true)"
+if [ "$code" = "404" ] || [ "$code" = "204" ]; then
+    pass bot-name-not-premium "$BOT has no Mojang profile (HTTP $code)"
+elif [ "$code" = "200" ]; then
+    fail bot-name-not-premium "$BOT is a premium name (HTTP 200); pick another bot name (MCC_ACCOUNT)"
+else
+    fail bot-name-not-premium "could not check $BOT: HTTP $code (uncertain; proceed with care)"
+fi
 
 # 1-3. Invalid usernames are refused with a clear message, before any auth
 # work and without consuming the rate limit.
@@ -90,27 +109,24 @@ else
     fail login-rate-recovery "expected admitted after ${WINDOW_WAIT}s, got: $rec"
 fi
 
-# 6. Offline play stays open: a fresh non-premium name is admitted offline.
-off="$(login "probeofflineopen")"
+# 6. Offline play stays open: the bot is a fresh non-premium name and is
+# admitted offline (not offered encryption).
+off="$(login "$BOT")"
 off_status="${off%%$'\t'*}"
 if [ "$off_status" = "admitted" ]; then
     pass offline-open "$off"
 elif [ "$off_status" = "encryption" ]; then
-    # A premium name would be offered encryption, not admitted — but this probe
-    # name is not premium, so this is a surprise worth flagging.
-    fail offline-open "a non-premium name was offered encryption"
+    fail offline-open "the non-premium bot was offered encryption"
 else
     fail offline-open "expected admitted, got: $off"
 fi
 
-# 7. The operator account still gets in offline (via MCC, the real client).
-# In hybrid mode `_alpha_01` is a premium name, so a fresh offline attempt is
-# offered encryption, dropped, and admitted on MCC's automatic reconnect (the
-# server's "recently dropped" fallback); the join scenario bundles that.
+# 7. The bot still gets in via the real client (MCC). The join scenario is
+# name-agnostic and runs as $MCC_ACCOUNT (default the bot).
 if join_out="$(bash "$RUN" join "$VER" 2>&1)"; then
-    pass operator-offline-admitted "$join_out"
+    pass bot-admitted "$join_out"
 else
-    fail operator-offline-admitted "$join_out"
+    fail bot-admitted "$join_out"
 fi
 
 exit "$FAILED"

@@ -1,4 +1,6 @@
 # 4. inventory-persist — give items, reconnect, inventory still there.
+# The bot's inventory accumulates across scenarios, so this targets slot 36 and
+# lists only it (a full /inv pages past the interesting slot).
 wait 22
 send /gamemode creative
 wait 2
@@ -9,14 +11,13 @@ expect Requested to clear slot #36
 send /inventory creativegive 36 Stone 5
 wait 2
 expect Requested Stone x5 in slot #36
-send /inv
+send /inventory player list 36
 wait 3
-expect Inventory — page
-expect 5x minecraft:stone
+expect #36: x5  Stone
 send /reco
 wait 25
 expect Server was successfully joined
-send /inv
+send /inventory player list 36
 wait 3
-expect 5x minecraft:stone
+expect #36: x5  Stone
 reject unreadable

@@ -51,7 +51,7 @@ fi
     echo "# V1 live run"
     echo
     echo "- Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-    echo "- Target: ${MCC_HOST:-fi2.walk.boykisser.online}:25565, account ${MCC_ACCOUNT:-_alpha_01}"
+    echo "- Target: ${MCC_HOST:-fi2.walk.boykisser.online}:25565, account ${MCC_ACCOUNT:-_aether_bot1}"
     echo "- Versions: ${VERSIONS[*]}"
     echo
     echo "| scenario |$(for v in "${VERSIONS[@]}"; do printf ' %s |' "$v"; done)"

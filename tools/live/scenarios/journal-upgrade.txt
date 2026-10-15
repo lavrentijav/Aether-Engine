@@ -1,14 +1,12 @@
 # 10. journal-upgrade — the on-disk history mixes v3 (written by the previous
 # build) and v4 (written now). /audit decodes every event in the journal, and
-# /inspect reads one block whose history predates the upgrade; both must work
-# without a decode error ("unsupported journal format version 3").
+# /inspect reads a block whose history predates the upgrade (at -8 69 8, the
+# old operator spawn area, ~13h old) plus one placed now (at 58 63 8, the bot's
+# spawn work area); both must work without a decode error.
 wait 22
 send /gamemode creative
 wait 2
 expect is now in Creative mode
-send /spawn
-wait 2
-expect Teleported to spawn
 # Whole journal: every old (v3) and new (v4) entry is decoded by the audit.
 send /audit
 wait 6
@@ -16,43 +14,47 @@ expect item instance\(s\)
 reject history unreadable
 reject unsupported journal format
 reject incompatible
-# A block whose history was written before the upgrade (all v3 entries).
+# A block whose history was written before the upgrade.
+send /tp -8 70 8
+wait 2
+expect Teleported
 send /inspect
 wait 2
 expect Inspect mode ON
-send /look down
-wait 1
-expect Looking Down
-send /dig
+send /dig -8 69 8
 wait 4
-expect page
+expect page [0-9]+ of
 expect minecraft:
 reject unsupported journal format
 reject incompatible
-# A block changed after the upgrade: place one now (v4), then inspect it.
 send /inspect
 wait 2
 expect Inspect mode OFF
+# A block changed after the upgrade: place one now (v4), then inspect it.
+send /tp 56 63 8
+wait 2
+expect Teleported
 send /inventory creativedelete 36
 wait 1
+expect Requested to clear slot #36
 send /give minecraft:stone 64
 wait 2
 expect Gave 64 minecraft:stone
 send /changeslot 1
 wait 1
 expect Changed to slot 1
-send /dig -6 70 8
+send /dig 58 63 8
 wait 3
-send /useblock -6 70 8
-wait 2
+send /useblock 58 63 8
+wait 3
 expect Useblock at
-send /block -6 70 8
+send /block 58 63 8
 wait 2
-expect -6 70 8: minecraft:stone
+expect 58 63 8: minecraft:stone
 send /inspect
 wait 2
 expect Inspect mode ON
-send /dig -6 70 8
+send /dig 58 63 8
 wait 4
 expect placed minecraft:stone
 reject unsupported journal format
@@ -61,7 +63,7 @@ send /inspect
 wait 2
 expect Inspect mode OFF
 # /lookup over the same region spans old and new entries.
-send /lookup player:_alpha_01 radius:8
+send /lookup player:_aether_bot1 radius:8
 wait 4
 expect page|entries
 reject history unreadable
