@@ -521,6 +521,8 @@ pub struct MobHit {
     pub kind: &'static str,
     pub xp: i32,
     pub pos: Vector3,
+    /// The damage actually dealt, after resistance: what `after-damage` hears.
+    pub damage: f32,
     /// Sheep wool colour index, for the loot table's colour component.
     pub wool: u8,
     /// Whether a sheep was sheared when it died.
@@ -582,6 +584,7 @@ pub fn hurt_mob(
         kind: m.def.kind,
         xp: m.def.xp,
         pos,
+        damage: amount,
         wool: m.wool,
         sheared: m.sheared,
         on_fire: m.burning > 0,

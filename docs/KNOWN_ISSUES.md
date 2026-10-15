@@ -84,6 +84,12 @@
     - **Sections are not re-hidden.** A section that becomes hidden after being revealed stays real on the client until the column is next streamed — the player already saw it, so there is no leak, but its blocks are back on the client.
     - **There is no spectator mode**, so `hidden_fill = "air"` falls back to stone for a survival player (and the module applies to every game mode); `/visibility off` (operator-only) is the admin bypass.
 
+16. **The WebAssembly plugin system is at its first stage (P1).** `crates/aether-plugin` is a Wasmtime 36.0.18 component-model host behind the server's `plugins` feature (on by default): it loads `plugin.toml` manifests, runs `wasm32-wasip2` components under per-call epoch interruption, a shared per-tick budget, a per-plugin memory cap, an init fuel budget and a fault counter, and runs the `before-*` / `after-*` / `on-tick` / `on-command` event bus wired at the game's hook points; `plugins/examples/hello` is the reference. Capabilities are deny-by-default (the operator must grant each), plugin commands cannot shadow a built-in, duplicate ids are refused, and a plugin may declare `deny_on_fault` to fail closed on a `before-*`. Four gaps are known:
+    - **WASI is linked but granted nothing.** A Rust `wasm32-wasip2` component imports the WASI 0.2 surface for its standard library, so the host links `wasmtime-wasi` to satisfy the imports. The context is `WasiCtxBuilder::new()` — no preopens, no environment, no arguments, closed stdin, sink stdout/stderr and every network address denied — so a plugin has no way out of the sandbox, but "no WASI at all" is not yet true.
+    - **`after-enchant` has no server hook point.** The event is in the WIT package and the host, but enchantment behaviour is not implemented, so nothing calls it; the E1/E2 work will.
+    - **Economy and registries are not plugins yet.** P2 (the economy service and `storage.ledger`) and P3 (plugin-registered custom enchantments/items) are not implemented: the economy still runs the built-in PostgreSQL `Economy`, and the frozen `aether:plugin@0.1.0` world means they will arrive as a new package version.
+    - **No native tier and no hot reload.** The native C-ABI tier and hot reload from the design are not started.
+
 ### B. Known Deviations Registry (Phase 1 — accepted on purpose)
 These are **not bugs** in Phase 1 — they are documented, temporary compatibility gaps that must be recorded in the engine config and closed in Phase 2.
 

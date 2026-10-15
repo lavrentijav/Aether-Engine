@@ -72,6 +72,55 @@ fn usage() -> Reply {
     ])
 }
 
+/// Every built-in command name, across the game, economy and history layers.
+///
+/// Passed to the plugin host as its reserved set, so a plugin can never be
+/// handed one of these names even if the dispatch order below ever changed.
+/// Keep it in step with the `match`es that handle commands.
+// Only consulted by the plugin host, which is absent without the `plugins`
+// feature; kept in every build so the list has one home.
+#[allow(dead_code)]
+pub const RESERVED_COMMANDS: &[&str] = &[
+    // game
+    "gamemode",
+    "gm",
+    "time",
+    "give",
+    "summon",
+    "killall",
+    "kill",
+    "spawn",
+    "tp",
+    "block",
+    "food",
+    "heal",
+    // history
+    "inspect",
+    "i",
+    "lookup",
+    "l",
+    "rollback",
+    "rb",
+    "page",
+    "pg",
+    "inv",
+    "inventory",
+    "stash",
+    "audit",
+    "cache",
+    // economy
+    "balance",
+    "bal",
+    "money",
+    "pay",
+    "sell",
+    "market",
+    "buy",
+    "listings",
+    "unlist",
+    "econ",
+];
+
 /// Handle `text` if it is a command. `None` means it was ordinary chat.
 pub fn dispatch(
     text: &str,
@@ -86,11 +135,15 @@ pub fn dispatch(
     let mut words = text[1..].split_whitespace();
     let cmd = words.next().unwrap_or_default();
     let args: Vec<&str> = words.collect();
-    // The economy owns its own verbs; it answers `None` for anything else, so
-    // a command name never means two things.
+    // **Built-ins first.** A plugin command is only tried once every built-in
+    // verb — including the operator-gated game commands — has declined the
+    // name, so a plugin can never shadow a built-in and its permission check.
+    // `[plugins]`-registered verbs that do not collide are unaffected.
     if let Some(lines) = crate::game::commands::dispatch(cmd, &args, handle, registry, world) {
         return Some(Reply(lines));
     }
+    // The economy owns its own verbs; it answers `None` for anything else, so
+    // a command name never means two things.
     if let Some(reply) = crate::economy::commands::dispatch(
         cmd,
         &args,
@@ -111,8 +164,52 @@ pub fn dispatch(
         "audit" => audit(world),
         "cache" => cache(world),
         "help" | "?" => help(&args, handle),
-        _ => stub(cmd, handle),
+        // Everything else is a fallback. Plugin commands are resolved through
+        // the registry here — **after** every core name has been offered, and
+        // with the same permission gate — so they can never shadow a core
+        // command; core stubs and usage are the last resort.
+        _ => fallback(cmd, &args, handle),
     })
+}
+
+/// The last-resort dispatcher: a plugin command (through the registry, with
+/// its permission check), else a core stub or the usage text.
+///
+/// This is the one place a plugin command is reached from. Because
+/// `registry::register_plugin` refuses core names, `registry::plugin_command`
+/// here can only answer a name the core does not own, so the core's gate is
+/// never bypassed.
+fn fallback(cmd: &str, args: &[&str], handle: &PlayerHandle) -> Reply {
+    if let Some(entry) = registry::plugin_command(cmd) {
+        if !permitted(handle, &entry.node, entry.op) {
+            return Reply::one("You do not have permission to run this command.");
+        }
+        let plugin_args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        return match crate::plugins::on_command(handle, cmd, &plugin_args) {
+            Some(lines) => Reply(lines),
+            // Registered but no live plugin answered — the plugin is disabled
+            // or failed to load; say so rather than showing the usage text.
+            None => Reply::one(format!("/{cmd} is not available right now")),
+        };
+    }
+    stub(cmd, handle)
+}
+
+/// Whether `handle` may run a command needing `op`.
+///
+/// Until the permission store (CMD-01) lands, a player's only levels are 4
+/// (an operator) and 0 (everyone else), exactly what [`crate::is_operator`]
+/// says; `node` is carried for when the store can resolve it. This is the
+/// single gate the core stubs and plugin commands both use.
+pub fn permitted(handle: &PlayerHandle, node: &str, op: u8) -> bool {
+    let level = if crate::is_operator(handle) { 4 } else { 0 };
+    permitted_level(level, node, op)
+}
+
+/// The level half of [`permitted`], without a handle: the decision itself, so
+/// it can be tested and reused by the permission core (CMD-01) later.
+pub fn permitted_level(level: u8, _node: &str, op: u8) -> bool {
+    level >= op
 }
 
 /// `/help [command]` — list the commands that are specified but not implemented yet, or explain one.
@@ -150,8 +247,7 @@ fn stub(cmd: &str, handle: &PlayerHandle) -> Reply {
     let Some(e) = registry::find(cmd) else {
         return usage();
     };
-    let level = if crate::is_operator(handle) { 4 } else { 0 };
-    if level < e.op {
+    if !permitted(handle, e.node, e.op) {
         return Reply::one("You do not have permission to run this command.");
     }
     Reply::one(format!("/{} is not implemented yet ({})", e.name, e.task))
@@ -606,6 +702,40 @@ mod tests {
             1 => "minecraft:stone".into(),
             _ => "minecraft:unknown".into(),
         }
+    }
+
+    #[test]
+    fn the_reserved_set_covers_the_operator_verbs() {
+        // The host refuses these before any plugin sees them; if one were
+        // dropped from the list a plugin could shadow it again.
+        for verb in [
+            "give", "tp", "gamemode", "summon", "killall", "time", "heal", "food", "pay", "econ",
+        ] {
+            assert!(
+                super::RESERVED_COMMANDS.contains(&verb),
+                "`{verb}` must be reserved"
+            );
+        }
+    }
+
+    #[test]
+    fn the_permission_gate_is_level_against_op() {
+        // A non-op (level 0) may run only op-0 commands; an op (level 4) any.
+        assert!(super::permitted_level(0, "n", 0));
+        assert!(!super::permitted_level(0, "n", 1));
+        assert!(!super::permitted_level(0, "n", 4));
+        assert!(super::permitted_level(4, "n", 4));
+        assert!(super::permitted_level(4, "n", 0));
+    }
+
+    #[test]
+    fn the_registry_owns_both_implemented_and_specified_core_names() {
+        // `core_owns` is the ownership check a plugin registration faces: it
+        // must reject an implemented name even if the reserved list drifted,
+        // and a specified-but-unimplemented one.
+        assert!(super::registry::core_owns("give"), "implemented");
+        assert!(super::registry::core_owns("stop"), "specified stub");
+        assert!(!super::registry::core_owns("definitely_a_plugin_name"));
     }
 
     #[test]

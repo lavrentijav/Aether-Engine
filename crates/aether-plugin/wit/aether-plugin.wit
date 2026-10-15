@@ -1,0 +1,134 @@
+/// The Aether plugin API, package `aether:plugin@0.1.0`.
+///
+/// A plugin is a WebAssembly component that exports the `plugin` world. The
+/// host instantiates it once, calls `init` (registration happens only there),
+/// then calls the event exports it subscribed to in its `plugin.toml`
+/// manifest. An event the plugin did not subscribe to is never called.
+///
+/// This package is deliberately versioned: the API is 0.x and a breaking
+/// change bumps the package version, never the meaning of a name in place.
+package aether:plugin@0.1.0;
+
+/// Types shared between the host services and the event exports.
+interface types {
+    /// A player, as much as a plugin may see of one.
+    record player {
+        /// The server's session entity id.
+        id: u64,
+        /// The player's login name.
+        name: string,
+        /// Whether the server considers this player an operator. The host
+        /// fills this from its own operator list, so a plugin that offers a
+        /// privileged command of its own can refuse it to everyone else. It
+        /// does **not** let a plugin shadow a built-in command: the host
+        /// never routes a reserved built-in name to a plugin at all.
+        operator: bool,
+    }
+
+    /// What `init` returns: the host acknowledges the plugin and reports the
+    /// id it registered under.
+    record manifest-ack {
+        id: string,
+    }
+
+    /// A `before-*` event's verdict. `cancel` carries the reason shown to the
+    /// player; the host treats a cancel from any plugin as final.
+    variant decision {
+        allow,
+        cancel(string),
+    }
+
+    /// The result of an `on-command` hook. When `handled` is false the host
+    /// tries the next plugin that registered the command, and finally the
+    /// built-in commands.
+    record command-result {
+        handled: bool,
+        lines: list<string>,
+    }
+
+    /// Log severity, mirroring the host's own levels.
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+}
+
+/// Host services a plugin may call. Each function is gated by the capability
+/// named in the plugin's manifest; an ungranted call is refused (logged by the
+/// host) and returns the neutral value.
+interface host {
+    use types.{log-level};
+
+    /// Capability `log`: write a line to the server log, tagged with the
+    /// plugin's id.
+    log: func(level: log-level, message: string);
+
+    /// Capability `storage.kv`: read a value from the plugin's own namespace.
+    kv-get: func(key: string) -> option<list<u8>>;
+    /// Capability `storage.kv`: write a value.
+    kv-put: func(key: string, value: list<u8>);
+    /// Capability `storage.kv`: remove a key.
+    kv-delete: func(key: string);
+    /// Capability `storage.kv`: the keys beginning with `prefix`.
+    kv-list: func(prefix: string) -> list<string>;
+
+    /// Capability `config`: an operator-provided value from `[plugins.<id>]`.
+    config: func(key: string) -> option<string>;
+
+    /// Capability `supports`: whether the host offers a named feature, such as
+    /// `economy.v1`. Versioned names, so a plugin can probe rather than
+    /// require.
+    supports: func(feature: string) -> bool;
+}
+
+/// The event/observer world a plugin component exports.
+///
+/// **Frozen for `aether:plugin@0.1.0`.** The component model has no optional
+/// exports, so this export set is a contract: a component compiled against
+/// `0.1.0` provides exactly these, and adding one — an `economy` export, a
+/// `register-enchantment` export — would change the world and refuse every
+/// existing component. A new role therefore gets a **new world in a new
+/// package version** (`aether:plugin@0.2.0`), loaded by a host that knows it,
+/// while `0.1.0` stays valid. Do not add exports here; bump the package.
+/// `tests/wit_world.rs` fails if this set changes.
+world plugin {
+    use types.{player, manifest-ack, decision, command-result};
+
+    /// Host services the component may import.
+    import host;
+
+    /// Lifecycle: called exactly once at load with the plugin's config as a
+    /// JSON object. Commands, enchantments and other registrations happen
+    /// here and nowhere else.
+    export init: func(config: string) -> result<manifest-ack, string>;
+    /// Lifecycle: called once at server shutdown, best effort.
+    export shutdown: func();
+
+    /// `before-*` events: return `allow` to let the action proceed, or
+    /// `cancel(reason)` to veto it.
+    export before-block-break: func(p: player, x: s32, y: s32, z: s32, block: string) -> decision;
+    export before-block-place: func(p: player, x: s32, y: s32, z: s32, block: string) -> decision;
+    export before-use-item: func(p: player, item: string) -> decision;
+    export before-attack: func(p: player, target: u64) -> decision;
+    export before-chat: func(p: player, message: string) -> decision;
+    export before-container-click: func(p: player, window: u32, slot: s32) -> decision;
+
+    /// `after-*` events: observe-only; the return value is ignored.
+    export after-player-join: func(p: player);
+    export after-player-leave: func(p: player);
+    export after-block-break: func(p: player, x: s32, y: s32, z: s32, block: string);
+    export after-entity-death: func(entity: u64, killer: option<u64>);
+    export after-damage: func(entity: u64, amount: f64, source: string);
+    export after-craft: func(p: player, item: string, count: u32);
+    export after-enchant: func(p: player, item: string, level: u32);
+
+    /// Called at most once every `tick_period` ticks, and only when the
+    /// manifest subscribes to `on-tick`. `n` is the world tick count.
+    export on-tick: func(n: u64);
+
+    /// Called for a command the plugin registered in its manifest.
+    export on-command: func(p: player, name: string, args: list<string>) -> command-result;
+}

@@ -23,6 +23,9 @@ serde = { workspace = true }
 # Protocol frame compression (zlib), pure Rust so the server keeps building
 # without a C toolchain.
 miniz_oxide = { workspace = true }
+# The WebAssembly plugin host. Optional so `--no-default-features` builds the
+# server without Wasmtime's compile cost and dependency tree.
+aether-plugin = { workspace = true, optional = true }
 postgres = { version = "0.19.10", optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -52,4 +55,9 @@ test = false
 workspace = true
 
 [features]
+# Plugins are on by default for the server binary — the feature exists so a
+# build that does not need Wasmtime (tests, a minimal deployment) can drop it
+# with `--no-default-features`.
+default = ["plugins"]
+plugins = ["dep:aether-plugin"]
 postgres = ["dep:postgres"]

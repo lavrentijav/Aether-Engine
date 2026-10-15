@@ -1,6 +1,6 @@
 # Plugins: core / native / WASM tiers, low-level API, economy as a plugin, custom enchantments
 
-Status: 📋 design (2026-10-14). ROADMAP Phase 4 "Plugin API: Native C-ABI tier + WebAssembly
+Status: 🚧 stage P1 done (2026-10-14). ROADMAP Phase 4 "Plugin API: Native C-ABI tier + WebAssembly
 (Wasmtime) sandbox + `engine.supports()`" — this document is that plan, pulled forward.
 
 ## Goals
@@ -12,7 +12,7 @@ Status: 📋 design (2026-10-14). ROADMAP Phase 4 "Plugin API: Native C-ABI tier
 3. **Enchantments become data**: vanilla ones from the data pack, level caps configurable or off,
    custom enchantments defined by config files or plugins.
 
-Non-goals now: the native **C-ABI** tier for third parties (later; same WIT world, different
+Non-goals now: the native **C-ABI** tier for third parties (later; same WIT package, different
 loader — distinct from the in-workspace native tier below, which is plain Rust), hot reload
 (later), client-side mods.
 
@@ -60,6 +60,15 @@ optional, i.e. whenever a vanilla-like server would run without it.
 - *Does every server need it, or is it a hot-path mechanism with no policy?* → **core**.
 - *Is it optional but performance-sensitive or deeply integrated with engine data?* → **native**.
 - *Is it optional, not performance-critical, and safe to sandbox?* → **WASM**.
+
+**World versioning (decided while shipping P1).** The component model has no optional exports, so a
+world's export set is a contract and adding one export refuses every component already built against
+it. The event/observer world `aether:plugin/plugin@0.1.0` is therefore **frozen**: a new role —
+economy (P2), registries (P3) — gets its own world in a **new package version**
+(`aether:plugin@0.2.0`), and the host loads each version it knows. `0.1.0` components keep loading.
+`crates/aether-plugin/tests/wit_world.rs` fails if the `0.1.0` export set or package identity changes.
+The earlier "same WIT world, different loader" line was wrong: a different loader does not change the
+world type a component was compiled against.
 
 ## Layering
 
@@ -151,10 +160,14 @@ Operator config `[plugins] dir`, `[plugins.<id>] enabled`, granted capabilities,
 
 - **E1** (with the enchanting work, queue T2): registry from the data pack, effect kinds, config
   caps, custom JSON dir, registry sync to 1.21+ clients; plugin hook points left as no-op calls.
-- **P1**: `crates/aether-plugin` — wasmtime embed, WIT package, manifest/loader, limits, event bus
+- **P1** ✅: `crates/aether-plugin` — wasmtime embed, WIT package, manifest/loader, limits, event bus
   with the events above wired at their hook points in `aether-server`, `storage.kv`, `log`,
   `supports`; `plugins/examples/hello` (registers a command, cancels breaking bedrock, logs joins);
-  tests: load, event order by priority, cancel, trap isolation, time budget.
+  tests: load, event order by priority, cancel, trap isolation, time budget. Shipped with two
+  deviations recorded in [KNOWN_ISSUES §A16](../KNOWN_ISSUES.md): the host links `wasmtime-wasi`
+  under a context that grants nothing (so a Rust `wasm32-wasip2` component's std imports resolve),
+  and `after-enchant` has no hook point until the enchanting work (E1/E2). Plugin commands are
+  resolved through the command registry (see below), not a side path.
 - **P1-N (CMD-00N)**: the **native** plugin loader — the same API/events/bus as P1 but for Rust
   crates linked in-process (no wasmtime, no boundary), enabled/disabled by config. This unblocks the
   native tier (permissions, regions/claims, WorldEdit, history, profiler, moderation, essentials).
