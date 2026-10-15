@@ -32,6 +32,22 @@ are still readable — keep that), `crates/aether-server/src/game/provenance.rs`
   (craft result, smelt/brew/stonecut/smithing result) with `from` = the consumed ingredient uids.
 - No new strings anywhere in the journal; the item name stays only on mint (joins are fine).
 
+### Code tables (owner's request: readable through a join, compact in storage, room for custom codes)
+- **Reserved ranges.** Event tag (u8): `1..=63` core, `64..=255` custom (plugins register through the
+  plugin API later; the decoder keeps an unknown custom tag as an opaque `EventBody::Custom { tag, bytes }`
+  instead of failing — length-prefixed payload for tags >= 64). Destroy reason (u8): `0..=127` core,
+  `128..=255` custom. Write the ranges as consts in `event.rs` with a test that every core code is in range.
+- **Postgres mirror**: `kind` becomes `smallint` (the tag), not text — migrate the existing column
+  (`ALTER … TYPE smallint USING` a CASE over the old names) and keep the mapping in a table.
+  Code tables, created/upserted on connect from the Rust consts (one source of truth):
+  - `aether_event_kinds(code smallint primary key, name text not null, custom bool not null default false)`
+  - `aether_destroy_reasons(code smallint primary key, name text not null, custom bool not null default false)`
+  - a view `aether_events_named` = `aether_events` joined to both tables (`kind_name`, `reason_name`) plus
+    the item name resolved from the uid's mint row, so a human `SELECT * FROM aether_events_named` reads
+    like the old text columns.
+- Plugins (later, P3) add rows with `custom = true` in the reserved ranges; the core never reuses them.
+- Test the SQL builders (no live Postgres needed): migration statements, upsert of code tables, the view.
+
 ## Tests (must exist)
 - `/give` into an existing stack → mint(new) + merge(new→existing); the per-uid ledger balances
   (sum of mint counts = units alive + destroyed + merged away).
