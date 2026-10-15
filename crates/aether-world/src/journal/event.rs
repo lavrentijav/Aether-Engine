@@ -10,6 +10,42 @@
 use crate::registry::items::ItemTypeId;
 use crate::BlockStateId;
 
+// ---------------------------------------------------------------------------
+// Code space
+// ---------------------------------------------------------------------------
+//
+// The journal carries compact `u8` codes, never strings. Each code space is
+// split: a core range this release defines, and a custom range a plugin may
+// register through the plugin API later (P3). The core never reuses a custom
+// code, and the decoder keeps an unknown custom code as an opaque payload
+// rather than failing the whole event.
+
+/// Lowest core event tag. `0` is reserved as "no tag".
+pub const TAG_CORE_MIN: u8 = 1;
+/// Highest core event tag. Custom tags start at [`TAG_CUSTOM_MIN`].
+pub const TAG_CORE_MAX: u8 = 63;
+/// Lowest custom event tag. A tag here this release does not know decodes as
+/// [`EventBody::Custom`] with a length-prefixed payload.
+pub const TAG_CUSTOM_MIN: u8 = 64;
+/// Highest custom event tag.
+pub const TAG_CUSTOM_MAX: u8 = 255;
+
+/// Lowest core destroy reason ([`DestroyReason::Other`]).
+pub const REASON_CORE_MIN: u8 = 0;
+/// Highest core destroy reason. Custom reasons start at
+/// [`REASON_CUSTOM_MIN`].
+pub const REASON_CORE_MAX: u8 = 127;
+/// Lowest custom destroy reason.
+pub const REASON_CUSTOM_MIN: u8 = 128;
+/// Highest custom destroy reason.
+pub const REASON_CUSTOM_MAX: u8 = 255;
+
+/// Whether `tag` is in the custom range and so may be an opaque
+/// [`EventBody::Custom`].
+pub fn is_custom_tag(tag: u8) -> bool {
+    (TAG_CUSTOM_MIN..=TAG_CUSTOM_MAX).contains(&tag)
+}
+
 /// Who caused an event.
 ///
 /// A player's UUID, or [`ActorId::SERVER`] for changes the engine made on its
@@ -33,6 +69,120 @@ impl ActorId {
 /// larger one, which "the last ten minutes" reasoning already leans on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ItemUid(pub u64);
+
+/// Why an item instance left the world.
+///
+/// A destroy used to be silent about its cause, which told a reader that a
+/// stack was gone but not whether it had been eaten, burnt or replaced. The
+/// byte is the whole of it: no string reaches the journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum DestroyReason {
+    /// No better reason is known.
+    #[default]
+    Other = 0,
+    /// Eaten or drunk.
+    Consumed = 1,
+    /// An item entity's five minutes ran out.
+    Despawn = 2,
+    /// Destroyed by fire or lava.
+    Burned = 3,
+    /// Fell out of the world.
+    Void = 4,
+    /// Caught in an explosion.
+    Explosion = 5,
+    /// An ingredient used up by a craft, smelt or brew.
+    Crafted = 6,
+    /// A creative client replaced the slot's contents.
+    CreativeReplace = 7,
+    /// Removed by a command (`/clear`, a `/kill` drop that is not kept).
+    Command = 8,
+    /// Cactus or other contact damage.
+    Cactus = 9,
+    /// Merged into another stack when the merge path had no way to keep the
+    /// source alive.
+    MergedAway = 10,
+}
+
+impl DestroyReason {
+    /// The reason a byte names, or [`DestroyReason::Other`] for one this
+    /// release does not know — a newer writer's reason must not fail an old
+    /// reader. This includes custom reasons (`>= REASON_CUSTOM_MIN`), which
+    /// only a plugin that registered them understands.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => DestroyReason::Consumed,
+            2 => DestroyReason::Despawn,
+            3 => DestroyReason::Burned,
+            4 => DestroyReason::Void,
+            5 => DestroyReason::Explosion,
+            6 => DestroyReason::Crafted,
+            7 => DestroyReason::CreativeReplace,
+            8 => DestroyReason::Command,
+            9 => DestroyReason::Cactus,
+            10 => DestroyReason::MergedAway,
+            _ => DestroyReason::Other,
+        }
+    }
+
+    /// The wire code for this reason.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// The stable name of this reason, as the PostgreSQL code table and the
+    /// chat display both spell it. One source of truth: nothing else hardcodes
+    /// these strings.
+    pub fn name(self) -> &'static str {
+        match self {
+            DestroyReason::Other => "other",
+            DestroyReason::Consumed => "consumed",
+            DestroyReason::Despawn => "despawn",
+            DestroyReason::Burned => "burned",
+            DestroyReason::Void => "void",
+            DestroyReason::Explosion => "explosion",
+            DestroyReason::Crafted => "crafted",
+            DestroyReason::CreativeReplace => "creative_replace",
+            DestroyReason::Command => "command",
+            DestroyReason::Cactus => "cactus",
+            DestroyReason::MergedAway => "merged_away",
+        }
+    }
+}
+
+/// Every core destroy reason, in code order. The PostgreSQL mirror upserts a
+/// `aether_destroy_reasons` row per entry from this list, so the table and the
+/// code cannot drift.
+pub const DESTROY_REASONS: &[DestroyReason] = &[
+    DestroyReason::Other,
+    DestroyReason::Consumed,
+    DestroyReason::Despawn,
+    DestroyReason::Burned,
+    DestroyReason::Void,
+    DestroyReason::Explosion,
+    DestroyReason::Crafted,
+    DestroyReason::CreativeReplace,
+    DestroyReason::Command,
+    DestroyReason::Cactus,
+    DestroyReason::MergedAway,
+];
+
+/// Every core event tag and its stable name, in tag order. The PostgreSQL
+/// mirror upserts `aether_event_kinds` from this list, so the table and the
+/// wire tags cannot drift. The name is the same string the mirror used to
+/// store in its `kind` *text* column before it became a `smallint`.
+pub const EVENT_KINDS: &[(u8, &str)] = &[
+    (TAG_BLOCK_SET, "block_set"),
+    (TAG_ITEM_MINT, "item_mint"),
+    (TAG_ITEM_MOVE, "item_move"),
+    (TAG_ITEM_DESTROY, "item_destroy"),
+    (TAG_ITEM_DERIVE, "item_derive"),
+    (TAG_ITEM_MERGE, "item_merge"),
+];
+
+/// The `aether_event_kinds` row name used while migrating old text rows whose
+/// name no core tag claims. Tag `0` is reserved and means "no tag".
+pub const EVENT_KIND_UNKNOWN: (u8, &str) = (0, "unknown");
 
 /// Where an item instance sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,12 +228,34 @@ pub enum EventBody {
         to: Place,
         count: u8,
     },
-    /// An item instance left the world (used up, burnt, despawned).
-    ItemDestroy { uid: ItemUid, from: Place },
-    /// An item instance came into existence *out of* others: the output of a
-    /// craft or a smelt from its inputs, the half split off a stack from the
-    /// stack, what a pickup put in a slot from the stack on the ground. A mint
-    /// with a pedigree — the edge provenance follows backwards.
+    /// An item instance left the world (used up, burnt, despawned). `reason`
+    /// says why; without it a destroy could not be told from a bug.
+    ItemDestroy {
+        uid: ItemUid,
+        from: Place,
+        reason: DestroyReason,
+    },
+    /// `count` units of stack `from` joined stack `into`.
+    ///
+    /// The merge exists so that topping up a stack is not journalled as a move
+    /// of the whole stack: the destination's count grew from somewhere, and a
+    /// movement event with the same `from` and `to` said nothing about where.
+    /// `from` ceases to exist when it is fully merged; there is deliberately
+    /// no separate destroy for it.
+    ItemMerge {
+        into: ItemUid,
+        from: ItemUid,
+        count: u8,
+    },
+    /// An item instance came into existence *out of* others by a real
+    /// transformation: the output of a craft, smelt, brew, stonecut or
+    /// smithing from its consumed ingredients. A mint with a pedigree — the
+    /// edge provenance follows backwards.
+    ///
+    /// Deliberately not a split, and not a pickup: the half split off a stack
+    /// is a new identity for units that already existed (an [`ItemMint`],
+    /// with the source moving the other way), and a pickup is an
+    /// [`ItemMove`] or an [`ItemMerge`]. Reserve this for a change of item.
     ItemDerive {
         uid: ItemUid,
         item: ItemTypeId,
@@ -93,6 +265,34 @@ pub enum EventBody {
         /// in the same action.
         from: Vec<ItemUid>,
     },
+    /// An event a plugin defined, under a tag in the custom range
+    /// (`>= TAG_CUSTOM_MIN`). Its payload is opaque to the core and stored
+    /// length-prefixed, so a journal written with plugins still decodes on a
+    /// build without them, and a plugin the reader does not have is a payload
+    /// it skips rather than an error that hides the rest of the history.
+    Custom {
+        /// The custom tag, in `TAG_CUSTOM_MIN..=TAG_CUSTOM_MAX`. The core
+        /// never assigns one of these.
+        tag: u8,
+        /// The plugin's opaque payload.
+        bytes: Vec<u8>,
+    },
+}
+
+impl EventBody {
+    /// The wire tag of this body. For [`EventBody::Custom`] this is the
+    /// plugin's own tag.
+    pub fn tag(&self) -> u8 {
+        match self {
+            EventBody::BlockSet { .. } => TAG_BLOCK_SET,
+            EventBody::ItemMint { .. } => TAG_ITEM_MINT,
+            EventBody::ItemMove { .. } => TAG_ITEM_MOVE,
+            EventBody::ItemDestroy { .. } => TAG_ITEM_DESTROY,
+            EventBody::ItemDerive { .. } => TAG_ITEM_DERIVE,
+            EventBody::ItemMerge { .. } => TAG_ITEM_MERGE,
+            EventBody::Custom { tag, .. } => *tag,
+        }
+    }
 }
 
 /// One immutable entry in the log.
@@ -122,7 +322,10 @@ impl Event {
             EventBody::ItemMint { to, .. } => to.position(),
             EventBody::ItemMove { to, from, .. } => to.position().or_else(|| from.position()),
             EventBody::ItemDestroy { from, .. } => from.position(),
+            EventBody::ItemMerge { .. } => None,
             EventBody::ItemDerive { to, .. } => to.position(),
+            // A plugin event carries no position the core understands.
+            EventBody::Custom { .. } => None,
         }
     }
 }
@@ -146,8 +349,13 @@ impl Place {
 /// wrong blocks, which is worse than refusing to undo anything.
 ///
 /// Version 3 replaced the item type's `String` name with a two-byte
-/// [`ItemTypeId`].
-pub const FORMAT_VERSION: u8 = 3;
+/// [`ItemTypeId`]. Version 4 added the [`EventBody::ItemMerge`] body (tag 6)
+/// and a `reason` byte to [`EventBody::ItemDestroy`]; a v1–v3 destroy reads
+/// back as [`DestroyReason::Other`]. Version 4 also reserved the custom tag
+/// range: a tag this release does not know but that lies in
+/// `TAG_CUSTOM_MIN..=TAG_CUSTOM_MAX` decodes as [`EventBody::Custom`] with a
+/// length-prefixed payload, so a plugin's events are skipped, not fatal.
+pub const FORMAT_VERSION: u8 = 4;
 
 /// Errors from [`Event::decode`].
 #[derive(Debug, PartialEq)]
@@ -158,8 +366,6 @@ pub enum DecodeError {
     Truncated,
     /// A tag byte names no known variant.
     UnknownTag(u8),
-    /// A string field was not UTF-8.
-    NotUtf8,
 }
 
 impl std::fmt::Display for DecodeError {
@@ -168,7 +374,6 @@ impl std::fmt::Display for DecodeError {
             DecodeError::Version(v) => write!(f, "unsupported journal format version {v}"),
             DecodeError::Truncated => write!(f, "journal entry ends mid-field"),
             DecodeError::UnknownTag(t) => write!(f, "unknown journal tag {t}"),
-            DecodeError::NotUtf8 => write!(f, "journal string field is not UTF-8"),
         }
     }
 }
@@ -180,6 +385,7 @@ const TAG_ITEM_MINT: u8 = 2;
 const TAG_ITEM_MOVE: u8 = 3;
 const TAG_ITEM_DESTROY: u8 = 4;
 const TAG_ITEM_DERIVE: u8 = 5;
+const TAG_ITEM_MERGE: u8 = 6;
 /// Optional trailer after the body: the cause. Absent in entries written
 /// before causes existed, which therefore decode with none.
 const TRAILER_CAUSE: u8 = 1;
@@ -335,10 +541,17 @@ impl Event {
                 put_place(&mut out, from);
                 put_place(&mut out, to);
             }
-            EventBody::ItemDestroy { uid, from } => {
+            EventBody::ItemDestroy { uid, from, reason } => {
                 out.push(TAG_ITEM_DESTROY);
                 out.extend_from_slice(&uid.0.to_be_bytes());
                 put_place(&mut out, from);
+                out.push(reason.code());
+            }
+            EventBody::ItemMerge { into, from, count } => {
+                out.push(TAG_ITEM_MERGE);
+                out.extend_from_slice(&into.0.to_be_bytes());
+                out.extend_from_slice(&from.0.to_be_bytes());
+                out.push(*count);
             }
             EventBody::ItemDerive {
                 uid,
@@ -356,6 +569,18 @@ impl Event {
                 for f in from {
                     out.extend_from_slice(&f.0.to_be_bytes());
                 }
+            }
+            EventBody::Custom { tag, bytes } => {
+                debug_assert!(
+                    is_custom_tag(*tag),
+                    "custom body tag {tag} is in the core range"
+                );
+                out.push(*tag);
+                // Length-prefixed so an unknown payload can be skipped whole:
+                // the core may not understand a plugin's bytes, but it must
+                // still be able to read past them to the next field or event.
+                out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                out.extend_from_slice(bytes);
             }
         }
         if let Some(cause) = self.cause {
@@ -397,9 +622,21 @@ impl Event {
                 from: c.place()?,
                 to: c.place()?,
             },
-            TAG_ITEM_DESTROY => EventBody::ItemDestroy {
-                uid: c.uid(v)?,
-                from: c.place()?,
+            TAG_ITEM_DESTROY => {
+                let uid = c.uid(v)?;
+                let from = c.place()?;
+                // The reason byte is new in v4; older entries simply had none.
+                let reason = if v >= 4 {
+                    DestroyReason::from_u8(c.u8()?)
+                } else {
+                    DestroyReason::Other
+                };
+                EventBody::ItemDestroy { uid, from, reason }
+            }
+            TAG_ITEM_MERGE if v >= 4 => EventBody::ItemMerge {
+                into: c.uid(v)?,
+                from: c.uid(v)?,
+                count: c.u8()?,
             },
             TAG_ITEM_DERIVE => {
                 let uid = c.uid(v)?;
@@ -418,6 +655,14 @@ impl Event {
                     to,
                     from,
                 }
+            }
+            // A tag in the custom range is a plugin's: keep its payload
+            // opaque and length-prefixed rather than failing. Gated on v4, the
+            // version that reserved the range.
+            t if v >= 4 && is_custom_tag(t) => {
+                let len = c.u32()? as usize;
+                let bytes = c.take(len)?.to_vec();
+                EventBody::Custom { tag: t, bytes }
             }
             t => return Err(DecodeError::UnknownTag(t)),
         };

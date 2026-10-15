@@ -205,6 +205,7 @@ fn every_place_variant_round_trips() {
             body: EventBody::ItemDestroy {
                 uid: ItemUid(1),
                 from: place,
+                reason: DestroyReason::Other,
             },
         };
         assert_eq!(Event::decode(&e.encode()), Ok(e));
@@ -627,6 +628,7 @@ fn a_destroyed_item_cannot_be_moved_again() {
         EventBody::ItemDestroy {
             uid: ItemUid(3),
             from: a,
+            reason: DestroyReason::Consumed,
         },
     )
     .unwrap();
@@ -849,6 +851,159 @@ fn an_untouched_block_reports_no_change_even_in_a_busy_column() {
 }
 
 #[test]
+fn a_version_3_blob_still_decodes() {
+    // A v3 blob stores the item as a two-byte id and a destroy with no reason.
+    // History written before v4 must stay readable for `/inspect` and rollback.
+    let mut b = header(3, alice().0);
+    b.push(2); // TAG_ITEM_MINT
+    b.extend_from_slice(&0x1234u64.to_be_bytes());
+    b.extend_from_slice(
+        &ItemTypeId::vanilla("minecraft:diamond")
+            .unwrap()
+            .0
+            .to_be_bytes(),
+    );
+    b.push(6); // count
+    b.push(4); // Place::Nowhere
+    let e = Event::decode(&b).expect("a v3 mint decodes");
+    match e.body {
+        EventBody::ItemMint { uid, count, .. } => {
+            assert_eq!(uid, ItemUid(0x1234));
+            assert_eq!(count, 6);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let mut d = header(3, alice().0);
+    d.push(4); // TAG_ITEM_DESTROY
+    d.extend_from_slice(&ItemUid(9).0.to_be_bytes());
+    d.push(4); // Place::Nowhere
+    let e = Event::decode(&d).expect("a v3 destroy decodes");
+    assert_eq!(
+        e.body,
+        EventBody::ItemDestroy {
+            uid: ItemUid(9),
+            from: Place::Nowhere,
+            reason: DestroyReason::Other,
+        },
+        "a v3 destroy had no reason byte; it reads as other"
+    );
+}
+
+#[test]
+fn a_version_4_merge_and_destroy_reason_round_trip() {
+    for reason in [
+        DestroyReason::Other,
+        DestroyReason::Consumed,
+        DestroyReason::Despawn,
+        DestroyReason::Burned,
+        DestroyReason::Void,
+        DestroyReason::Explosion,
+        DestroyReason::Crafted,
+        DestroyReason::CreativeReplace,
+        DestroyReason::Command,
+        DestroyReason::Cactus,
+        DestroyReason::MergedAway,
+    ] {
+        let e = Event {
+            seq: 4,
+            at_ms: 5,
+            actor: alice(),
+            cause: None,
+            body: EventBody::ItemDestroy {
+                uid: ItemUid(7),
+                from: Place::Ground { x: 1, y: 2, z: 3 },
+                reason,
+            },
+        };
+        assert_eq!(Event::decode(&e.encode()), Ok(e));
+    }
+
+    let m = Event {
+        seq: 9,
+        at_ms: 10,
+        actor: bob(),
+        cause: Some(8),
+        body: EventBody::ItemMerge {
+            into: ItemUid(1),
+            from: ItemUid(2),
+            count: 3,
+        },
+    };
+    let blob = m.encode();
+    assert_eq!(blob[0], event::FORMAT_VERSION);
+    assert_eq!(Event::decode(&blob), Ok(m));
+}
+
+#[test]
+fn every_core_code_sits_in_its_reserved_range() {
+    // The code space is split so a plugin's code can never collide with a
+    // core one. If a core code drifts into the custom range this fails.
+    for (code, _) in EVENT_KINDS {
+        assert!(
+            (event::TAG_CORE_MIN..=event::TAG_CORE_MAX).contains(code),
+            "core event tag {code} is outside {}..={}",
+            event::TAG_CORE_MIN,
+            event::TAG_CORE_MAX
+        );
+    }
+    for reason in DESTROY_REASONS {
+        let code = reason.code();
+        assert!(
+            (event::REASON_CORE_MIN..=event::REASON_CORE_MAX).contains(&code),
+            "core destroy reason {code} is outside {}..={}",
+            event::REASON_CORE_MIN,
+            event::REASON_CORE_MAX
+        );
+    }
+    assert_eq!(event::TAG_CUSTOM_MIN, event::TAG_CORE_MAX + 1);
+    assert_eq!(event::REASON_CUSTOM_MIN, event::REASON_CORE_MAX + 1);
+    assert_eq!(
+        event::EVENT_KIND_UNKNOWN.0,
+        0,
+        "0 is the reserved no-tag code"
+    );
+}
+
+#[test]
+fn a_custom_body_round_trips_and_its_payload_is_length_prefixed() {
+    // A plugin tag the core does not know must survive a round trip with its
+    // payload intact, and a cause behind it must still be readable — the
+    // length prefix is what lets a reader skip bytes it does not understand.
+    let e = Event {
+        seq: 3,
+        at_ms: 4,
+        actor: alice(),
+        cause: Some(2),
+        body: EventBody::Custom {
+            tag: event::TAG_CUSTOM_MIN + 5,
+            bytes: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00],
+        },
+    };
+    assert_eq!(Event::decode(&e.encode()), Ok(e.clone()));
+    assert_eq!(e.body.tag(), event::TAG_CUSTOM_MIN + 5);
+
+    // An empty payload is still a custom body, not a decode error.
+    let empty = Event {
+        body: EventBody::Custom {
+            tag: 200,
+            bytes: Vec::new(),
+        },
+        ..e.clone()
+    };
+    assert_eq!(Event::decode(&empty.encode()), Ok(empty));
+}
+
+#[test]
+fn an_unknown_tag_in_the_core_range_is_refused_not_read_as_custom() {
+    // Tags 1..=63 are the core's; a tag there this release does not know is a
+    // version problem, not a plugin's opaque body.
+    let mut b = header(4, alice().0);
+    b.push(7); // not a core tag, below TAG_CUSTOM_MIN
+    assert_eq!(Event::decode(&b), Err(DecodeError::UnknownTag(7)));
+}
+
+#[test]
 fn a_derived_item_and_a_cause_survive_a_round_trip() {
     let e = Event {
         seq: 9,
@@ -933,6 +1088,105 @@ fn the_ledger_remembers_what_an_item_was_made_from() {
     let pick = l.get(ItemUid(12)).unwrap();
     assert_eq!(pick.derived_from, vec![ItemUid(10), ItemUid(11)]);
     assert!(l.anomalies().is_empty());
+}
+
+#[test]
+fn a_merge_moves_its_units_and_empties_the_source() {
+    let store = MemStore::new();
+    let j = Journal::open(&store).unwrap();
+    let a = Place::Inventory {
+        owner: alice(),
+        slot: 0,
+    };
+    let b = Place::Inventory {
+        owner: alice(),
+        slot: 1,
+    };
+    j.append(alice(), mint(1, a)).unwrap();
+    j.append(alice(), mint(2, b)).unwrap();
+    j.append(
+        alice(),
+        EventBody::ItemMerge {
+            into: ItemUid(1),
+            from: ItemUid(2),
+            count: 1,
+        },
+    )
+    .unwrap();
+    let l = Ledger::replay(&j.all_events().unwrap());
+    assert!(l.anomalies().is_empty(), "{:?}", l.anomalies());
+    assert_eq!(l.get(ItemUid(1)).unwrap().count, 2, "the units joined it");
+    assert_eq!(l.get(ItemUid(1)).unwrap().merged_in, 1);
+    let gone = l.get(ItemUid(2)).unwrap();
+    assert_eq!(gone.count, 0);
+    assert_eq!(gone.at, Place::Nowhere, "a fully merged stack ceases");
+    let bal = l.balance();
+    assert!(bal.is_balanced(), "{bal:?}");
+    assert_eq!(
+        (bal.created, bal.alive, bal.destroyed, bal.merged_away),
+        (2, 1, 0, 1)
+    );
+    assert!(l.units_conserved(), "a merge must account for every unit");
+}
+
+#[test]
+fn a_count_that_grows_in_place_is_not_unit_conserved() {
+    // The signature of the live `/give` bug: a stack whose count grew with no
+    // mint and no merge to explain it. Instance balance cannot see it (the uid
+    // never left), but the per-uid unit count must.
+    let store = MemStore::new();
+    let j = Journal::open(&store).unwrap();
+    let slot = Place::Inventory {
+        owner: alice(),
+        slot: 0,
+    };
+    j.append(alice(), mint(1, slot)).unwrap();
+    j.append(
+        alice(),
+        EventBody::ItemMove {
+            uid: ItemUid(1),
+            from: slot,
+            to: slot,
+            count: 5,
+        },
+    )
+    .unwrap();
+    let l = Ledger::replay(&j.all_events().unwrap());
+    assert!(l.balance().is_balanced(), "the instance never left");
+    assert!(
+        !l.units_conserved(),
+        "four units appeared with no mint or merge"
+    );
+    assert_eq!(l.get(ItemUid(1)).unwrap().minted, 1);
+    assert_eq!(l.get(ItemUid(1)).unwrap().count, 5);
+}
+
+#[test]
+fn a_merge_from_a_stack_that_was_never_minted_is_reported() {
+    let store = MemStore::new();
+    let j = Journal::open(&store).unwrap();
+    let a = Place::Inventory {
+        owner: alice(),
+        slot: 0,
+    };
+    j.append(alice(), mint(1, a)).unwrap();
+    j.append(
+        alice(),
+        EventBody::ItemMerge {
+            into: ItemUid(1),
+            from: ItemUid(99),
+            count: 1,
+        },
+    )
+    .unwrap();
+    let l = Ledger::replay(&j.all_events().unwrap());
+    assert_eq!(
+        l.anomalies(),
+        &[Anomaly::NeverMinted {
+            uid: ItemUid(99),
+            seq: 2
+        }]
+    );
 }
 
 #[test]

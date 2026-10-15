@@ -6,7 +6,7 @@
 >
 > Legend: ✅ done · 🚧 in progress · 📋 planned · ❄️ deferred · ❌ cancelled.
 >
-> Last reviewed: 2026-10-14 · Spec: v1.1
+> Last reviewed: 2026-10-15 · Spec: v1.1
 >
 > Forward-looking architecture ideas not yet built (SIMD cell format refinements, 2D
 > heightmap skipping, LOD/Ultra-Full render modes, a Surface API for LOD mods, Git-like
@@ -62,7 +62,7 @@ modern versions run a server-side survival game).
 | Filter language shared by `/lookup` and `/rollback` (`player:` `time:` `block:` `action:` `radius:`) + paged chat output (`/page`) | ✅ |
 | Recovery stash: a rollback returns what was *placed* (not the world's current content), grouped by block + state tags | ✅ |
 | Stash chest window on 1.21.11 — glass frame, page arrows; chat listing on versions without container support | 🚧 Preview |
-| History mirror into PostgreSQL, batched off the game thread, idempotent inserts (`--features postgres`) | ✅ |
+| History mirror into PostgreSQL, batched off the game thread, idempotent inserts (`--features postgres`). `kind` is the body's `smallint` tag and `reason` its code; `aether_event_kinds`/`aether_destroy_reasons` are upserted from the Rust consts on connect, and `aether_events_named` joins them (plus the item name resolved from the uid's mint row) so a human query reads as text | ✅ |
 | Quantity dialogue in the stash window: eight adjust buttons (±1, ±16, ±32, ±64) around the item, cancel and confirm; the ceiling is the entry's whole count, not a stack | ✅ |
 | Slot counts above 64 on the wire (VarInt since 1.20.5) — a recovery manifest shows its real number | ✅ |
 | Handing items over splits into stacks of 64; what will not fit becomes a `minecraft:item` entity at the player's feet and is picked back up on contact | ✅ |
@@ -143,7 +143,7 @@ modern versions run a server-side survival game).
 | One client can no longer stall the server: a bounded outgoing queue and writer thread per connection, 30 s write timeout, clients silent for 30 s dropped, a repeat login replaces the old session, every departure logged with its reason | ✅ |
 | Connection limits: `max_players` enforced at login (operators exempt), `max_connections` caps the connections served (`0` = `max_players*2 + 16`), `max_connections_per_ip` caps each address (`0` disables) | ✅ |
 | Running as a service: clean stop on SIGINT/SIGTERM (players saved, world flushed), tick watchdog and status line, timestamped logs, `deploy/aether.service`, `AETHER_*` overrides, `tools/fetch-vanilla-data.sh`, operators bound to an address, whitelist | ✅ |
-| Item provenance from the survival layer: pickups, drops, chests, furnaces, crafting (output derived from its inputs), eating, death drops and block drops (with the break as cause) are journalled, by diffing what a player can reach around each action; `/audit` replays them with no anomalies in a full live session | ✅ |
+| Item provenance from the survival layer (journal **format v4**): pickups, drops, chests, furnaces, crafting, eating, death drops and block drops are journalled, by diffing what a player can reach around each action. Topping up a stack is an `item_merge` (the units left a named source) rather than a move to the same slot that grew from nowhere; a `/give` mints the new units and then merges them; a split mints a new identity and moves the source; `item_derive` is reserved for a real output (craft/smelt/brew) from its consumed ingredients; a destroy carries a `reason` (consumed, despawn, crafted, creative replace, …); and `/audit` replays them with no anomalies in a full live session. v1–v3 history still decodes | ✅ |
 | Grouped revisions (one revision per operation/tick) and packed, indexed history segments for the cold journal | 📋 |
 | Parallel column generation + encoding on a server-wide pool of one worker per core; sections copied once per encode (cold 289-column join 20 s → 9.5 s on 4 cores, warm 1.8 s) | ✅ |
 | Redstone / incremental relight / full staged physics | ❌ Not yet started |

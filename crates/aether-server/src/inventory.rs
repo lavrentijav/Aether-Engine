@@ -278,8 +278,14 @@ impl Inventory {
                 return None;
             }
             if self.slots[i].is_none() {
-                let n = stack.count.min(max);
-                self.slots[i] = Some(stack.split(n));
+                if stack.count <= max {
+                    // The whole remainder fits in one slot, so it keeps its
+                    // identity: a pickup into an empty slot is a move of the
+                    // same instance, not a mint of a copy.
+                    self.slots[i] = Some(stack);
+                    return None;
+                }
+                self.slots[i] = Some(stack.split(max));
             }
         }
         (stack.count > 0).then_some(stack)
@@ -336,6 +342,64 @@ impl Inventory {
         left
     }
 
+    /// [`Inventory::give_many`], but reporting where each unit went so the
+    /// caller can journal it: a [`GiveStep::Placed`] is a fresh stack that
+    /// went to an empty slot, a [`GiveStep::Merged`] says which existing stack
+    /// a fresh uid's units topped up. Returns the steps and what did not fit.
+    pub fn give_many_report(&mut self, item: ItemTypeId, count: u64) -> (Vec<GiveStep>, u64) {
+        self.ensure();
+        let mut steps = Vec::new();
+        let mut left = count;
+        let max = crate::game::tables::max_stack_id(item).min(STACK);
+        let order: Vec<usize> = (FIRST_HOTBAR..OFFHAND).chain(9..FIRST_HOTBAR).collect();
+        let stackable = crate::game::tables::max_stack_id(item) > 1;
+        while left > 0 {
+            let chunk = left.min(max as u64) as u8;
+            let mut remaining = chunk;
+            if stackable {
+                for &i in &order {
+                    if remaining == 0 {
+                        break;
+                    }
+                    if let Some(s) = &mut self.slots[i] {
+                        if s.item == item && s.count < max {
+                            let n = (max - s.count).min(remaining);
+                            s.count += n;
+                            remaining -= n;
+                            steps.push(GiveStep::Merged {
+                                slot: i,
+                                into: s.uid,
+                                mint: mint_uid(),
+                                count: n,
+                            });
+                        }
+                    }
+                }
+            }
+            for &i in &order {
+                if remaining == 0 {
+                    break;
+                }
+                if self.slots[i].is_none() {
+                    let n = remaining.min(max);
+                    remaining -= n;
+                    let st = Stack::new(item, n);
+                    steps.push(GiveStep::Placed {
+                        slot: i,
+                        stack: st.clone(),
+                    });
+                    self.slots[i] = Some(st);
+                }
+            }
+            let moved = (chunk - remaining) as u64;
+            if moved == 0 {
+                break;
+            }
+            left -= moved;
+        }
+        (steps, left)
+    }
+
     /// Remove `count` of `item`, across as many slots as it takes. Returns how
     /// many were actually removed.
     pub fn take(&mut self, item: ItemTypeId, mut count: u64) -> u64 {
@@ -382,6 +446,21 @@ impl Inventory {
     pub fn is_empty(&self) -> bool {
         self.slots.iter().all(Option::is_none)
     }
+}
+
+/// Where one gift's units went, so the caller can journal a mint (and, for a
+/// top-up, the merge that followed) without re-deriving it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GiveStep {
+    /// A fresh stack placed into an empty slot.
+    Placed { slot: usize, stack: Stack },
+    /// `count` fresh units (uid `mint`) merged into the stack at `slot`.
+    Merged {
+        slot: usize,
+        into: ItemUid,
+        mint: ItemUid,
+        count: u8,
+    },
 }
 
 /// What one [`Inventory::set`] changed, so the caller can journal it.

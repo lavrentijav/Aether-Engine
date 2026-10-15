@@ -270,9 +270,16 @@ fn describe_body(
             short_place(to),
             e.seq
         )),
-        EventBody::ItemDestroy { uid, .. } => {
-            Some(format!("  {ago} item {} destroyed  #{}", uid.0, e.seq))
-        }
+        EventBody::ItemDestroy { uid, reason, .. } => Some(format!(
+            "  {ago} item {} destroyed ({})  #{}",
+            uid.0,
+            reason.name(),
+            e.seq
+        )),
+        EventBody::ItemMerge { into, from, count } => Some(format!(
+            "  {ago} {count}x item {} merged into {}  #{}",
+            from.0, into.0, e.seq
+        )),
         EventBody::ItemDerive {
             item, count, from, ..
         } => Some(format!(
@@ -280,6 +287,12 @@ fn describe_body(
             actor_name(e.actor.0),
             item_name(world, *item),
             from.len(),
+            e.seq
+        )),
+        EventBody::Custom { tag, bytes } => Some(format!(
+            "  {ago} {} custom event tag {tag} ({} bytes)  #{}",
+            actor_name(e.actor.0),
+            bytes.len(),
             e.seq
         )),
     }

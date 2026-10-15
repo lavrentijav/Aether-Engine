@@ -65,10 +65,43 @@ pub struct Instance {
     /// Every place it has been, oldest first — the provenance trail a human
     /// actually reads when investigating.
     pub trail: Vec<(u64, Place)>,
-    /// The instances it was made from (a craft's inputs, the stack it was
-    /// split off); empty for one minted from nothing.
+    /// The instances it was made from (a craft's inputs); empty for one minted
+    /// from nothing.
     pub derived_from: Vec<ItemUid>,
+    /// How many units it began with — a mint's count, or a derive's.
+    pub minted: u8,
+    /// Units it has absorbed from merges.
+    pub merged_in: u32,
+    /// Units it has given to merges.
+    pub merged_out: u32,
+    /// Units that left it in a move that reduced its count — the source of a
+    /// split, whose units got a new identity rather than a merge.
+    pub moved_out: u32,
+    /// Units it held when it was destroyed outright.
+    pub destroyed_units: u32,
     destroyed: bool,
+    /// Gone because a merge emptied it, not because of an explicit destroy.
+    merged_away: bool,
+}
+
+impl Instance {
+    /// Whether every unit this instance ever held is accounted for: the units
+    /// it was minted with plus those merged in must equal the units still
+    /// held, plus those destroyed, merged out or split out. A unit that
+    /// appears with no mint or merge (a count growing in place) or vanishes
+    /// with no destroy or transfer breaks this — the signature of a dupe or a
+    /// dropped event.
+    /// Whether the instance no longer exists — destroyed outright or emptied
+    /// by a merge.
+    pub fn is_destroyed(&self) -> bool {
+        self.destroyed
+    }
+
+    pub fn conserves_units(&self) -> bool {
+        let live = if self.destroyed { 0 } else { self.count as u32 };
+        self.minted as u32 + self.merged_in
+            == live + self.destroyed_units + self.merged_out + self.moved_out
+    }
 }
 
 /// The current whereabouts of every item instance, plus everything the history
@@ -138,11 +171,16 @@ impl Ledger {
                         seq: e.seq,
                     });
                 }
+                // A move that reduced the count is a split: those units got a
+                // new identity elsewhere, and must be accounted out of here.
+                if *count < inst.count {
+                    inst.moved_out += (inst.count - *count) as u32;
+                }
                 inst.at = *to;
                 inst.count = *count;
                 inst.trail.push((e.seq, *to));
             }
-            EventBody::ItemDestroy { uid, from } => {
+            EventBody::ItemDestroy { uid, from, .. } => {
                 let Some(inst) = self.items.get_mut(uid) else {
                     self.anomalies.push(Anomaly::NeverMinted {
                         uid: *uid,
@@ -165,11 +203,56 @@ impl Ledger {
                         seq: e.seq,
                     });
                 }
+                inst.destroyed_units += inst.count as u32;
                 inst.destroyed = true;
                 inst.at = Place::Nowhere;
                 inst.trail.push((e.seq, Place::Nowhere));
             }
+            EventBody::ItemMerge { into, from, count } => self.merge(e.seq, *into, *from, *count),
+            // A plugin event: the core does not know what it did to items, so
+            // it changes nothing here.
+            EventBody::Custom { .. } => {}
         }
+    }
+
+    /// Fold an [`EventBody::ItemMerge`] in: `count` units leave `from` for
+    /// `into`. A `from` emptied by the merge ceases to exist — no separate
+    /// destroy, because the merge is the whole of it.
+    fn merge(&mut self, seq: u64, into: ItemUid, from: ItemUid, count: u8) {
+        if !self.items.contains_key(&from) {
+            self.anomalies.push(Anomaly::NeverMinted { uid: from, seq });
+            return;
+        }
+        if !self.items.contains_key(&into) {
+            self.anomalies.push(Anomaly::NeverMinted { uid: into, seq });
+            return;
+        }
+        if self.items[&from].destroyed {
+            self.anomalies
+                .push(Anomaly::UsedAfterDestroyed { uid: from, seq });
+            return;
+        }
+        if self.items[&into].destroyed {
+            self.anomalies
+                .push(Anomaly::UsedAfterDestroyed { uid: into, seq });
+            return;
+        }
+        let taken = count.min(self.items[&from].count);
+        {
+            let f = self.items.get_mut(&from).unwrap();
+            f.count -= taken;
+            f.merged_out += taken as u32;
+            if f.count == 0 {
+                f.destroyed = true;
+                f.merged_away = true;
+                f.at = Place::Nowhere;
+                f.trail.push((seq, Place::Nowhere));
+            }
+        }
+        let t = self.items.get_mut(&into).unwrap();
+        t.count = t.count.saturating_add(taken);
+        t.merged_in += taken as u32;
+        t.trail.push((seq, t.at));
     }
 
     fn mint(
@@ -194,7 +277,13 @@ impl Ledger {
                 minted_at: seq,
                 trail: vec![(seq, to)],
                 derived_from,
+                minted: count,
+                merged_in: 0,
+                merged_out: 0,
+                moved_out: 0,
+                destroyed_units: 0,
                 destroyed: false,
+                merged_away: false,
             },
         );
     }
@@ -207,6 +296,22 @@ impl Ledger {
     /// Everything the replay found wrong, oldest first.
     pub fn anomalies(&self) -> &[Anomaly] {
         &self.anomalies
+    }
+
+    /// Every instance the ledger tracks, in uid order.
+    pub fn instances(&self) -> impl Iterator<Item = (ItemUid, &Instance)> {
+        let mut v: Vec<(ItemUid, &Instance)> =
+            self.items.iter().map(|(uid, i)| (*uid, i)).collect();
+        v.sort_by_key(|(uid, _)| *uid);
+        v.into_iter()
+    }
+
+    /// Whether every instance conserves its units (see
+    /// [`Instance::conserves_units`]). The per-uid counterpart of
+    /// [`Ledger::balance`]: balance counts instances, this counts the units
+    /// inside them.
+    pub fn units_conserved(&self) -> bool {
+        self.items.values().all(Instance::conserves_units)
     }
 
     /// Every live instance in `owner`'s inventory, by slot.
@@ -233,6 +338,48 @@ impl Ledger {
     /// Whether the ledger is empty.
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// The conservation tally over every instance the history ever created.
+    ///
+    /// Every uid is minted or derived exactly once and then ends in exactly
+    /// one place: still alive, destroyed outright, or emptied by a merge. A
+    /// shortfall is a uid that vanished untracked — the signature of a
+    /// duplication or a missing event. This is the whole of the balance the
+    /// property test asserts.
+    pub fn balance(&self) -> Balance {
+        let mut b = Balance::default();
+        for inst in self.items.values() {
+            b.created += 1;
+            if inst.merged_away {
+                b.merged_away += 1;
+            } else if inst.destroyed {
+                b.destroyed += 1;
+            } else {
+                b.alive += 1;
+            }
+        }
+        b
+    }
+}
+
+/// Every created instance is alive, destroyed or merged away.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Balance {
+    /// Instances ever created (a mint or a derive).
+    pub created: usize,
+    /// Instances still in the world.
+    pub alive: usize,
+    /// Instances that met an explicit destroy.
+    pub destroyed: usize,
+    /// Instances emptied by a merge.
+    pub merged_away: usize,
+}
+
+impl Balance {
+    /// Whether nothing appeared or vanished untracked.
+    pub fn is_balanced(&self) -> bool {
+        self.created == self.alive + self.destroyed + self.merged_away
     }
 }
 

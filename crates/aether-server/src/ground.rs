@@ -20,8 +20,9 @@
 //! are the remainder of a transaction that already happened.
 
 use aether_api::Vector3;
+use aether_world::journal::ActorId;
 
-use crate::game::entities;
+use crate::game::{entities, provenance};
 use crate::inventory::Stack;
 use crate::players::{PlayerHandle, SharedRegistry};
 use crate::session::DemoWorld;
@@ -40,9 +41,18 @@ pub fn give_or_drop(
     item: ItemTypeId,
     count: u64,
 ) -> (u64, u64) {
-    let left = handle.inventory().give_many(item, count);
+    let actor = ActorId(handle.uuid);
+    let (steps, left) = handle.inventory().give_many_report(item, count);
+    // A gift creates units: mint them, and where they topped up an existing
+    // stack say so with a merge rather than growing its count from nowhere.
+    {
+        let journal = world.journal();
+        for body in provenance::give_events(actor, item, &steps) {
+            let _ = journal.append(actor, body);
+        }
+    }
     if left > 0 {
-        drop_at_feet(handle, item, left);
+        drop_at_feet(handle, world, item, left);
     }
     handle.sync_inventory(world);
     crate::session::save_inventory(handle, world);
@@ -50,17 +60,28 @@ pub fn give_or_drop(
 }
 
 /// Put `count` of `item` on the ground where `handle` is standing, for them
-/// alone to pick up.
-pub fn drop_at_feet(handle: &PlayerHandle, item: ItemTypeId, count: u64) {
+/// alone to pick up. Each stack is its own instance and is minted on the
+/// ground, so a player picking it back up has a uid to follow.
+pub fn drop_at_feet(handle: &PlayerHandle, world: &DemoWorld, item: ItemTypeId, count: u64) {
+    let actor = ActorId(handle.uuid);
     let pos = handle.pos();
     let max = crate::game::tables::max_stack_id(item).max(1) as u64;
+    let at = Vector3::new(pos.x, pos.y + 0.5, pos.z);
     let mut left = count;
     while left > 0 {
         let n = left.min(max);
         left -= n;
+        let stack = Stack::new(item, n as u8);
+        provenance::mint_on_ground(
+            world,
+            actor,
+            &stack,
+            provenance::ground_place(at.x, at.y, at.z),
+            None,
+        );
         entities::spawn_item(
-            Vector3::new(pos.x, pos.y + 0.5, pos.z),
-            Stack::new(item, n as u8),
+            at,
+            stack,
             Vector3::new(0.0, 0.1, 0.0),
             20,
             Some(handle.uuid),
