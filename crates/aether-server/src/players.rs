@@ -63,6 +63,9 @@ pub struct PlayerHandle {
     /// Anti-xray / visibility-culling bookkeeping for this client. See
     /// [`crate::visibility`].
     visibility: Mutex<crate::visibility::State>,
+    /// The sidebar this client currently shows, so an update can diff against
+    /// it and resend only the lines that changed. `None` means hidden.
+    sidebar: Mutex<Option<crate::protocol::scoreboard::SidebarBoard>>,
 }
 
 impl PlayerHandle {
@@ -189,6 +192,29 @@ impl PlayerHandle {
         self.outbox.push_paced(frames);
     }
 
+    /// Replace this client's sidebar, writing only the packets that change it.
+    ///
+    /// The diff lives here — next to the per-player state it needs — rather
+    /// than in the plugin, so the plugin may hand over the whole board on
+    /// every tick and only the lines that actually changed reach the client.
+    /// `None` hides the sidebar.
+    pub fn update_sidebar(
+        &self,
+        board: Option<&crate::protocol::scoreboard::SidebarBoard>,
+        world: &dyn BlockSource,
+    ) {
+        let style = self.codec.sidebar_style();
+        let ops = {
+            let mut prev = self.sidebar.lock().unwrap();
+            let ops = crate::protocol::scoreboard::present(style, prev.as_ref(), board);
+            *prev = board.cloned();
+            ops
+        };
+        for op in ops {
+            self.emit(&ServerEvent::Scoreboard(op), world);
+        }
+    }
+
     fn render(&self, ev: &ServerEvent, world: &dyn BlockSource) -> Vec<Vec<u8>> {
         let legacy = if self.full() { None } else { ev.legacy() };
         let packets = match ev {
@@ -213,6 +239,13 @@ impl PlayerHandle {
                 crate::visibility::forget_column(self, *cx, *cz);
                 self.codec.encode(legacy.as_ref().unwrap_or(ev), world)
             }
+            // The scoreboard path is the same on every codec — its ids and
+            // field shapes come from the version table — so it is rendered
+            // here rather than duplicated in twenty-four `encode`s.
+            ServerEvent::Scoreboard(op) => match self.codec.scoreboard_wire() {
+                Some(wire) => crate::protocol::scoreboard::encode(&wire, op),
+                None => Vec::new(),
+            },
             _ => self.codec.encode(legacy.as_ref().unwrap_or(ev), world),
         };
         let threshold = self.outbox.threshold();
@@ -278,6 +311,7 @@ impl Registry {
             )),
             tracked: Mutex::new(std::collections::HashSet::new()),
             visibility: Mutex::new(crate::visibility::State::default()),
+            sidebar: Mutex::new(None),
         });
         self.players
             .write()

@@ -21,6 +21,7 @@ pub mod commands;
 pub mod compat;
 pub mod modern;
 pub mod nbt;
+pub mod scoreboard;
 pub mod v47;
 pub mod v755;
 pub mod v756;
@@ -498,6 +499,10 @@ pub enum ServerEvent<'a> {
         volume: f32,
         pitch: f32,
     },
+    /// One scoreboard packet, already resolved into an explicit operation
+    /// (see [`scoreboard::ScoreboardOp`]). The neutral source is a plugin's
+    /// sidebar; the codec renders it in its own version's dialect.
+    Scoreboard(scoreboard::ScoreboardOp),
 }
 
 /// A game window's kind.
@@ -763,6 +768,26 @@ pub trait ProtocolCodec: Sync + Send {
     /// subset.
     fn full_gameplay(&self) -> bool {
         false
+    }
+
+    /// This version's scoreboard packet ids and field shapes, or `None` on a
+    /// wire without scoreboard packets. Selected from [`Self::protocol_id`] by
+    /// the core's map; a codec never spells its own ids here, so adding a new
+    /// release is one row in one table rather than an edit to every module.
+    fn scoreboard_wire(&self) -> Option<scoreboard::Wire> {
+        scoreboard::wire_for(self.protocol_id())
+    }
+
+    /// How this codec draws a sidebar, or [`scoreboard::SidebarStyle::Unsupported`]
+    /// if it has no scoreboard packets. The sidebar plugin asks this before it
+    /// sends anything, so a version without support is skipped rather than
+    /// silently mis-rendered.
+    fn sidebar_style(&self) -> scoreboard::SidebarStyle {
+        match self.scoreboard_wire() {
+            Some(w) if w.number_format => scoreboard::SidebarStyle::DisplayNames,
+            Some(_) => scoreboard::SidebarStyle::Teams,
+            None => scoreboard::SidebarStyle::Unsupported,
+        }
     }
 
     /// The items this codec puts in the hotbar at join, slot `0..9`, as
