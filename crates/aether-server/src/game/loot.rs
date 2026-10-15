@@ -1643,7 +1643,16 @@ fn parse_function_inner(
                         .unwrap_or(j.i32_or("extra", 0)),
                 },
                 _ => BonusFormula::UniformBonusCount {
-                    bonus_multiplier: j.i32_or("bonusMultiplier", 1),
+                    // `parameters.bonusMultiplier`, like the binomial arm
+                    // above: reading it at the top level always fell back to
+                    // the default 1, halving the fortune bonus (short_grass,
+                    // fern, … all write it nested).
+                    bonus_multiplier: j
+                        .get("parameters")
+                        .and_then(|p| p.get("bonusMultiplier"))
+                        .and_then(Json::as_f64)
+                        .map(|v| v as i32)
+                        .unwrap_or_else(|| j.i32_or("bonusMultiplier", 1)),
                 },
             },
         },
@@ -1885,6 +1894,74 @@ mod tests {
         assert_eq!(NumberProvider::Constant(2.4).get_i32(&mut rng), 2);
         assert_eq!(NumberProvider::Constant(2.5).get_i32(&mut rng), 3);
         assert_eq!(NumberProvider::Constant(2.6).get_i32(&mut rng), 3);
+    }
+
+    /// `uniform_bonus_count` reads `bonusMultiplier` from `parameters`, like
+    /// the binomial arm. Mis-reading it at the top level dropped the fortune
+    /// multiplier to its default 1 (this is fortune III, multiplier 2:
+    /// `1 + nextInt(2*3 + 1)` = 1..=7, mean 4).
+    #[test]
+    fn uniform_bonus_count_reads_parameters() {
+        let t = table_from(
+            r#"{"pools":[{"rolls":1,"entries":[
+                {"type":"minecraft:item","name":"minecraft:stick",
+                 "functions":[
+                   {"function":"minecraft:set_count","add":false,"count":1},
+                   {"function":"minecraft:apply_bonus",
+                    "enchantment":"minecraft:fortune",
+                    "formula":"minecraft:uniform_bonus_count",
+                    "parameters":{"bonusMultiplier":2}}]}]}]}"#,
+        );
+        let ctx = LootContext::default().with_enchant("minecraft:fortune", 3);
+        let mut rng = Rng::new(41);
+        let mut sum = 0u64;
+        let mut min = u8::MAX;
+        let mut max = 0u8;
+        for _ in 0..120_000 {
+            let out = t.roll(&ctx, &mut rng);
+            let n = out.first().map_or(0, |s| s.count);
+            sum += n as u64;
+            min = min.min(n);
+            max = max.max(n);
+        }
+        assert_eq!(min, 1);
+        assert_eq!(max, 7, "multiplier 2 with fortune III must reach 7");
+        let mean = sum as f64 / 120_000.0;
+        assert!((mean - 4.0).abs() < 0.05, "mean was {mean}");
+    }
+
+    /// The real short-grass table with fortune III: the seeds drop at 0.125
+    /// and the bonus is `1 + nextInt(2*3 + 1)` = 1..=7, so the per-break mean
+    /// is `0.125 * 4 = 0.5` and the maximum is 7.
+    #[test]
+    fn real_short_grass_fortune_matches_vanilla() {
+        let Ok(root) = std::env::var("AETHER_VANILLA_PACK") else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let tables = LootTables::open(&root);
+        let t = tables
+            .block_table("minecraft:short_grass")
+            .expect("short_grass table");
+        let ctx = LootContext::default().with_enchant("minecraft:fortune", 3);
+        let mut rng = Rng::new(13);
+        let mut total = 0u64;
+        let mut max = 0u8;
+        for _ in 0..200_000 {
+            let out = t.roll(&ctx, &mut rng);
+            match out.first() {
+                None => {}
+                Some(s) => {
+                    assert_eq!(s.item, "minecraft:wheat_seeds");
+                    assert!((1..=7).contains(&s.count), "count {}", s.count);
+                    total += s.count as u64;
+                    max = max.max(s.count);
+                }
+            }
+        }
+        assert_eq!(max, 7, "fortune III must reach 7 seeds");
+        let mean = total as f64 / 200_000.0;
+        assert!((mean - 0.5).abs() < 0.02, "per-break mean was {mean}");
     }
 
     /// `explosion_decay` decays per item, not per stack: each of the three
