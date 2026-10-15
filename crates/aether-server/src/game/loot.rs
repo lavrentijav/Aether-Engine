@@ -717,11 +717,14 @@ fn apply_function(f: &Function, st: &mut LootStack, ctx: &LootContext, rng: &mut
             if level <= 0 {
                 return;
             }
-            // Vanilla draws the provider (usually `uniform 0..1`) once and
-            // multiplies by the level; the count is then clamped to `limit`.
-            let extra = count.get_i32(rng) * level;
-            let n = (st.count as i32 + extra).clamp(0, *limit as i32);
-            st.count = n.clamp(0, 255) as u8;
+            // Vanilla: `grow(round(level * count.getFloat))`, the bonus
+            // clamped to `limit` (0 = unlimited). Drawing the float and
+            // scaling it gives 0..level, not `getInt * level` (which is only
+            // ever 0 or level).
+            let extra = (count.get_f32(rng) * level as f32).round() as i32;
+            let cap = if *limit == 0 { i32::MAX } else { *limit as i32 };
+            let add = extra.clamp(0, cap);
+            st.count = (st.count as i32 + add).clamp(0, 255) as u8;
         }
         Function::EnchantRandomly
         | Function::EnchantWithLevels
@@ -1517,11 +1520,11 @@ fn parse_function_inner(j: &Json, _tags: Option<&TagLoader>) -> Option<Function>
                 .get("count")
                 .map(parse_number)
                 .unwrap_or(NumberProvider::Constant(1.0));
-            let limit = j.i32_or("limit", 255).max(0);
+            let limit = j.i32_or("limit", 0);
             Function::EnchantedCountIncrease {
                 enchantment,
                 count,
-                limit: limit as u32,
+                limit: limit.max(0) as u32,
             }
         }
         "minecraft:enchant_randomly" => Function::EnchantRandomly,
@@ -1611,6 +1614,39 @@ mod tests {
         assert!((counts[2] as f64 / 100_000.0 - 0.2).abs() < 0.01);
         assert!((counts[3] as f64 / 100_000.0 - 0.2).abs() < 0.01);
         assert!((counts[4] as f64 / 100_000.0 - 0.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn enchanted_count_increase_is_round_level_times_float() {
+        // Vanilla grows by `round(level * count.getFloat)`. With a `uniform
+        // 0..1` provider and looting III that is 0/1/2/3 at 1/6, 1/3, 1/3,
+        // 1/6 — not `getInt * level` (only 0 or 3).
+        let t = table_from(
+            r#"{"pools":[{"rolls":1,"entries":[
+                {"type":"minecraft:item","name":"minecraft:diamond",
+                 "functions":[
+                   {"function":"minecraft:set_count","add":false,"count":10},
+                   {"function":"minecraft:enchanted_count_increase",
+                    "enchantment":"minecraft:looting",
+                    "count":{"type":"minecraft:uniform","min":0,"max":1}}]}]}]}"#,
+        );
+        let ctx = LootContext {
+            enchants: [("minecraft:looting".to_owned(), 3)].into_iter().collect(),
+            ..Default::default()
+        };
+        let mut rng = Rng::new(17);
+        let mut counts = [0u64; 4];
+        for _ in 0..120_000 {
+            let out = t.roll(&ctx, &mut rng);
+            let n = out[0].count;
+            assert!((10..=13).contains(&n), "count {n}");
+            counts[(n - 10) as usize] += 1;
+        }
+        let total = 120_000f64;
+        assert!((counts[0] as f64 / total - 1.0 / 6.0).abs() < 0.02);
+        assert!((counts[1] as f64 / total - 1.0 / 3.0).abs() < 0.02);
+        assert!((counts[2] as f64 / total - 1.0 / 3.0).abs() < 0.02);
+        assert!((counts[3] as f64 / total - 1.0 / 6.0).abs() < 0.02);
     }
 
     #[test]
