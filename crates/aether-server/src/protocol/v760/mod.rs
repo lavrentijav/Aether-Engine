@@ -69,6 +69,7 @@ const SB_POSITION: i32 = 0x14;
 const SB_POSITION_LOOK: i32 = 0x15;
 const SB_LOOK: i32 = 0x16;
 const SB_FLYING: i32 = 0x17;
+const SB_KEEP_ALIVE: i32 = 0x12;
 const SB_DIG: i32 = 0x1d;
 const SB_PLACE: i32 = 0x31;
 
@@ -307,6 +308,12 @@ impl ProtocolCodec for Codec {
         // server's view of the block. It is read from the end because the
         // fields in front of it differ between releases.
         let seq = super::trailing_var_int(&pkt.data);
+        if pkt.id == SB_KEEP_ALIVE {
+            return match pin.i64() {
+                Ok(id) => ClientEvent::KeepAlive(id),
+                Err(_) => ClientEvent::Ignored,
+            };
+        }
         // Movement carries a plain `onGround` bool in this generation; the
         // packed flags byte only arrives much later.
         if pkt.id == SB_POSITION {
@@ -661,5 +668,27 @@ mod tests {
         assert_eq!(id, IDS_BLOCK_CHANGED_ACK);
         // 300 as a VarInt: 0b10101100, 0b00000010.
         assert_eq!(body, vec![0xAC, 0x02]);
+    }
+
+    #[test]
+    fn a_keep_alive_reply_decodes_under_this_releases_id() {
+        // Serverbound keep-alive moved for 1.19.2; decoding it at 1.19's id
+        // would silently drop the measurement.
+        let pkt = RawPacket {
+            id: 0x12,
+            data: 0x0102_0304_0506_0708u64.to_be_bytes().to_vec(),
+        };
+        let prev = PosLook {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: true,
+        };
+        match Codec.decode(&pkt, prev) {
+            ClientEvent::KeepAlive(id) => assert_eq!(id, 0x0102_0304_0506_0708),
+            _ => panic!("expected a keep-alive"),
+        }
     }
 }

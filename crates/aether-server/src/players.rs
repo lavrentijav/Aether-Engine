@@ -69,6 +69,9 @@ pub struct PlayerHandle {
     /// The tab-list header/footer last sent, so an unchanged pair is not
     /// resent every tick.
     tab: Mutex<Option<(String, String)>>,
+    /// The last measured keep-alive round trip, in milliseconds. Read by the
+    /// `%ping%` placeholder; `0` until the first reply arrives.
+    ping_ms: std::sync::atomic::AtomicU32,
 }
 
 impl PlayerHandle {
@@ -80,6 +83,17 @@ impl PlayerHandle {
     /// Record a new position/look (called by the owning connection thread).
     pub fn set_pos(&self, p: PosLook) {
         *self.pos.lock().unwrap() = p;
+    }
+
+    /// Record a measured keep-alive round trip, in milliseconds.
+    pub fn set_ping(&self, ms: u32) {
+        self.ping_ms.store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The last measured keep-alive round trip, in milliseconds (`0` until the
+    /// first reply).
+    pub fn ping(&self) -> u32 {
+        self.ping_ms.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Borrow this player's command session (inspect mode, current pager).
@@ -343,6 +357,7 @@ impl Registry {
             visibility: Mutex::new(crate::visibility::State::default()),
             sidebar: Mutex::new(None),
             tab: Mutex::new(None),
+            ping_ms: std::sync::atomic::AtomicU32::new(0),
         });
         self.players
             .write()

@@ -138,8 +138,9 @@ Checks per [`COMMON.md`](../tasks/COMMON.md): `cargo fmt`, `cargo clippy -- -D w
   packets). The full vanilla `/scoreboard` model, commands and storage are a separate task
   (CMD-15a/b); `mode = "yield"` is parsed but inert until there is a vanilla sidebar model to yield
   to.
-- **`%ping%` is 0 and `%time%` is 06:00.** The tab list does not yet measure round-trip latency and
-  no world clock is exposed to plugins; the placeholders exist and are honest about the gap.
+- **`%time%` is 06:00.** No world clock is exposed to plugins yet (the core's
+  `game::time_of_day()` is not routed into `PlayerExtra`); the placeholder exists and is honest
+  about the gap. `%ping%` is the real measured keep-alive round trip.
 - **WASM plugins cannot register placeholders yet.** The `sidebar@0.1` service is typed in
   `crates/aether-plugin` for native consumers. A WASM consumer needs a WIT interface (a new package
   version, since exports are frozen), which is deferred.

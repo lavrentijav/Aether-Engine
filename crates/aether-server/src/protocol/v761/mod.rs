@@ -69,6 +69,7 @@ const SB_POSITION: i32 = 0x13;
 const SB_POSITION_LOOK: i32 = 0x14;
 const SB_LOOK: i32 = 0x15;
 const SB_FLYING: i32 = 0x16;
+const SB_KEEP_ALIVE: i32 = 0x11;
 const SB_DIG: i32 = 0x1c;
 const SB_PLACE: i32 = 0x31;
 
@@ -295,6 +296,12 @@ impl ProtocolCodec for Codec {
         // server's view of the block. It is read from the end because the
         // fields in front of it differ between releases.
         let seq = super::trailing_var_int(&pkt.data);
+        if pkt.id == SB_KEEP_ALIVE {
+            return match pin.i64() {
+                Ok(id) => ClientEvent::KeepAlive(id),
+                Err(_) => ClientEvent::Ignored,
+            };
+        }
         // Movement carries a plain `onGround` bool in this generation; the
         // packed flags byte only arrives much later.
         if pkt.id == SB_POSITION {

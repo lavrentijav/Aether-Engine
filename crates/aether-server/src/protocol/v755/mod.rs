@@ -71,6 +71,7 @@ const SB_POSITION: i32 = 0x11;
 const SB_POSITION_LOOK: i32 = 0x12;
 const SB_LOOK: i32 = 0x13;
 const SB_FLYING: i32 = 0x14;
+const SB_KEEP_ALIVE: i32 = 0x0f;
 const SB_BLOCK_DIG: i32 = 0x1A;
 const SB_BLOCK_PLACE: i32 = 0x2E;
 
@@ -328,6 +329,10 @@ impl ProtocolCodec for Codec {
     fn decode(&self, pkt: &RawPacket, prev: PosLook) -> ClientEvent {
         let mut pin = PacketIn::new(&pkt.data);
         match pkt.id {
+            SB_KEEP_ALIVE => match pin.i64() {
+                Ok(id) => ClientEvent::KeepAlive(id),
+                Err(_) => ClientEvent::Ignored,
+            },
             SB_POSITION => match (pin.f64(), pin.f64(), pin.f64(), pin.bool()) {
                 (Ok(x), Ok(y), Ok(z), Ok(on_ground)) => ClientEvent::Move(PosLook {
                     x,
@@ -739,6 +744,26 @@ mod tests {
                 assert_eq!((x, y, z), (-3, 70 - registry::Y_OFFSET, 12))
             }
             _ => panic!("expected a dig"),
+        }
+    }
+
+    #[test]
+    fn a_keep_alive_reply_decodes_with_its_long_id() {
+        let pkt = RawPacket {
+            id: SB_KEEP_ALIVE,
+            data: 0x0102_0304_0506_0708u64.to_be_bytes().to_vec(),
+        };
+        let prev = PosLook {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: true,
+        };
+        match Codec.decode(&pkt, prev) {
+            ClientEvent::KeepAlive(id) => assert_eq!(id, 0x0102_0304_0506_0708),
+            _ => panic!("expected a keep-alive"),
         }
     }
 }

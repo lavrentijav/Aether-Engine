@@ -164,6 +164,13 @@ impl ProtocolCodec for Codec {
     fn decode(&self, pkt: &RawPacket, prev: PosLook) -> ClientEvent {
         let mut pin = PacketIn::new(&pkt.data);
         match pkt.id {
+            // Keep Alive (0x00) here is a VarInt, unlike every later version's
+            // 8-byte long. Echoed back so the play loop can time the round
+            // trip.
+            0x00 => match pin.var_int() {
+                Ok(id) => ClientEvent::KeepAlive(id as i64),
+                Err(_) => ClientEvent::Ignored,
+            },
             0x03 => match pin.bool() {
                 Ok(on_ground) => ClientEvent::Move(PosLook { on_ground, ..prev }),
                 Err(_) => ClientEvent::Ignored,
@@ -559,5 +566,26 @@ mod tests {
         let mut want = vec![0x38, 0x04, 0x01];
         want.extend_from_slice(&uuid.to_be_bytes());
         assert_eq!(pkt.body(), want.as_slice());
+    }
+
+    #[test]
+    fn a_keep_alive_reply_decodes_with_its_varint_id() {
+        // 1.8 echoes the id as a VarInt, unlike every later version's long.
+        let pkt = RawPacket {
+            id: 0x00,
+            data: vec![0x2A],
+        };
+        let prev = PosLook {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: true,
+        };
+        match Codec.decode(&pkt, prev) {
+            ClientEvent::KeepAlive(id) => assert_eq!(id, 42),
+            _ => panic!("expected a keep-alive"),
+        }
     }
 }

@@ -630,8 +630,11 @@ pub enum ClientEvent {
     ChangeGameMode(GameMode),
     /// Middle-click on a block (creative pick).
     PickBlock { x: i32, y: i32, z: i32 },
-    /// Anything this server does not act on (keep-alive replies, animations,
-    /// ...).
+    /// The client's reply to a keep-alive, echoing the id the server sent. The
+    /// play loop matches it against the send time to measure round-trip
+    /// latency (see `PlayerHandle::set_ping`).
+    KeepAlive(i64),
+    /// Anything this server does not act on (animations, ...).
     Ignored,
 }
 

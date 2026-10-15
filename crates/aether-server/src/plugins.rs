@@ -231,9 +231,9 @@ mod imp {
                 (game.health, game.food)
             };
             Some(aether_plugin::sidebar::PlayerExtra {
-                // The tab list does not yet measure round-trip latency; the
-                // placeholder is honest about that rather than inventing one.
-                ping: 0,
+                // The measured keep-alive round trip; `0` until the first
+                // reply.
+                ping: handle.ping() as i32,
                 world: "minecraft:overworld".to_string(),
                 x: pos.x,
                 y: pos.y,
