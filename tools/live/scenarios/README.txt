@@ -28,3 +28,13 @@
 #   /inspect                     -> "Inspect mode ON"/"Inspect mode OFF"
 #   /rollback <filters>          -> "rolled back N block(s)"
 #   /effects                     -> "Active effects:" / "No active effects."
+#   /audit                       -> "<n> item instance(s), <m> anomal(y/ies):"
+#                                   (decodes every journal event, so it also
+#                                    checks old journal formats still read)
+#   /send /help                  -> CMD0 task catalog ("Commands not implemented
+#                                   yet — /help <command> ..."), not the old
+#                                   "History commands:" blurb.
+#
+# journal-upgrade.txt checks /inspect and /lookup against entries written before
+# and after a server upgrade (old v3 journal + new v4). pg-check.sh (separate,
+# read-only) checks the PostgreSQL aether_events_named view for a session.
