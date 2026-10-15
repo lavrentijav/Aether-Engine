@@ -84,7 +84,16 @@ interface host {
     supports: func(feature: string) -> bool;
 }
 
-/// The world every plugin component exports.
+/// The event/observer world a plugin component exports.
+///
+/// **Frozen for `aether:plugin@0.1.0`.** The component model has no optional
+/// exports, so this export set is a contract: a component compiled against
+/// `0.1.0` provides exactly these, and adding one — an `economy` export, a
+/// `register-enchantment` export — would change the world and refuse every
+/// existing component. A new role therefore gets a **new world in a new
+/// package version** (`aether:plugin@0.2.0`), loaded by a host that knows it,
+/// while `0.1.0` stays valid. Do not add exports here; bump the package.
+/// `tests/wit_world.rs` fails if this set changes.
 world plugin {
     use types.{player, manifest-ack, decision, command-result};
 

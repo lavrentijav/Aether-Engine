@@ -12,8 +12,17 @@ Status: 🚧 stage P1 done (2026-10-14). ROADMAP Phase 4 "Plugin API: Native C-A
 3. **Enchantments become data**: vanilla ones from the data pack, level caps configurable or off,
    custom enchantments defined by config files or plugins.
 
-Non-goals now: native C-ABI tier (later; same WIT world, different loader), hot reload (later),
+Non-goals now: native C-ABI tier (later; same WIT package, different loader), hot reload (later),
 client-side mods.
+
+**World versioning (decided while shipping P1).** The component model has no optional exports, so a
+world's export set is a contract and adding one export refuses every component already built against
+it. The event/observer world `aether:plugin/plugin@0.1.0` is therefore **frozen**: a new role —
+economy (P2), registries (P3) — gets its own world in a **new package version**
+(`aether:plugin@0.2.0`), and the host loads each version it knows. `0.1.0` components keep loading.
+`crates/aether-plugin/tests/wit_world.rs` fails if the `0.1.0` export set or package identity changes.
+The earlier "same WIT world, different loader" line was wrong: a different loader does not change the
+world type a component was compiled against.
 
 ## Layering
 
