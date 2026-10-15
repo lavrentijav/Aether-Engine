@@ -81,6 +81,72 @@ interface commands {
     parse: func(name: string, args: list<string>) -> list<tuple<string, string>>;
 }
 
+/// Messages: chat, action bar, title, broadcast and translation, with colour
+/// codes handled once.
+interface messages {
+    use aether:plugin/types@0.1.0.{player};
+
+    /// Times for a title: fade-in, stay and fade-out, in ticks.
+    record title-times {
+        fade-in: u32,
+        stay: u32,
+        fade-out: u32,
+    }
+
+    /// Send a chat line, with `&`-style colour codes translated.
+    send: func(p: player, text: string);
+    /// Send a translatable message chosen by key, with `(name, value)` args.
+    send-key: func(p: player, key: string, args: list<tuple<string, string>>);
+    /// Send an action-bar line.
+    actionbar: func(p: player, text: string);
+    /// Show a title and optional subtitle.
+    title: func(p: player, title: string, subtitle: option<string>, times: title-times);
+    /// Broadcast a chat line to everyone.
+    broadcast: func(text: string);
+    /// The player's permission meta prefix, colour-formatted (empty if none).
+    prefix: func(p: player) -> string;
+}
+
+/// Player lookup and direct manipulation.
+interface players {
+    use aether:plugin/types@0.1.0.{player};
+
+    /// A world position.
+    record pos {
+        x: f64,
+        y: f64,
+        z: f64,
+    }
+
+    /// Why a teleport happened, so regions/events can treat it differently.
+    enum teleport-cause {
+        command,
+        plugin,
+        portal,
+    }
+
+    /// Everyone online.
+    online: func() -> list<player>;
+    /// The online player called `name`, case-insensitively.
+    by-name: func(name: string) -> option<player>;
+    /// An online player by session entity id.
+    by-id: func(id: u64) -> option<player>;
+    /// The last known name of a possibly-offline player.
+    offline-name: func(uuid-low: u64, uuid-high: u64) -> option<string>;
+    /// Move a player, searching for a safe spot; error reason on failure.
+    teleport: func(p: player, to: pos, cause: teleport-cause) -> result<_, string>;
+    /// Give `count` of `item`, returning how many could not fit.
+    give: func(p: player, item: string, count: u32) -> u64;
+}
+
+/// Typed, reloadable config, backed by `[plugins.<id>]` in the operator config.
+interface config {
+    /// A raw value by key.
+    value: func(key: string) -> option<string>;
+    /// A change counter; compare across calls to detect a reload cheaply.
+    revision: func() -> u64;
+}
+
 /// A world importing the plugin host interface plus every SDK service
 /// interface, so the host can generate **one** linker entry covering all the
 /// imports a dependent component may use. Importing both here is what keeps
@@ -90,4 +156,7 @@ world services {
     import aether:plugin/host@0.1.0;
     import permissions;
     import commands;
+    import messages;
+    import players;
+    import config;
 }

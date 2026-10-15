@@ -21,7 +21,8 @@ mod imp {
     use aether_world::KvBackend;
 
     use crate::config::Config;
-    use crate::players::PlayerHandle;
+    use crate::players::{PlayerHandle, SharedRegistry};
+    use crate::protocol::ServerEvent;
     use crate::session::DemoWorld;
 
     /// Features `supports()` reports. Versioned names, as the design asks, so
@@ -56,10 +57,22 @@ mod imp {
         out
     }
 
-    /// The world and operator config behind the host imports.
+    /// The world, operator config and player registry behind the host imports.
     struct ServerBackend {
         world: Arc<DemoWorld>,
         config: Arc<Config>,
+        registry: SharedRegistry,
+    }
+
+    impl ServerBackend {
+        /// The plugin-visible view of an online player.
+        fn player(&self, handle: &PlayerHandle) -> Player {
+            Player {
+                id: handle.entity_id as u64,
+                name: handle.name.clone(),
+                operator: crate::is_operator(handle),
+            }
+        }
     }
 
     impl HostBackend for ServerBackend {
@@ -125,18 +138,39 @@ mod imp {
         fn supports(&self, _plugin: &str, feature: &str) -> bool {
             SUPPORTED.contains(&feature)
         }
+
+        fn send_message(&self, _plugin: &str, player: u64, text: &str) {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return;
+            };
+            handle.emit(&ServerEvent::Chat(text.to_string()), &*self.world);
+        }
+
+        fn broadcast(&self, _plugin: &str, text: &str) {
+            self.registry
+                .broadcast(&ServerEvent::Chat(text.to_string()), &*self.world);
+        }
+
+        fn online_players(&self, _plugin: &str) -> Vec<Player> {
+            self.registry
+                .snapshot()
+                .iter()
+                .map(|h| self.player(h))
+                .collect()
+        }
     }
 
     static HOST: OnceLock<Mutex<PluginHost>> = OnceLock::new();
 
     /// Load every plugin the operator configured. Called once at startup.
-    pub fn install(cfg: &Arc<Config>, world: &Arc<DemoWorld>) {
+    pub fn install(cfg: &Arc<Config>, world: &Arc<DemoWorld>, registry: &SharedRegistry) {
         if cfg.plugins.dir.trim().is_empty() {
             return;
         }
         let backend = Arc::new(ServerBackend {
             world: Arc::clone(world),
             config: Arc::clone(cfg),
+            registry: Arc::clone(registry),
         });
         let host_config = HostConfig {
             budget_ms: cfg.plugins.budget_ms.max(1),
@@ -380,12 +414,13 @@ mod imp {
 
 #[cfg(not(feature = "plugins"))]
 mod imp {
-    use crate::players::PlayerHandle;
+    use crate::players::{PlayerHandle, SharedRegistry};
 
     /// No-op: the server has no plugin host compiled in.
     pub fn install(
         _cfg: &std::sync::Arc<crate::config::Config>,
         _world: &std::sync::Arc<crate::session::DemoWorld>,
+        _registry: &SharedRegistry,
     ) {
     }
     pub fn on_tick(_n: u64) {}

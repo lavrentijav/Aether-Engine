@@ -15,4 +15,7 @@ world dependent {
     /// forwarding call to the native SDK plugin.
     import aether:sdk/permissions@0.1.0;
     import aether:sdk/commands@0.1.0;
+    import aether:sdk/messages@0.1.0;
+    import aether:sdk/players@0.1.0;
+    import aether:sdk/config@0.1.0;
 }

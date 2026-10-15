@@ -40,6 +40,27 @@ pub trait HostBackend: Send + Sync {
     fn config(&self, plugin: &str, key: &str) -> Option<String>;
     /// `supports`: whether the host offers a named feature.
     fn supports(&self, plugin: &str, feature: &str) -> bool;
+
+    /// Send a chat line to one online player, identified by session entity id.
+    ///
+    /// Used by the SDK `messages` service. The default does nothing, so a host
+    /// (or a test) that has no player access still satisfies the trait; the
+    /// server overrides it to reach its player registry.
+    fn send_message(&self, _plugin: &str, _player: u64, _text: &str) {}
+
+    /// Broadcast a chat line to every online player.
+    fn broadcast(&self, _plugin: &str, _text: &str) {}
+
+    /// The online players, for the SDK `players` service. The default is empty.
+    fn online_players(&self, _plugin: &str) -> Vec<Player> {
+        Vec::new()
+    }
+
+    /// A change counter for `[plugins.<id>]`, so a dependent can detect a
+    /// reload cheaply. The default is constant (no reloads).
+    fn config_revision(&self, _plugin: &str) -> u64 {
+        0
+    }
 }
 
 /// Sandbox and scheduling limits for the whole host.
@@ -95,8 +116,8 @@ impl Default for HostConfig {
 pub(crate) struct StoreData {
     pub(crate) plugin: String,
     pub(crate) capabilities: Vec<String>,
-    config: BTreeMap<String, String>,
-    backend: Arc<dyn HostBackend>,
+    pub(crate) config: BTreeMap<String, String>,
+    pub(crate) backend: Arc<dyn HostBackend>,
     /// The shared service registry, so a WASM component can call the native
     /// SDK services through the generated `aether:sdk` imports.
     pub(crate) services: Arc<ServiceRegistry>,

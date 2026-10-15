@@ -176,10 +176,12 @@ fn main() -> std::process::ExitCode {
     let _ = CONFIG.set(Arc::clone(&cfg));
     // Load the WebAssembly plugins after the world exists, so their
     // `storage.kv` has somewhere to live, and before the listener accepts a
-    // connection, so no event can fire before `init` has run.
-    plugins::install(&cfg, &world);
-    let next_eid = Arc::new(AtomicI32::new(1));
+    // connection, so no event can fire before `init` has run. The player
+    // registry is created first so the SDK's message/player services can reach
+    // it through the host backend.
     let registry: SharedRegistry = Arc::new(Registry::default());
+    plugins::install(&cfg, &world, &registry);
+    let next_eid = Arc::new(AtomicI32::new(1));
     // The world ticks on its own thread, independently of whether anyone is
     // connected: time, mobs, items on the floor, furnaces.
     game::tick::start(Arc::clone(&registry), Arc::clone(&world));

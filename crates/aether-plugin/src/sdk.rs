@@ -36,6 +36,8 @@ pub mod bindings {
 }
 
 pub use bindings::aether::sdk::commands::{Arg, ArgKind, CommandSpec};
+pub use bindings::aether::sdk::messages::TitleTimes;
+pub use bindings::aether::sdk::players::{Pos, TeleportCause};
 pub use bindings::Services;
 
 /// The provider-side permission service the SDK plugin implements.
@@ -78,14 +80,67 @@ pub trait CommandsService: Send + Sync {
     fn parse(&self, caller: &str, name: &str, args: &[String]) -> Vec<(String, String)>;
 }
 
+/// The provider-side message service.
+pub trait MessagesService: Send + Sync {
+    /// A chat line to one player.
+    fn send(&self, caller: &str, p: &Player, text: &str);
+    /// A translatable message by key with `(name, value)` args.
+    fn send_key(&self, caller: &str, p: &Player, key: &str, args: &[(String, String)]);
+    /// An action-bar line.
+    fn actionbar(&self, caller: &str, p: &Player, text: &str);
+    /// A title and optional subtitle.
+    fn title(
+        &self,
+        caller: &str,
+        p: &Player,
+        title: &str,
+        subtitle: Option<&str>,
+        times: TitleTimes,
+    );
+    /// A line to everyone.
+    fn broadcast(&self, caller: &str, text: &str);
+    /// A player's formatted prefix (empty if none).
+    fn prefix(&self, caller: &str, p: &Player) -> String;
+}
+
+/// The provider-side player service.
+///
+/// Most of these front core APIs (CMD-31/32) that are not on this branch, so
+/// the SDK's implementation reports the gap rather than guessing; the trait
+/// still exists so the surface is final.
+pub trait PlayersService: Send + Sync {
+    /// Everyone online.
+    fn online(&self, caller: &str) -> Vec<Player>;
+    /// An online player by name.
+    fn by_name(&self, caller: &str, name: &str) -> Option<Player>;
+    /// An online player by session entity id.
+    fn by_id(&self, caller: &str, id: u64) -> Option<Player>;
+    /// A possibly-offline player's last known name.
+    fn offline_name(&self, caller: &str, uuid_low: u64, uuid_high: u64) -> Option<String>;
+    /// Move a player, searching for a safe spot.
+    fn teleport(
+        &self,
+        caller: &str,
+        p: &Player,
+        to: Pos,
+        cause: TeleportCause,
+    ) -> Result<(), String>;
+    /// Give items, returning how many did not fit.
+    fn give(&self, caller: &str, p: &Player, item: &str, count: u32) -> u64;
+}
+
 /// Erasure wrappers, so a trait object can live in the untyped registry and be
 /// recovered by a known concrete type.
 pub struct PermissionsProvider(pub Arc<dyn PermissionsService>);
 pub struct CommandsProvider(pub Arc<dyn CommandsService>);
+pub struct MessagesProvider(pub Arc<dyn MessagesService>);
+pub struct PlayersProvider(pub Arc<dyn PlayersService>);
 
-/// The service names under which the SDK examples are registered.
+/// The service names under which the SDK services are registered.
 pub const PERMISSIONS_SERVICE: &str = "sdk.permissions";
 pub const COMMANDS_SERVICE: &str = "sdk.commands";
+pub const MESSAGES_SERVICE: &str = "sdk.messages";
+pub const PLAYERS_SERVICE: &str = "sdk.players";
 /// The service version.
 pub const SERVICE_VERSION: &str = "0.1";
 
@@ -113,6 +168,30 @@ pub fn register_commands(
     )
 }
 
+/// Publish a message provider.
+pub fn register_messages(
+    registry: &ServiceRegistry,
+    service: Arc<dyn MessagesService>,
+) -> Result<(), String> {
+    registry.register(
+        MESSAGES_SERVICE,
+        SERVICE_VERSION,
+        Arc::new(MessagesProvider(service)),
+    )
+}
+
+/// Publish a player provider.
+pub fn register_players(
+    registry: &ServiceRegistry,
+    service: Arc<dyn PlayersService>,
+) -> Result<(), String> {
+    registry.register(
+        PLAYERS_SERVICE,
+        SERVICE_VERSION,
+        Arc::new(PlayersProvider(service)),
+    )
+}
+
 /// Resolve the permission provider, if one is registered.
 pub fn permissions(registry: &ServiceRegistry) -> Option<Arc<dyn PermissionsService>> {
     registry
@@ -124,6 +203,20 @@ pub fn permissions(registry: &ServiceRegistry) -> Option<Arc<dyn PermissionsServ
 pub fn commands(registry: &ServiceRegistry) -> Option<Arc<dyn CommandsService>> {
     registry
         .get::<CommandsProvider>(COMMANDS_SERVICE, SERVICE_VERSION)
+        .map(|p| Arc::clone(&p.0))
+}
+
+/// Resolve the message provider, if one is registered.
+pub fn messages(registry: &ServiceRegistry) -> Option<Arc<dyn MessagesService>> {
+    registry
+        .get::<MessagesProvider>(MESSAGES_SERVICE, SERVICE_VERSION)
+        .map(|p| Arc::clone(&p.0))
+}
+
+/// Resolve the player provider, if one is registered.
+pub fn players(registry: &ServiceRegistry) -> Option<Arc<dyn PlayersService>> {
+    registry
+        .get::<PlayersProvider>(PLAYERS_SERVICE, SERVICE_VERSION)
         .map(|p| Arc::clone(&p.0))
 }
 
@@ -271,5 +364,140 @@ impl bindings::aether::sdk::commands::Host for StoreData {
                 Vec::new()
             }
         }
+    }
+}
+
+impl bindings::aether::sdk::messages::Host for StoreData {
+    fn send(&mut self, p: Player, text: String) {
+        match messages(&self.services) {
+            Some(svc) => svc.send(&self.plugin, &p, &text),
+            None => {
+                self.service_unavailable(MESSAGES_SERVICE, "send");
+            }
+        }
+    }
+
+    fn send_key(&mut self, p: Player, key: String, args: Vec<(String, String)>) {
+        match messages(&self.services) {
+            Some(svc) => svc.send_key(&self.plugin, &p, &key, &args),
+            None => {
+                self.service_unavailable(MESSAGES_SERVICE, "send-key");
+            }
+        }
+    }
+
+    fn actionbar(&mut self, p: Player, text: String) {
+        match messages(&self.services) {
+            Some(svc) => svc.actionbar(&self.plugin, &p, &text),
+            None => {
+                self.service_unavailable(MESSAGES_SERVICE, "actionbar");
+            }
+        }
+    }
+
+    fn title(&mut self, p: Player, title: String, subtitle: Option<String>, times: TitleTimes) {
+        match messages(&self.services) {
+            Some(svc) => svc.title(&self.plugin, &p, &title, subtitle.as_deref(), times),
+            None => {
+                self.service_unavailable(MESSAGES_SERVICE, "title");
+            }
+        }
+    }
+
+    fn broadcast(&mut self, text: String) {
+        match messages(&self.services) {
+            Some(svc) => svc.broadcast(&self.plugin, &text),
+            None => {
+                self.service_unavailable(MESSAGES_SERVICE, "broadcast");
+            }
+        }
+    }
+
+    fn prefix(&mut self, p: Player) -> String {
+        match messages(&self.services) {
+            Some(svc) => svc.prefix(&self.plugin, &p),
+            None => {
+                self.service_unavailable(MESSAGES_SERVICE, "prefix");
+                String::new()
+            }
+        }
+    }
+}
+
+impl bindings::aether::sdk::players::Host for StoreData {
+    fn online(&mut self) -> Vec<Player> {
+        match players(&self.services) {
+            Some(svc) => svc.online(&self.plugin),
+            None => {
+                self.service_unavailable(PLAYERS_SERVICE, "online");
+                Vec::new()
+            }
+        }
+    }
+
+    fn by_name(&mut self, name: String) -> Option<Player> {
+        match players(&self.services) {
+            Some(svc) => svc.by_name(&self.plugin, &name),
+            None => {
+                self.service_unavailable(PLAYERS_SERVICE, "by-name");
+                None
+            }
+        }
+    }
+
+    fn by_id(&mut self, id: u64) -> Option<Player> {
+        match players(&self.services) {
+            Some(svc) => svc.by_id(&self.plugin, id),
+            None => {
+                self.service_unavailable(PLAYERS_SERVICE, "by-id");
+                None
+            }
+        }
+    }
+
+    fn offline_name(&mut self, uuid_low: u64, uuid_high: u64) -> Option<String> {
+        match players(&self.services) {
+            Some(svc) => svc.offline_name(&self.plugin, uuid_low, uuid_high),
+            None => {
+                self.service_unavailable(PLAYERS_SERVICE, "offline-name");
+                None
+            }
+        }
+    }
+
+    fn teleport(&mut self, p: Player, to: Pos, cause: TeleportCause) -> Result<(), String> {
+        match players(&self.services) {
+            Some(svc) => svc.teleport(&self.plugin, &p, to, cause),
+            None => {
+                self.service_unavailable(PLAYERS_SERVICE, "teleport");
+                Err("player service unavailable".to_string())
+            }
+        }
+    }
+
+    fn give(&mut self, p: Player, item: String, count: u32) -> u64 {
+        match players(&self.services) {
+            Some(svc) => svc.give(&self.plugin, &p, &item, count),
+            None => {
+                self.service_unavailable(PLAYERS_SERVICE, "give");
+                count as u64
+            }
+        }
+    }
+}
+
+/// Config is host-backed sugar rather than a registry service: the bridge reads
+/// the caller's own `[plugins.<id>]` values directly, so it works whenever the
+/// host does, independent of any provider.
+impl bindings::aether::sdk::config::Host for StoreData {
+    fn value(&mut self, key: String) -> Option<String> {
+        self.config
+            .get(&key)
+            .cloned()
+            .or_else(|| self.backend.config(&self.plugin, &key))
+    }
+
+    fn revision(&mut self) -> u64 {
+        self.backend.config_revision(&self.plugin)
     }
 }
