@@ -150,6 +150,31 @@ shadow before the discard was added.
 count as the shadow is indistinguishable from a legitimate move of the engine-only
 item; resolved in the safe anti-laundering direction (the engine-only item wins).
 
+## Round-5 fix (J10-fix14)
+
+The merge/swap selection treated a different *real* item sharing a wire id as a
+swap, so a disguised stack merging onto a genuine same-wire stack (pale onto
+oak) lost the merged-in portion (53 of 74). Fix, in `resolve_change`:
+
+* the reconciling branch's **merge** now fires when the slot shows the same
+  item *on the wire* and either it is the same real item or the shared item is
+  **stackable** (`wire_stacks`, from the engine's stack-size table). The slot
+  keeps its own authoritative item and only what was added is consumed. Two
+  *unstackable* look-alikes (a spear shown as a trident onto a genuine trident)
+  stay a **swap**, so the N1 fix is preserved.
+* `reconciles` uses the same wire test for its merge clause.
+* stale doc at the old `items.rs:170` corrected ("discards the shadow", not
+  "leaves the shadow alone").
+
+Tests: `a_disguised_stack_merging_onto_a_genuine_same_wire_stack_keeps_its_count`
+(74 onto 11 → slot 64, 21 remain) and
+`a_disguised_stack_merging_fully_onto_a_genuine_stack_leaves_nothing_carried`;
+reverting the guard fails both plus the property test. `run_reports` now seeds
+genuine `oak_planks` and `trident` (wire-colliding) and merges/swaps by wire
+item stackability, so it sees the merge. The menu avoids *conjuring*
+wire-colliding items: a genuine conjure sharing a stand-in's wire id and a
+count the stale shadow can cover is the documented indistinguishable residual.
+
 ## Left / interface note for the J5 (J9) agent
 
 The per-move logic keys off `compat::items::table_for(handle.codec.protocol_id())`.
