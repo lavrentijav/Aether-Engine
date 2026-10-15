@@ -30,6 +30,7 @@ pub mod cell;
 pub mod journal;
 pub mod light;
 pub mod palette;
+pub mod pathfind;
 pub mod registry;
 pub mod storage;
 pub mod subchunk;

@@ -773,6 +773,8 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
             })
             .collect();
         let mut rng = rng().lock().unwrap();
+        // Pathfinding work every mob shares this tick.
+        let nav = mobs::NavBudget::default();
         for e in all.iter_mut() {
             e.age += 1;
             let id = e.id;
@@ -899,6 +901,7 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                         players: &views,
                         now,
                         day,
+                        nav: &nav,
                     };
                     if mobs::tick(
                         id,
