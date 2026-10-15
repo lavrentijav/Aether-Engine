@@ -30,9 +30,11 @@ pub mod cell;
 pub mod journal;
 pub mod light;
 pub mod palette;
+pub mod pathfind;
 pub mod registry;
 pub mod storage;
 pub mod subchunk;
+pub mod visibility;
 
 pub use block::{BlockProperties, BlockStateId};
 pub use cell::AvxCell;

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aether_plugin::manifest::Manifest;
+use aether_plugin::manifest::{CommandDecl, Manifest};
 use aether_plugin::{
     Decision, HostBackend, HostConfig, LogLevel, ManifestFile, Player, PluginHost,
 };
@@ -109,7 +109,10 @@ fn recorder(
         priority,
         capabilities: vec![],
         subscribe: subscribe.iter().map(|s| s.to_string()).collect(),
-        commands: commands.iter().map(|s| s.to_string()).collect(),
+        commands: commands
+            .iter()
+            .map(|s| CommandDecl::Plain(s.to_string()))
+            .collect(),
         tick_period: 1,
         deny_on_fault: false,
     };

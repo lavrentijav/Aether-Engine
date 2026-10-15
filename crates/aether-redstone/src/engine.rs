@@ -1,0 +1,193 @@
+//! The redstone engine: the public API and the block-behaviour dispatch.
+//!
+//! [`Redstone`] holds no block data. Every method is a function of the
+//! [`RedstoneView`] it is handed, so the same engine drives any world and two
+//! runs of the same circuit produce the same result. The pending neighbour
+//! updates live on the stack for the duration of one call.
+//!
+//! The behaviour of a block lives in a [`crate::blocks`] module and is reached
+//! through a state-indexed table ([`crate::behaviour::behaviour`]); this file
+//! never matches on a block name.
+//!
+//! # Update order
+//!
+//! This is the **1.21.11 default** — the experimental "Eigencraft" wire
+//! evaluator is off. Neighbour notifications are generated in vanilla's
+//! `UPDATE_ORDER` (west, east, down, up, north, south) and drained by a port of
+//! vanilla's depth-first `CollectingNeighborUpdater` ([`crate::behaviour`]):
+//! a LIFO stack where a multi-neighbour update yields to freshly generated
+//! updates before resuming, with the chain limit.
+
+use aether_world::BlockStateId;
+
+use crate::behaviour::{self, block_id_of, Context, SHAPE_UPDATE_LIMIT};
+use crate::dir::Direction;
+use crate::pos::BlockPos;
+use crate::view::{RedstoneView, SetBlockFlags};
+
+/// The redstone engine.
+///
+/// The engine owns **no** state — not even the redstone-torch burnout log,
+/// which lives on the world ([`RedstoneView::record_toggle`]) because it is per
+/// level. The same `Redstone` instance can therefore drive any number of
+/// worlds, and two worlds never share torch history.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Redstone;
+
+impl Redstone {
+    /// A new engine. It holds nothing; this is a constructor for symmetry.
+    pub const fn new() -> Self {
+        Redstone
+    }
+
+    // -----------------------------------------------------------------------
+    // Power queries
+    // -----------------------------------------------------------------------
+
+    /// The **weak** redstone signal emitted into the neighbour in `dir`.
+    ///
+    /// `dir` points from the receiver toward the block being read. A conductor
+    /// also contributes the strong power it holds, which is how a lever on a
+    /// block powers wire on the far side.
+    pub fn get_signal<V: RedstoneView>(&self, view: &V, pos: BlockPos, dir: Direction) -> u8 {
+        self.signals(view).get_signal(pos, dir)
+    }
+
+    /// The **strong** signal this block provides to the neighbour in `dir`.
+    pub fn get_direct_signal<V: RedstoneView>(
+        &self,
+        view: &V,
+        pos: BlockPos,
+        dir: Direction,
+    ) -> u8 {
+        self.signals(view).get_direct_signal(pos, dir)
+    }
+
+    /// The largest weak signal among a block's six neighbours.
+    pub fn get_best_neighbor_signal<V: RedstoneView>(&self, view: &V, pos: BlockPos) -> u8 {
+        self.signals(view).get_best_neighbor_signal(pos)
+    }
+
+    /// Whether any of a block's six neighbours emits a signal into it.
+    pub fn has_neighbor_signal<V: RedstoneView>(&self, view: &V, pos: BlockPos) -> bool {
+        self.signals(view).has_neighbor_signal(pos)
+    }
+
+    fn signals<'a, V: RedstoneView>(&self, view: &'a V) -> behaviour::SignalCtx<'a> {
+        behaviour::SignalCtx {
+            view,
+            suppress_wire: false,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Block mutation
+    // -----------------------------------------------------------------------
+
+    /// Vanilla's `Level.setBlock(pos, state, flags)`.
+    ///
+    /// The host promises nothing was written yet; the engine runs the removal
+    /// and placement hooks and the neighbour/shape updates the flags select.
+    /// Returns whether the state changed.
+    pub fn set_block<V: RedstoneView>(
+        &self,
+        view: &mut V,
+        pos: BlockPos,
+        state: BlockStateId,
+        flags: SetBlockFlags,
+    ) -> bool {
+        let mut ctx = Context::new(view);
+        ctx.set_block(pos, state, flags)
+    }
+
+    // -----------------------------------------------------------------------
+    // Entry points
+    // -----------------------------------------------------------------------
+
+    /// A block was placed at `pos`. The host writes the state first, then calls
+    /// this; the engine runs the placement hook and notifies the neighbours.
+    pub fn on_placed<V: RedstoneView>(&self, view: &mut V, pos: BlockPos) {
+        let mut ctx = Context::new(view);
+        let state = ctx.get_block(pos);
+        behaviour::behaviour(state).on_place(&mut ctx, state, pos, behaviour::AIR);
+        behaviour::behaviour(state).set_placed_by(&mut ctx, state, pos);
+        ctx.fan_out(pos, pos, state, None, None);
+        // Vanilla's `Level.setBlock(pos, state, 3)` uses the default limit 512
+        // and then runs the shape passes at `j - 1`.
+        ctx.update_shapes(
+            pos,
+            behaviour::AIR,
+            state,
+            SetBlockFlags::UPDATE_NEIGHBORS,
+            SHAPE_UPDATE_LIMIT - 1,
+        );
+    }
+
+    /// A block was removed from `pos`, whose old state was `old`. The host has
+    /// already written air.
+    pub fn on_removed<V: RedstoneView>(&self, view: &mut V, pos: BlockPos, old: BlockStateId) {
+        let mut ctx = Context::new(view);
+        behaviour::behaviour(old).on_remove(&mut ctx, old, pos);
+        ctx.fan_out(pos, pos, old, None, None);
+        ctx.update_shapes(
+            pos,
+            old,
+            behaviour::AIR,
+            SetBlockFlags::NONE,
+            SHAPE_UPDATE_LIMIT - 1,
+        );
+    }
+
+    /// A neighbour of the block at `pos` (the block at `from`) changed.
+    pub fn on_neighbour_changed<V: RedstoneView>(
+        &self,
+        view: &mut V,
+        pos: BlockPos,
+        from: BlockPos,
+    ) {
+        let mut ctx = Context::new(view);
+        let source = ctx.get_block(from);
+        ctx.dispatch_neighbor_changed(pos, Some(behaviour::NeighborSource::plain(from, source)));
+    }
+
+    /// A block tick scheduled for `(block, pos)` has come due.
+    ///
+    /// The tick is dropped unless the cell still holds `block`, as
+    /// `ServerLevel.tickBlock` guards with `blockState.is(block)`.
+    pub fn on_scheduled_tick<V: RedstoneView>(&self, view: &mut V, block: u16, pos: BlockPos) {
+        if block_id_of(view.get_block(pos)) != Some(block) {
+            return;
+        }
+        let mut ctx = Context::new(view);
+        ctx.dispatch_tick(pos);
+    }
+
+    /// A player used the block at `pos`: a lever pulls, a button presses, a
+    /// repeater cycles its delay, a wire toggles cross/dot.
+    pub fn on_use<V: RedstoneView>(&self, view: &mut V, pos: BlockPos) {
+        let mut ctx = Context::new(view);
+        ctx.dispatch_use(pos);
+    }
+
+    /// An entity entered the block at `pos`. A pressure plate re-reads its
+    /// entity count. The host calls this when an entity steps on or off.
+    pub fn on_entity_inside<V: RedstoneView>(&self, view: &mut V, pos: BlockPos) {
+        let mut ctx = Context::new(view);
+        ctx.dispatch_entity_inside(pos);
+    }
+
+    /// A projectile hit the block at `pos` on `face`, at `position` (block-local,
+    /// each component `0.0..1.0`). `arrow` is whether an arrow hit. The target
+    /// block uses this to set its output power.
+    pub fn on_projectile_hit<V: RedstoneView>(
+        &self,
+        view: &mut V,
+        pos: BlockPos,
+        face: Direction,
+        position: [f32; 3],
+        arrow: bool,
+    ) {
+        let mut ctx = Context::new(view);
+        ctx.dispatch_projectile_hit(pos, face, position, arrow);
+    }
+}

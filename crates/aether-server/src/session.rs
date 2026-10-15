@@ -207,17 +207,31 @@ fn login_and_play(
     // read must not become a fresh start, or the first save would write that
     // fresh start over it. See `crate::stored`.
     let saved = if codec.full_gameplay() {
-        stored::classify(
+        // Current key, then the pre-rename one: a player who last saved before
+        // the key prefix changed keeps their position and effects.
+        match stored::classify(
             world.get_meta(&crate::game::player::key(player.uuid)),
             crate::game::player::decode,
-        )
+        ) {
+            Stored::Missing => stored::classify(
+                world.get_meta(&crate::game::player::legacy_key(player.uuid)),
+                crate::game::player::decode,
+            ),
+            found => found,
+        }
     } else {
         Stored::Missing
     };
-    let saved_inventory = stored::classify(
+    let saved_inventory = match stored::classify(
         world.get_meta(&crate::inventory::key(player.uuid)),
         crate::inventory::decode,
-    );
+    ) {
+        Stored::Missing => stored::classify(
+            world.get_meta(&crate::inventory::legacy_key(player.uuid)),
+            crate::inventory::decode,
+        ),
+        found => found,
+    };
     for (what, record) in [
         ("player state", saved.unreadable()),
         ("inventory", saved_inventory.unreadable()),
@@ -255,7 +269,7 @@ fn login_and_play(
         yaw: player.yaw,
         pitch: player.pitch,
         max_players: cfg.server.max_players,
-        view_radius: cfg.server.view_radius.clamp(1, 12),
+        view_radius: cfg.server.clamped_view_radius(),
         resource_pack: cfg.resource_pack.clone(),
     };
 
@@ -307,10 +321,32 @@ fn login_and_play(
             });
         }
     });
+    // Anti-xray: a section under the surface the player cannot see must not be
+    // sent as real blocks even in the first burst, so the reachable set is
+    // computed from the spawn position before the handle exists and the same
+    // columns are masked here. It is seeded into the handle below, so the
+    // reveal planner knows what this client already holds.
+    let vis = crate::visibility_config()
+        .enabled
+        .then(|| crate::visibility::visible_from(world, (spawn.x, spawn.y, spawn.z), r));
+    let fill = crate::visibility::fill_for_mode(game_mode);
     for cz in spawn_cz - initial..=spawn_cz + initial {
         for cx in spawn_cx - initial..=spawn_cx + initial {
             let view = crate::protocol::ColumnView::new(world, cx, cz);
-            for pkt in codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view) {
+            let packets = match &vis {
+                Some(vis) => {
+                    let hidden = crate::visibility::desired_hidden(vis, cx, cz);
+                    if hidden != 0 {
+                        let masked =
+                            crate::visibility::MaskedColumn::new(&view, cx, cz, hidden, fill);
+                        codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &masked)
+                    } else {
+                        codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view)
+                    }
+                }
+                None => codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view),
+            };
+            for pkt in packets {
                 pkt.send(s)?;
             }
             loaded.insert((cx, cz));
@@ -331,6 +367,23 @@ fn login_and_play(
         on_ground: false,
     };
     let handle = registry.join(eid, player.uuid, player.name.clone(), ip, codec, &*s, pos)?;
+    // Seed the visibility bookkeeping with the masked first burst: what the
+    // client holds, and the reachable set those masks came from, so the reveal
+    // planner never re-sends a column it already sent and never forgets one it
+    // has not.
+    if let Some(visible) = vis {
+        let mut sent = std::collections::HashMap::new();
+        for cz in spawn_cz - initial..=spawn_cz + initial {
+            for cx in spawn_cx - initial..=spawn_cx + initial {
+                sent.insert(
+                    (cx, cz),
+                    crate::visibility::desired_hidden(&visible, cx, cz),
+                );
+            }
+        }
+        let section = crate::visibility::section_of(pos);
+        handle.visibility().seed(section, visible, sent);
+    }
     // A returning player gets what they had; a new one gets the starter
     // hotbar. Seeding over a restored inventory would overwrite the first nine
     // slots of it, which is the whole hotbar.
@@ -1204,6 +1257,10 @@ impl Streamer {
                     }
                     let ((ccx, ccz), reset) = msg;
                     if reset {
+                        // A respawn starts the client with an empty level, so
+                        // the columns it used to hold are no longer ours to
+                        // reveal; drop them or `sent` grows for the session.
+                        crate::visibility::reset_columns(&handle);
                         loaded.clear();
                     }
                     let in_range =
@@ -1324,6 +1381,7 @@ pub(crate) fn set_and_broadcast(
     // without an author is invisible to `/rollback` and to any later question
     // about who did what.
     let seq = world.set_block_by(JournalActor(handle.uuid), x, y, z, block, props);
+    crate::visibility::invalidate_block(x, y, z);
     let ev = ServerEvent::BlockChange { x, y, z, block };
     handle.emit(&ev, world);
     registry.broadcast_except(handle.entity_id, &ev, world);

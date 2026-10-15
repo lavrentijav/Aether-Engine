@@ -29,3 +29,7 @@ Authoritative docs:
 - Keep `docs/STATUS.md` and `docs/ROADMAP.md` in sync when a feature lands or a plan changes.
 - Before treating a compatibility gap as a bug, check the Known Deviations Registry in
   `docs/KNOWN_ISSUES.md` — Phase 1 deviations are intentional, not defects.
+
+### Core vs plugin
+- Optional, non-performance-critical features go into **plugins** (plugin API, `docs/design/plugins.md`),
+  not the core. See "Core or plugin?" in [`CONTRIBUTING.md`](CONTRIBUTING.md).

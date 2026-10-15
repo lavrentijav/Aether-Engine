@@ -1,0 +1,13 @@
+# Manifest for the shops plugin (CMD-43). See crates/aether-plugin/src/manifest.rs.
+id = "shops"
+name = "Shops"
+version = "0.1.0"
+api = "0.1"
+entry = "shops.wasm"
+priority = 90
+
+capabilities = ["log", "config", "supports", "storage.kv", "players", "world.read", "world.write"]
+
+subscribe = ["on-command", "before-use-item", "before-container-click"]
+
+commands = ["shop", "auction", "ah", "sell", "adminshop"]

@@ -87,6 +87,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-redstone"
+version = "0.1.0"
+dependencies = [
+ "aether-world",
+]
+
+[[package]]
 name = "aether-server"
 version = "0.1.0"
 dependencies = [
@@ -94,6 +101,7 @@ dependencies = [
  "aether-plugin",
  "aether-world",
  "aether-worldgen",
+ "criterion",
  "libc",
  "miniz_oxide",
  "postgres",
@@ -112,6 +120,7 @@ dependencies = [
  "aether-core",
  "criterion",
  "fjall",
+ "libc",
  "zstd",
 ]
 

@@ -21,6 +21,7 @@
 
 pub mod pager;
 pub mod query;
+pub mod registry;
 
 use aether_api::{JournalActor, Ledger};
 use aether_world::journal::{now_ms, Event, EventBody};
@@ -162,14 +163,94 @@ pub fn dispatch(
         "stash" => crate::stash::open_command(handle, world),
         "audit" => audit(world),
         "cache" => cache(world),
-        _ => {
-            let plugin_args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-            match crate::plugins::on_command(handle, cmd, &plugin_args) {
-                Some(lines) => Reply(lines),
-                None => usage(),
-            }
-        }
+        "help" | "?" => help(&args, handle),
+        // Everything else is a fallback. Plugin commands are resolved through
+        // the registry here — **after** every core name has been offered, and
+        // with the same permission gate — so they can never shadow a core
+        // command; core stubs and usage are the last resort.
+        _ => fallback(cmd, &args, handle),
     })
+}
+
+/// The last-resort dispatcher: a plugin command (through the registry, with
+/// its permission check), else a core stub or the usage text.
+///
+/// This is the one place a plugin command is reached from. Because
+/// `registry::register_plugin` refuses core names, `registry::plugin_command`
+/// here can only answer a name the core does not own, so the core's gate is
+/// never bypassed.
+fn fallback(cmd: &str, args: &[&str], handle: &PlayerHandle) -> Reply {
+    if let Some(entry) = registry::plugin_command(cmd) {
+        if !permitted(handle, &entry.node, entry.op) {
+            return Reply::one("You do not have permission to run this command.");
+        }
+        let plugin_args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        return match crate::plugins::on_command(handle, cmd, &plugin_args) {
+            Some(lines) => Reply(lines),
+            // Registered but no live plugin answered — the plugin is disabled
+            // or failed to load; say so rather than showing the usage text.
+            None => Reply::one(format!("/{cmd} is not available right now")),
+        };
+    }
+    stub(cmd, handle)
+}
+
+/// Whether `handle` may run a command needing `op`.
+///
+/// Until the permission store (CMD-01) lands, a player's only levels are 4
+/// (an operator) and 0 (everyone else), exactly what [`crate::is_operator`]
+/// says; `node` is carried for when the store can resolve it. This is the
+/// single gate the core stubs and plugin commands both use.
+pub fn permitted(handle: &PlayerHandle, node: &str, op: u8) -> bool {
+    let level = if crate::is_operator(handle) { 4 } else { 0 };
+    permitted_level(level, node, op)
+}
+
+/// The level half of [`permitted`], without a handle: the decision itself, so
+/// it can be tested and reused by the permission core (CMD-01) later.
+pub fn permitted_level(level: u8, _node: &str, op: u8) -> bool {
+    level >= op
+}
+
+/// `/help [command]` — list the commands that are specified but not implemented yet, or explain one.
+///
+/// This is a stop-gap until the real tree-driven `/help` (CMD-05): it makes the catalogue
+/// discoverable while each command is stubbed with its own `not implemented yet (CMD-nn)`.
+fn help(args: &[&str], handle: &PlayerHandle) -> Reply {
+    if let Some(name) = args.first() {
+        return match registry::find(name) {
+            Some(e) => Reply::one(format!(
+                "/{} — {} (op level {}), planned in {}",
+                e.name, e.node, e.op, e.task
+            )),
+            None => Reply::one(format!(
+                "no entry for `{name}`; /help lists the commands still to come"
+            )),
+        };
+    }
+    let mut lines = registry::help_lines();
+    lines.push(format!(
+        "({} commands pending, {} runnable now)",
+        registry::CORE.len(),
+        if crate::is_operator(handle) {
+            "all"
+        } else {
+            "level-0"
+        }
+    ));
+    Reply(lines)
+}
+
+/// The fallback for a name no dispatcher answered: a known-but-unimplemented command replies with
+/// its task id (and enforces its permission), anything else is usage.
+fn stub(cmd: &str, handle: &PlayerHandle) -> Reply {
+    let Some(e) = registry::find(cmd) else {
+        return usage();
+    };
+    if !permitted(handle, e.node, e.op) {
+        return Reply::one("You do not have permission to run this command.");
+    }
+    Reply::one(format!("/{} is not implemented yet ({})", e.name, e.task))
 }
 
 /// `/cache` — how the generated-column cache is doing.
@@ -417,6 +498,11 @@ fn rollback(
             // Every restored block is pushed to everyone: a rollback only the
             // caller could see would look like it had failed.
             for r in &plan {
+                // A rollback can reopen or reseal a cave, so the visibility
+                // cache must forget the restored section too — otherwise the
+                // graph still shows the old wall and the anti-xray mask keeps
+                // hiding what is now visible (finding 3).
+                crate::visibility::invalidate_block(r.x, r.y, r.z);
                 let ev = ServerEvent::BlockChange {
                     x: r.x,
                     y: r.y,
@@ -617,6 +703,26 @@ mod tests {
                 "`{verb}` must be reserved"
             );
         }
+    }
+
+    #[test]
+    fn the_permission_gate_is_level_against_op() {
+        // A non-op (level 0) may run only op-0 commands; an op (level 4) any.
+        assert!(super::permitted_level(0, "n", 0));
+        assert!(!super::permitted_level(0, "n", 1));
+        assert!(!super::permitted_level(0, "n", 4));
+        assert!(super::permitted_level(4, "n", 4));
+        assert!(super::permitted_level(4, "n", 0));
+    }
+
+    #[test]
+    fn the_registry_owns_both_implemented_and_specified_core_names() {
+        // `core_owns` is the ownership check a plugin registration faces: it
+        // must reject an implemented name even if the reserved list drifted,
+        // and a specified-but-unimplemented one.
+        assert!(super::registry::core_owns("give"), "implemented");
+        assert!(super::registry::core_owns("stop"), "specified stub");
+        assert!(!super::registry::core_owns("definitely_a_plugin_name"));
     }
 
     #[test]

@@ -1,0 +1,40 @@
+# Manifest for the essentials-player plugin (CMD-38). See crates/aether-plugin/src/manifest.rs.
+id = "essentials-player"
+name = "Essentials Player"
+version = "0.1.0"
+api = "0.1"
+# native: a Rust crate in this workspace, linked in-process (CMD-00N).
+# No .wasm entry: the loader calls it directly, no WASM boundary.
+priority = 40
+
+capabilities = ["log", "config", "supports", "storage.kv", "players", "scheduler"]
+
+subscribe = ["on-command"]
+
+commands = [
+    "fly",
+    "god",
+    "speed",
+    "feed",
+    "heal",
+    "repair",
+    "hat",
+    "nick",
+    "realname",
+    "whois",
+    "seen",
+    "afk",
+    "near",
+    "getpos",
+    "depth",
+    "compass",
+    "ptime",
+    "pweather",
+    "suicide",
+    "burn",
+    "thru",
+    "skull",
+    "more",
+    "condense",
+    "exp",
+]

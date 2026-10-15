@@ -12,6 +12,9 @@
 
 pub mod format;
 
+#[cfg(feature = "fjall")]
+mod lock;
+
 use crate::subchunk::SubChunk;
 use format::{FormatError, SubChunkKey};
 use std::collections::BTreeMap;
@@ -210,11 +213,24 @@ mod fjall_backend {
     pub struct FjallStore {
         _keyspace: Keyspace,
         partition: PartitionHandle,
+        /// Held for the store's whole life: one world, one process. See
+        /// `storage::lock`.
+        _lock: super::lock::WorldLock,
     }
 
     impl FjallStore {
         /// Open (creating if needed) a world store rooted at `path`.
+        ///
+        /// # One world, one process
+        ///
+        /// Takes an exclusive `flock` on the world directory before opening
+        /// the LSM. Two processes sharing one world would each mint item uids
+        /// and journal sequence numbers from the same reservation bounds, and
+        /// overwrite each other's sub-chunks; the second open therefore fails
+        /// with an error naming the process that holds it. See `storage::lock`.
         pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+            let path = path.as_ref();
+            let lock = super::lock::WorldLock::acquire(path)?;
             let keyspace = Config::new(path)
                 .open()
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -224,6 +240,7 @@ mod fjall_backend {
             Ok(Self {
                 _keyspace: keyspace,
                 partition,
+                _lock: lock,
             })
         }
     }
@@ -661,6 +678,27 @@ mod tests {
         storage.flush().unwrap();
         let loaded = storage.load(key).unwrap().expect("persisted");
         assert_eq!(loaded.solid_mask(), sc.solid_mask());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "fjall")]
+    #[test]
+    fn a_second_fjall_store_on_the_same_directory_is_refused() {
+        // The chokepoint both the server and the converter go through: a
+        // second process opening one world would mint duplicate uids and
+        // sequence numbers, so the open must fail and name the holder.
+        let dir = std::env::temp_dir().join(format!("aether-fjall-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = FjallStore::open(&dir).unwrap();
+        let Err(err) = FjallStore::open(&dir) else {
+            panic!("a second open of a held directory must be refused");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("already open"), "{msg}");
+        assert!(msg.contains(&std::process::id().to_string()), "{msg}");
+        // Releasing the first makes the directory openable again.
+        drop(first);
+        let _ = FjallStore::open(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

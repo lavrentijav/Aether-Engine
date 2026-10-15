@@ -3,17 +3,76 @@
 //! The behaviour is the shape of vanilla's, not its letter: animals wander
 //! and flee when hit, zombies and spiders chase and strike, skeletons keep
 //! their distance and shoot, creepers hiss and blow up, and the undead burn
-//! in daylight. Pathfinding is a straight line with a jump over one-block
-//! steps and a refusal to walk off a drop — enough to be a real threat on
-//! open ground, and an honest gap underground (see `KNOWN_ISSUES`).
+//! in daylight.
+//!
+//! Movement is A\* over the block grid (`aether_world::pathfind`, a
+//! simplified `WalkNodeEvaluator`): a mob follows a cached path to its goal,
+//! re-solving when the target moves far enough, the next waypoint is walled
+//! off, the path runs out, or the mob stops making progress (a block dropped
+//! onto the path). The search is charged against a per-tick node budget shared
+//! by every mob, so a crowd cannot stall the tick; a mob that cannot afford a
+//! path falls back to straight-line steering, guarded against steps the
+//! pathfinder itself would refuse.
+
+use std::cell::Cell;
 
 use aether_api::{Body, Vector3};
+use aether_world::pathfind::{self, Nav};
+use aether_world::registry::shapes::Box6;
 
 use super::entities::{Action, PlayerView};
 use super::tables::Rng;
 use crate::inventory::Stack;
 use crate::protocol::MetaValue;
 use crate::session::DemoWorld;
+
+/// Node expansions every mob shares per tick. Once it is spent, no mob
+/// searches again until the next tick and they steer straight.
+const NAV_NODE_BUDGET: usize = 4096;
+/// Most nodes a single search may expand.
+const MAX_PATH_NODES: usize = 512;
+/// A fresh path is solved when the goal has moved this far from the cached
+/// path's goal, or the path was blocked.
+const REPATH_DISTANCE: f64 = 2.0;
+/// Ticks a mob waits before it solves another path.
+const REPATH_COOLDOWN: u32 = 10;
+/// A path counts as reaching the goal within this many horizontal blocks.
+const GOAL_RANGE: f64 = 1.2;
+/// How far up or down the goal's column a standable landing is sought.
+const GOAL_RESOLVE_DY: i32 = 4;
+/// Consecutive no-progress ticks before the cached path is thrown away and a
+/// fresh one is solved — how a block dropped onto the path is noticed.
+const STUCK_TICKS: u32 = 10;
+
+/// The per-tick pathfinding budget shared by every mob.
+///
+/// `Cell` because the tick is single-threaded and the `Ctx` handed to each
+/// mob is shared immutably.
+pub struct NavBudget {
+    remaining: Cell<usize>,
+}
+
+impl NavBudget {
+    pub fn new(n: usize) -> Self {
+        Self {
+            remaining: Cell::new(n),
+        }
+    }
+    /// Nodes still available this tick.
+    pub fn remaining(&self) -> usize {
+        self.remaining.get()
+    }
+    /// Charge `n` expansions against the budget.
+    pub fn spend(&self, n: usize) {
+        self.remaining.set(self.remaining.get().saturating_sub(n));
+    }
+}
+
+impl Default for NavBudget {
+    fn default() -> Self {
+        Self::new(NAV_NODE_BUDGET)
+    }
+}
 
 /// One kind of mob.
 #[derive(Debug)]
@@ -172,6 +231,17 @@ pub struct Mob {
     pub see_time: i32,
     /// Status effects running on this mob.
     pub effects: super::effects::Effects,
+    /// Cached A\* path, nearest waypoint first, as block cells.
+    pub path: Vec<[i32; 3]>,
+    /// The waypoint in [`Mob::path`] the mob is walking to.
+    pub path_at: usize,
+    /// The goal the cached path was solved for.
+    pub path_goal: Option<(f64, f64, f64)>,
+    /// Ticks before a fresh path may be solved.
+    pub repath: u32,
+    /// Consecutive ticks the mob wanted to move but barely did, so a block
+    /// dropped in its way can force a fresh path.
+    pub stuck: u32,
 }
 
 impl Mob {
@@ -210,6 +280,11 @@ impl Mob {
             meta_dirty: false,
             see_time: 0,
             effects: super::effects::Effects::default(),
+            path: Vec::new(),
+            path_at: 0,
+            path_goal: None,
+            repath: 0,
+            stuck: 0,
         }
     }
 
@@ -251,14 +326,199 @@ pub struct Ctx<'a> {
     pub players: &'a [PlayerView],
     pub now: u64,
     pub day: bool,
+    /// The pathfinding budget shared by every mob this tick.
+    pub nav: &'a NavBudget,
+}
+
+/// Where a mob is heading: a point, and how fast.
+struct Goal {
+    x: f64,
+    y: f64,
+    z: f64,
+    speed: f64,
+}
+
+/// A [`pathfind::Nav`] view of the server world, reading the per-state
+/// collision shapes and the names of the few hazards that matter.
+struct WorldNav<'a> {
+    world: &'a DemoWorld,
+}
+
+impl Nav for WorldNav<'_> {
+    fn boxes(&self, x: i32, y: i32, z: i32) -> &'static [Box6] {
+        aether_world::registry::shapes::collision_boxes(self.world.get_block(x, y, z).raw())
+    }
+    fn hazard(&self, x: i32, y: i32, z: i32) -> bool {
+        is_hazard(self.world.get_block(x, y, z))
+    }
+}
+
+/// Whether a block state is one a walking mob must not path onto. Read from
+/// the block registry's `&'static str` name rather than `block_name`, which
+/// allocates a `String` — `hazard` is on the per-node hot path.
+fn is_hazard(state: aether_world::BlockStateId) -> bool {
+    matches!(
+        aether_world::registry::blocks::block_of_state(state).map(|(_, n)| n),
+        Some("minecraft:lava")
+            | Some("minecraft:fire")
+            | Some("minecraft:soul_fire")
+            | Some("minecraft:cactus")
+            | Some("minecraft:magma_block")
+    )
+}
+
+/// Whether cell `w` is one a mob can stand in.
+fn standable_at(world: &DemoWorld, w: [i32; 3]) -> bool {
+    pathfind::standable(&WorldNav { world }, w[0], w[1], w[2])
+}
+
+/// Whether the straight-line fallback may step toward `(dx, dz)` from cell
+/// `from`: some cell directly ahead — same level, one up, or a drop within
+/// [`pathfind::MAX_DROP`] — must be standable. A cached path needs no such
+/// check, because the search already refused those drops and hazards.
+fn can_advance<N: pathfind::Nav + ?Sized>(nav: &N, from: [i32; 3], dx: f64, dz: f64) -> bool {
+    let sx = if dx > 1e-6 {
+        1
+    } else if dx < -1e-6 {
+        -1
+    } else {
+        0
+    };
+    let sz = if dz > 1e-6 {
+        1
+    } else if dz < -1e-6 {
+        -1
+    } else {
+        0
+    };
+    if sx == 0 && sz == 0 {
+        return true;
+    }
+    if pathfind::step(nav, from, sx, sz).is_some() {
+        return true;
+    }
+    if sx != 0 && sz != 0 {
+        // A diagonal may be walled one way but open the other; try each axis.
+        return pathfind::step(nav, from, sx, 0).is_some()
+            || pathfind::step(nav, from, 0, sz).is_some();
+    }
+    false
+}
+
+/// Solve a path from `pos` to a point, charged against the tick budget.
+fn find_path(ctx: &Ctx, pos: Vector3, goal: (f64, f64, f64)) -> Option<Vec<[i32; 3]>> {
+    let remaining = ctx.nav.remaining();
+    if remaining == 0 {
+        return None;
+    }
+    let nav = WorldNav { world: ctx.world };
+    let start = pathfind::resolve_start(
+        &nav,
+        [
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        ],
+    )?;
+    let raw = [
+        goal.0.floor() as i32,
+        goal.1.floor() as i32,
+        goal.2.floor() as i32,
+    ];
+    // The goal is a point, not a node: settle it onto the surface in its own
+    // column so a wander pick on a slope, or a jumping player, is reachable.
+    let target = pathfind::resolve_goal(&nav, raw, GOAL_RESOLVE_DY).unwrap_or(raw);
+    let budget = remaining.min(MAX_PATH_NODES);
+    let result = pathfind::search(&nav, start, target, GOAL_RANGE, budget);
+    ctx.nav.spend(result.expanded);
+    result.reached.then_some(result.path)
+}
+
+/// Follow the cached path toward `goal`, solving a fresh one when it is stale,
+/// blocked or missing. Returns the waypoint to steer for, or `None` to head
+/// straight at `goal`.
+fn follow_path(m: &mut Mob, pos: Vector3, goal: (f64, f64, f64), ctx: &Ctx) -> Option<(f64, f64)> {
+    m.repath = m.repath.saturating_sub(1);
+    // Stale if the goal wandered away, or the path ran out.
+    let moved = m.path_goal.map_or(true, |(px, py, pz)| {
+        (px - goal.0).powi(2) + (py - goal.1).powi(2) + (pz - goal.2).powi(2)
+            > REPATH_DISTANCE * REPATH_DISTANCE
+    });
+    if moved || m.path_at >= m.path.len() {
+        m.path.clear();
+        m.path_at = 0;
+    }
+    // Blocked if the next waypoint is no longer standable.
+    if let Some(w) = m.path.get(m.path_at) {
+        if !standable_at(ctx.world, *w) {
+            m.path.clear();
+            m.path_at = 0;
+        }
+    }
+    if m.path.is_empty() && m.repath == 0 {
+        match find_path(ctx, pos, goal) {
+            Some(path) => {
+                m.path = path;
+                m.path_at = 0;
+                m.path_goal = Some(goal);
+                m.repath = REPATH_COOLDOWN;
+            }
+            None => {
+                m.repath = REPATH_COOLDOWN;
+                // An animal whose pick is unreachable drops it and chooses
+                // again; a hunter keeps straight-line steering as a fallback.
+                if m.target.is_none() {
+                    m.wander = None;
+                }
+                return None;
+            }
+        }
+    }
+    // Advance past waypoints already reached.
+    while m.path_at < m.path.len() {
+        let w = m.path[m.path_at];
+        let (wx, wz) = (w[0] as f64 + 0.5, w[2] as f64 + 0.5);
+        if (wx - pos.x).powi(2) + (wz - pos.z).powi(2) < 0.6 * 0.6 {
+            m.path_at += 1;
+        } else {
+            break;
+        }
+    }
+    if m.path_at >= m.path.len() {
+        m.path.clear();
+        m.path_at = 0;
+        return None;
+    }
+    let w = m.path[m.path_at];
+    Some((w[0] as f64 + 0.5, w[2] as f64 + 0.5))
+}
+
+/// Note this tick's intended vs actual movement. A mob that wants to move but
+/// barely does — a block placed between it and the next waypoint while the
+/// waypoint cell itself stays standable — counts up; after [`STUCK_TICKS`] in
+/// a row the cached path is dropped and the cooldown cleared, so the next
+/// `follow_path` re-solves around the obstruction. Returns whether the path
+/// was thrown away.
+fn note_progress(m: &mut Mob, intended: f64, moved: f64) -> bool {
+    if intended > 0.01 && moved < intended * 0.4 {
+        m.stuck += 1;
+    } else {
+        m.stuck = 0;
+    }
+    if m.stuck >= STUCK_TICKS {
+        m.stuck = 0;
+        if !m.path.is_empty() {
+            m.path.clear();
+            m.path_at = 0;
+            m.repath = 0;
+            return true;
+        }
+    }
+    false
 }
 
 fn yaw_to(dx: f64, dz: f64) -> f32 {
     (-dx).atan2(dz).to_degrees() as f32
-}
-
-fn solid(world: &DemoWorld, x: i32, y: i32, z: i32) -> bool {
-    world.props_of(world.get_block(x, y, z)).collision
 }
 
 fn is_water(world: &DemoWorld, x: i32, y: i32, z: i32) -> bool {
@@ -269,11 +529,6 @@ fn is_water(world: &DemoWorld, x: i32, y: i32, z: i32) -> bool {
 /// Whether nothing but air is above `(x, y, z)` for a good while.
 pub fn sky_above(world: &DemoWorld, x: i32, y: i32, z: i32) -> bool {
     (y..(y + 48).min(384)).all(|yy| world.get_block(x, yy, z) == aether_api::block_ids::AIR)
-}
-
-/// Whether there is ground within three blocks below `(x, y, z)`.
-fn ground_below(world: &DemoWorld, x: i32, y: i32, z: i32) -> bool {
-    (1..=3).any(|d| solid(world, x, y - d, z) || is_water(world, x, y - d, z))
 }
 
 /// Step one mob. Returns `true` when it should be removed.
@@ -381,7 +636,7 @@ pub fn tick(
     }
 
     // Choose where to go.
-    let mut goal: Option<(f64, f64, f64)> = None; // x, z, speed
+    let mut goal: Option<Goal> = None;
     if m.def.hostile {
         let valid = m
             .target
@@ -443,9 +698,19 @@ pub fn tick(
                         m.see_time.min(0) - 1
                     };
                     if dist > 15.0 || !sees {
-                        goal = Some((p.pos.x, p.pos.z, move_speed));
+                        goal = Some(Goal {
+                            x: p.pos.x,
+                            y: p.pos.y,
+                            z: p.pos.z,
+                            speed: move_speed,
+                        });
                     } else if dist < 4.0 {
-                        goal = Some((pos.x - dx, pos.z - dz, move_speed));
+                        goal = Some(Goal {
+                            x: pos.x - dx,
+                            y: pos.y,
+                            z: pos.z - dz,
+                            speed: move_speed,
+                        });
                     }
                     if sees && dist < 15.0 && m.see_time >= 20 && m.attack_cd == 0 {
                         m.attack_cd = SKELETON_INTERVAL;
@@ -489,7 +754,12 @@ pub fn tick(
                                 m.meta_dirty = true;
                             }
                         }
-                        goal = Some((p.pos.x, p.pos.z, move_speed));
+                        goal = Some(Goal {
+                            x: p.pos.x,
+                            y: p.pos.y,
+                            z: p.pos.z,
+                            speed: move_speed,
+                        });
                     }
                     if m.fuse >= 30 {
                         actions.push(Action::Explode {
@@ -500,7 +770,12 @@ pub fn tick(
                     }
                 }
                 _ => {
-                    goal = Some((p.pos.x, p.pos.z, move_speed));
+                    goal = Some(Goal {
+                        x: p.pos.x,
+                        y: p.pos.y,
+                        z: p.pos.z,
+                        speed: move_speed,
+                    });
                     let reach = 1.2 + body_half_width(body);
                     if dist_h < reach && dy.abs() < 2.0 && m.attack_cd == 0 {
                         m.attack_cd = 20;
@@ -549,31 +824,48 @@ pub fn tick(
             if (wx - pos.x).powi(2) + (wz - pos.z).powi(2) < 0.5 {
                 m.wander = None;
             } else {
-                goal = Some((wx, wz, speed));
+                goal = Some(Goal {
+                    x: wx,
+                    y: pos.y,
+                    z: wz,
+                    speed,
+                });
             }
         }
     }
 
-    // Steer.
+    // Whether the mob is at a water surface: there it swims, so the walking
+    // pathfinder and its drop guard do not apply.
+    let height = body_height(body);
+    let feet_wet = is_water(world, bx, (pos.y + 0.1).floor() as i32, bz);
+
+    // Steer. When a path is being followed it supplies the waypoint; the
+    // straight line to the goal is the fallback when no path was found.
     let mut want = (0.0, 0.0);
-    if let Some((gx, gz, speed)) = goal {
-        let (dx, dz) = (gx - pos.x, gz - pos.z);
+    if let Some(g) = &goal {
+        let waypoint = follow_path(m, pos, (g.x, g.y, g.z), ctx);
+        let (tx, tz) = waypoint.unwrap_or((g.x, g.z));
+        let (dx, dz) = (tx - pos.x, tz - pos.z);
         let len = (dx * dx + dz * dz).sqrt();
         if len > 0.3 {
-            want = (dx / len * speed, dz / len * speed);
+            want = (dx / len * g.speed, dz / len * g.speed);
             if m.target.is_none() {
                 *yaw = yaw_to(dx, dz);
                 *pitch = 0.0;
             }
-            // Do not walk off a drop the mob cannot climb back up.
-            let ahead_x = (pos.x + dx / len * 0.8).floor() as i32;
-            let ahead_z = (pos.z + dz / len * 0.8).floor() as i32;
-            if !solid(world, ahead_x, by, ahead_z)
-                && !ground_below(world, ahead_x, by + 1, ahead_z)
-                && m.target.is_none()
+            // Only the straight-line fallback needs the drop guard, and it
+            // applies to every mob: a hostile whose search failed must not
+            // walk off a cliff either. A mob with a path can trust it, since
+            // the search used the same drop limit, and a swimming mob is not
+            // walking at all.
+            if !feet_wet
+                && waypoint.is_none()
+                && !can_advance(&WorldNav { world }, [bx, by, bz], dx, dz)
             {
                 want = (0.0, 0.0);
-                m.wander = None;
+                if m.target.is_none() {
+                    m.wander = None;
+                }
             }
         }
     }
@@ -581,8 +873,6 @@ pub fn tick(
     // pace, the way vanilla's `travel` (drag 0.8, a quarter of gravity) and
     // `FloatGoal` (rise while more than 0.4 deep) settle it. Holding exactly
     // against gravity at the surface, as this did, stood mobs *on* the water.
-    let height = body_height(body);
-    let feet_wet = is_water(world, bx, (pos.y + 0.1).floor() as i32, bz);
     let middle_wet = is_water(world, bx, (pos.y + height * 0.5).floor() as i32, bz);
     let swimming = feet_wet || middle_wet;
     let pace = if swimming { 0.5 } else { 1.0 };
@@ -603,6 +893,9 @@ pub fn tick(
         body.velocity.y = 0.42;
     }
     m.jump = false;
+    // Flowing water carries a swimming mob downstream, on top of its own
+    // steering.
+    crate::game::fluids::push_body(world, body);
     let before = body.feet();
     world.step_body(body);
     let after = body.feet();
@@ -611,6 +904,7 @@ pub fn tick(
     if intended > 0.01 && moved < intended * 0.4 {
         m.jump = true;
     }
+    note_progress(m, intended, moved);
     false
 }
 
@@ -774,6 +1068,7 @@ fn spawn_height(world: &DemoWorld, x: i32, near_y: i32, z: i32) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn every_mob_is_a_real_entity_type() {
@@ -792,5 +1087,102 @@ mod tests {
         // Vanilla: yaw 0 faces +Z, 90 faces -X.
         assert!((yaw_to(0.0, 1.0) - 0.0).abs() < 1e-3);
         assert!((yaw_to(-1.0, 0.0) - 90.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn hazards_are_recognised_from_the_registry() {
+        let h = |n: &str| is_hazard(aether_world::registry::blocks::default_state(n).unwrap());
+        for name in [
+            "minecraft:lava",
+            "minecraft:fire",
+            "minecraft:soul_fire",
+            "minecraft:cactus",
+            "minecraft:magma_block",
+        ] {
+            assert!(h(name), "{name} is a hazard");
+        }
+        for name in ["minecraft:stone", "minecraft:water", "minecraft:air"] {
+            assert!(!h(name), "{name} is not a hazard");
+        }
+    }
+
+    fn mob_with_a_path() -> Mob {
+        let mut m = Mob::new(&ZOMBIE, &mut Rng::new(1));
+        m.path = vec![[1, 64, 0], [2, 64, 0]];
+        m.path_at = 0;
+        m.path_goal = Some((2.5, 64.0, 0.5));
+        m.repath = REPATH_COOLDOWN;
+        m
+    }
+
+    #[test]
+    fn a_wedged_mob_throws_its_path_away() {
+        // A block placed between the mob and its waypoint leaves the waypoint
+        // cell standable, so only the lack of progress can notice.
+        let mut m = mob_with_a_path();
+        for _ in 0..STUCK_TICKS {
+            note_progress(&mut m, 0.1, 0.0);
+        }
+        assert!(m.path.is_empty(), "the wedged path is dropped");
+        assert_eq!(m.repath, 0, "a fresh path may be solved at once");
+    }
+
+    #[test]
+    fn movement_resets_the_stuck_counter() {
+        let mut m = mob_with_a_path();
+        let mut forced = false;
+        for _ in 0..(STUCK_TICKS - 1) {
+            forced |= note_progress(&mut m, 0.1, 0.0);
+        }
+        assert!(!forced, "not yet");
+        // A single tick of real movement clears the count, so it never
+        // false-positives on a mob that is making its way.
+        assert!(!note_progress(&mut m, 0.1, 0.09));
+        assert_eq!(m.stuck, 0);
+        assert!(!m.path.is_empty(), "the path survives a moving mob");
+    }
+
+    /// A plain grid of full cubes, for the fallback guard.
+    struct BlockGrid(HashSet<[i32; 3]>);
+
+    impl BlockGrid {
+        fn new() -> Self {
+            Self(HashSet::new())
+        }
+        fn put(mut self, x: i32, y: i32, z: i32) -> Self {
+            self.0.insert([x, y, z]);
+            self
+        }
+    }
+
+    impl pathfind::Nav for BlockGrid {
+        fn boxes(&self, x: i32, y: i32, z: i32) -> &'static [Box6] {
+            const FULL: [Box6; 1] = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+            const NONE: [Box6; 0] = [];
+            if self.0.contains(&[x, y, z]) {
+                &FULL
+            } else {
+                &NONE
+            }
+        }
+        fn hazard(&self, _x: i32, _y: i32, _z: i32) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn the_fallback_guard_follows_the_pathfinder_drop_limit() {
+        // Floor at y = 0 up to x = 0, then a shelf two lower.
+        let shallow = BlockGrid::new().put(0, 0, 0).put(1, -2, 0);
+        assert!(
+            can_advance(&shallow, [0, 1, 0], 1.0, 0.0),
+            "a two-block drop is within MAX_DROP and must be walked"
+        );
+        // The same, four lower: past MAX_DROP, so the fallback refuses.
+        let deep = BlockGrid::new().put(0, 0, 0).put(1, -4, 0);
+        assert!(
+            !can_advance(&deep, [0, 1, 0], 1.0, 0.0),
+            "a four-block drop must be refused"
+        );
     }
 }

@@ -1,0 +1,26 @@
+# Manifest for the economy plugin (CMD-42). See crates/aether-plugin/src/manifest.rs.
+id = "economy"
+name = "Economy"
+version = "0.1.0"
+api = "0.1"
+entry = "economy.wasm"
+priority = 100
+
+capabilities = ["log", "config", "supports", "storage.kv", "storage.ledger"]
+
+subscribe = ["on-command"]
+
+commands = [
+    "balance",
+    "bal",
+    "money",
+    "pay",
+    "baltop",
+    "eco",
+    "worth",
+    "sell",
+    "buy",
+    "market",
+    "listings",
+    "unlist",
+]

@@ -1,0 +1,13 @@
+# Manifest for the fun/cosmetic plugin (CMD-46). See crates/aether-plugin/src/manifest.rs.
+id = "fun"
+name = "Fun"
+version = "0.1.0"
+api = "0.1"
+entry = "fun.wasm"
+priority = 50
+
+capabilities = ["log", "config", "supports", "storage.kv", "players", "world.read", "world.write"]
+
+subscribe = ["on-command", "before-use-item"]
+
+commands = ["firework", "lightning", "smite", "tree", "bigtree", "book", "powertool", "particles", "pet"]

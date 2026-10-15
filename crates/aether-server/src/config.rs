@@ -115,6 +115,16 @@ impl ServerConfig {
     pub fn per_ip_connection_limit(&self) -> u32 {
         self.max_connections_per_ip
     }
+
+    /// The chunk radius the client and the streamer actually use.
+    ///
+    /// Clamped to `1..=12`. The load accepts any integer, and a `0` would make
+    /// the streamer send a 3×3 area while the visibility search seeded only the
+    /// player's own section — every other section of those columns would be
+    /// masked as stone, invisible walls the client can plainly see.
+    pub fn clamped_view_radius(&self) -> i32 {
+        self.view_radius.clamp(1, 12)
+    }
 }
 
 /// `[resource_pack]` settings.
@@ -188,6 +198,44 @@ impl Default for PluginsConfig {
     }
 }
 
+/// `[visibility]` settings: the optional anti-xray / visibility-culling module.
+///
+/// Off by default. When on, a section the player cannot see is sent as solid
+/// stone (or air) instead of its real blocks, so x-ray mods and transparent
+/// packs see nothing that is not already on screen. See
+/// `docs/design/visibility-culling.md`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct VisibilityConfig {
+    /// Whether to cull at all. Off until proven.
+    pub enabled: bool,
+    /// How far, in blocks, a section may be from the player and still be sent
+    /// for real without being reached by sight — the "could see it if he
+    /// turned his head or took a step" sphere.
+    pub margin_blocks: i32,
+    /// What a hidden section is encoded as.
+    pub hidden_fill: HiddenFill,
+    /// Optional ray refinement — reserved; not implemented.
+    pub ray_refinement: bool,
+    /// Block-level buried-ore masking — reserved; not implemented.
+    pub mask_buried_ores: bool,
+    /// How many columns may be re-sent (revealed) per tick.
+    pub reveal_budget_per_tick: u32,
+}
+
+impl Default for VisibilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            margin_blocks: 5,
+            hidden_fill: HiddenFill::Stone,
+            ray_refinement: false,
+            mask_buried_ores: false,
+            reveal_budget_per_tick: 32,
+        }
+    }
+}
+
 /// `[plugins.<id>]`: what the operator decides about one plugin.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -211,6 +259,18 @@ impl PluginEntry {
     }
 }
 
+/// What a hidden section is filled with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HiddenFill {
+    /// Solid stone, the safe default: collision stays, no void to fall into.
+    #[default]
+    Stone,
+    /// Air. Only safe for a client that is flying or otherwise cannot fall
+    /// through the floor; the design reserves it for spectators.
+    Air,
+}
+
 /// Whole server config.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -219,6 +279,8 @@ pub struct Config {
     pub server: ServerConfig,
     /// Optional resource pack offered on join.
     pub resource_pack: ResourcePackConfig,
+    /// Optional anti-xray / visibility culling.
+    pub visibility: VisibilityConfig,
     /// Optional history mirror.
     pub database: DatabaseConfig,
     /// WebAssembly plugins: the directory and the per-plugin overrides.
@@ -509,6 +571,18 @@ init_fuel = 100000000  # fuel for a plugin's instantiation and init
 dir = "world-cache"     # empty disables the cache
 ttl_hours = 24          # entries older than this are regenerated
 max_entries = 20000     # above this the oldest are swept away, hourly
+
+[visibility]
+# Anti-xray / visibility culling. Off by default until it is proven.
+# A section the player cannot see is sent as solid stone instead of its real
+# blocks, so x-ray mods and transparent resource packs see only stone. See
+# docs/design/visibility-culling.md.
+enabled = false
+margin_blocks = 5        # "could see it if he turned or stepped" sphere, in blocks
+hidden_fill = "stone"    # "stone" (safe) or "air" (spectators/flying only)
+ray_refinement = false   # reserved, not implemented
+mask_buried_ores = false # reserved, not implemented
+reveal_budget_per_tick = 32  # columns re-sent (revealed) per tick, nearest first
 "#;
 
 impl Config {
@@ -570,6 +644,37 @@ mod tests {
         assert_eq!(cfg.server.host, "127.0.0.1");
         assert_eq!(cfg.server.world_dir, "world");
         assert_eq!(cfg.server.autosave_secs, 30);
+    }
+
+    #[test]
+    fn the_view_radius_is_clamped_to_the_range_the_streamer_uses() {
+        // A raw 0 would make the streamer send a 3x3 area while the visibility
+        // search seeded only the player's own section (finding 6).
+        let radius = |v: i32| ServerConfig {
+            view_radius: v,
+            ..ServerConfig::default()
+        };
+        assert_eq!(radius(0).clamped_view_radius(), 1);
+        assert_eq!(radius(-5).clamped_view_radius(), 1);
+        assert_eq!(radius(100).clamped_view_radius(), 12);
+        assert_eq!(radius(8).clamped_view_radius(), 8);
+    }
+
+    #[test]
+    fn visibility_is_off_by_default_and_parses_its_settings() {
+        let cfg = Config::default();
+        assert!(!cfg.visibility.enabled, "the module is opt-in");
+        assert_eq!(cfg.visibility.hidden_fill, HiddenFill::Stone);
+        assert_eq!(cfg.visibility.margin_blocks, 5);
+        assert_eq!(cfg.visibility.reveal_budget_per_tick, 32);
+
+        let cfg: Config = toml::from_str(
+            "[visibility]\nenabled = true\nhidden_fill = \"air\"\nmargin_blocks = 2\n",
+        )
+        .unwrap();
+        assert!(cfg.visibility.enabled);
+        assert_eq!(cfg.visibility.hidden_fill, HiddenFill::Air);
+        assert_eq!(cfg.visibility.margin_blocks, 2);
     }
 
     #[test]

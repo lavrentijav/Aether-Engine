@@ -132,6 +132,9 @@ fn capture(handle: &PlayerHandle, world: &DemoWorld) -> Seen {
         Some(WindowKind::Dispenser { pos }) => {
             vec![(*pos, super::containers::ContainerKind::Dispenser)]
         }
+        Some(WindowKind::BrewingStand { pos }) => {
+            vec![(*pos, super::containers::ContainerKind::BrewingStand)]
+        }
         _ => Vec::new(),
     };
     for ((x, y, z), kind) in containers {
