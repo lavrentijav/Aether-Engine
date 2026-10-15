@@ -23,6 +23,21 @@ fn menu_id(v: &Version, m: Menu) -> i32 {
     }
 }
 
+/// The effect id this version puts on the wire. Protocol 764 (1.20.2) still
+/// numbered effects the way the pre-registry `MobEffect.register` did, with
+/// Speed as 1, so its wire id is the engine's 0-based registry index plus
+/// one; 1.20.3 (765) moved to the 0-based registry index the engine uses
+/// everywhere else. Getting this wrong shifts every effect by one and the
+/// client announces a different potion entirely (1.20.2 showed "Nausea II"
+/// for Regeneration, "Health Boost" for Absorption).
+fn wire_effect_id(v: &Version, effect: u8) -> i32 {
+    if v.gen == Gen::V1_20_2 {
+        effect as i32 + 1
+    } else {
+        effect as i32
+    }
+}
+
 /// Append a stack in this version's slot format.
 pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
     // Before 1.20.5 a slot is a presence flag, an item id and count, then an
@@ -528,7 +543,7 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
         } => {
             let mut p = PacketOut::new(ids.cb_update_mob_effect);
             let flags = (*ambient as u8) | ((*visible as u8) << 1) | ((*show_icon as u8) << 2);
-            p.var_int(*entity_id).var_int(*effect as i32);
+            p.var_int(*entity_id).var_int(wire_effect_id(v, *effect));
             if v.gen < Gen::V1_20_5 {
                 // Pre-1.20.5: the amplifier is a signed byte and the flags
                 // byte is followed by an *optional* factor-data compound,
@@ -543,7 +558,7 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
         }
         ServerEvent::RemoveMobEffect { entity_id, effect } => {
             let mut p = PacketOut::new(ids.cb_remove_mob_effect);
-            p.var_int(*entity_id).var_int(*effect as i32);
+            p.var_int(*entity_id).var_int(wire_effect_id(v, *effect));
             vec![p]
         }
         ServerEvent::UpdateAttributes {
@@ -1539,16 +1554,21 @@ mod tests {
             visible: true,
             show_icon: true,
         };
-        for v in [
-            &crate::protocol::modern::version::V1_20_2,
-            &crate::protocol::modern::version::V1_20_4,
+        for (v, wire_effect) in [
+            (&crate::protocol::modern::version::V1_20_2, 21),
+            (&crate::protocol::modern::version::V1_20_4, 20),
         ] {
             let pkts = encode(v, &ev).unwrap();
             let body = pkts[0].body();
             assert_eq!(body[0] as i32, v.packets.cb_update_mob_effect);
             let mut pin = crate::proto::PacketIn::new(&body[1..]);
             assert_eq!(pin.var_int().unwrap(), 7, "{}", v.name);
-            assert_eq!(pin.var_int().unwrap(), 20, "{}", v.name);
+            assert_eq!(
+                pin.var_int().unwrap(),
+                wire_effect,
+                "{}: 764 uses the legacy 1-based effect id",
+                v.name
+            );
             assert_eq!(pin.u8().unwrap(), 2, "{}: amplifier is an i8", v.name);
             assert_eq!(pin.var_int().unwrap(), 300, "{}", v.name);
             assert_eq!(pin.u8().unwrap(), 0b110, "{}: visible|show_icon", v.name);
@@ -1565,5 +1585,52 @@ mod tests {
         assert_eq!(pin.var_int().unwrap(), 300);
         assert_eq!(pin.u8().unwrap(), 0b110);
         assert!(pin.u8().is_err(), "no factor option from 1.20.5");
+    }
+
+    #[test]
+    fn effect_ids_are_one_based_on_764_and_zero_based_from_765() {
+        // The engine's `effect` field is the 0-based `minecraft:mob_effect`
+        // registry index (`effects::REGENERATION = 9`, `ABSORPTION = 21`).
+        // 1.20.2 still numbered them the legacy way (Speed = 1), so its wire
+        // id is one higher; 1.20.3 and later use the registry index as-is.
+        // The remove packet must agree with the update packet or a client
+        // keeps the effect forever.
+        let update = ServerEvent::UpdateMobEffect {
+            entity_id: 1,
+            effect: 9,
+            amplifier: 1,
+            duration: 100,
+            ambient: false,
+            visible: true,
+            show_icon: true,
+        };
+        let remove = ServerEvent::RemoveMobEffect {
+            entity_id: 1,
+            effect: 9,
+        };
+        let update_id = |v: &crate::protocol::modern::version::Version| {
+            let pkts = encode(v, &update).unwrap();
+            let mut pin = crate::proto::PacketIn::new(pkts[0].body());
+            assert_eq!(pin.var_int().unwrap(), v.packets.cb_update_mob_effect);
+            assert_eq!(pin.var_int().unwrap(), 1);
+            pin.var_int().unwrap()
+        };
+        let remove_id = |v: &crate::protocol::modern::version::Version| {
+            let pkts = encode(v, &remove).unwrap();
+            let mut pin = crate::proto::PacketIn::new(pkts[0].body());
+            assert_eq!(pin.var_int().unwrap(), v.packets.cb_remove_mob_effect);
+            assert_eq!(pin.var_int().unwrap(), 1);
+            pin.var_int().unwrap()
+        };
+        for v in [
+            &crate::protocol::modern::version::V1_20_2,
+            &crate::protocol::modern::version::V1_20_4,
+            &crate::protocol::modern::version::V1_20_5,
+            &crate::protocol::modern::version::V1_21_11,
+        ] {
+            let expected = if v.gen == Gen::V1_20_2 { 10 } else { 9 };
+            assert_eq!(update_id(v), expected, "{} update", v.name);
+            assert_eq!(remove_id(v), expected, "{} remove", v.name);
+        }
     }
 }

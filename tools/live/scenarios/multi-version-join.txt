@@ -1,0 +1,11 @@
+# 9. multi-version-join — scenario 1 run across the default version list.
+wait 22
+send /list
+wait 4
+expect Server was successfully joined
+expect PlayerList: .*_alpha_01
+reject kicked
+reject Disconnected
+reject Connection lost
+reject Cannot connect
+reject not supported

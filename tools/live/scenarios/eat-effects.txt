@@ -1,0 +1,26 @@
+# 5. eat-effects — eat a golden apple in mid-air, get its effects, no disconnect.
+wait 22
+send /gamemode creative
+wait 2
+expect is now in Creative mode
+send /inventory creativegive 36 GoldenApple 1
+wait 2
+expect Requested GoldenApple x1 in slot #36
+send /changeslot 1
+wait 1
+expect Changed to slot 1
+send /tp 0 200 0
+wait 1
+expect Teleported to 0 200 0
+send /look up
+wait 1
+expect Looking Up
+send /useitem
+wait 5
+expect Used an item
+send /effects
+wait 3
+expect Regeneration|Absorption
+reject kicked
+reject Disconnected
+reject Unsupported

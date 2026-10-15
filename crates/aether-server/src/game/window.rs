@@ -157,6 +157,9 @@ impl<'a> Ctx<'a> {
             Layout::Crafting => (0..9).map(Ref::Grid).collect(),
             _ => return,
         };
+        // An ingredient that vanishes here was used by a craft, not eaten or
+        // lost; the scope wrapping the click reads this when it journals.
+        super::provenance::note_destroy_reason(aether_world::journal::DestroyReason::Crafted);
         for r in cells {
             if let Some(mut s) = self.get(r) {
                 let remainder = recipes::remainder(s.item);

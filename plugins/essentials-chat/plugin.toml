@@ -1,0 +1,13 @@
+# Manifest for the essentials-chat plugin (CMD-40). See crates/aether-plugin/src/manifest.rs.
+id = "essentials-chat"
+name = "Essentials Chat"
+version = "0.1.0"
+api = "0.1"
+entry = "essentials-chat.wasm"
+priority = 60
+
+capabilities = ["log", "config", "supports", "players", "storage.kv"]
+
+subscribe = ["before-chat", "on-command"]
+
+commands = ["r", "reply", "mail", "ignore", "socialspy", "broadcast", "motd", "rules"]

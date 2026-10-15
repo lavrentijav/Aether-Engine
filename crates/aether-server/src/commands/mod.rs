@@ -21,6 +21,7 @@
 
 pub mod pager;
 pub mod query;
+pub mod registry;
 
 use aether_api::{JournalActor, Ledger};
 use aether_world::journal::{now_ms, Event, EventBody};
@@ -109,8 +110,51 @@ pub fn dispatch(
         "stash" => crate::stash::open_command(handle, world),
         "audit" => audit(world),
         "cache" => cache(world),
-        _ => usage(),
+        "help" | "?" => help(&args, handle),
+        _ => stub(cmd, handle),
     })
+}
+
+/// `/help [command]` — list the commands that are specified but not implemented yet, or explain one.
+///
+/// This is a stop-gap until the real tree-driven `/help` (CMD-05): it makes the catalogue
+/// discoverable while each command is stubbed with its own `not implemented yet (CMD-nn)`.
+fn help(args: &[&str], handle: &PlayerHandle) -> Reply {
+    if let Some(name) = args.first() {
+        return match registry::find(name) {
+            Some(e) => Reply::one(format!(
+                "/{} — {} (op level {}), planned in {}",
+                e.name, e.node, e.op, e.task
+            )),
+            None => Reply::one(format!(
+                "no entry for `{name}`; /help lists the commands still to come"
+            )),
+        };
+    }
+    let mut lines = registry::help_lines();
+    lines.push(format!(
+        "({} commands pending, {} runnable now)",
+        registry::CORE.len(),
+        if crate::is_operator(handle) {
+            "all"
+        } else {
+            "level-0"
+        }
+    ));
+    Reply(lines)
+}
+
+/// The fallback for a name no dispatcher answered: a known-but-unimplemented command replies with
+/// its task id (and enforces its permission), anything else is usage.
+fn stub(cmd: &str, handle: &PlayerHandle) -> Reply {
+    let Some(e) = registry::find(cmd) else {
+        return usage();
+    };
+    let level = if crate::is_operator(handle) { 4 } else { 0 };
+    if level < e.op {
+        return Reply::one("You do not have permission to run this command.");
+    }
+    Reply::one(format!("/{} is not implemented yet ({})", e.name, e.task))
 }
 
 /// `/cache` — how the generated-column cache is doing.
@@ -226,9 +270,16 @@ fn describe_body(
             short_place(to),
             e.seq
         )),
-        EventBody::ItemDestroy { uid, .. } => {
-            Some(format!("  {ago} item {} destroyed  #{}", uid.0, e.seq))
-        }
+        EventBody::ItemDestroy { uid, reason, .. } => Some(format!(
+            "  {ago} item {} destroyed ({})  #{}",
+            uid.0,
+            reason.name(),
+            e.seq
+        )),
+        EventBody::ItemMerge { into, from, count } => Some(format!(
+            "  {ago} {count}x item {} merged into {}  #{}",
+            from.0, into.0, e.seq
+        )),
         EventBody::ItemDerive {
             item, count, from, ..
         } => Some(format!(
@@ -236,6 +287,12 @@ fn describe_body(
             actor_name(e.actor.0),
             item_name(world, *item),
             from.len(),
+            e.seq
+        )),
+        EventBody::Custom { tag, bytes } => Some(format!(
+            "  {ago} {} custom event tag {tag} ({} bytes)  #{}",
+            actor_name(e.actor.0),
+            bytes.len(),
             e.seq
         )),
     }

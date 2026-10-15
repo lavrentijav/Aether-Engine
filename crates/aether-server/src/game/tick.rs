@@ -492,6 +492,9 @@ fn consume_one(
     if !survival {
         return;
     }
+    // A destroy here is an item being eaten or drunk; the scope that wraps
+    // this tick reads the reason when it journals.
+    super::provenance::note_destroy_reason(aether_world::journal::DestroyReason::Consumed);
     let remainder = if item == crate::inventory::item("minecraft:mushroom_stew")
         || item == crate::inventory::item("minecraft:rabbit_stew")
         || item == crate::inventory::item("minecraft:beetroot_soup")
