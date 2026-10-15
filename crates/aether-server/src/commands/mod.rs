@@ -76,6 +76,9 @@ fn usage() -> Reply {
 /// Passed to the plugin host as its reserved set, so a plugin can never be
 /// handed one of these names even if the dispatch order below ever changed.
 /// Keep it in step with the `match`es that handle commands.
+// Only consulted by the plugin host, which is absent without the `plugins`
+// feature; kept in every build so the list has one home.
+#[allow(dead_code)]
 pub const RESERVED_COMMANDS: &[&str] = &[
     // game
     "gamemode",
