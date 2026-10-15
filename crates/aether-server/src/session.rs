@@ -1582,18 +1582,30 @@ fn resolve_creative_report(
     };
 
     let (resolution, carried) = table.resolve_change(reported, previous, carried);
+    // The server's own cursor is the shadow: keep them the same so a window
+    // resync shows the client the item the server believes it carries. Without
+    // this, a rejected click would resync an *empty* cursor and the client would
+    // silently drop the stack it is carrying, while the shadow still held it —
+    // then the next click would destroy it.
+    {
+        let mut st = handle.game();
+        st.creative_carry = carried;
+        st.cursor = carried.map(|c| crate::inventory::Stack {
+            item: c.item,
+            count: c.count,
+            uid: aether_world::journal::ledger::mint_uid(),
+            damage: 0,
+            potion: None,
+        });
+    }
     match resolution {
         protocol::compat::items::Resolution::Apply(Some((item, count))) => {
-            handle.game().creative_carry = carried;
             Some((Some(item), count))
         }
-        protocol::compat::items::Resolution::Apply(None) => {
-            handle.game().creative_carry = carried;
-            Some((None, 0))
-        }
+        protocol::compat::items::Resolution::Apply(None) => Some((None, 0)),
         protocol::compat::items::Resolution::Reject => {
-            // Keep the shadow as it was (the cursor is untouched) and show the
-            // client the server's view again, reverting its optimistic merge.
+            // Show the client the server's view again (the slot it kept and the
+            // cursor it is really carrying), reverting its optimistic merge.
             handle.sync_inventory(world);
             None
         }

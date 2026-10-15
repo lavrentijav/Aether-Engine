@@ -237,18 +237,24 @@ impl ItemTable {
                             // Refuse; the client reverts on resync.
                             return (Resolution::Reject, carried);
                         }
-                        // Unstackable as shown: the client swapped two
-                        // look-alikes. Both real items survive the swap.
-                        return match placing {
-                            Some(c) => (
-                                Resolution::Apply(Some((c.item, c.count))),
-                                Some(Carried {
-                                    item: p_item,
-                                    count: p_count,
-                                }),
-                            ),
-                            None => (Resolution::Apply(Some((p_item, p_count))), carried),
-                        };
+                        // Unstackable as shown: the client cannot merge two
+                        // stack-to-one look-alikes, so it swapped them. The
+                        // slot takes the placed item — the carried real item if
+                        // the shadow explains the report, else the genuine item
+                        // the wire names — and the **displaced slot stack goes
+                        // to the cursor**, exactly as in the `Some(c)` swap
+                        // below. Shadowing it is essential: without it the
+                        // client's true cursor item is forgotten and a later
+                        // placement converts it (a spear becomes a genuine
+                        // trident). Both real items survive.
+                        let placed = placing.map_or((r_item, r_count), |c| (c.item, c.count));
+                        return (
+                            Resolution::Apply(Some(placed)),
+                            Some(Carried {
+                                item: p_item,
+                                count: p_count,
+                            }),
+                        );
                     }
                 }
 
@@ -299,10 +305,19 @@ impl ItemTable {
                 {
                     return (Resolution::Apply(Some(p)), None);
                 }
-                // The server does not know the client's cursor: `r` is a
-                // conjured genuine item or a swap whose cursor item differs from
-                // the shadow. Either way the slot takes the genuine reported
-                // item and the slot's old item leaves to the cursor (N4).
+                // Same wire but a grown count: a merge the shadow could not
+                // explain (the shadow was stale — a conjured remainder the
+                // server cannot track). The slot absorbs it and the displaced
+                // item is the *same* real item, not a separate stack, so the
+                // server holds no cursor shadow rather than inventing one from
+                // the slot, which would over-count and fabricate.
+                if previous.is_some_and(|(p, _)| self.same_wire(p, r_item)) {
+                    return (Resolution::Apply(Some((r_item, r_count))), None);
+                }
+                // A different wire id: the server does not know the client's
+                // cursor — `r` is a conjured genuine item or a swap. The slot
+                // takes the genuine reported item and the slot's old item leaves
+                // to the cursor (N4).
                 let carry = previous.map(|(item, count)| Carried { item, count });
                 (Resolution::Apply(Some((r_item, r_count))), carry)
             }
@@ -578,8 +593,9 @@ mod tests {
         };
 
         // Genuine items, including ones whose wire id collides with a stand-in
-        // (`oak_planks` with pale_oak_planks, `leather` with a harness), so a
-        // conjured genuine item can meet a seeded look-alike.
+        // (`oak_planks` with pale_oak_planks, `leather` with a harness,
+        // `trident` with the spear), so a conjured genuine item can meet a
+        // seeded look-alike — including an *unstackable* one.
         let menu = [
             id("minecraft:diamond"),
             id("minecraft:stick"),
@@ -587,6 +603,7 @@ mod tests {
             id("minecraft:apple"),
             id("minecraft:oak_planks"),
             id("minecraft:leather"),
+            id("minecraft:trident"),
         ];
         assert_eq!(shown_as(t, harness), Some(id("minecraft:leather")));
 
@@ -605,12 +622,12 @@ mod tests {
         let initial_wire = wire_multi(&client, cursor);
 
         let mut shadow: Option<Carried> = None;
+        // The window cursor the server would send on a resync: the session keeps
+        // `PlayerState::cursor` equal to the shadow, so a resync carries the
+        // shadowed stack. Modelled explicitly so a rejected click's client
+        // cursor is the *packet's* content, not an assumption.
+        let mut server_cursor: Option<(ItemTypeId, u8)> = None;
         let mut rng = seed | 1;
-        // Genuine items the client has conjured but the server has not yet
-        // recorded — placed across later reports. The server's real items may
-        // grow only by spending this credit, and never shrink.
-        let mut conjure_credit: std::collections::BTreeMap<ItemTypeId, u64> =
-            std::collections::BTreeMap::new();
 
         for step in 0..steps {
             let s = (xorshift(&mut rng) as usize) % n;
@@ -666,9 +683,7 @@ mod tests {
                 // would make the server's shadow stale in an untrackable way.
                 8 if allow_creation && cursor.is_none() => {
                     let item = menu[(xorshift(&mut rng) as usize) % menu.len()];
-                    let n = max_of(item) as u64;
-                    *conjure_credit.entry(item).or_insert(0) += n;
-                    cursor = Some((item, n as u8));
+                    cursor = Some((item, max_of(item)));
                 }
                 _ => {}
             }
@@ -686,24 +701,27 @@ mod tests {
                 Resolution::Apply(stack) => {
                     server[s] = stack;
                     shadow = carry;
+                    // The session mirrors the shadow into its cursor.
+                    server_cursor = shadow.map(|c| (c.item, c.count));
                 }
                 Resolution::Reject => {
                     // The server refused the click and resynced the window: the
-                    // client reverts to the server's slots and cursor, so any
-                    // conjured item it was carrying is discarded.
+                    // client reverts to the server's slots and the *cursor the
+                    // resync packet carried* (the shadowed stack, since the
+                    // session keeps its cursor equal to the shadow). The shadow
+                    // is unchanged, so the client keeps the stack it is
+                    // carrying; a conjured item it was carrying is discarded.
                     client = server.clone();
-                    cursor = shadow.map(|c| (c.item, c.count));
-                    conjure_credit.clear();
+                    cursor = server_cursor;
                 }
             }
             let server_after = multiset(&server, shadow.map(|c| (c.item, c.count)));
+            let client_side = multiset(&client, cursor);
 
-            // The core invariant: the server's real items (slots plus its cursor
-            // shadow) never shrink, and grow only by a genuine item the client
-            // conjured (spending its credit). Every move, merge, swap or removal
-            // leaves the real multiset exactly as it was — so a look-alike merge
-            // that converted a pale_oak_planks into an oak_planks (or a harness
-            // into leather) would fail here, and so would any fabricated item.
+            // The server never loses or transmutes a **real** item: every move,
+            // merge, swap or refused click leaves each real item's count the
+            // same or higher. A look-alike merge that converted a pale_oak_planks
+            // into an oak_planks (round 5) would show as a drop here.
             let mut items: Vec<ItemTypeId> = server_before
                 .keys()
                 .chain(server_after.keys())
@@ -719,15 +737,18 @@ mod tests {
                     "step {step}: the server lost {} of {item:?} without a removal",
                     before - after
                 );
-                let growth = after - before;
-                if growth > 0 {
-                    let credit = conjure_credit.get(&item).copied().unwrap_or(0);
-                    assert!(
-                        growth <= credit,
-                        "step {step}: the server gained {growth} of {item:?} with no conjure"
-                    );
-                    *conjure_credit.get_mut(&item).unwrap() -= growth;
-                }
+            }
+            // The server never fabricates an item the client does not have: its
+            // slots-plus-shadow is a sub-multiset of the client's slots-plus-
+            // cursor (they differ only by a conjured genuine item's untrackable
+            // cursor remainder). Any item the server holds that the client does
+            // not is a duplicate it invented.
+            for (item, count) in &server_after {
+                assert!(
+                    client_side.get(item).copied().unwrap_or(0) >= *count,
+                    "step {step}: the server invented {item:?} ({count} vs {})",
+                    client_side.get(item).copied().unwrap_or(0)
+                );
             }
 
             // Every slot holds the same real item and count on both sides.
@@ -1268,6 +1289,38 @@ mod tests {
         let (res, carry) = t.resolve_change(Some((shown, 1)), Some((trident, 1)), held(spear, 1));
         assert_eq!(res, Resolution::Apply(Some((spear, 1))));
         assert_eq!(carry, held(trident, 1));
+    }
+
+    #[test]
+    fn an_unstackable_look_alike_swap_with_an_unknown_cursor_shadows_the_displaced_item() {
+        // Round 7: a genuine trident conjured onto the cursor (no shadow) is
+        // swapped onto a slot that really holds a spear (shown as a trident).
+        // The slot takes the genuine trident and the displaced spear must go to
+        // the cursor — without shadowing it, a later placement of the client's
+        // spear (which the client can only describe as "trident") would be
+        // written as a genuine trident, converting it.
+        let spear = id("minecraft:iron_spear");
+        let trident = id("minecraft:trident");
+        let t = &V1_21_1;
+        let shown = shown_as(t, spear).unwrap();
+
+        // Cursor unknown, slot holds the spear; the client reports a trident.
+        let (res, carry) = t.resolve_change(Some((trident, 1)), Some((spear, 1)), None);
+        assert_eq!(res, Resolution::Apply(Some((trident, 1))));
+        assert_eq!(
+            carry,
+            held(spear, 1),
+            "the spear is displaced to the cursor"
+        );
+
+        // Placing that cursor item into an empty slot keeps it a spear, not a
+        // genuine trident.
+        let (res, _) = t.resolve_change(Some((shown, 1)), None, carry);
+        assert_eq!(
+            res,
+            Resolution::Apply(Some((spear, 1))),
+            "the spear must not become a trident"
+        );
     }
 
     #[test]

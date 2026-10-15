@@ -214,6 +214,34 @@ it fail with "the server gained 53 of oak_planks with no conjure" (the exact
 round-5 transmutation). The model resyncs on reject and conjures onto an empty
 cursor.
 
+## Round-8 fixes (J10-fix17)
+
+Two defects from the round-7 review:
+
+1. **Reject did not resync the cursor.** On `Reject` the session called
+   `sync_inventory`, which sends `PlayerState::cursor`; in creative that was
+   `None`, so the client was told its cursor was empty and silently dropped the
+   stack it carried, while the shadow still held it — the next click destroyed
+   it. `resolve_creative_report` now sets `st.cursor` from the shadow (and keeps
+   it equal to the shadow on every outcome), so the resync shows the client the
+   stack it is really carrying.
+2. **Unstackable `placing == None` arm did not shadow.** A genuine trident
+   conjured onto the cursor and swapped onto a spear slot wrote the trident but
+   left the displaced spear unshadowed, so a later placement of the client's
+   spear (described as "trident") was written as a genuine trident — conversion.
+   The arm now shadows the displaced slot stack like the `Some(c)` arm.
+
+The property test's oracle also exposed a third, related defect: the same-wire
+fall-through shadowed `previous`, over-counting the cursor and fabricating an
+item. A same-wire report the shadow cannot explain is now treated as a merge the
+slot absorbs, with no invented shadow.
+
+The property test now models the resync cursor as the session's `st.cursor`
+(the shadow), adds `trident` to the conjure menu (alongside the seeded
+`iron_spear`), and asserts the server never loses/transmutes a real item and
+never invents one the client does not hold. Reverting either defect-2 change
+fails the focused test and the property test.
+
 ## Left / interface note for the J5 (J9) agent
 
 The per-move logic keys off `compat::items::table_for(handle.codec.protocol_id())`.
