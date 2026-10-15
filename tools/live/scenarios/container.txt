@@ -1,0 +1,51 @@
+# 6. container — place a chest, open it, move an item in, reopen: item persists.
+wait 22
+send /gamemode creative
+wait 2
+expect is now in Creative mode
+send /spawn
+wait 2
+expect Teleported to spawn
+send /inventory creativedelete 36
+wait 1
+expect Requested to clear slot #36
+send /inventory creativedelete 37
+wait 1
+expect Requested to clear slot #37
+send /inventory creativegive 36 Chest 1
+wait 1
+expect Requested Chest x1 in slot #36
+send /inventory creativegive 37 Diamond 1
+wait 2
+expect Requested Diamond x1 in slot #37
+send /changeslot 1
+wait 1
+expect Changed to slot 1
+send /dig -12 70 8
+wait 3
+send /useblock -12 70 8
+wait 2
+expect Useblock at
+send /block -12 70 8
+wait 2
+expect -12 70 8: minecraft:chest
+send /useblock -12 70 8
+wait 3
+expect opened: Chest
+send /inventory container list
+wait 2
+send /inventory player click 37 shift
+wait 3
+expect Done
+send /inventory container list
+wait 2
+expect Diamond
+send /inventory container close
+wait 2
+expect Closing
+send /useblock -12 70 8
+wait 3
+expect opened: Chest
+expect Diamond
+reject unreadable
+reject Disconnected
