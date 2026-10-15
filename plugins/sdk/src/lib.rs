@@ -62,6 +62,17 @@ pub fn registration() -> NativeRegistration {
     }
 }
 
+/// Capability names the SDK service layer gates on.
+///
+/// A dependent asks for these in `plugin.toml` and the operator grants them;
+/// the host records the effective grant and the gate reads it by caller id.
+/// Checking here, in the service implementation, is the single gate — it
+/// applies to native dependents and WASM ones alike, and the host bridge does
+/// not duplicate it.
+const CAP_PERMISSIONS_ADMIN: &str = "permissions.admin";
+const CAP_MESSAGES_SEND: &str = "messages.send";
+const CAP_MESSAGES_BROADCAST: &str = "messages.broadcast";
+
 /// The SDK service host.
 pub struct SdkPlugin {
     commands: Arc<Commands>,
@@ -100,7 +111,11 @@ impl NativePlugin for SdkPlugin {
 
         let commands: Arc<dyn CommandsService> = self.commands.clone();
         sdk::register_commands(ctx.services, commands)?;
-        let permissions: Arc<dyn PermissionsService> = Arc::new(Permissions);
+        // The permission service gates its admin writes itself, reading the
+        // caller's effective capabilities from the host backend — the single
+        // gate, applied to native and WASM callers alike.
+        let permissions: Arc<dyn PermissionsService> =
+            Arc::new(Permissions::new(Arc::clone(ctx.backend)));
         sdk::register_permissions(ctx.services, permissions)?;
         let messages: Arc<dyn MessagesService> = self.messages.clone();
         sdk::register_messages(ctx.services, messages)?;
@@ -247,8 +262,25 @@ fn value_is_valid(kind: ArgKind, value: &str) -> bool {
 ///
 /// The core permission model (CMD-01/02) is not available on this branch, so
 /// every check denies and every write refuses with a clear message. This is the
-/// approved "fail closed until the core lands" behaviour.
-struct Permissions;
+/// approved "fail closed until the core lands" behaviour. The admin write path
+/// is gated on `permissions.admin` here — the one gate, applied by caller id,
+/// so a native dependent is checked too.
+struct Permissions {
+    backend: Arc<dyn HostBackend>,
+}
+
+impl Permissions {
+    fn new(backend: Arc<dyn HostBackend>) -> Permissions {
+        Permissions { backend }
+    }
+
+    fn may(&self, caller: &str, capability: &str) -> bool {
+        self.backend
+            .capabilities(caller)
+            .iter()
+            .any(|c| c == capability)
+    }
+}
 
 impl PermissionsService for Permissions {
     fn check(&self, _caller: &str, _p: &Player, _node: &str) -> bool {
@@ -266,10 +298,20 @@ impl PermissionsService for Permissions {
     fn meta(&self, _caller: &str, _p: &Player, _key: &str) -> Option<String> {
         None
     }
-    fn grant(&self, _c: &str, _s: &str, _n: &str, _v: bool) -> Result<(), String> {
+    fn grant(&self, caller: &str, _s: &str, _n: &str, _v: bool) -> Result<(), String> {
+        if !self.may(caller, CAP_PERMISSIONS_ADMIN) {
+            return Err(format!(
+                "caller `{caller}` lacks the `{CAP_PERMISSIONS_ADMIN}` capability"
+            ));
+        }
         Err("the permission model (CMD-01/02) is not available yet".to_string())
     }
-    fn revoke(&self, _c: &str, _s: &str, _n: &str) -> Result<(), String> {
+    fn revoke(&self, caller: &str, _s: &str, _n: &str) -> Result<(), String> {
+        if !self.may(caller, CAP_PERMISSIONS_ADMIN) {
+            return Err(format!(
+                "caller `{caller}` lacks the `{CAP_PERMISSIONS_ADMIN}` capability"
+            ));
+        }
         Err("the permission model (CMD-01/02) is not available yet".to_string())
     }
 }
@@ -302,6 +344,30 @@ impl Messages {
         let _ = self.backend.set(backend);
     }
 
+    /// Whether `caller` was granted `capability`, read from the host's record
+    /// of effective grants. The one place the message gate is applied.
+    fn may(&self, caller: &str, capability: &str) -> bool {
+        self.backend
+            .get()
+            .map(|b| b.capabilities(caller).iter().any(|c| c == capability))
+            .unwrap_or(false)
+    }
+
+    /// Refuse a send from a caller without `capability`, logging it once.
+    fn deny(&self, caller: &str, capability: &str) -> bool {
+        if self.may(caller, capability) {
+            return false;
+        }
+        if let Some(backend) = self.backend.get() {
+            backend.log(
+                caller,
+                LogLevel::Warn,
+                &format!("lacks `{capability}`; message refused"),
+            );
+        }
+        true
+    }
+
     /// Look up a template and substitute `{name}` placeholders.
     fn translate(&self, key: &str, args: &[(String, String)]) -> String {
         let template = self
@@ -327,30 +393,42 @@ impl Messages {
 
 impl MessagesService for Messages {
     fn send(&self, caller: &str, p: &Player, text: &str) {
+        if self.deny(caller, CAP_MESSAGES_SEND) {
+            return;
+        }
         self.deliver(p, text, caller);
     }
 
     fn send_key(&self, caller: &str, p: &Player, key: &str, args: &[(String, String)]) {
+        if self.deny(caller, CAP_MESSAGES_SEND) {
+            return;
+        }
         let rendered = self.translate(key, args);
         self.deliver(p, &rendered, caller);
     }
 
-    fn actionbar(&self, _caller: &str, _p: &Player, _text: &str) {
-        // Action bars need the player/UI host API (CMD-32), absent here.
+    fn actionbar(&self, caller: &str, _p: &Player, _text: &str) {
+        // Action bars need the player/UI host API (CMD-32), absent here; the
+        // capability is still checked so the gate is uniform.
+        let _ = self.deny(caller, CAP_MESSAGES_SEND);
     }
 
     fn title(
         &self,
-        _caller: &str,
+        caller: &str,
         _p: &Player,
         _title: &str,
         _subtitle: Option<&str>,
         _times: TitleTimes,
     ) {
         // Titles need the player/UI host API (CMD-32), absent here.
+        let _ = self.deny(caller, CAP_MESSAGES_SEND);
     }
 
     fn broadcast(&self, caller: &str, text: &str) {
+        if self.deny(caller, CAP_MESSAGES_BROADCAST) {
+            return;
+        }
         let rendered = colorize(text);
         if let Some(backend) = self.backend.get() {
             backend.broadcast(caller, &rendered);
@@ -708,6 +786,45 @@ mod tests {
     use aether_plugin::ServiceRegistry;
     use std::sync::Mutex as StdMutex;
 
+    /// A backend that grants one caller the given capabilities and nobody else,
+    /// for exercising the service-layer capability gate.
+    struct CapsBackend {
+        caller: String,
+        caps: Vec<String>,
+    }
+
+    impl HostBackend for CapsBackend {
+        fn kv_get(&self, _: &str, _: &str) -> Option<Vec<u8>> {
+            None
+        }
+        fn kv_put(&self, _: &str, _: &str, _: &[u8]) {}
+        fn kv_delete(&self, _: &str, _: &str) {}
+        fn kv_list(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn log(&self, _: &str, _: LogLevel, _: &str) {}
+        fn config(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn supports(&self, _: &str, _: &str) -> bool {
+            false
+        }
+        fn capabilities(&self, plugin: &str) -> Vec<String> {
+            if plugin == self.caller {
+                self.caps.clone()
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    fn caps_backend(caller: &str, caps: &[&str]) -> Arc<dyn HostBackend> {
+        Arc::new(CapsBackend {
+            caller: caller.to_string(),
+            caps: caps.iter().map(|c| (*c).to_string()).collect(),
+        })
+    }
+
     fn spec(name: &str, usage: &str, args: Vec<(&str, ArgKind)>) -> CommandSpec {
         CommandSpec {
             name: name.to_string(),
@@ -920,20 +1037,36 @@ mod tests {
 
     #[test]
     fn the_permission_service_fails_closed() {
-        let p = Permissions;
+        // Even an admin-capable caller is refused while the model is absent.
+        let p = Permissions::new(caps_backend("greet", &[CAP_PERMISSIONS_ADMIN]));
         let player = Player {
             id: 1,
             name: "Steve".to_string(),
             operator: true,
         };
-        assert!(!p.check("x", &player, "essentials.home"));
-        assert!(!p.require("x", &player, "essentials.home"));
-        assert_eq!(p.level("x", &player), 0);
-        assert!(!p.has_level("x", &player, 2));
-        assert!(p.groups("x", &player).is_empty());
-        assert!(p.meta("x", &player, "prefix").is_none());
-        assert!(p.grant("x", "Steve", "n", true).is_err());
-        assert!(p.revoke("x", "Steve", "n").is_err());
+        assert!(!p.check("greet", &player, "essentials.home"));
+        assert!(!p.require("greet", &player, "essentials.home"));
+        assert_eq!(p.level("greet", &player), 0);
+        assert!(!p.has_level("greet", &player, 2));
+        assert!(p.groups("greet", &player).is_empty());
+        assert!(p.meta("greet", &player, "prefix").is_none());
+        // The admin write path is gated on the capability, and fails closed on
+        // the missing model even when it is granted.
+        assert!(p.grant("greet", "Steve", "n", true).is_err());
+        assert!(p.revoke("greet", "Steve", "n").is_err());
+    }
+
+    #[test]
+    fn the_permission_admin_gate_is_applied_in_the_service_layer() {
+        // A caller lacking `permissions.admin` is refused with a capability
+        // reason, before the missing-model reason.
+        let p = Permissions::new(caps_backend("greet", &[]));
+        let err = p.grant("greet", "Steve", "n", true).unwrap_err();
+        assert!(err.contains("permissions.admin"), "{err}");
+        // A caller that has it gets the missing-model reason instead.
+        let p = Permissions::new(caps_backend("greet", &[CAP_PERMISSIONS_ADMIN]));
+        let err = p.grant("greet", "Steve", "n", true).unwrap_err();
+        assert!(err.contains("CMD-01/02"), "{err}");
     }
 
     #[test]
@@ -989,6 +1122,13 @@ mod tests {
             fn send_message(&self, _plugin: &str, player: u64, text: &str) {
                 self.sent.lock().unwrap().push((player, text.to_string()));
             }
+            fn capabilities(&self, plugin: &str) -> Vec<String> {
+                if plugin == "greet" {
+                    vec![CAP_MESSAGES_SEND.to_string()]
+                } else {
+                    Vec::new()
+                }
+            }
         }
         let rec = Arc::new(Rec::default());
         let slot = Arc::new(OnceLock::new());
@@ -1004,6 +1144,9 @@ mod tests {
             rec.sent.lock().unwrap().as_slice(),
             [(7u64, "\u{00a7}aHi".to_string())]
         );
+        // A caller without the capability sends nothing (the gate lives here).
+        messages.send("nobody", &player, "&cblocked");
+        assert_eq!(rec.sent.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -1062,7 +1205,11 @@ mod tests {
         let messages = Arc::new(Messages::new(Arc::clone(&backend)));
         let messages_svc: Arc<dyn MessagesService> = messages.clone();
         sdk::register_commands(&registry, Arc::new(Commands::default())).unwrap();
-        sdk::register_permissions(&registry, Arc::new(Permissions)).unwrap();
+        sdk::register_permissions(
+            &registry,
+            Arc::new(Permissions::new(caps_backend("x", &[]))),
+        )
+        .unwrap();
         sdk::register_messages(&registry, messages_svc).unwrap();
         sdk::register_players(&registry, Arc::new(Players::new(backend))).unwrap();
         sdk::register_scheduler(&registry, Arc::new(Scheduler::new(Arc::clone(&clock)))).unwrap();

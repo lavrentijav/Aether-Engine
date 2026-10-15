@@ -398,10 +398,9 @@ impl bindings::aether::sdk::permissions::Host for StoreData {
     }
 
     fn grant(&mut self, subject: String, node: String, value: bool) -> Result<(), String> {
-        if !self.allowed("permissions.admin") {
-            self.deny("permissions.admin", "permissions.grant");
-            return Err("permissions.admin capability not granted".to_string());
-        }
+        // The capability gate is applied once, in the service implementation
+        // (the SDK plugin), so it also covers native dependents that call the
+        // provider directly. The bridge only forwards.
         match permissions(&self.services) {
             Some(svc) => svc.grant(&self.plugin, &subject, &node, value),
             None => {
@@ -412,10 +411,6 @@ impl bindings::aether::sdk::permissions::Host for StoreData {
     }
 
     fn revoke(&mut self, subject: String, node: String) -> Result<(), String> {
-        if !self.allowed("permissions.admin") {
-            self.deny("permissions.admin", "permissions.revoke");
-            return Err("permissions.admin capability not granted".to_string());
-        }
         match permissions(&self.services) {
             Some(svc) => svc.revoke(&self.plugin, &subject, &node),
             None => {

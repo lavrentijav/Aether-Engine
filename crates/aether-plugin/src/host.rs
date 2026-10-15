@@ -77,6 +77,16 @@ pub trait HostBackend: Send + Sync {
     ) -> std::result::Result<(), String> {
         Ok(())
     }
+
+    /// The capabilities the host granted `plugin` (its effective grant).
+    ///
+    /// The SDK's service layer reads this to gate its own privileged helpers
+    /// (`permissions.admin`, message sends) in **one** place, keyed by the
+    /// caller id, so the gate applies to native dependents as well as WASM
+    /// ones. The default is empty — deny — matching the host's own policy.
+    fn capabilities(&self, _plugin: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Sandbox and scheduling limits for the whole host.

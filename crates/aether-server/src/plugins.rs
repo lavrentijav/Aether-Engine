@@ -62,6 +62,11 @@ mod imp {
         world: Arc<DemoWorld>,
         config: Arc<Config>,
         registry: SharedRegistry,
+        /// Effective capabilities per loaded plugin, filled at load. The SDK's
+        /// service layer reads these to gate its privileged helpers once,
+        /// keyed by caller id, so the gate applies to native and WASM
+        /// dependents alike.
+        granted: Mutex<std::collections::BTreeMap<String, Vec<String>>>,
     }
 
     impl ServerBackend {
@@ -171,6 +176,18 @@ mod imp {
         ) -> Result<(), String> {
             crate::commands::registry::register_plugin(name, plugin, node, op)
         }
+
+        /// The effective capabilities the host granted `plugin`, recorded at
+        /// load. The SDK's service layer uses this as its single capability
+        /// gate.
+        fn capabilities(&self, plugin: &str) -> Vec<String> {
+            self.granted
+                .lock()
+                .unwrap()
+                .get(plugin)
+                .cloned()
+                .unwrap_or_default()
+        }
     }
 
     static HOST: OnceLock<Mutex<PluginHost>> = OnceLock::new();
@@ -184,7 +201,11 @@ mod imp {
             world: Arc::clone(world),
             config: Arc::clone(cfg),
             registry: Arc::clone(registry),
+            granted: Mutex::new(std::collections::BTreeMap::new()),
         });
+        // Kept so each plugin's effective grant can be recorded for the SDK's
+        // capability gate; `host` takes ownership of the other handle.
+        let grant_sink = Arc::clone(&backend);
         let host_config = HostConfig {
             budget_ms: cfg.plugins.budget_ms.max(1),
             tick_budget_ms: cfg.plugins.tick_budget_ms.max(1),
@@ -207,7 +228,7 @@ mod imp {
         // before it loads. The SDK is the only one today; it is a plugin like
         // any other, disabled by `[plugins.sdk] enabled = false`, and a
         // dependent that needs it then refuses to load with a clear error.
-        install_native(&mut host, cfg);
+        install_native(&mut host, cfg, &grant_sink);
         for file in discover(Path::new(&cfg.plugins.dir)) {
             let id = file.manifest.id.clone();
             let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
@@ -218,6 +239,11 @@ mod imp {
             let caps = effective_capabilities(&file.manifest.capabilities, &entry.capabilities);
             match host.add(&file, &caps, &entry.config) {
                 Ok(()) => {
+                    grant_sink
+                        .granted
+                        .lock()
+                        .unwrap()
+                        .insert(id.clone(), caps.clone());
                     // Register the plugin's commands through the command
                     // registry, with the ownership and permission model the
                     // core uses; a core name is refused here, not shadowed.
@@ -265,7 +291,7 @@ mod imp {
     /// reaches the host through the in-process [`PluginHost::add_native`]
     /// rather than a `.wasm` file. Loading it before the on-disk discovery is
     /// what lets a WASM dependent's `requires` be satisfied.
-    fn install_native(host: &mut PluginHost, cfg: &Arc<Config>) {
+    fn install_native(host: &mut PluginHost, cfg: &Arc<Config>, grant_sink: &Arc<ServerBackend>) {
         let registration = aether_sdk_plugin::registration();
         let id = registration.manifest.id.clone();
         let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
@@ -282,7 +308,14 @@ mod imp {
         // service method still checks its *caller's* capabilities.
         let caps = effective_capabilities(&file.manifest.capabilities, &entry.capabilities);
         match host.add_native(&file, &caps, &entry.config, (registration.new)()) {
-            Ok(()) => crate::log::info(&format!("plugin     : {id} (native SDK)")),
+            Ok(()) => {
+                grant_sink
+                    .granted
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), caps.clone());
+                crate::log::info(&format!("plugin     : {id} (native SDK)"));
+            }
             Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
         }
     }
