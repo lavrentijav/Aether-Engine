@@ -220,7 +220,7 @@ impl ProtocolCodec for Codec {
             .var_int(0) // portal cooldown
             .var_int(63); // sea level
         if v.gen >= Gen::V26_2 {
-            login.bool(false); // 26.2: not in online mode
+            login.bool(p.online); // 26.2: whether the player authenticated
         }
         login.bool(false); // does not enforce secure chat
         login.send(s)?;
@@ -305,9 +305,19 @@ impl ProtocolCodec for Codec {
                 p.u8(0x01 | 0x08) // add_player | update_listed
                     .var_int(1) // one entry
                     .uuid(h.uuid)
-                    .string(&h.name)
-                    .var_int(0) // no profile properties
-                    .bool(true); // listed
+                    .string(&h.name);
+                // Skin and cape properties from Mojang. Empty for an offline
+                // login, which is what this used to always send.
+                p.var_int(h.properties.len() as i32);
+                for prop in &h.properties {
+                    p.string(&prop.name)
+                        .string(&prop.value)
+                        .bool(prop.signature.is_some());
+                    if let Some(sig) = &prop.signature {
+                        p.string(sig);
+                    }
+                }
+                p.bool(true); // listed
                 vec![p]
             }
             ServerEvent::TabListRemove(uuid) => {

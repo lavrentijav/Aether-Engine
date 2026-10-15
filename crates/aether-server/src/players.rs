@@ -42,6 +42,9 @@ pub struct PlayerHandle {
     pub name: String,
     /// The address the client connected from.
     pub ip: Option<std::net::IpAddr>,
+    /// Skin/cape properties from Mojang, empty for an offline login. Sent in
+    /// the tab list so other clients render the right skin.
+    pub properties: Vec<crate::auth::api::Property>,
     /// The wire dialect this particular client speaks.
     pub codec: &'static dyn ProtocolCodec,
     outbox: Arc<Outbox>,
@@ -249,6 +252,7 @@ impl Registry {
         uuid: u128,
         name: String,
         ip: Option<std::net::IpAddr>,
+        properties: Vec<crate::auth::api::Property>,
         codec: &'static dyn ProtocolCodec,
         stream: &Conn,
         pos: PosLook,
@@ -263,6 +267,7 @@ impl Registry {
             uuid,
             name,
             ip,
+            properties,
             codec,
             outbox,
             pos: Mutex::new(pos),

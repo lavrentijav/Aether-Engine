@@ -97,6 +97,14 @@ pub fn run() -> std::process::ExitCode {
         );
     }
 
+    // Online-mode key and HTTP client, before the world opens: a hybrid
+    // server that cannot reach Mojang must say so at startup, not refuse
+    // every premium login later. Offline is a no-op here.
+    if let Err(e) = auth::install(&cfg.auth) {
+        return fail(&format!("auth error: {e}"));
+    }
+    log::info(&format!("auth       : {:?}", cfg.auth.mode));
+
     let store = match FjallStore::open(&cfg.server.world_dir) {
         Ok(s) => s,
         Err(e) => {

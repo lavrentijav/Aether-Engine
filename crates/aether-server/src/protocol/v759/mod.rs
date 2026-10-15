@@ -108,6 +108,13 @@ impl ProtocolCodec for Codec {
         Ok(Some(PacketIn::new(&p.data).string()?))
     }
 
+    fn encryption_request_has_should_authenticate(&self) -> bool {
+        // 1.19 and 1.19.2 only: the Encryption Request carries this boolean,
+        // and the Encryption Response carries salt and a message signature
+        // after the shared secret and token, which the login path ignores.
+        true
+    }
+
     fn complete_login(&self, s: &mut Conn, p: &JoinParams) -> io::Result<()> {
         // Login Success: UUID as 16 raw bytes, username, empty property list.
         PacketOut::new(0x02)

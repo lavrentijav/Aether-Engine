@@ -16,9 +16,67 @@
 
 pub mod api;
 pub mod crypto;
+pub mod policy;
 pub mod store;
 
+pub use policy::Admission;
 pub use store::Lock;
+
+use std::sync::OnceLock;
+
+/// The server's RSA keypair, generated once at startup.
+static SERVER_KEY: OnceLock<crypto::ServerKey> = OnceLock::new();
+/// The Mojang client, built once at startup.
+static API: OnceLock<Box<dyn api::ProfileApi>> = OnceLock::new();
+/// The name-lookup cache, shared by every connection.
+static CACHE: OnceLock<api::LookupCache> = OnceLock::new();
+
+/// Build the key, HTTP client and cache for online or hybrid mode.
+///
+/// A no-op under [`AuthMode::Offline`](crate::config::AuthMode::Offline),
+/// so an offline server never generates a key or opens a socket to Mojang.
+/// Called at startup; a failure to build the HTTP client stops the server,
+/// because hybrid mode that cannot reach Mojang would refuse every premium
+/// name.
+pub fn install(cfg: &crate::config::AuthConfig) -> Result<(), String> {
+    use crate::config::AuthMode;
+    if cfg.mode == AuthMode::Offline {
+        return Ok(());
+    }
+    let key = crypto::ServerKey::generate();
+    let timeout = std::time::Duration::from_millis(cfg.lookup_timeout_ms.max(1));
+    let api = api::MojangApi::new(&cfg.session_server, &cfg.profile_api, timeout)
+        .map_err(|e| format!("cannot build the Mojang HTTP client: {e:?}"))?;
+    let _ = SERVER_KEY.set(key);
+    let _ = API.set(Box::new(api));
+    let _ = CACHE.set(api::LookupCache::new());
+    Ok(())
+}
+
+/// Resolve a login for the session layer, using the installed key/API/cache.
+///
+/// `store` is the world's lock table.
+pub fn authenticate(
+    s: &mut crate::proto::Conn,
+    codec: &dyn crate::protocol::ProtocolCodec,
+    cfg: &crate::config::AuthConfig,
+    store: &dyn store::MetaStore,
+    name: &str,
+    ip: Option<std::net::IpAddr>,
+) -> std::io::Result<Admission> {
+    use crate::config::AuthMode;
+    if cfg.mode == AuthMode::Offline {
+        return Ok(Admission::Offline);
+    }
+    let (Some(key), Some(api), Some(cache)) = (SERVER_KEY.get(), API.get(), CACHE.get()) else {
+        // Startup installs these; reaching here means a wiring bug, and
+        // admitting anyone would silently drop the policy.
+        return Ok(Admission::Refused(
+            "Authentication is not initialised on this server.".into(),
+        ));
+    };
+    policy::authenticate(s, codec, cfg, store, key, api.as_ref(), cache, name, ip)
+}
 
 /// A shared RSA key for tests.
 ///

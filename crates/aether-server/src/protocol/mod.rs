@@ -641,6 +641,12 @@ pub struct JoinParams {
     pub resource_pack: crate::config::ResourcePackConfig,
     /// The mode the player joins in.
     pub game_mode: GameMode,
+    /// Whether the player authenticated with Mojang. Carried into the 26.2+
+    /// play Login packet's `online_mode` field.
+    pub online: bool,
+    /// Skin and cape properties from the session server, if any. Empty for an
+    /// offline login.
+    pub properties: Vec<crate::auth::api::Property>,
 }
 
 /// Which game mode the server runs.
@@ -712,6 +718,14 @@ pub trait ProtocolCodec: Sync + Send {
     /// Read the client's login request and return the username it asked for.
     /// `None` means the client sent something else and the connection is over.
     fn read_login_start(&self, s: &mut Conn) -> io::Result<Option<String>>;
+
+    /// Whether this version's clientbound Encryption Request ends with the
+    /// `should_authenticate` boolean that 1.19 and 1.19.2 added (and 1.19.3
+    /// removed). The Encryption Request and Response ids are `0x01` in every
+    /// version this server speaks, so only the extra field is version-gated.
+    fn encryption_request_has_should_authenticate(&self) -> bool {
+        false
+    }
 
     /// Acknowledge the login and drive the client all the way into the play
     /// state — for modern versions that includes the whole configuration

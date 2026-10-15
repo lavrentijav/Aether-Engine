@@ -156,16 +156,34 @@ fn login_and_play(
     next_eid: &AtomicI32,
     registry: &SharedRegistry,
 ) -> io::Result<()> {
-    let Some(name) = codec.read_login_start(s)? else {
+    let Some(claimed) = codec.read_login_start(s)? else {
         return Ok(());
     };
-    if !cfg.may_join(&name) {
+    if !cfg.may_join(&claimed) {
         crate::log::info(&format!(
-            "[x] {name} refused: not on the whitelist ({})",
+            "[x] {claimed} refused: not on the whitelist ({})",
             ip.map(|i| i.to_string()).unwrap_or_default()
         ));
         return protocol::kick_login(s, "You are not on this server's whitelist.");
     }
+    // Online/hybrid authentication, before compression is enabled: the
+    // encryption handshake runs in the uncompressed login state, and Set
+    // Compression must come *after* the encryption switch or the client reads
+    // the compressed frame as ciphertext.
+    let (name, uuid_override, properties, authenticated) =
+        match crate::auth::authenticate(s, codec, &cfg.auth, world, &claimed, ip)? {
+            crate::auth::Admission::Offline => (claimed, None, Vec::new(), false),
+            crate::auth::Admission::Online(profile) => {
+                (profile.name, Some(profile.uuid), profile.properties, true)
+            }
+            crate::auth::Admission::Refused(reason) => {
+                crate::log::info(&format!(
+                    "[x] {claimed} refused: {reason} ({})",
+                    ip.map(|i| i.to_string()).unwrap_or_default()
+                ));
+                return protocol::kick_login(s, &reason);
+            }
+        };
     // Between Login Start and Login Success, and nowhere else: every version
     // this server speaks takes Set Compression at login id 0x03, so the switch
     // belongs here rather than repeated in nineteen codecs. Both directions
@@ -177,6 +195,11 @@ fn login_and_play(
     let eid = next_eid.fetch_add(1, Ordering::Relaxed);
     let world_spawn = world_spawn(world);
     let mut player = Player::spawn(eid, name.clone(), world_spawn);
+    // An authenticated player keeps their Mojang uuid — inventory, ops and
+    // journal all key on it.
+    if let Some(uuid) = uuid_override {
+        player.uuid = uuid;
+    }
     // The same player logging in again — a client that reconnected before
     // the server noticed the old connection die — replaces the old session,
     // as in vanilla. Its thread saves the player on the way out; wait for
@@ -271,15 +294,18 @@ fn login_and_play(
         max_players: cfg.server.max_players,
         view_radius: cfg.server.clamped_view_radius(),
         resource_pack: cfg.resource_pack.clone(),
+        online: authenticated,
+        properties: properties.clone(),
     };
 
     codec.complete_login(s, &params)?;
     crate::log::info(&format!(
-        "[+] {} joined (eid {}, {} via {}, from {})",
+        "[+] {} joined (eid {}, {} via {}, {} auth, from {})",
         player.name,
         eid,
         player.uuid_hyphenated(),
         codec.version_name(),
+        if authenticated { "online" } else { "offline" },
         ip.map(|i| i.to_string()).unwrap_or_else(|| "?".into())
     ));
 
@@ -366,7 +392,16 @@ fn login_and_play(
         pitch: player.pitch,
         on_ground: false,
     };
-    let handle = registry.join(eid, player.uuid, player.name.clone(), ip, codec, &*s, pos)?;
+    let handle = registry.join(
+        eid,
+        player.uuid,
+        player.name.clone(),
+        ip,
+        properties,
+        codec,
+        &*s,
+        pos,
+    )?;
     // Seed the visibility bookkeeping with the masked first burst: what the
     // client holds, and the reachable set those masks came from, so the reveal
     // planner never re-sends a column it already sent and never forgets one it

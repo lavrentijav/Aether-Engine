@@ -537,6 +537,7 @@ mod tests {
                 0x1234,
                 "tester".into(),
                 None,
+                Vec::new(),
                 &Codec,
                 &client,
                 PosLook {
