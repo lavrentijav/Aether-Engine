@@ -165,36 +165,53 @@ fn decode(b: &[u8]) -> Option<Container> {
     Some(c)
 }
 
-/// Load the container at `pos` from the world, or a fresh empty one of `kind`.
+/// Load the container at `pos` from the world, or create it on first access.
 ///
-/// A chest is *not* seeded here: vanilla fills a generated chest only when a
-/// player opens it, and miners must not find loot by breaking one. See
-/// [`seed_generated_chest`].
+/// A chest with no saved state that the journal has never touched is a
+/// naturally generated one (a dungeon or igloo chest); it is filled from its
+/// loot table *on this first access* — vanilla unpacks a chest's `LootTable`
+/// block entity on the first `getItem`/`removeItem`/`isEmpty`, whether that
+/// comes from a player opening it, a hopper drawing from it, or the block
+/// being broken. Doing it here, at the single point every path funnels
+/// through, is what keeps a stale in-memory entry from ever holding an
+/// unseeded generated chest (the bug where a hopper's first touch voided the
+/// loot). A player's own chest is journalled, so it is never reseeded.
 fn load(world: &DemoWorld, pos: Pos, kind: ContainerKind) -> Container {
-    world
+    load_with(world, pos, kind, super::loot::LootTables::global())
+}
+
+fn load_with(
+    world: &DemoWorld,
+    pos: Pos,
+    kind: ContainerKind,
+    tables: &super::loot::LootTables,
+) -> Container {
+    if let Some(c) = world
         .get_meta(&key(pos))
         .ok()
         .flatten()
         .and_then(|b| decode(&b))
         .filter(|c| c.kind == kind)
-        .unwrap_or_else(|| Container::new(kind))
-}
-
-/// Fill a naturally generated chest from its loot table on the first player
-/// open, the way vanilla unpacks a chest's `LootTable` block entity. A no-op
-/// for an already-saved chest (a player's, or one already opened).
-pub fn seed_generated_chest(world: &DemoWorld, pos: Pos, seed: u64) {
-    if world.get_meta(&key(pos)).ok().flatten().is_some() {
-        return;
+    {
+        return c;
     }
-    let mut c = Container::new(ContainerKind::Chest);
-    let Some(filled) = super::loot::seed_generated_chest(world, pos, seed, c.slots.len()) else {
-        return;
-    };
-    for (slot, stack) in filled {
-        c.slots[slot] = Some(Stack::named(&stack.item, stack.count));
+    let mut c = Container::new(kind);
+    if kind == ContainerKind::Chest {
+        if let Some(id) = super::loot::generated_chest_table(world, pos) {
+            if let Some(filled) = super::loot::generated_chest_loot(
+                tables,
+                id,
+                crate::seed(),
+                pos,
+                c.slots.len(),
+            ) {
+                for (slot, stack) in filled {
+                    c.slots[slot] = Some(Stack::named(&stack.item, stack.count));
+                }
+            }
+        }
     }
-    let _ = world.put_meta(&key(pos), &encode(&c));
+    c
 }
 
 /// Run `f` over the container at `pos`, loading or creating it as `kind`.
@@ -586,5 +603,66 @@ mod tests {
         let mut dst = vec![None];
         assert!(transfer_one(&mut src, &mut dst));
         assert_eq!(dst[0].as_ref().unwrap().uid, uid);
+    }
+
+    /// A generated chest is filled on the *first* access, whichever path
+    /// reaches `load` — a hopper's first touch no longer leaves the cache (and
+    /// meta) holding an empty chest that the player then sees and re-encodes.
+    /// A chest the journal has seen (a player's) is never seeded.
+    #[test]
+    fn a_generated_chest_seeds_on_first_access_not_a_player_chest() {
+        let Ok(root) = std::env::var("AETHER_VANILLA_PACK") else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let tables = crate::game::loot::LootTables::open(&root);
+        let world = test_world(7);
+        let (x, y, z) = (4, 70, 4);
+
+        // A dungeon chest: a chest with a spawner beside it, journal-untouched
+        // (as the generator writes it).
+        world.set_block(x, y, z, "minecraft:chest");
+        world.set_block(x + 1, y, z, "minecraft:spawner");
+
+        // The "first access" — as `move_one`/`with` would do it.
+        let first = load_with(&world, (x, y, z), ContainerKind::Chest, &tables);
+        assert!(
+            first.slots.iter().any(|s| s.is_some()),
+            "a generated chest must be seeded on first access"
+        );
+        // A later access re-derives the same loot, so nothing is voided.
+        let second = load_with(&world, (x, y, z), ContainerKind::Chest, &tables);
+        let shape = |c: &Container| -> Vec<Option<(aether_world::ItemTypeId, u8)>> {
+            c.slots.iter().map(|s| s.as_ref().map(|s| (s.item, s.count))).collect()
+        };
+        assert_eq!(shape(&first), shape(&second));
+
+        // A player's chest is journalled, so it is not seeded even beside a
+        // spawner.
+        let (px, pz) = (40, 40);
+        let (id, props) = world.intern_block("minecraft:chest");
+        world.set_block_by(aether_world::journal::ActorId(1), px, y, pz, id, props);
+        world.set_block(px + 1, y, pz, "minecraft:spawner");
+        let player_chest = load_with(&world, (px, y, pz), ContainerKind::Chest, &tables);
+        assert!(
+            player_chest.slots.iter().all(|s| s.is_none()),
+            "a player chest must not be looted"
+        );
+    }
+
+    /// A throwaway world on a temp store, for the container tests.
+    fn test_world(seed: u64) -> DemoWorld {
+        use aether_api::{FjallStore, World};
+        let dir = std::env::temp_dir().join(format!("aether-u1-ctr-{}-{seed}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FjallStore::open(&dir).expect("temp store");
+        let generator = crate::worldgen::Generator::load("", "", seed).expect("noise generator");
+        let revision = generator.revision();
+        let cfg = crate::gencache::CacheConfig {
+            root: String::new(),
+            ..Default::default()
+        };
+        let generator = crate::gencache::Cached::with_revision(generator, seed, revision, &cfg);
+        World::new(store, generator)
     }
 }

@@ -1128,19 +1128,6 @@ pub fn generated_chest_loot(
     Some(out)
 }
 
-/// Roll the loot a freshly generated chest at `pos` should start with, and
-/// where in its `slots` each stack goes. `None` when the position is not a
-/// generated chest or no pack is configured.
-pub fn seed_generated_chest(
-    world: &DemoWorld,
-    pos: (i32, i32, i32),
-    seed: u64,
-    slots: usize,
-) -> Option<Vec<(usize, LootStack)>> {
-    let id = generated_chest_table(world, pos)?;
-    generated_chest_loot(LootTables::global(), id, seed, pos, slots)
-}
-
 // --- parsing ---------------------------------------------------------------
 
 /// Record a construct the parser skipped, once per unique `kind:type`.

@@ -244,12 +244,6 @@ pub fn use_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i3
             let (left, right) = crate::placement::chest_halves(state, x, y, z, &|nx, ny, nz| {
                 world.get_block(nx, ny, nz)
             });
-            // A generated dungeon/igloo chest is filled on first open, not on
-            // break or when a hopper touches it.
-            super::containers::seed_generated_chest(world, left, crate::seed());
-            if let Some(r) = right {
-                super::containers::seed_generated_chest(world, r, crate::seed());
-            }
             window::open(handle, world, WindowKind::Chest { left, right });
             return true;
         }
