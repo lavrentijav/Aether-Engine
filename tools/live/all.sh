@@ -36,6 +36,17 @@ for scen in "${SCENARIOS[@]}"; do
     done
 done
 
+# The auth scenario is login-layer, not gameplay, so it runs once after the
+# matrix (it waits out the server's login-rate window itself).
+AUTH_OUT="$(bash "$HERE/auth.sh" "${VERSIONS[0]}" 2>&1)"
+AUTH_RC=$?
+echo
+echo "$AUTH_OUT"
+AUTH_FAILS=0
+if [ "$AUTH_RC" -ne 0 ]; then
+    AUTH_FAILS=1
+fi
+
 {
     echo "# V1 live run"
     echo
@@ -78,11 +89,18 @@ done
         echo '```'
     done
     fi
+
+    echo
+    echo "## Auth (AU1 hybrid, ${VERSIONS[0]})"
+    echo
+    echo '```'
+    echo "$AUTH_OUT"
+    echo '```'
 } > "$OUT_MD"
 
 echo
 echo "Wrote $OUT_MD"
-if [ "${#FAIL_LINES[@]}" -eq 0 ]; then
+if [ "${#FAIL_LINES[@]}" -eq 0 ] && [ "$AUTH_FAILS" -eq 0 ]; then
     exit 0
 fi
 exit 1

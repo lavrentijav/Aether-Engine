@@ -5,6 +5,12 @@
 #   InventoryHandling   = true   -> /inventory /changeslot /useitem
 #   EntityHandling      = true   -> entities
 #
+# [ChatBot.AutoRelog] is on (1 s delay, network interruptions only): under AU1
+# hybrid auth `_alpha_01` is a premium name, so a fresh offline attempt is
+# offered Mojang encryption, dropped, and admitted offline on the reconnect
+# (the server's same-address fallback). Without AutoRelog the first connection
+# of every scenario fails. See auth.sh / last-run.md.
+#
 # send <cmd>  — a line starting with '/' goes to the server; unknown server
 #               commands are forwarded, so use "/send /help" for server help.
 # wait <secs> — sleep before the next step.
@@ -38,3 +44,9 @@
 # journal-upgrade.txt checks /inspect and /lookup against entries written before
 # and after a server upgrade (old v3 journal + new v4). pg-check.sh (separate,
 # read-only) checks the PostgreSQL aether_events_named view for a session.
+#
+# auth.sh (separate, login-layer) checks AU1 hybrid admission with a raw login
+# probe: invalid names refused, the per-IP login rate limit and its recovery,
+# and that offline play / `_alpha_01` still get in. It is not an MCC scenario
+# because an offline client cannot answer the encryption offer, and the rate
+# limit needs logins much faster than an MCC process can start.
