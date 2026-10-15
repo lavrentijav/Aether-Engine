@@ -16,7 +16,7 @@
 //! | furnace         | 0 input, 1 fuel, 2 output, 3–29 main, 30–38 hotbar       |
 
 use super::containers::{self, ContainerKind};
-use super::player::{Drag, OpenWindow, PlayerState, WindowKind};
+use super::player::{Drag, MenuShape, OpenWindow, PlayerState, WindowKind};
 use super::recipes;
 use super::tables;
 use crate::inventory::{Inventory, Stack};
@@ -689,6 +689,35 @@ fn layout_of(w: &OpenWindow) -> (Layout, Option<ContainerTarget>) {
             Layout::BrewingStand,
             Some(ContainerTarget::Single(ContainerKind::BrewingStand, *pos)),
         ),
+        // A menu never reaches `layout_of`: `click` intercepts it first.
+        WindowKind::Menu { .. } => (Layout::Chest, None),
+    }
+}
+
+/// The menu id of a window kind, if it is a virtual menu. Pure, so the click
+/// router can be tested without a player.
+fn open_menu_id_kind(kind: &WindowKind) -> Option<u64> {
+    match kind {
+        WindowKind::Menu { menu, .. } => Some(*menu),
+        _ => None,
+    }
+}
+
+/// The id of the menu window this player has open, if the open window is a
+/// virtual menu. Locks the player state only long enough to read it.
+pub fn open_menu_id(handle: &PlayerHandle) -> Option<u64> {
+    handle
+        .game()
+        .window
+        .as_ref()
+        .and_then(|w| open_menu_id_kind(&w.kind))
+}
+
+/// The menu slots this player is currently shown, for a plugin updating one.
+pub fn menu_slots(handle: &PlayerHandle) -> Option<(u64, MenuShape, Vec<Option<Stack>>)> {
+    match handle.game().window.as_ref().map(|w| &w.kind) {
+        Some(WindowKind::Menu { menu, shape, slots }) => Some((*menu, *shape, slots.clone())),
+        _ => None,
     }
 }
 
@@ -701,6 +730,19 @@ pub fn click(
     button: i8,
     mode: i32,
 ) {
+    // A virtual menu is read-only from the inventory's point of view: **no**
+    // click — left, right, shift, number-key swap, offhand, drop, double-click
+    // collect or creative middle-click — may move a stack, because the slots
+    // are stand-ins for actions, not items. The click is handed to the plugin
+    // that owns the menu, and the client is resynced so any local prediction
+    // (a client-side peek at the item, a shift-click animation) is reverted.
+    if window != 0 {
+        if let Some(menu) = open_menu_id(handle) {
+            crate::plugins::menu_click(handle, menu, slot as i32, button, mode);
+            sync_open(handle, world);
+            return;
+        }
+    }
     let mut crafted: Vec<(aether_world::ItemTypeId, u8)> = Vec::new();
     let drops = {
         let mut st = handle.game();
@@ -1021,6 +1063,14 @@ fn open_window_slots(st: &PlayerState, inv: &Inventory, world: &DemoWorld) -> Op
             v.append(&mut player_part);
             (w.id, v, props)
         }
+        WindowKind::Menu { slots, .. } => {
+            // The menu's own slots, then the player's inventory below. The
+            // player's rows are shown (as in vanilla) but a click on them is
+            // still intercepted, so they are read-only too.
+            let mut v = slots.clone();
+            v.append(&mut player_part);
+            (w.id, v, Vec::new())
+        }
     })
 }
 
@@ -1105,6 +1155,7 @@ pub fn open(handle: &PlayerHandle, world: &DemoWorld, kind: WindowKind) {
             WindowKind::Hopper { .. } => (Menu::Hopper, "Hopper"),
             WindowKind::Dispenser { .. } => (Menu::Dispenser, "Dispenser"),
             WindowKind::BrewingStand { .. } => (Menu::BrewingStand, "Brewing Stand"),
+            WindowKind::Menu { shape, .. } => (shape.menu(), shape.default_title()),
         };
         st.window = Some(OpenWindow { id, kind });
         (id, menu, title)
@@ -1120,11 +1171,131 @@ pub fn open(handle: &PlayerHandle, world: &DemoWorld, kind: WindowKind) {
     sync_open(handle, world);
 }
 
+/// Fit `slots` to a shape's slot count: pad with empty slots, drop any past
+/// the end. A plugin that sends the wrong number must still get a coherent
+/// window, not a client desync.
+fn fit_menu_slots(shape: MenuShape, mut slots: Vec<Option<Stack>>) -> Vec<Option<Stack>> {
+    slots.truncate(shape.slot_count());
+    slots.resize(shape.slot_count(), None);
+    slots
+}
+
+/// Open a **virtual menu** for a plugin: a window whose slots are stand-ins
+/// for actions, never items. Every click on it is intercepted (see [`click`])
+/// and handed to the plugin that owns `menu`; nothing reaches the player's
+/// real inventory.
+pub fn open_menu(
+    handle: &PlayerHandle,
+    world: &DemoWorld,
+    menu: u64,
+    shape: MenuShape,
+    title: &str,
+    slots: Vec<Option<Stack>>,
+) {
+    let slots = fit_menu_slots(shape, slots);
+    let (id, proto_menu) = {
+        let mut st = handle.game();
+        let id = st.next_window_id();
+        st.drag = None;
+        st.window = Some(OpenWindow {
+            id,
+            kind: WindowKind::Menu { menu, shape, slots },
+        });
+        (id, shape.menu())
+    };
+    handle.emit(
+        &ServerEvent::OpenWindow {
+            window_id: id,
+            menu: proto_menu,
+            title: title.to_owned(),
+        },
+        world,
+    );
+    sync_open(handle, world);
+}
+
+/// Replace one menu slot and resend the window. `false` if the player has no
+/// menu open (a stale plugin update must not resurrect a closed window).
+/// Updating a single slot still resends the whole window: a menu is small and
+/// a partial update is one more thing the client can disagree about.
+pub fn set_menu_slot(
+    handle: &PlayerHandle,
+    world: &DemoWorld,
+    index: usize,
+    stack: Option<Stack>,
+) -> bool {
+    let changed = {
+        let mut st = handle.game();
+        match &mut st.window {
+            Some(OpenWindow {
+                kind: WindowKind::Menu { slots, .. },
+                ..
+            }) => {
+                if index < slots.len() {
+                    slots[index] = stack;
+                    true
+                } else {
+                    return true; // a menu is open, just a bad index
+                }
+            }
+            _ => false,
+        }
+    };
+    if changed {
+        sync_open(handle, world);
+    }
+    changed
+}
+
+/// Close the menu `menu` if it is the one this player has open. A click on a
+/// menu that was already closed (a race, a resync) is ignored, never applied
+/// to whatever window took its place.
+pub fn close_menu(handle: &PlayerHandle, world: &DemoWorld, menu: u64) -> bool {
+    let id = {
+        let mut st = handle.game();
+        match st.window.as_ref() {
+            Some(OpenWindow {
+                kind: WindowKind::Menu { menu: m, .. },
+                ..
+            }) if *m == menu => st.window.take().map(|w| w.id),
+            _ => None,
+        }
+    };
+    match id {
+        Some(id) => {
+            handle.emit(&ServerEvent::CloseWindow(id), world);
+            sync(handle, world);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The window id of the menu `menu` if the player has it open.
+pub fn menu_window_id(handle: &PlayerHandle, menu: u64) -> Option<u8> {
+    match handle.game().window.as_ref() {
+        Some(OpenWindow {
+            id,
+            kind: WindowKind::Menu { menu: m, .. },
+        }) if *m == menu => Some(*id),
+        _ => None,
+    }
+}
+
 /// The client closed whatever it had open: hand back the crafting grid and
 /// the cursor.
 pub fn close(handle: &PlayerHandle, world: &DemoWorld) {
-    let leftovers = {
+    let (leftovers, menu) = {
         let mut st = handle.game();
+        // Tell the plugin that owns the menu it was closed — but only after
+        // the state lock is released, since the callback may open another menu.
+        let menu = match st.window.as_ref() {
+            Some(OpenWindow {
+                kind: WindowKind::Menu { menu, .. },
+                ..
+            }) => Some(*menu),
+            _ => None,
+        };
         let mut back: Vec<Stack> = Vec::new();
         if let Some(OpenWindow {
             kind: WindowKind::Crafting { grid },
@@ -1143,12 +1314,17 @@ pub fn close(handle: &PlayerHandle, world: &DemoWorld) {
                 back.push(s);
             }
         }
-        back.into_iter()
+        let leftovers = back
+            .into_iter()
             .filter_map(|s| inv.insert(s))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (leftovers, menu)
     };
     for s in leftovers {
         super::entities::throw_from(handle, s);
+    }
+    if let Some(menu) = menu {
+        crate::plugins::menu_close(handle, menu);
     }
     sync(handle, world);
 }
@@ -1384,6 +1560,116 @@ mod tests {
             c.click(40, 0, 0, &mut drag);
             assert_eq!(c.cursor.as_ref().map(|s| s.count), Some(5));
             assert!(c.cont.as_ref().unwrap()[40].is_none());
+        }
+    }
+
+    /// A throwaway world on a temp store, for the menu tests.
+    fn test_world(seed: u64) -> DemoWorld {
+        use aether_api::{FjallStore, World};
+        let dir = std::env::temp_dir().join(format!("aether-mn1-{}-{seed}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FjallStore::open(&dir).expect("temp store");
+        let generator = crate::worldgen::Generator::load("", "", seed).expect("noise generator");
+        let revision = generator.revision();
+        let cfg = crate::gencache::CacheConfig {
+            root: String::new(),
+            ..Default::default()
+        };
+        let generator = crate::gencache::Cached::with_revision(generator, seed, revision, &cfg);
+        World::new(store, generator)
+    }
+
+    fn menu_state(shape: MenuShape, menu: u64, slots: Vec<Option<Stack>>) -> PlayerState {
+        let mut st = PlayerState::new(crate::protocol::GameMode::Survival);
+        st.window = Some(OpenWindow {
+            id: 7,
+            kind: WindowKind::Menu {
+                menu,
+                shape,
+                slots: fit_menu_slots(shape, slots),
+            },
+        });
+        st
+    }
+
+    #[test]
+    fn fitting_menu_slots_pads_and_truncates_to_the_shape() {
+        // A two-slot menu on a 3-row chest is padded to 27; a 100-slot one is
+        // trimmed. A plugin that miscounts must still get a coherent window.
+        let short = fit_menu_slots(
+            MenuShape::Chest3,
+            vec![Some(Stack::named("minecraft:stone", 1))],
+        );
+        assert_eq!(short.len(), 27);
+        assert!(short[0].is_some());
+        assert!(short[1..].iter().all(Option::is_none));
+
+        let long = fit_menu_slots(MenuShape::Hopper, vec![None; 100]);
+        assert_eq!(long.len(), 5);
+    }
+
+    #[test]
+    fn a_menu_window_shows_its_slots_then_the_player_rows() {
+        let world = test_world(11);
+        let mut inv = Inventory::new();
+        inv.put_slot(9, Some(Stack::named("minecraft:diamond", 3)));
+        let menu_items = vec![
+            Some(Stack::named("minecraft:emerald_block", 1)),
+            None,
+            Some(Stack::named("minecraft:barrier", 1)),
+        ];
+        let st = menu_state(MenuShape::Chest3, 42, menu_items);
+        let (id, slots, props) = open_window_slots(&st, &inv, &world).expect("menu window");
+        assert_eq!(id, 7);
+        assert!(props.is_empty());
+        // 27 menu slots, then the player's 36. The item is where the menu put
+        // it and the player's diamond shows in the inventory rows below.
+        assert_eq!(slots.len(), 27 + 36);
+        assert_eq!(
+            slots[0].as_ref().map(|s| s.item),
+            Some(crate::inventory::item("minecraft:emerald_block"))
+        );
+        assert!(slots[1].is_none());
+        assert_eq!(
+            slots[27].as_ref().map(|s| s.item),
+            Some(crate::inventory::item("minecraft:diamond"))
+        );
+    }
+
+    #[test]
+    fn only_a_menu_window_routes_clicks_to_a_menu() {
+        // The click router keys on the window kind alone; every click on a
+        // menu is delivered to the plugin, and no container window ever is.
+        assert_eq!(
+            open_menu_id_kind(&WindowKind::Menu {
+                menu: 9,
+                shape: MenuShape::Chest6,
+                slots: vec![],
+            }),
+            Some(9)
+        );
+        assert_eq!(
+            open_menu_id_kind(&WindowKind::Chest {
+                left: (0, 0, 0),
+                right: None,
+            }),
+            None
+        );
+        assert_eq!(
+            open_menu_id_kind(&WindowKind::Hopper { pos: (0, 0, 0) }),
+            None
+        );
+    }
+
+    #[test]
+    fn a_menu_slot_count_matches_every_shape() {
+        for (shape, n) in [
+            (MenuShape::Chest3, 27),
+            (MenuShape::Chest6, 54),
+            (MenuShape::Dispenser, 9),
+            (MenuShape::Hopper, 5),
+        ] {
+            assert_eq!(shape.slot_count(), n, "{shape:?}");
         }
     }
 }

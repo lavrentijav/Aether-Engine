@@ -1345,6 +1345,60 @@ impl PluginHost {
         })
     }
 
+    /// A click on a virtual menu window, delivered to every **native** plugin.
+    ///
+    /// There is no manifest subscription and no WASM path: a menu click is a
+    /// private channel between the core and the native plugin that opened the
+    /// window (in practice the menus service host). It is not an event other
+    /// plugins observe, so it cannot be cancelled and is never counted against
+    /// the event budget it is not part of.
+    pub fn menu_click(&mut self, p: &Player, menu: u64, slot: i32, button: i8, mode: i32) {
+        let services = Arc::clone(&self.services);
+        let backend = Arc::clone(&self.backend);
+        for i in 0..self.plugins.len() {
+            if self.plugins[i].disabled {
+                continue;
+            }
+            let id = self.plugins[i].manifest.id.clone();
+            let capabilities = self.plugins[i].capabilities.clone();
+            let config = self.plugins[i].config.clone();
+            if let Kind::Native(n) = &mut self.plugins[i].kind {
+                let mut ctx = NativeContext {
+                    id: &id,
+                    capabilities: &capabilities,
+                    config: &config,
+                    services: &services,
+                    backend: &backend,
+                };
+                n.on_menu_click(&mut ctx, p, menu, slot, button, mode);
+            }
+        }
+    }
+
+    /// A player closed a virtual menu window: tell every native plugin.
+    pub fn menu_close(&mut self, p: &Player, menu: u64) {
+        let services = Arc::clone(&self.services);
+        let backend = Arc::clone(&self.backend);
+        for i in 0..self.plugins.len() {
+            if self.plugins[i].disabled {
+                continue;
+            }
+            let id = self.plugins[i].manifest.id.clone();
+            let capabilities = self.plugins[i].capabilities.clone();
+            let config = self.plugins[i].config.clone();
+            if let Kind::Native(n) = &mut self.plugins[i].kind {
+                let mut ctx = NativeContext {
+                    id: &id,
+                    capabilities: &capabilities,
+                    config: &config,
+                    services: &services,
+                    backend: &backend,
+                };
+                n.on_menu_close(&mut ctx, p, menu);
+            }
+        }
+    }
+
     // --- after-* -------------------------------------------------------
 
     /// `after-player-join`.

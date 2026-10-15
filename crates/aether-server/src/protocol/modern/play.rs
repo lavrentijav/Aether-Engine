@@ -57,7 +57,17 @@ pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
             // in the `minecraft:potion_contents` component; a worn tool
             // carries its damage. Both are components added to the default set.
             let potion = potion_contents(s);
-            let added = (s.damage > 0) as i32 + potion.is_some() as i32;
+            // A plugin menu item shows a name and lore that the real item does
+            // not. They are two more components on top of damage and potion;
+            // `glint` and `model` are carried in the model but not yet written
+            // (the generator has no ids for them — see KNOWN_ISSUES).
+            let display = s.display.as_deref();
+            let name = display.and_then(|d| d.name.as_deref());
+            let lore: &[String] = display.map(|d| d.lore.as_slice()).unwrap_or(&[]);
+            let added = (s.damage > 0) as i32
+                + potion.is_some() as i32
+                + name.is_some() as i32
+                + !lore.is_empty() as i32;
             p.var_int(s.count as i32)
                 .var_int(w.id)
                 .var_int(added)
@@ -67,6 +77,16 @@ pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
             }
             if let Some(potion) = potion {
                 write_potion_contents(v, p, potion);
+            }
+            if let Some(name) = name {
+                p.var_int(v.component_custom_name)
+                    .bytes(&crate::protocol::nbt::string(name).to_network());
+            }
+            if !lore.is_empty() {
+                p.var_int(v.component_lore).var_int(lore.len() as i32);
+                for line in lore {
+                    p.bytes(&crate::protocol::nbt::string(line).to_network());
+                }
             }
         }
         // A stand-in for a *different* item (the compat layer's substitution,
@@ -192,6 +212,22 @@ fn write_legacy_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
                 ("Lore", Nbt::List(vec![Nbt::Str(json_text(&marker))])),
             ]),
         ));
+    } else if let Some(d) = s.display.as_deref() {
+        // A plugin menu item on a pre-1.20.5 client: the name and lore ride in
+        // the NBT `display` tag rather than the data components.
+        let mut display: Vec<(String, Nbt)> = Vec::new();
+        if let Some(name) = &d.name {
+            display.push(("Name".to_owned(), Nbt::Str(json_text(name))));
+        }
+        if !d.lore.is_empty() {
+            display.push((
+                "Lore".to_owned(),
+                Nbt::List(d.lore.iter().map(|l| Nbt::Str(json_text(l))).collect()),
+            ));
+        }
+        if !display.is_empty() {
+            fields.push(("display".to_owned(), Nbt::Compound(display)));
+        }
     }
     if fields.is_empty() {
         p.u8(0); // no NBT: a lone TAG_End

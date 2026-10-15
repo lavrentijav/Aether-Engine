@@ -39,6 +39,66 @@ pub enum WindowKind {
     Dispenser { pos: (i32, i32, i32) },
     /// A brewing stand at a position.
     BrewingStand { pos: (i32, i32, i32) },
+    /// A **server-invented** menu a plugin opened. Its slots are virtual:
+    /// every click is intercepted and routed to the plugin, and none of them
+    /// ever moves a stack into or out of the player's real inventory. The
+    /// `menu` id is the plugin's handle for it; `slots` is what the client is
+    /// shown.
+    Menu {
+        /// The plugin-assigned menu instance id, for routing clicks.
+        menu: u64,
+        /// The window shape, which decides the menu registry id and slot count.
+        shape: MenuShape,
+        /// The window's own slots (never the player's), `shape.slot_count()` of
+        /// them.
+        slots: Vec<Option<Stack>>,
+    },
+}
+
+/// The protocol window a virtual menu draws as. Only the shapes whose menu
+/// registry id the generated tables carry are offered; a menu that wants a
+/// different size picks the nearest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuShape {
+    /// A single chest, 27 slots (3 rows).
+    Chest3,
+    /// A double chest, 54 slots (6 rows).
+    Chest6,
+    /// A dispenser/dropper, 9 slots (a 3×3 grid).
+    Dispenser,
+    /// A hopper, 5 slots.
+    Hopper,
+}
+
+impl MenuShape {
+    /// How many menu slots the window has.
+    pub fn slot_count(self) -> usize {
+        match self {
+            MenuShape::Chest3 => 27,
+            MenuShape::Chest6 => 54,
+            MenuShape::Dispenser => 9,
+            MenuShape::Hopper => 5,
+        }
+    }
+
+    /// The protocol menu registry entry to open it with.
+    pub fn menu(self) -> crate::protocol::Menu {
+        match self {
+            MenuShape::Chest3 => crate::protocol::Menu::Chest,
+            MenuShape::Chest6 => crate::protocol::Menu::LargeChest,
+            MenuShape::Dispenser => crate::protocol::Menu::Dispenser,
+            MenuShape::Hopper => crate::protocol::Menu::Hopper,
+        }
+    }
+
+    /// The default title, for a menu that gives none.
+    pub fn default_title(self) -> &'static str {
+        match self {
+            MenuShape::Chest3 | MenuShape::Chest6 => "Menu",
+            MenuShape::Dispenser => "Dispenser",
+            MenuShape::Hopper => "Hopper",
+        }
+    }
 }
 
 /// A drag in progress (click mode 5).

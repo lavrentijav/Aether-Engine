@@ -53,6 +53,25 @@ pub const OFFHAND: usize = 45;
 pub const STACK: u8 = 64;
 
 /// One stack in one slot.
+/// Client-side presentation overrides for a **virtual** menu item.
+///
+/// Real stacks a player carries never have one; a plugin menu draws its
+/// buttons with a name and lore the real item does not carry. These are
+/// rendering hints only — they are not persisted (see [`encode`]) and never
+/// affect what an item *is*: a menu item is a stand-in for an action, not an
+/// item the player owns.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ItemDisplay {
+    /// The `minecraft:custom_name` text, if any.
+    pub name: Option<String>,
+    /// `minecraft:lore` lines, in order.
+    pub lore: Vec<String>,
+    /// The `minecraft:enchantment_glint_override` flag.
+    pub glint: bool,
+    /// The `minecraft:custom_model_data` id.
+    pub model: Option<i32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stack {
     /// The item type, an index into the world's item registry — two bytes
@@ -69,6 +88,8 @@ pub struct Stack {
     /// `minecraft:potion_contents` data component on the wire, which is what
     /// tells the client which potion it is.
     pub potion: Option<u16>,
+    /// Display overrides for a plugin menu item; `None` for a real stack.
+    pub display: Option<Box<ItemDisplay>>,
 }
 
 impl Stack {
@@ -80,7 +101,34 @@ impl Stack {
             uid: mint_uid(),
             damage: 0,
             potion: None,
+            display: None,
         }
+    }
+
+    /// A stack presented with a name, lore, glint and model id, for a plugin
+    /// menu item. The stack itself is real (it decides the icon); the display
+    /// is what the client draws. Never entered into a real inventory.
+    pub fn menu_item(
+        item: ItemTypeId,
+        count: u8,
+        name: Option<String>,
+        lore: Vec<String>,
+        glint: bool,
+        model: Option<i32>,
+    ) -> Self {
+        let mut s = Self::new(item, count);
+        s.display = Some(Box::new(ItemDisplay {
+            name,
+            lore,
+            glint,
+            model,
+        }));
+        s
+    }
+
+    /// Whether this stack is a display-only menu item.
+    pub fn is_menu_item(&self) -> bool {
+        self.display.is_some()
     }
 
     /// [`Stack::new`] from a canonical item name, for the game's own literals.
@@ -127,6 +175,7 @@ impl Stack {
             uid: mint_uid(),
             damage: self.damage,
             potion: self.potion,
+            display: self.display.clone(),
         }
     }
 }
@@ -568,6 +617,9 @@ pub fn decode(blob: &[u8]) -> Option<Inventory> {
                 uid: ItemUid(uid),
                 damage,
                 potion,
+                // Display overrides are a menu's, never a saved inventory's:
+                // a persisted stack is something the player really holds.
+                display: None,
             });
         }
     }

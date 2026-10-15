@@ -435,6 +435,20 @@ mod imp {
         })
     }
 
+    /// A click on a virtual menu: delivered to the native plugins (the menus
+    /// service host). The core has already guaranteed the click cannot move an
+    /// item, so this only dispatches.
+    pub fn menu_click(handle: &PlayerHandle, menu: u64, slot: i32, button: i8, mode: i32) {
+        with((), |h| {
+            h.menu_click(&player(handle), menu, slot, button, mode)
+        });
+    }
+
+    /// A virtual menu was closed; tell the plugin that owns it.
+    pub fn menu_close(handle: &PlayerHandle, menu: u64) {
+        with((), |h| h.menu_close(&player(handle), menu));
+    }
+
     pub fn after_player_join(handle: &PlayerHandle) {
         with((), |h| h.after_player_join(&player(handle)));
     }
@@ -588,6 +602,8 @@ mod imp {
     pub fn before_container_click(_h: &PlayerHandle, _w: u32, _s: i32) -> Option<String> {
         None
     }
+    pub fn menu_click(_h: &PlayerHandle, _menu: u64, _slot: i32, _button: i8, _mode: i32) {}
+    pub fn menu_close(_h: &PlayerHandle, _menu: u64) {}
     pub fn after_player_join(_h: &PlayerHandle) {}
     pub fn after_player_leave(_h: &PlayerHandle) {}
     pub fn after_entity_death(_e: u64, _k: Option<u64>) {}
