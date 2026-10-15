@@ -290,26 +290,40 @@ lands once, in CMD-01/02; the SDK only fronts it.
 Every stub registers commands; WorldEdit and essentials-* register a dozen.
 
 ```rust
-sdk.commands.register(
-    CommandSpec::new("home")
-        .perm("essentials.home")
-        .usage("/home [name]")
-        .arg(Arg::word("name").optional().suggest_static(&["home", "base"]))
-        .sub(CommandSpec::new("set").arg(Arg::word("name")))
-)?;
+// A dependent constructs the WIT record directly — there is no method-chaining
+// builder (see the note below). Roots and subcommands are both `command-spec`s;
+// a subcommand names its `parent`.
+commands::register(&commands::CommandSpec {
+    name: "home".into(),
+    parent: None,
+    permission: Some("essentials.home".into()),
+    op: 0,
+    usage: "/home [name]".into(),
+    description: String::new(),
+    args: vec![commands::Arg { name: "name".into(), kind: commands::ArgKind::Word,
+                              required: false, choices: vec!["home".into()], help: String::new() }],
+})?;
+commands::register(&commands::CommandSpec { name: "set".into(), parent: Some("home".into()), .. })?;
 ```
 
-The builder type (`CommandSpec`) is constructed by pure sugar in the thin client; `register` is the
-service call that validates the spec (name, usage, permission node, op level, **static**
-completions) and registers it in the **core command registry** through the host backend
-(`HostBackend::register_command` → `commands::registry::register_plugin`). The ownership rule
-applies there: a core name (implemented or a CMD0 stub) is refused, so an SDK command is dispatched
-and permission-checked by the core's single gate (`commands::permitted`, node + op level), never as
-a side path around it. Dispatch still enters the dependent's frozen `on-command` export; the thin
-client's generated dispatch calls `commands.parse(name, args)` (one call) and then the handler, so
-permission and usage stay uniform across plugins. The dependent still lists its command names in
-`plugin.toml` (`commands = [...]`) so the host's router calls its `on-command`; the SDK spec is the
-richer form. Subcommands are nested specs.
+`commands.register` is the service call that validates the spec (name, usage, permission node, op
+level, **static** completions) and registers a **root** spec in the **core command registry**
+through the host backend (`HostBackend::register_command` → `commands::registry::register_plugin`).
+The ownership rule applies there: a core name (implemented or a CMD0 stub) is refused, so an SDK
+command is dispatched and permission-checked by the core's single gate (`commands::permitted`, node
++ op level), never as a side path around it. Dispatch still enters the dependent's frozen
+`on-command` export; the handler calls `commands.resolve(name, args)` (one call) to pick a
+subcommand and get the parsed arguments. A **subcommand** (a spec with `parent` set) is stored
+under its parent and is never registered as a top-level command — the core routes the parent to the
+plugin and `resolve` selects the subcommand by its first argument. The dependent lists its root
+command names in `plugin.toml` (`commands = [...]`) so the host's router calls its `on-command`.
+
+**Why there is no builder.** A Rust builder/method-chain in `crates/aether-plugin-sdk` would
+return the thin crate's own generated `CommandSpec`, which is a *different Rust type* from the
+`CommandSpec` the dependent's in-crate `wit-bindgen` generation defines (the cross-crate export
+limitation in §11) — so the builder's output could not be passed to the dependent's
+`commands::register`. The record is therefore constructed directly, as above. A macro builder that
+expands to the caller's own type is possible later; it is not worth the complexity now.
 
 **Dynamic tab-completion is the one helper that cannot fit `@0.1.0`.** The host drives completion
 from its tree, so the guest must answer a new callback (`on-complete`) or `command-result` must grow
@@ -366,8 +380,9 @@ sched().cancel(id);
 ```
 
 This is the clearest justification for a native plugin: the SDK owns one shared timer wheel, keyed
-by (dependent id, timer id), drained once per tick from the SDK's own `on-tick`. An idle wheel is
-O(1); a due batch is O(due). A dependent's timers are dropped when it is disabled or unloaded.
+by (dependent id, timer id), advanced once per tick from the SDK's own `on-tick`. It is a binary
+min-heap keyed by due tick: an idle tick is a single `peek` — O(1), never a scan of live timers —
+and a due batch is O(due · log n). A dependent's timers are dropped when it is disabled or unloaded.
 **Async** (blocking work delivered back on the tick) is native-only for the *dependent*: the SDK can
 schedule the result, but the work itself is the dependent's. Network work belongs to PA3, not PS1.
 
@@ -404,7 +419,7 @@ done once in `init` and cached; a call is one service call.
 | native dependent → SDK service | 0 | direct `Arc<dyn SdkService>` call on the tick thread; no serialization, no lock on the query path |
 | WASM dependent → SDK service | **1** | guest → host WIT import; host reads caller id and calls the native provider in-process; primitives/short strings copied once each way |
 | service resolution (`init` / load) | 0 | registry hash lookup, once |
-| SDK `on-tick` drain | 0 | one walk of the shared timer wheel; O(1) when idle, O(due) otherwise |
+| SDK `on-tick` drain | 0 | one `peek` of the timer min-heap; O(1) when idle, O(due · log n) otherwise |
 | `config.changed()` | 1 | compares a revision integer returned by the host |
 | `cooldowns.ready` | 1 | map lookup + subtraction; no allocation |
 
@@ -419,36 +434,56 @@ case, so a heavy plugin cannot stall the tick regardless.
 
 Contents, and nothing more:
 
-- `wit/` — the `aether:sdk@0.1` package and the `dependent` world, vendored from the host's copy so
-  they cannot drift.
-- `src/lib.rs` — `wit_bindgen::generate!({ world: "dependent", path: "wit" })` with the standard
-  `pub use` surface.
-- `src/prelude.rs` — ergonomic re-exports: `permissions()`, `commands()`, `messages()`, `players()`,
-  `config()`, `scheduler()`, `cooldowns()`, `confirm()`, `services()` — thin newtype handles over the
-  generated resources with no behaviour beyond forwarding.
+- `wit/dependent.wit` — the `dependent` world: the frozen `aether:plugin@0.1.0` world plus imports
+  of the SDK service interfaces. The `aether:sdk@0.1` package itself is read from the host's own
+  copy by relative path (`../aether-plugin/wit-sdk`) rather than vendored, so the two cannot drift.
+- `src/lib.rs` — a `bindings` module with `wit_bindgen::generate!({ world: "aether:sdk-client/dependent", generate_all, pub_export_macro: true, path: [...] })`, and a `prelude` module that
+  re-exports the generated service modules (`commands`, `messages`, …), the shared event types and
+  `export!`.
 - `requires!` — a macro that emits the `REQUIRES` constant from the same service list the manifest
-  uses, so the two cannot drift. (The design's `export_plugin!` was not built: `wit-bindgen` 0.57
-  cannot export a world from a separate bindings crate, so a dependent generates its bindings
-  in-crate and `export!` itself — see §11.)
+  uses, as a reminder of the dependency. It is **not** enforced: the host reads `requires` from
+  `plugin.toml`, not from this constant, so the two are kept in sync by the author (a macro cannot
+  write the manifest).
+
+**Why there are no typed `permissions()`/`commands()` resource handles.** The `aether:sdk@0.1`
+functions are stateless: the host injects the caller id, there is no resource to own, and the
+generated service *modules* (`aether::sdk::permissions::check(...)`) already namespace the calls.
+Wrapping them in zero-state handle objects would add a layer with no behaviour. The design's
+`prelude.rs` file listing was aspirational; the prelude is a small module rather than a file of
+handles.
+
+**Why a dependent generates its own bindings.** `wit-bindgen` 0.57 cannot *export* a world from a
+separate bindings crate, so a dependent runs `generate!` against the shipped `dependent` world
+in-crate and calls the crate's `export!` (§11). The WASM example `plugins/examples/greet` shows the
+pattern.
 
 Explicitly **not** in the crate: formatting, parsing, registries, schedulers, cooldowns,
 translation, config typing, or any state. Those are the native plugin's, reached over the boundary.
 
 ## 10. Testing
 
-- **Native SDK plugin unit tests**: the stateful services (timer wheel, cooldowns, confirmations,
-  command parse, colour/translation) run in-process against a mock core (permissions resolver,
-  player registry). This is where the bulk of the logic is tested.
-- **Service interface tests**: a fixture WASM plugin that calls each service; the host test asserts
-  forwarding, caller-id injection, capability refusal and neutral values — extending
-  `crates/aether-plugin/tests/plugin_host.rs`.
-- **Load-time dependency tests**: a dependent with `requires = ["sdk@0.1"]` fails to load with the
-  documented error when the SDK is disabled, and loads when it is enabled; a non-dependent loads
-  either way.
-- **Frozen-world regression**: `tests/wit_world.rs` keeps pinning the `@0.1.0` export set, and the
-  checked-in `hello.wasm` must still load after the SDK imports are added. Extend the pin to the
-  host's *import* interface names, so an accidental breaking import change is caught.
-- **Allocation/cost tests** for the hot-path helpers.
+The testing plan as implemented (some items are deliberately deferred, marked below):
+
+- **Native SDK plugin unit tests** — implemented in `plugins/sdk/src/lib.rs`: command
+  register/parse/resolve and subcommands, colour/translation, the message and `permissions.admin`
+  capability gates, the service-layer `require`, the binary-heap scheduler (ordering, cancel,
+  ownership, repeats, idle), cooldowns, and confirmations.
+- **Service interface tests** — `crates/aether-plugin/tests/sdk_bridge.rs` loads the checked-in
+  `greet.wasm` (a real `wasm32-wasip2` component) and drives it through the host linker to mock
+  providers, asserting caller-id injection and forwarding of `commands.register` and
+  `messages.send`, plus the load refusal when the SDK is absent. A capability-refusal test for the
+  bridge and a neutral-value/"unavailable" test are covered by the plugin's service-layer unit
+  tests instead (the bridge itself no longer gates).
+- **Real SDK end to end** — a native `plugins/sdk` integration test registers the real `SdkPlugin`
+  against a host and drives a `greet` call through it with the caller's capabilities granted.
+- **Load-time dependency tests** — `sdk_bridge.rs` and `plugin_host.rs` cover the missing-service
+  refusal and the positive path for both tiers.
+- **Frozen-world regression** — `tests/wit_world.rs` pins the `@0.1.0` export set *and* the host's
+  import interface names, so an accidental breaking import change is caught, and the checked-in
+  `hello.wasm` still loads.
+- **Allocation/cost tests** — a counting global allocator in a dedicated test binary asserts the
+  hot paths (idle scheduler advance, querying a ready cooldown, an unknown-command resolve) do not
+  allocate.
 - Checks per `COMMON.md`: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -j4
   -- -D warnings`, `cargo-locked test` for touched crates.
 
