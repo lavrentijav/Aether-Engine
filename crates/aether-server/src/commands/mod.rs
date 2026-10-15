@@ -358,6 +358,11 @@ fn rollback(
             // Every restored block is pushed to everyone: a rollback only the
             // caller could see would look like it had failed.
             for r in &plan {
+                // A rollback can reopen or reseal a cave, so the visibility
+                // cache must forget the restored section too — otherwise the
+                // graph still shows the old wall and the anti-xray mask keeps
+                // hiding what is now visible (finding 3).
+                crate::visibility::invalidate_block(r.x, r.y, r.z);
                 let ev = ServerEvent::BlockChange {
                     x: r.x,
                     y: r.y,

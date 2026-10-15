@@ -705,6 +705,7 @@ fn apply(world: &DemoWorld, registry: &SharedRegistry, p: Pos, to: BlockStateId)
         }
     }
     world.set_block_id(x, y, z, to, world.props_of(to));
+    crate::visibility::invalidate_block(x, y, z);
     registry.broadcast(&ServerEvent::BlockChange { x, y, z, block: to }, world);
     // A fluid change is still a change: sand above it may now be unsupported,
     // a crop beside it may have lost its support.

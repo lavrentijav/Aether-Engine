@@ -66,6 +66,10 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
     super::blockticks::tick(world, registry, rng);
 
     let players = registry.snapshot();
+    // Anti-xray: recompute a player's reachable sections where needed and
+    // re-send (reveal) newly visible columns, capped per tick. A no-op unless
+    // `[visibility] enabled`.
+    crate::visibility::tick(&players, world);
     for p in &players {
         // Eating finishes here, in the tick: journal what it used up. Only
         // while eating, so a capture is not taken every tick for nothing.
