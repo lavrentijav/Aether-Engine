@@ -85,18 +85,18 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// Whether every unit this instance ever held is accounted for: the units
-    /// it was minted with plus those merged in must equal the units still
-    /// held, plus those destroyed, merged out or split out. A unit that
-    /// appears with no mint or merge (a count growing in place) or vanishes
-    /// with no destroy or transfer breaks this — the signature of a dupe or a
-    /// dropped event.
     /// Whether the instance no longer exists — destroyed outright or emptied
     /// by a merge.
     pub fn is_destroyed(&self) -> bool {
         self.destroyed
     }
 
+    /// Whether every unit this instance ever held is accounted for: the units
+    /// it was minted with plus those merged in must equal the units still
+    /// held, plus those destroyed, merged out or split out. A unit that
+    /// appears with no mint or merge (a count growing in place) or vanishes
+    /// with no destroy or transfer breaks this — the signature of a dupe or a
+    /// dropped event.
     pub fn conserves_units(&self) -> bool {
         let live = if self.destroyed { 0 } else { self.count as u32 };
         self.minted as u32 + self.merged_in
