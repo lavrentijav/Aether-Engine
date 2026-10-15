@@ -52,14 +52,15 @@ aether-plugin = { path = "crates/aether-plugin", version = "0.1.0" }
 # Third-party
 # The Wasmtime component model runtime. Kept to the features the plugin host
 # uses — JIT, the component model and the default compiler — so the tree does
-# not carry async, pooling, profiling or the debug builtins. The floor is a
-# RustSec-clean release: earlier 36.x have published sandbox-escape and
-# component-model advisories.
-wasmtime = { version = "36.0.17", default-features = false, features = ["component-model", "cranelift", "runtime", "std", "wat"] }
+# not carry async, pooling, profiling or the debug builtins. The floor is the
+# RustSec-clean release of this line: 36.0.18 fixes RUSTSEC-2026-0363
+# (component-model handle tables charged to no limit) and RUSTSEC-2026-0352
+# (wasmtime-wasi filesystem sandbox escape). Do not lower it.
+wasmtime = { version = "36.0.18", default-features = false, features = ["component-model", "cranelift", "runtime", "std", "wat"] }
 # Only the WASI 0.2 host surface a `wasm32-wasip2` component needs for Rust's
 # standard library; the default `wasmtime-wasi` context grants no filesystem,
 # no environment, no arguments and denies by default every network address.
-wasmtime-wasi = { version = "36.0.17", default-features = false }
+wasmtime-wasi = { version = "36.0.18", default-features = false }
 zstd = "0.13"
 fjall = "2"
 miniz_oxide = "0.8"
