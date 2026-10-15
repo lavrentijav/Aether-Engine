@@ -1126,6 +1126,39 @@ fn a_merge_moves_its_units_and_empties_the_source() {
         (bal.created, bal.alive, bal.destroyed, bal.merged_away),
         (2, 1, 0, 1)
     );
+    assert!(l.units_conserved(), "a merge must account for every unit");
+}
+
+#[test]
+fn a_count_that_grows_in_place_is_not_unit_conserved() {
+    // The signature of the live `/give` bug: a stack whose count grew with no
+    // mint and no merge to explain it. Instance balance cannot see it (the uid
+    // never left), but the per-uid unit count must.
+    let store = MemStore::new();
+    let j = Journal::open(&store).unwrap();
+    let slot = Place::Inventory {
+        owner: alice(),
+        slot: 0,
+    };
+    j.append(alice(), mint(1, slot)).unwrap();
+    j.append(
+        alice(),
+        EventBody::ItemMove {
+            uid: ItemUid(1),
+            from: slot,
+            to: slot,
+            count: 5,
+        },
+    )
+    .unwrap();
+    let l = Ledger::replay(&j.all_events().unwrap());
+    assert!(l.balance().is_balanced(), "the instance never left");
+    assert!(
+        !l.units_conserved(),
+        "four units appeared with no mint or merge"
+    );
+    assert_eq!(l.get(ItemUid(1)).unwrap().minted, 1);
+    assert_eq!(l.get(ItemUid(1)).unwrap().count, 5);
 }
 
 #[test]
