@@ -936,6 +936,43 @@ fn a_version_4_merge_and_destroy_reason_round_trip() {
 }
 
 #[test]
+fn a_custom_destroy_reason_round_trips_verbatim() {
+    // A reason code this release does not define must come back as the same
+    // byte, not folded into `Other`: a plugin's destroy reason, or a core code
+    // a newer build added, is information the journal must not lose.
+    for code in [event::REASON_CUSTOM_MIN, 200, event::REASON_CUSTOM_MAX] {
+        let e = Event {
+            seq: 3,
+            at_ms: 4,
+            actor: alice(),
+            cause: None,
+            body: EventBody::ItemDestroy {
+                uid: ItemUid(7),
+                from: Place::Ground { x: 1, y: 2, z: 3 },
+                reason: DestroyReason::Custom(code),
+            },
+        };
+        let decoded = Event::decode(&e.encode()).expect("decodes");
+        assert_eq!(decoded, e, "code {code}");
+        match decoded.body {
+            EventBody::ItemDestroy {
+                reason: DestroyReason::Custom(c),
+                ..
+            } => assert_eq!(c, code),
+            other => panic!("code {code} came back as {other:?}"),
+        }
+        // The raw byte is on the wire, and re-encoding reproduces it.
+        assert_eq!(e.encode()[e.encode().len() - 1], code);
+    }
+    // `from_u8` keeps the raw code, and an unassigned core code (11..=127)
+    // is preserved too rather than guessed at.
+    assert_eq!(DestroyReason::from_u8(200), DestroyReason::Custom(200));
+    assert_eq!(DestroyReason::from_u8(77), DestroyReason::Custom(77));
+    assert_eq!(DestroyReason::from_u8(77).code(), 77);
+    assert_eq!(DestroyReason::from_u8(0), DestroyReason::Other);
+}
+
+#[test]
 fn every_core_code_sits_in_its_reserved_range() {
     // The code space is split so a plugin's code can never collide with a
     // core one. If a core code drifts into the custom range this fails.

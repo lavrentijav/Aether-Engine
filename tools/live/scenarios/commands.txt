@@ -1,4 +1,8 @@
 # 8. commands — operator commands answer.
+#
+# 2026-10-15: main (CMD0) replaced the old `/help` history blurb with the
+# command catalog ("Commands not implemented yet — /help <command> ..."), so
+# the assertion now matches the catalog instead of "History commands:".
 wait 22
 send /time set day
 wait 3
@@ -14,6 +18,6 @@ wait 3
 expect Teleported to spawn
 send /send /help
 wait 4
-expect History commands:
+expect Implemented: /help|Commands not implemented|history:
 reject Unknown command
 reject insufficient permissions

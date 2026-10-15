@@ -1,0 +1,23 @@
+[package]
+name = "hello-plugin"
+version = "0.1.0"
+edition = "2024"
+description = "Aether Engine example plugin: registers /hello, cancels breaking bedrock, logs joins."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# A plugin is a `wasm32-wasip2` WebAssembly component, so it is built as its
+# own thing rather than as a workspace member of the host.
+[lib]
+crate-type = ["cdylib"]
+name = "hello"
+
+[dependencies]
+# The guest half of the component model bindings; the WIT itself is the host's
+# copy, so the two cannot drift.
+wit-bindgen = "0.57"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

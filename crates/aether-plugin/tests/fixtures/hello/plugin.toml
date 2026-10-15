@@ -1,0 +1,18 @@
+# Fixture manifest for the built `hello.wasm` (a copy of
+# plugins/examples/hello/hello.wasm). See tests/fixtures/README.md.
+id = "hello"
+name = "Hello Plugin"
+version = "0.1.0"
+api = "0.1"
+entry = "hello.wasm"
+priority = 10
+capabilities = ["log", "config", "supports"]
+subscribe = [
+    "on-tick",
+    "before-block-break",
+    "after-player-join",
+    "after-player-leave",
+    "on-command",
+]
+commands = ["hello"]
+tick_period = 20

@@ -16,6 +16,8 @@ allow = [
     # `subtle` under `rsa`.
     "ISC",
     "CDLA-Permissive-2.0",
+    # `encoding_rs` (via the Wasmtime component model) and `subtle` (under
+    # `rsa`) are BSD-3-Clause: permissive, attribution only.
     "BSD-3-Clause",
 ]
 confidence-threshold = 0.8

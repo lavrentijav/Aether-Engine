@@ -1,0 +1,21 @@
+[package]
+name = "recorder-plugin"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Its own workspace: this is a test fixture component, not a host crate.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+name = "recorder"
+
+[dependencies]
+wit-bindgen = "0.57"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"

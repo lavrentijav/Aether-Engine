@@ -73,6 +73,24 @@ batch_size = 500        # write as soon as this many events are waiting
 batch_delay_ms = 1000   # ...or this long after the first one arrived
 queue_depth = 100000    # events that may wait before submissions are dropped
 
+[plugins]
+# WebAssembly plugins (a build with the `plugins` feature, the default). Each
+# plugin is a directory under `dir` holding plugin.toml and its .wasm
+# component. Empty disables plugins. See docs/design/plugins.md.
+dir = ""             # e.g. "plugins"
+budget_ms = 5        # per-call time budget before a running plugin is interrupted
+tick_budget_ms = 25  # shared budget for all plugins across one tick
+memory_mib = 64      # per-plugin linear-memory cap
+max_faults = 5       # traps before the host disables a plugin
+init_fuel = 100000000  # fuel for a plugin's instantiation and init
+
+# Per-plugin overrides are tables named for the plugin's manifest id, e.g.
+# [plugins.hello]
+# enabled = true
+# capabilities = ["log", "config", "supports"]  # DEFAULT DENY: empty grants
+#                                                # nothing, even if asked for
+# config = { greeting = "hi" }
+
 [cache]
 # Unmodified generated columns are cached on disk so the generator does not
 # recompute the same terrain on every restart. Pure speed: every entry is

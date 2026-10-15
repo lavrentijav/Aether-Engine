@@ -78,6 +78,10 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
         survival(p, registry, world, now);
     }
 
+    // Plugins get one tick hook a frame, at a safe point: no world or player
+    // lock is held here. The host applies each plugin's own period and budget.
+    crate::plugins::on_tick(now);
+
     if now % 2 == 0 {
         broadcast_equipment(&players, registry, world);
     }

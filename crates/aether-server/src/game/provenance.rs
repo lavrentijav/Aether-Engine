@@ -248,6 +248,19 @@ pub fn give_events(owner: ActorId, item: ItemTypeId, steps: &[GiveStep]) -> Vec<
     out
 }
 
+/// Hand a single `item` to `inv` and return the events to journal, or `None`
+/// when there was no room. A picked-up arrow goes through here: it is a fresh
+/// instance, so it mints, and when it tops up a held stack it merges rather
+/// than growing that stack's count with no event.
+pub fn give_one_events(
+    actor: ActorId,
+    inv: &mut crate::inventory::Inventory,
+    item: ItemTypeId,
+) -> Option<Vec<EventBody>> {
+    let (steps, left) = inv.give_many_report(item, 1);
+    (left == 0).then(|| give_events(actor, item, &steps))
+}
+
 /// A stack is leaving a player for the ground at `at` (see [`ground_place`]).
 /// Inside a scope it becomes part of that scope's "after"; outside one there
 /// is no telling where it came from, so it is minted there.
@@ -859,11 +872,88 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // `/give` and the ledger balance.
+    // `/give`, arrow pickup and the ledger balance.
     // -----------------------------------------------------------------------
 
     use crate::inventory::Inventory;
     use aether_world::journal::{Event, Ledger};
+
+    /// A picked-up arrow is a fresh item instance: picking it up onto an
+    /// existing arrow stack must mint the arriving unit and merge it in, not
+    /// grow the stack's count with no event (which `/audit` would later report
+    /// as an anomaly). This is the exact sequence the arrow-pickup branch in
+    /// `entities::tick` runs.
+    #[test]
+    fn a_picked_up_arrow_mints_and_merges_into_a_held_stack() {
+        let arrow = crate::inventory::item("minecraft:arrow");
+        let mut bag = Inventory::new();
+        bag.put_slot(36, Some(Stack::named("minecraft:arrow", 5)));
+        let held = bag.slot(36).unwrap().uid;
+
+        let bodies = give_one_events(owner(), &mut bag, arrow).expect("space for one arrow");
+        assert_eq!(bag.slot(36).unwrap().count, 6, "topped up in place");
+
+        // One mint of the new unit, then a merge into the held stack.
+        assert_eq!(bodies.len(), 2, "{bodies:?}");
+        let mint_uid = match &bodies[0] {
+            EventBody::ItemMint {
+                uid,
+                item,
+                count: 1,
+                ..
+            } => {
+                assert_eq!(*item, arrow);
+                *uid
+            }
+            other => panic!("expected a mint, got {other:?}"),
+        };
+        assert_eq!(
+            bodies[1],
+            EventBody::ItemMerge {
+                into: held,
+                from: mint_uid,
+                count: 1,
+            }
+        );
+
+        // Replayed, the events keep the stack's count honest.
+        let mut events = vec![ev(
+            1,
+            EventBody::ItemMint {
+                uid: held,
+                item: arrow,
+                count: 5,
+                to: inv(36),
+            },
+        )];
+        for (i, body) in bodies.into_iter().enumerate() {
+            events.push(ev(i as u64 + 2, body));
+        }
+        let ledger = Ledger::replay(&events);
+        assert!(ledger.anomalies().is_empty(), "{:?}", ledger.anomalies());
+        assert!(ledger.units_conserved());
+        assert_eq!(ledger.get(held).unwrap().count, 6);
+    }
+
+    #[test]
+    fn a_picked_up_arrow_into_an_empty_slot_is_a_plain_mint() {
+        let arrow = crate::inventory::item("minecraft:arrow");
+        let mut bag = Inventory::new();
+        let bodies = give_one_events(owner(), &mut bag, arrow).expect("space for one arrow");
+        assert_eq!(bodies.len(), 1, "no merge without a stack to top up");
+        assert!(matches!(bodies[0], EventBody::ItemMint { count: 1, .. }));
+    }
+
+    #[test]
+    fn a_picked_up_arrow_with_no_room_is_not_taken() {
+        let arrow = crate::inventory::item("minecraft:arrow");
+        let mut bag = Inventory::new();
+        // Fill every slot with a different, full stack so nothing can merge.
+        for slot in (9..46).chain(0..9) {
+            bag.put_slot(slot, Some(Stack::named("minecraft:stone", 64)));
+        }
+        assert!(give_one_events(owner(), &mut bag, arrow).is_none());
+    }
 
     fn ev(seq: u64, body: EventBody) -> Event {
         Event {

@@ -75,42 +75,52 @@ pub struct ItemUid(pub u64);
 /// A destroy used to be silent about its cause, which told a reader that a
 /// stack was gone but not whether it had been eaten, burnt or replaced. The
 /// byte is the whole of it: no string reaches the journal.
+///
+/// Codes `0..=127` are the core's; [`DestroyReason::Custom`] holds a plugin's
+/// code unchanged so a reason the core does not know still round-trips
+/// (decode then re-encode, or a mirror backfill) instead of collapsing to
+/// [`DestroyReason::Other`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[repr(u8)]
 pub enum DestroyReason {
     /// No better reason is known.
     #[default]
-    Other = 0,
+    Other,
     /// Eaten or drunk.
-    Consumed = 1,
+    Consumed,
     /// An item entity's five minutes ran out.
-    Despawn = 2,
+    Despawn,
     /// Destroyed by fire or lava.
-    Burned = 3,
+    Burned,
     /// Fell out of the world.
-    Void = 4,
+    Void,
     /// Caught in an explosion.
-    Explosion = 5,
+    Explosion,
     /// An ingredient used up by a craft, smelt or brew.
-    Crafted = 6,
+    Crafted,
     /// A creative client replaced the slot's contents.
-    CreativeReplace = 7,
+    CreativeReplace,
     /// Removed by a command (`/clear`, a `/kill` drop that is not kept).
-    Command = 8,
+    Command,
     /// Cactus or other contact damage.
-    Cactus = 9,
+    Cactus,
     /// Merged into another stack when the merge path had no way to keep the
     /// source alive.
-    MergedAway = 10,
+    MergedAway,
+    /// A reason code this release does not define, kept verbatim so it
+    /// survives a decode/re-encode. Set by a plugin in the custom range
+    /// (`REASON_CUSTOM_MIN..=REASON_CUSTOM_MAX`), or by any newer writer whose
+    /// code is not in this build's core list.
+    Custom(u8),
 }
 
 impl DestroyReason {
-    /// The reason a byte names, or [`DestroyReason::Other`] for one this
-    /// release does not know — a newer writer's reason must not fail an old
-    /// reader. This includes custom reasons (`>= REASON_CUSTOM_MIN`), which
-    /// only a plugin that registered them understands.
+    /// The reason a byte names. A code this release does not define — a
+    /// plugin's custom reason, or a core code a newer build added — is kept as
+    /// [`DestroyReason::Custom`] rather than folded into
+    /// [`DestroyReason::Other`], so the byte round-trips.
     pub fn from_u8(v: u8) -> Self {
         match v {
+            0 => DestroyReason::Other,
             1 => DestroyReason::Consumed,
             2 => DestroyReason::Despawn,
             3 => DestroyReason::Burned,
@@ -121,18 +131,32 @@ impl DestroyReason {
             8 => DestroyReason::Command,
             9 => DestroyReason::Cactus,
             10 => DestroyReason::MergedAway,
-            _ => DestroyReason::Other,
+            other => DestroyReason::Custom(other),
         }
     }
 
     /// The wire code for this reason.
     pub fn code(self) -> u8 {
-        self as u8
+        match self {
+            DestroyReason::Other => 0,
+            DestroyReason::Consumed => 1,
+            DestroyReason::Despawn => 2,
+            DestroyReason::Burned => 3,
+            DestroyReason::Void => 4,
+            DestroyReason::Explosion => 5,
+            DestroyReason::Crafted => 6,
+            DestroyReason::CreativeReplace => 7,
+            DestroyReason::Command => 8,
+            DestroyReason::Cactus => 9,
+            DestroyReason::MergedAway => 10,
+            DestroyReason::Custom(code) => code,
+        }
     }
 
     /// The stable name of this reason, as the PostgreSQL code table and the
     /// chat display both spell it. One source of truth: nothing else hardcodes
-    /// these strings.
+    /// these strings. A custom reason has no name in this build — the plugin
+    /// that owns its code names it — so it reads as `custom`.
     pub fn name(self) -> &'static str {
         match self {
             DestroyReason::Other => "other",
@@ -146,6 +170,7 @@ impl DestroyReason {
             DestroyReason::Command => "command",
             DestroyReason::Cactus => "cactus",
             DestroyReason::MergedAway => "merged_away",
+            DestroyReason::Custom(_) => "custom",
         }
     }
 }
