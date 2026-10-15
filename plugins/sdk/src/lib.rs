@@ -19,7 +19,8 @@
 //! native registry, its manifest can disable it, and a dependent that
 //! `requires` one of its services refuses to load when no provider is present.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -608,9 +609,23 @@ impl Clock {
 }
 
 struct Timer {
-    caller: String,
+    caller: Arc<str>,
     due: u64,
     period: Option<u64>,
+}
+
+/// The timer state, kept behind one lock so the heap, the timers and the due
+/// queue never disagree.
+#[derive(Default)]
+struct SchedulerState {
+    timers: HashMap<u64, Timer>,
+    /// Min-heap of `(due, id)`. An idle tick is a single `peek`, so advancing
+    /// costs O(1) when nothing is due and O(due · log n) otherwise — never a
+    /// scan of every live timer.
+    heap: BinaryHeap<Reverse<(u64, u64)>>,
+    /// `(id, caller)` pairs that came due since the last `poll`, retaining the
+    /// caller so a poll by one dependent leaves another's due timers for them.
+    due: Vec<(u64, Arc<str>)>,
 }
 
 /// The timer wheel. Ids are global and monotonically increasing; a timer is
@@ -619,10 +634,7 @@ struct Timer {
 struct Scheduler {
     clock: Arc<Clock>,
     next: AtomicU64,
-    timers: Mutex<HashMap<u64, Timer>>,
-    /// `(id, caller)` pairs that came due since the last `poll`, retaining the
-    /// caller so a poll by one dependent leaves another's due timers for them.
-    due: Mutex<Vec<(u64, String)>>,
+    state: Mutex<SchedulerState>,
 }
 
 impl Scheduler {
@@ -630,73 +642,76 @@ impl Scheduler {
         Scheduler {
             clock,
             next: AtomicU64::new(0),
-            timers: Mutex::new(HashMap::new()),
-            due: Mutex::new(Vec::new()),
+            state: Mutex::new(SchedulerState::default()),
         }
+    }
+
+    fn schedule(&self, caller: &str, due: u64, period: Option<u64>) -> u64 {
+        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut st = self.state.lock().unwrap();
+        st.timers.insert(
+            id,
+            Timer {
+                caller: Arc::from(caller),
+                due,
+                period,
+            },
+        );
+        st.heap.push(Reverse((due, id)));
+        id
     }
 
     fn advance(&self, n: u64) {
         self.clock.set(n);
-        let mut due = self.due.lock().unwrap();
-        let mut timers = self.timers.lock().unwrap();
-        let mut fired_one_shot = Vec::new();
-        for (id, timer) in timers.iter_mut() {
-            if timer.due > n {
-                continue;
+        let mut st = self.state.lock().unwrap();
+        while let Some(Reverse((due, id))) = st.heap.peek().copied() {
+            if due > n {
+                break;
             }
-            due.push((*id, timer.caller.clone()));
-            match timer.period {
-                Some(period) if period > 0 => {
-                    // Catch up without spinning if several periods passed.
-                    let behind = n - timer.due;
-                    timer.due += (behind / period + 1) * period;
+            st.heap.pop();
+            // Read the timer and its reschedule decision, then drop the borrow
+            // before touching the other fields of `st`.
+            let (caller, next) = {
+                let Some(timer) = st.timers.get_mut(&id) else {
+                    // Cancelled (or already spent); drop the stale entry.
+                    continue;
+                };
+                // A repeat that rescheduled pushed a fresh entry; an older one
+                // that is still in the heap must not fire twice.
+                if timer.due != due {
+                    continue;
                 }
-                // A one-shot is spent; drop it so it cannot fire again.
-                _ => fired_one_shot.push(*id),
+                let caller = Arc::clone(&timer.caller);
+                let next = match timer.period {
+                    Some(period) if period > 0 => {
+                        // Catch up without spinning if several periods passed.
+                        let behind = n - timer.due;
+                        timer.due += (behind / period + 1) * period;
+                        Some(timer.due)
+                    }
+                    // A one-shot is spent; drop it so it cannot fire again.
+                    _ => None,
+                };
+                (caller, next)
+            };
+            match next {
+                Some(next) => st.heap.push(Reverse((next, id))),
+                None => {
+                    st.timers.remove(&id);
+                }
             }
+            st.due.push((id, caller));
         }
-        for id in fired_one_shot {
-            timers.remove(&id);
-        }
-    }
-
-    fn after(&self, caller: &str, ticks: u64) -> u64 {
-        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        let due = self.clock.now() + ticks.max(1);
-        self.timers.lock().unwrap().insert(
-            id,
-            Timer {
-                caller: caller.to_string(),
-                due,
-                period: None,
-            },
-        );
-        id
-    }
-
-    fn every(&self, caller: &str, period: u64) -> u64 {
-        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        let period = period.max(1);
-        let due = self.clock.now() + period;
-        self.timers.lock().unwrap().insert(
-            id,
-            Timer {
-                caller: caller.to_string(),
-                due,
-                period: Some(period),
-            },
-        );
-        id
     }
 
     fn cancel(&self, caller: &str, id: u64) -> bool {
-        let mut timers = self.timers.lock().unwrap();
-        match timers.get(&id) {
-            Some(t) if t.caller == caller => {
-                timers.remove(&id);
-                drop(timers);
-                // A timer that already came due this tick must not be delivered.
-                self.due.lock().unwrap().retain(|(d, _)| *d != id);
+        let mut st = self.state.lock().unwrap();
+        match st.timers.get(&id) {
+            Some(t) if t.caller.as_ref() == caller => {
+                st.timers.remove(&id);
+                // The heap entry is left and skipped on pop; a due entry not
+                // yet polled is dropped here.
+                st.due.retain(|(d, _)| *d != id);
                 true
             }
             _ => false,
@@ -704,18 +719,29 @@ impl Scheduler {
     }
 
     fn poll(&self, caller: &str) -> Vec<u64> {
-        let mut due = self.due.lock().unwrap();
+        let mut st = self.state.lock().unwrap();
         let mut mine = Vec::new();
         let mut rest = Vec::new();
-        for (id, owner) in due.drain(..) {
-            if owner == caller {
+        for (id, owner) in st.due.drain(..) {
+            if owner.as_ref() == caller {
                 mine.push(id);
             } else {
                 rest.push((id, owner));
             }
         }
-        *due = rest;
+        st.due = rest;
         mine
+    }
+}
+
+impl Scheduler {
+    fn after(&self, caller: &str, ticks: u64) -> u64 {
+        self.schedule(caller, self.clock.now() + ticks.max(1), None)
+    }
+
+    fn every(&self, caller: &str, period: u64) -> u64 {
+        let period = period.max(1);
+        self.schedule(caller, self.clock.now() + period, Some(period))
     }
 }
 
@@ -1441,6 +1467,36 @@ mod tests {
         assert!(scheduler.cancel("a", id));
         scheduler.advance(2);
         assert!(scheduler.poll("a").is_empty());
+    }
+
+    #[test]
+    fn timers_fire_in_due_order_and_only_once_due() {
+        // Several timers with different due ticks: an advance to a later tick
+        // delivers exactly the ones now due, regardless of scheduling order.
+        let clock = Arc::new(Clock::default());
+        let scheduler = Scheduler::new(clock);
+        let late = scheduler.after("a", 30);
+        let soon = scheduler.after("a", 5);
+        let mid = scheduler.after("a", 10);
+        scheduler.advance(9);
+        assert_eq!(scheduler.poll("a"), vec![soon]);
+        scheduler.advance(30);
+        assert_eq!(scheduler.poll("a"), vec![mid, late]);
+        // Nothing left.
+        scheduler.advance(100);
+        assert!(scheduler.poll("a").is_empty());
+    }
+
+    #[test]
+    fn an_idle_advance_does_no_work_and_delivers_nothing() {
+        // `advance` peeks the heap; with no timers it is a no-op and nothing is
+        // ever delivered, even across many ticks.
+        let clock = Arc::new(Clock::default());
+        let scheduler = Scheduler::new(clock);
+        for n in 0..1000 {
+            scheduler.advance(n);
+            assert!(scheduler.poll("a").is_empty());
+        }
     }
 
     #[test]
