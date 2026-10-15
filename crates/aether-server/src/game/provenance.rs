@@ -62,6 +62,20 @@ struct Entry {
     place: Place,
     count: u8,
     item: aether_world::ItemTypeId,
+    /// Wear and potion contents are part of an item's identity for
+    /// provenance purposes: a water bottle and an awkward bottle share an item
+    /// id but are not the same thing, and a brewing step must not be mistaken
+    /// for a split of a potion off a potion.
+    damage: u16,
+    potion: Option<u16>,
+}
+
+impl Entry {
+    /// Whether two entries are the same *kind* of stack — same item, wear and
+    /// potion contents. What a split preserves and a transformation does not.
+    fn same_kind(&self, other: &Entry) -> bool {
+        self.item == other.item && self.damage == other.damage && self.potion == other.potion
+    }
 }
 
 type Seen = HashMap<ItemUid, Entry>;
@@ -74,6 +88,8 @@ fn add(seen: &mut Seen, s: &Stack, place: Place) {
                 place,
                 count: s.count,
                 item: s.item,
+                damage: s.damage,
+                potion: s.potion,
             },
         );
     }
@@ -328,7 +344,10 @@ pub fn container_changed(
         }
         seen
     };
-    for body in diff(&seen(before), &seen(after), DestroyReason::Other) {
+    // An autonomous container change is a furnace or brewing stand working:
+    // whatever vanished — the input, the fuel, the ingredient — was used up by
+    // a smelt or a brew, so its destroy reason is `Crafted`.
+    for body in diff(&seen(before), &seen(after), DestroyReason::Crafted) {
         let _ = world.journal().append(ActorId::SERVER, body);
     }
 }
@@ -444,7 +463,7 @@ fn diff(before: &Seen, after: &Seen, reason: DestroyReason) -> Vec<EventBody> {
         let mut cands: Vec<ItemUid> = sources
             .iter()
             .copied()
-            .filter(|s| before[s].item == a.item && lost[s] > *merged_from.get(s).unwrap_or(&0))
+            .filter(|s| before[s].same_kind(a) && lost[s] > *merged_from.get(s).unwrap_or(&0))
             .collect();
         cands.sort();
         for s in cands {
@@ -504,7 +523,10 @@ fn diff(before: &Seen, after: &Seen, reason: DestroyReason) -> Vec<EventBody> {
             continue;
         }
         let a = &after[uid];
-        let split = sources.iter().any(|s| before[s].item == a.item);
+        // A split preserves the whole identity — item, wear and potion. A
+        // brewing step keeps the item id (`minecraft:potion`) but changes the
+        // potion, so it is a transformation and must derive, not mint.
+        let split = sources.iter().any(|s| before[s].same_kind(a));
         if split || sources.is_empty() {
             made.push(EventBody::ItemMint {
                 uid: *uid,
@@ -577,6 +599,20 @@ mod tests {
             place,
             count,
             item: crate::inventory::item(item),
+            damage: 0,
+            potion: None,
+        }
+    }
+
+    /// An entry for a potion bottle with the given `minecraft:potion` registry
+    /// index, for the brew tests.
+    fn potion_e(place: Place, count: u8, potion: u16) -> Entry {
+        Entry {
+            place,
+            count,
+            item: crate::inventory::item("minecraft:potion"),
+            damage: 0,
+            potion: Some(potion),
         }
     }
 
@@ -655,6 +691,79 @@ mod tests {
             from: inv(1),
             to: inv(1),
             count: 4,
+        }));
+    }
+
+    #[test]
+    fn moving_an_item_through_the_crafting_grid_is_moves_only() {
+        // Placement into and out of a grid cell, and between cells, changes
+        // nothing about the item — no count, no kind — so it must journal as
+        // moves and nothing else. No derive, no mint, no destroy.
+        let grid = |i: i16| Place::Inventory {
+            owner: owner(),
+            slot: GRID_SLOT - i,
+        };
+        let before = Seen::from([(ItemUid(1), e(inv(9), 4, "minecraft:diamond"))]);
+        // Into a grid cell, then to another cell, then back to the inventory.
+        let after = Seen::from([(ItemUid(1), e(grid(3), 4, "minecraft:diamond"))]);
+        assert_eq!(
+            diff(&before, &after, OTHER),
+            vec![EventBody::ItemMove {
+                uid: ItemUid(1),
+                from: inv(9),
+                to: grid(3),
+                count: 4,
+            }]
+        );
+        let back = Seen::from([(ItemUid(1), e(inv(36), 4, "minecraft:diamond"))]);
+        assert_eq!(
+            diff(&after, &back, OTHER),
+            vec![EventBody::ItemMove {
+                uid: ItemUid(1),
+                from: grid(3),
+                to: inv(36),
+                count: 4,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_brew_derives_its_bottle_from_the_bottles_and_ingredient_it_used() {
+        // A brewing step transforms water bottles into awkward bottles and
+        // consumes the nether wart. The bottle keeps its item id, so a
+        // classifier that looked only at the item id would call this a split
+        // of a potion off a potion and lose the `from` edge. The potion
+        // contents are part of the identity, so this is a derive.
+        let water = crate::game::brewing::potion_id("minecraft:water").unwrap();
+        let awkward = crate::game::brewing::potion_id("minecraft:awkward").unwrap();
+        assert_ne!(water, awkward);
+        let bottle = crate::inventory::item("minecraft:potion");
+
+        let before = Seen::from([
+            (ItemUid(1), potion_e(inv(0), 1, water)),
+            (ItemUid(2), e(inv(3), 1, "minecraft:nether_wart")),
+        ]);
+        let after = Seen::from([(ItemUid(3), potion_e(inv(0), 1, awkward))]);
+        let ev = diff(&before, &after, DestroyReason::Crafted);
+        assert!(
+            ev.iter().all(|b| !matches!(b, EventBody::ItemMint { .. })),
+            "a brew must not mint a bottle from nothing: {ev:?}"
+        );
+        assert!(
+            ev.contains(&EventBody::ItemDerive {
+                uid: ItemUid(3),
+                item: bottle,
+                count: 1,
+                to: inv(0),
+                from: vec![ItemUid(1), ItemUid(2)],
+            }),
+            "the bottle must derive from the old bottle and the wart: {ev:?}"
+        );
+        // The wart is gone: an explicit destroy with the crafted reason.
+        assert!(ev.contains(&EventBody::ItemDestroy {
+            uid: ItemUid(2),
+            from: inv(3),
+            reason: DestroyReason::Crafted,
         }));
     }
 
@@ -869,6 +978,8 @@ mod tests {
                         place: c.loc.place(),
                         count: c.count,
                         item: crate::inventory::item(c.item),
+                        damage: 0,
+                        potion: None,
                     },
                 );
             }
@@ -877,9 +988,23 @@ mod tests {
     }
 
     /// A random walk over the operations the live server performs — moving in
-    /// a window, giving, picking up, eating — fed through the same `diff` and
-    /// ledger the server uses. At no point may an item appear from nowhere or
-    /// vanish untracked.
+    /// a window, giving, picking up, merging, eating — where every mutation is
+    /// fed through the *same* `diff` the server uses (except `/give`, which
+    /// mints its own units) and the resulting events are replayed into the
+    /// same [`Ledger`]. The test then checks three things the old version did
+    /// not:
+    ///
+    /// * the ledger's live stacks match the simulated cells exactly (a dropped
+    ///   event would leave a uid in one and not the other);
+    /// * every instance conserves its *units*, not merely its existence — the
+    ///   property that a merge emitter is needed to satisfy, because a top-up
+    ///   journalled as a move would grow a count with no `merged_in` to
+    ///   explain it (`Ledger::units_conserved`);
+    /// * at least one `ItemMerge` was actually emitted, so the test is not
+    ///   passing by never exercising the merge path.
+    ///
+    /// Reverting the merge emitter makes this fail: the destination count
+    /// grows but its unit ledger does not, and `units_conserved` catches it.
     #[test]
     fn the_ledger_balances_over_random_window_give_pickup_and_eat_sequences() {
         let items = ["minecraft:dirt", "minecraft:diamond", "minecraft:bread"];
@@ -888,12 +1013,16 @@ mod tests {
         let mut cells: Vec<Cell> = Vec::new();
         let mut seq = 0u64;
         let mut ledger = Ledger::default();
+        let mut merges = 0usize;
 
         for _ in 0..3_000 {
             let op = rng.below(9);
             let before = seen_of(&cells);
             let mut reason = DestroyReason::Other;
-            let mut explicit: Vec<EventBody> = Vec::new();
+            // `/give` units are minted by the caller and merged in explicitly;
+            // every other op mutates `cells` and lets `diff` find the change.
+            // Doing both for one op is the double-count the old test had.
+            let mut explicit: Option<Vec<EventBody>> = None;
             match op {
                 // Move a stack to another place.
                 0 | 1 => {
@@ -932,7 +1061,8 @@ mod tests {
                     next_uid += 1;
                 }
                 // `/give` onto an existing stack: mint the fresh units, then
-                // merge them in (the path the server now takes explicitly).
+                // merge them in. Explicit only — no `diff` over the grown
+                // state.
                 4 => {
                     let stackable: Vec<usize> =
                         (0..cells.len()).filter(|i| cells[*i].count < 64).collect();
@@ -942,18 +1072,20 @@ mod tests {
                         let n = 1 + rng.below(room as u64) as u8;
                         let mint = ItemUid(next_uid);
                         next_uid += 1;
-                        explicit.push(EventBody::ItemMint {
-                            uid: mint,
-                            item: crate::inventory::item(cells[i].item),
-                            count: n,
-                            to: cells[i].loc.place(),
-                        });
-                        explicit.push(EventBody::ItemMerge {
-                            into: cells[i].uid,
-                            from: mint,
-                            count: n,
-                        });
                         cells[i].count += n;
+                        explicit = Some(vec![
+                            EventBody::ItemMint {
+                                uid: mint,
+                                item: crate::inventory::item(cells[i].item),
+                                count: n,
+                                to: cells[i].loc.place(),
+                            },
+                            EventBody::ItemMerge {
+                                into: cells[i].uid,
+                                from: mint,
+                                count: n,
+                            },
+                        ]);
                     }
                 }
                 // Pick a ground stack up onto a same-item slot stack: a merge
@@ -1003,9 +1135,14 @@ mod tests {
             }
             cells.retain(|c| c.count > 0);
             let after = seen_of(&cells);
-            let mut bodies = diff(&before, &after, reason);
-            bodies.extend(explicit);
+            let bodies = match explicit {
+                Some(bodies) => bodies,
+                None => diff(&before, &after, reason),
+            };
             for body in bodies {
+                if matches!(body, EventBody::ItemMerge { .. }) {
+                    merges += 1;
+                }
                 seq += 1;
                 ledger.apply(&ev(seq, body));
             }
@@ -1016,8 +1153,57 @@ mod tests {
             "the random walk produced anomalies: {:?}",
             ledger.anomalies()
         );
+        assert!(
+            merges > 0,
+            "no merge was ever emitted, so the merge path was never exercised"
+        );
+
+        // The ledger's live state must equal the simulated cells: same uids,
+        // same counts, same places. A dropped event would show as a uid in one
+        // and not the other.
+        for c in &cells {
+            let inst = ledger
+                .get(c.uid)
+                .unwrap_or_else(|| panic!("cell uid {} never reached the ledger", c.uid.0));
+            assert!(
+                !inst.is_destroyed(),
+                "cell uid {} is live but the ledger destroyed it",
+                c.uid.0
+            );
+            assert_eq!(inst.count, c.count, "uid {} count", c.uid.0);
+            assert_eq!(inst.at, c.loc.place(), "uid {} place", c.uid.0);
+        }
+        let live_uids: std::collections::HashSet<ItemUid> = cells.iter().map(|c| c.uid).collect();
+        for (uid, inst) in ledger.instances() {
+            if !inst.is_destroyed() {
+                assert!(
+                    live_uids.contains(&uid),
+                    "ledger holds live uid {} that no cell has",
+                    uid.0
+                );
+            }
+        }
+
+        // Instance balance and, the stronger property, per-uid unit balance.
         let bal = ledger.balance();
         assert!(bal.is_balanced(), "{bal:?}");
+        assert!(
+            ledger.units_conserved(),
+            "some instance's units are unaccounted for: {:?}",
+            ledger
+                .instances()
+                .filter(|(_, i)| !i.conserves_units())
+                .map(|(uid, i)| (
+                    uid.0,
+                    i.count,
+                    i.minted,
+                    i.merged_in,
+                    i.merged_out,
+                    i.moved_out,
+                    i.destroyed_units
+                ))
+                .collect::<Vec<_>>()
+        );
     }
 
     fn random_loc(rng: &mut Rng) -> Loc {
