@@ -61,17 +61,20 @@ pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
             // in the `minecraft:potion_contents` component; a worn tool
             // carries its damage. Both are components added to the default set.
             let potion = potion_contents(s);
-            // A plugin menu item shows a name and lore that the real item does
-            // not. They are two more components on top of damage and potion;
-            // `glint` and `model` are carried in the model but not yet written
-            // (the generator has no ids for them — see KNOWN_ISSUES).
+            // A plugin menu item shows a name, lore, glint and model id that
+            // the real item does not. They are extra components on top of
+            // damage and potion.
             let display = s.display.as_deref();
             let name = display.and_then(|d| d.name.as_deref());
             let lore: &[String] = display.map(|d| d.lore.as_slice()).unwrap_or(&[]);
+            let glint = display.is_some_and(|d| d.glint);
+            let model = display.and_then(|d| d.model);
             let added = (s.damage > 0) as i32
                 + potion.is_some() as i32
                 + name.is_some() as i32
-                + !lore.is_empty() as i32;
+                + !lore.is_empty() as i32
+                + glint as i32
+                + model.is_some() as i32;
             p.var_int(s.count as i32)
                 .var_int(w.id)
                 .var_int(added)
@@ -91,6 +94,15 @@ pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
                 for line in lore {
                     p.bytes(&crate::protocol::nbt::string(line).to_network());
                 }
+            }
+            if glint {
+                // `enchantment_glint_override` is a plain bool: true draws the
+                // enchantment shimmer without naming an enchantment.
+                p.var_int(v.component_glint_override).bool(true);
+            }
+            if let Some(model) = model {
+                p.var_int(v.component_custom_model_data);
+                write_custom_model_data(v, p, model);
             }
         }
         // A stand-in for a *different* item (the compat layer's substitution,
@@ -129,6 +141,24 @@ fn write_potion_contents(v: &Version, p: &mut PacketOut, potion: u16) {
         .bool(false) // no custom colour: the client computes it
         .var_int(0) // no custom effects
         .bool(false); // no custom name
+}
+
+/// Append the payload of `minecraft:custom_model_data` (the component id is
+/// written by the caller).
+///
+/// The component's stream form changed at 1.21.4 (protocol 769): before it was
+/// a single VarInt, from 1.21.4 a record of four lists (`floats`, `flags`,
+/// `strings`, `colors`). An integer model id maps onto a one-element `floats`
+/// list — vanilla's own conversion — so an old-style numeric override keeps
+/// working after the change. `colors` is present from 1.21.4, so all four
+/// lists are always written there, empty but for `floats`.
+fn write_custom_model_data(v: &Version, p: &mut PacketOut, model: i32) {
+    if v.protocol < 769 {
+        p.var_int(model);
+        return;
+    }
+    p.var_int(1).f32(model as f32); // floats: the legacy int as one float
+    p.var_int(0).var_int(0).var_int(0); // flags, strings, colors
 }
 
 /// A stand-in item id the version always has, for an item it cannot name.
@@ -231,6 +261,25 @@ fn write_legacy_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
         }
         if !display.is_empty() {
             fields.push(("display".to_owned(), Nbt::Compound(display)));
+        }
+        // Glint has no override before 1.20.5: it is drawn when the item
+        // carries any enchantment, so a hidden placeholder enchantment is
+        // added and `HideFlags` (bit 1 = hide enchantments) keeps it out of
+        // the tooltip. `lure` is a real enchantment every release knows.
+        if d.glint {
+            fields.push((
+                "Enchantments".to_owned(),
+                Nbt::List(vec![Nbt::Compound(vec![
+                    ("id".to_owned(), Nbt::Str("minecraft:lure".to_owned())),
+                    ("lvl".to_owned(), Nbt::Short(1)),
+                ])]),
+            ));
+            fields.push(("HideFlags".to_owned(), Nbt::Int(1)));
+        }
+        // A numeric model override is the plain `CustomModelData` tag before
+        // 1.20.5 (since 1.14).
+        if let Some(model) = d.model {
+            fields.push(("CustomModelData".to_owned(), Nbt::Int(model)));
         }
     }
     if fields.is_empty() {
@@ -1048,6 +1097,104 @@ mod tests {
             "and the lore marker follows it"
         );
         assert!(contains(&body, b"Aether: "), "the marker names the item");
+    }
+
+    #[test]
+    fn a_menu_item_writes_glint_and_model_data_components() {
+        // 1.21.11: glint is the boolean `enchantment_glint_override`, model
+        // data the four-list record. Nothing else is set, so exactly two
+        // components ride along.
+        for v in [
+            &crate::protocol::modern::version::V1_21_11,
+            &crate::protocol::modern::version::V26_1,
+            &crate::protocol::modern::version::V1_21_5,
+        ] {
+            let stack = Stack::menu_item(
+                aether_world::ItemTypeId::vanilla("minecraft:stone").unwrap(),
+                1,
+                None,
+                Vec::new(),
+                true,
+                Some(7),
+            );
+            let mut p = PacketOut::new(0);
+            write_stack(v, &mut p, Some(&stack));
+            let body = p.body()[1..].to_vec();
+            let mut pin = crate::proto::PacketIn::new(&body);
+            assert!(pin.var_int().unwrap() > 0);
+            pin.var_int().unwrap(); // item id
+            assert_eq!(
+                pin.var_int().unwrap(),
+                2,
+                "glint and model data, {}",
+                v.name
+            );
+            assert_eq!(pin.var_int().unwrap(), 0, "none removed");
+            assert_eq!(pin.var_int().unwrap(), v.component_glint_override);
+            assert!(pin.bool().unwrap(), "glint is on");
+            assert_eq!(pin.var_int().unwrap(), v.component_custom_model_data);
+            // From 1.21.4 the model data is a record; the int becomes one
+            // float, and the other three lists are empty.
+            assert_eq!(pin.var_int().unwrap(), 1, "one float, {}", v.name);
+            assert_eq!(pin.f32().unwrap(), 7.0);
+            assert_eq!(pin.var_int().unwrap(), 0, "no flags");
+            assert_eq!(pin.var_int().unwrap(), 0, "no strings");
+            assert_eq!(pin.var_int().unwrap(), 0, "no colours");
+        }
+    }
+
+    #[test]
+    fn pre_1_21_4_model_data_is_a_plain_var_int() {
+        // 1.20.5/1.21.1/1.21.3: `custom_model_data` is still a single VarInt.
+        for v in [
+            &crate::protocol::modern::version::V1_20_5,
+            &crate::protocol::modern::version::V1_21_1,
+            &crate::protocol::modern::version::V1_21_3,
+        ] {
+            let stack = Stack::menu_item(
+                aether_world::ItemTypeId::vanilla("minecraft:stone").unwrap(),
+                1,
+                None,
+                Vec::new(),
+                false,
+                Some(1234),
+            );
+            let mut p = PacketOut::new(0);
+            write_stack(v, &mut p, Some(&stack));
+            let body = p.body()[1..].to_vec();
+            let mut pin = crate::proto::PacketIn::new(&body);
+            pin.var_int().unwrap();
+            pin.var_int().unwrap();
+            assert_eq!(pin.var_int().unwrap(), 1, "model data only, {}", v.name);
+            assert_eq!(pin.var_int().unwrap(), 0);
+            assert_eq!(pin.var_int().unwrap(), v.component_custom_model_data);
+            assert_eq!(pin.var_int().unwrap(), 1234);
+        }
+    }
+
+    #[test]
+    fn a_legacy_menu_item_writes_glint_and_model_as_nbt() {
+        // 1.20.2 has no data components: glint is a hidden placeholder
+        // enchantment and the model id the `CustomModelData` tag.
+        let v = &crate::protocol::modern::version::V1_20_2;
+        let stack = Stack::menu_item(
+            aether_world::ItemTypeId::vanilla("minecraft:stone").unwrap(),
+            1,
+            Some("Hello".to_string()),
+            Vec::new(),
+            true,
+            Some(9),
+        );
+        let mut p = PacketOut::new(0);
+        write_stack(v, &mut p, Some(&stack));
+        let body = p.body()[1..].to_vec();
+        assert!(
+            contains(&body, b"Enchantments"),
+            "a placeholder enchantment"
+        );
+        assert!(contains(&body, b"minecraft:lure"), "a real enchantment id");
+        assert!(contains(&body, b"HideFlags"), "the enchant line is hidden");
+        assert!(contains(&body, b"CustomModelData"), "the model id tag");
     }
 
     #[test]

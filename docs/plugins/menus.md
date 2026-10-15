@@ -76,8 +76,10 @@ actions = ["[economy] take 100", "[give] minecraft:diamond_sword 1", "[close]"]
   `dispenser` (9) and `hopper` (5). `rows = 1..=6` picks the matching chest
   size.
 * **Item:** `material`/`item`, `count`, `name`, `lore`, `glint`, `model`.
-  A material without `minecraft:` gets the prefix; an unknown item is drawn as
-  a barrier rather than vanishing.
+  `glint` (the enchantment shimmer) and `model` (a `custom_model_data` id) are
+  written per protocol version (component on 1.20.5+, NBT before). A material
+  without `minecraft:` gets the prefix; an unknown item is drawn as a barrier
+  rather than vanishing.
 * **Conditions** (optional `view_condition` and `click_condition`):
   * `permission:<node>` — the player holds the node (via `sdk.permissions`),
   * `group:<name>` — the player is in the group,

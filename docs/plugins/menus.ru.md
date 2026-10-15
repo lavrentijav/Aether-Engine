@@ -76,8 +76,9 @@ actions = ["[economy] take 100", "[give] minecraft:diamond_sword 1", "[close]"]
   слотов, 1–6 рядов по девять; `chest`/`chest3` — 27, `large_chest`/`chest6` —
   54), `dispenser` (9) и `hopper` (5). `rows = 1..=6` выбирает нужный размер.
 * **Предмет:** `material`/`item`, `count`, `name`, `lore`, `glint`, `model`.
-  Материал без `minecraft:` получает префикс; неизвестный предмет рисуется
-  барьером, а не исчезает.
+  `glint` (блеск чар) и `model` (id `custom_model_data`) пишутся по версии
+  протокола (компонент на 1.20.5+, NBT до). Материал без `minecraft:`
+  получает префикс; неизвестный предмет рисуется барьером, а не исчезает.
 * **Условия** (необязательные `view_condition` и `click_condition`):
   * `permission:<node>` — у игрока есть узел (через `sdk.permissions`),
   * `group:<name>` — игрок в группе,
