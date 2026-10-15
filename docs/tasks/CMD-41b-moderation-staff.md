@@ -1,7 +1,7 @@
 # CMD-41b — Plugin: moderation — jail, vanish, freeze, sudo, report, history
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/moderation`
-Needs: `oc/P1`, `oc/CMD-32a`, `oc/CMD-40`, `oc/CMD-41a`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N) · plugin: `plugins/moderation`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-32a`, `oc/CMD-40`, `oc/CMD-41a`
 Parent/umbrella: `docs/tasks/CMD-41-moderation.md`
 
 ## Commands

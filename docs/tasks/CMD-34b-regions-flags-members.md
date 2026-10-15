@@ -1,7 +1,7 @@
 # CMD-34b — Plugin: regions flags, members, bypass
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/regions`
-Needs: `oc/P1`, `oc/CMD-29b`, `oc/CMD-34a`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N) · plugin: `plugins/regions`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-29b`, `oc/CMD-34a`
 Parent/umbrella: `docs/tasks/CMD-34-regions-plugin.md`
 
 ## Commands (`/rg` = `/region`)

@@ -1,7 +1,7 @@
 # CMD-38b — Plugin: essentials-player — identity & info
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/essentials-player`
-Needs: `oc/P1`, `oc/CMD-32a`, `oc/CMD-32c`, `oc/CMD-38a`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N) · plugin: `plugins/essentials-player`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-32a`, `oc/CMD-32c`, `oc/CMD-38a`
 Parent/umbrella: `docs/tasks/CMD-38-essentials-player.md`
 
 ## Commands (EssentialsX reference)

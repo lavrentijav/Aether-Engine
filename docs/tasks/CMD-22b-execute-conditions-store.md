@@ -1,7 +1,7 @@
 # CMD-22b — V-data: /execute conditions, store, run
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-15a`, `oc/CMD-22a`
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
+Needs: `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-15a`, `oc/CMD-22a`
 Parent/umbrella: `docs/tasks/CMD-22-execute.md`
 
 ## Goal

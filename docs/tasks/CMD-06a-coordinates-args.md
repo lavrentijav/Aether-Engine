@@ -1,8 +1,8 @@
 # CMD-06a — Argument types + coordinate/rotation parser
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: `oc/CMD-03`
-Parent/umbrella: `docs/tasks/CMD-06-selectors-coordinates.md`
+Parent/umbrella: `docs/tasks/CMD-06b-selectors-coordinates.md`
 
 ## Goal
 The non-entity argument parsers and the coordinate/rotation resolver used by nearly every command.

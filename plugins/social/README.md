@@ -1,6 +1,6 @@
 # social plugin — skeleton (CMD-44)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`), the player API (`oc/CMD-32`) and the
+Status: 📋 skeleton (CMD0), **WASM tier** (sandboxed). Needs the plugin host (`oc/P1`), the player API (`oc/CMD-32`) and the
 teleport plugin/API (`oc/CMD-37`, `oc/CMD-31`). **No code until P1 is merged** — manifest and README
 only.
 

@@ -1,6 +1,6 @@
 # integrations plugin — skeleton (CMD-45)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`), the net/HTTP capability (`oc/PA3`) and
+Status: 📋 skeleton (CMD0), **WASM tier** (sandboxed). Needs the plugin host (`oc/P1`), the net/HTTP capability (`oc/PA3`) and
 the player API (`oc/CMD-32`). **No code until P1 is merged** — manifest and README only.
 
 - CMD task: **CMD-45** — `docs/tasks/CMD-45-integrations.md`

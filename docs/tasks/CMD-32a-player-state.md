@@ -1,6 +1,6 @@
 # CMD-32a — Core API: player state, effects, scheduler
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: `oc/CMD-01`, `oc/P1`
 Parent/umbrella: `docs/tasks/CMD-32-player-api.md`
 

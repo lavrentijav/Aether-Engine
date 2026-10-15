@@ -1,11 +1,11 @@
 # CMD-08 — V-admin: player & access management
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-06`
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
+Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-06b`
 
 ## Goal
 Implement the vanilla commands that manage operators, bans and the whitelist. All target lists use
-the selector/player parser from CMD-06 and the permission check from CMD-01.
+the selector/player parser from CMD-06b and the permission check from CMD-01.
 
 ## Commands (vanilla 1.21.11)
 | syntax | node | op | success feedback (en_us) |

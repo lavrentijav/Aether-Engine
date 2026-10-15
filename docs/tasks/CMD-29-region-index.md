@@ -1,7 +1,15 @@
-# CMD-29 — Core API: region index + protection check
+# CMD-29 — Native: region index + protection check
 
-Status: 📋 task brief (CMD0) · size: L · core: yes
-Needs: `oc/CMD-01`, `oc/P1` (the region *model* is a plugin; this is the mechanism it uses)
+Status: 📋 task brief (CMD0) · size: L · tier: native plugin (N)
+Needs: `oc/CMD-00N`, `oc/CMD-01`, `oc/P1`
+
+## Tier (CMD0 review, 3-tier model)
+Reclassified from core to a **native plugin** (in-process Rust, `plugins/regions`). The core keeps
+only the **minimal hook**: the P1 event hook points (`before-block-break/place`, `before-use-item`,
+`before-attack`) which already exist for every plugin, callable with no policy attached. The region
+**index, the model and the check with priority/flag policy** live in the native plugin (CMD-29a/b here
+plus CMD-34/35). Nothing here may make the core depend on the plugin: with `plugins/regions`
+disabled the hooks simply allow everything.
 
 ## Split (CMD0 review)
 This L task is split into:

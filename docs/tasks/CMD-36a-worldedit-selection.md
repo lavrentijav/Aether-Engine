@@ -1,7 +1,7 @@
 # CMD-36a — Plugin: WorldEdit selection & fill
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/worldedit`
-Needs: `oc/P1`, `oc/CMD-30b`, `oc/CMD-06`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N) · plugin: `plugins/worldedit`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-30b`, `oc/CMD-06b`
 Parent/umbrella: `docs/tasks/CMD-36-worldedit-plugin.md`
 
 ## Commands
@@ -17,7 +17,7 @@ max edit volume and per-tick budget come from the core bulk-edit API (CMD-30).
 
 ## Files
 - `plugins/worldedit/`: manifest, `src/`, README.
-- core bulk edit (CMD-30), selector/coordinate parser (CMD-06), region check (CMD-29) so a fill
+- core bulk edit (CMD-30), selector/coordinate parser (CMD-06b), region check (CMD-29) so a fill
   cannot edit a protected region without bypass.
 
 ## Edge cases to test explicitly

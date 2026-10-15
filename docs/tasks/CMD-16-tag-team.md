@@ -1,7 +1,7 @@
 # CMD-16 — V-data: tags, teams, team message
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
+Needs: `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-01`
 
 ## Goal
 Entity tags and scoreboard teams (with all their effect rules), plus `/teammsg`. Teams are read by

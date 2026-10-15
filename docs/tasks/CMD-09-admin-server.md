@@ -1,6 +1,6 @@
 # CMD-09 — V-admin: server control & info
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: `oc/CMD-05`
 
 ## Goal

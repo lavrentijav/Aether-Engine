@@ -1,7 +1,7 @@
 # CMD-12a — V-world: setblock, fill, clone
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
+Needs: `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-01`
 Parent/umbrella: `docs/tasks/CMD-12-block-ops.md`
 
 ## Commands (vanilla 1.21.11)
@@ -20,7 +20,7 @@ journal.
 
 ## Files
 - new `crates/aether-server/src/commands/world_edit.rs`.
-- `placement.rs`, `game/provenance.rs`, `aether_world` block-state parsing from CMD-06.
+- `placement.rs`, `game/provenance.rs`, `aether_world` block-state parsing from CMD-06b.
 
 ## Edge cases to test explicitly
 - `/setblock keep` on an occupied cell → `That block is already <block>`, no change/journal.

@@ -1,7 +1,7 @@
 # CMD-10 — V-player: effects, items, attributes, damage
 
-Status: 📋 task brief (CMD0) · size: L · core: yes
-Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
+Status: 📋 task brief (CMD0) · size: L · tier: core (C)
+Needs: `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-01`
 
 ## Split (CMD0 review)
 This L group is split into:
@@ -50,7 +50,7 @@ the true count; it must journal item destruction (provenance) like any other rem
   vanilla rules.
 - `/damage` with a damage type, with `by <entity>`, and with `at <location>`; a killing blow runs
   the normal death path once (no double death).
-- every target list uses CMD-06; selectors may hit multiple entities.
+- every target list uses CMD-06b; selectors may hit multiple entities.
 
 ## Done criteria
 - Implementations + unit tests for the edge cases; combat/effect integration tests.

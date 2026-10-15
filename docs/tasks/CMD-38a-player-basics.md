@@ -1,7 +1,7 @@
 # CMD-38a — Plugin: essentials-player — movement & state
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/essentials-player`
-Needs: `oc/P1`, `oc/CMD-32a`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N) · plugin: `plugins/essentials-player`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-32a`
 Parent/umbrella: `docs/tasks/CMD-38-essentials-player.md`
 
 ## Commands (EssentialsX reference)

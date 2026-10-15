@@ -1,7 +1,7 @@
 # CMD-22 — V-data: `/execute`
 
-Status: 📋 task brief (CMD0) · size: L · core: yes
-Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-15`, `oc/CMD-21`
+Status: 📋 task brief (CMD0) · size: L · tier: core (C)
+Needs: `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-15`, `oc/CMD-21`
 
 ## Split (CMD0 review)
 This L task is split into:
@@ -36,7 +36,7 @@ Semantics: a modifier with an entity selector that resolves to **0** entities ma
 
 ## Files
 - new `crates/aether-server/src/commands/execute.rs`.
-- command tree (CMD-03) source-stack model; selectors (CMD-06); scoreboard (CMD-15); `/data`
+- command tree (CMD-03) source-stack model; selectors (CMD-06b); scoreboard (CMD-15); `/data`
   write path (CMD-14); bossbar (CMD-17); function (CMD-21).
 
 ## Edge cases to test explicitly

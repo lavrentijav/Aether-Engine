@@ -1,7 +1,7 @@
 # CMD-34 — Plugin: WorldGuard-style regions
 
-Status: 📋 task brief (CMD0) · size: L · core: no · plugin: `plugins/regions`
-Needs: `oc/P1`, `oc/CMD-29`
+Status: 📋 task brief (CMD0) · size: L · tier: native plugin (N) · plugin: `plugins/regions`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-29`
 
 ## Split (CMD0 review)
 | id | brief | contents | size |

@@ -1,7 +1,7 @@
 # CMD-35a — Plugin: claims model & shovel
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/claims`
-Needs: `oc/P1`, `oc/CMD-29b`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N) · plugin: `plugins/claims`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-29b`
 Parent/umbrella: `docs/tasks/CMD-35-claims-plugin.md`
 
 ## Commands (GriefPrevention reference)

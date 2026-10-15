@@ -1,14 +1,17 @@
 # CMD-25 — `/aether profile` sub-tick profiler
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-05`, `oc/CMD-01`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N)
+Needs: `oc/CMD-00N`, `oc/CMD-05`, `oc/CMD-01`
 
 ## Goal
 A per-system sub-tick profiler (BACKLOG O4). Turns "the tick is 40 ms" into "redstone is 22 ms,
-light is 7 ms, entities 5 ms". Extends the `/aether` root from CMD-24. **Core, no P1 dependency**:
-the per-system scopes are measured in the tick itself. Per-plugin timings are an optional addition
-that activates only when the plugin host (`oc/P1`) is present (see below); the plugin must not be a
-build or runtime requirement of this task.
+light is 7 ms, entities 5 ms". Extends the `/aether` root from CMD-24.
+
+**Tier (CMD0 review):** this is a **native plugin**, not core. The core exposes **named scope hooks**
+(no policy) around the tick systems; the profiler command, sampling, histograms and report live in
+the native plugin (`plugins/`, `needs: oc/CMD-00N`). It does **not** need P1 directly, but it does
+need the native loader CMD-00N. Per-plugin timings are an optional addition once the host provides
+them.
 
 ## Commands
 | syntax | node | op | feedback |
@@ -28,17 +31,19 @@ and loaded, it can call it to report per-plugin `on-tick`/event time. If P1 is a
 section is simply empty. This is deliberately *not* a `needs: oc/P1` — CMD-25 ships without it.
 
 ## Files
-- new `crates/aether-server/src/commands/profile.rs` + `crates/aether-server/src/profiler.rs`.
-- the tick loop: add named scopes.
+- **core:** named scope hooks in the tick (`crates/aether-server/src/profiler.rs`) — a cheap
+  `profile("redstone") { … }` guard whose only policy is on/off; the hook API is what a native
+  plugin reads.
+- **native plugin:** `plugins/` — the `/aether profile` command, histogram storage, report.
 
 ## Edge cases to test explicitly
 - profiling off adds no measurable overhead (bench the tick with/without).
 - start twice / stop twice; dump while stopped reports the last run or says none.
 - a system that panics/errs still gets its scope closed (no leak).
 - the report is deterministic for a fixed workload; percentages sum to ≤ 100.
-- **without P1** the profiler builds and runs, and the plugin section is empty (not a panic, not a
-  compile error); **with P1** per-plugin times appear when the host calls the scope API.
+- **core scope hooks work with the profiler plugin disabled** (no panic, no cost beyond the flag);
+  per-plugin times appear only when the host reports them.
 
 ## Done criteria
-- Profiler + command + tests; a bench proving the off-path is free.
+- Core scope hooks + native profiler + tests; a bench proving the off-path is free.
 - fmt / clippy `-D warnings` / `cargo-locked test`.

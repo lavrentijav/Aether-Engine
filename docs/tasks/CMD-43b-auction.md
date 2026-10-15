@@ -1,6 +1,6 @@
 # CMD-43b — Plugin: shops — auction house & /sell
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/shops`
+Status: 📋 task brief (CMD0) · size: M · tier: WASM plugin (W) · plugin: `plugins/shops`
 Needs: `oc/P1`, `oc/CMD-42`, `oc/CMD-43a`
 Parent/umbrella: `docs/tasks/CMD-43-shops.md`
 

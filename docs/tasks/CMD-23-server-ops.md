@@ -1,6 +1,6 @@
 # CMD-23 — Server diagnostics & lifecycle
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: `oc/CMD-05`, `oc/CMD-01`
 
 ## Goal

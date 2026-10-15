@@ -1,6 +1,6 @@
 # economy plugin — skeleton (CMD-42)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`) and the economy service WIT + ledger
+Status: 📋 skeleton (CMD0), **WASM tier** (sandboxed). Needs the plugin host (`oc/P1`) and the economy service WIT + ledger
 (`oc/P2`; BACKLOG PM1). **No code until P1 is merged** — manifest and README only.
 
 - CMD task: **CMD-42** — `docs/tasks/CMD-42-economy.md`

@@ -1,7 +1,7 @@
 # CMD-38 — Plugin: essentials-player
 
-Status: 📋 task brief (CMD0) · size: L · core: no · plugin: `plugins/essentials-player`
-Needs: `oc/P1`, `oc/CMD-32`
+Status: 📋 task brief (CMD0) · size: L · tier: native plugin (N) · plugin: `plugins/essentials-player`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-32`
 
 ## Split (CMD0 review)
 | id | brief | contents | size |

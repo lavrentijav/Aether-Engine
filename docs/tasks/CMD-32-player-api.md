@@ -1,6 +1,6 @@
 # CMD-32 — Core API: player & UI API (PA1)
 
-Status: 📋 task brief (CMD0) · size: L · core: yes
+Status: 📋 task brief (CMD0) · size: L · tier: core (C)
 Needs: `oc/CMD-01`, `oc/P1`
 
 ## Split (CMD0 review)

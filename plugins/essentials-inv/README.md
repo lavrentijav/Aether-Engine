@@ -1,6 +1,6 @@
 # essentials-inv plugin — skeleton (CMD-39)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`) and the core player/window API
+Status: 📋 skeleton (CMD0), **native tier** (in-process, CMD-00N). Needs the native loader (`oc/CMD-00N`) and the core player/window API
 (`oc/CMD-32`, PA1). **No code until P1 is merged** — manifest and README only.
 
 - CMD task: **CMD-39** — `docs/tasks/CMD-39-essentials-inv.md`

@@ -1,7 +1,7 @@
 # CMD-17 — V-data: chat, titles, bossbars, dialogs
 
-Status: 📋 task brief (CMD0) · size: L · core: yes
-Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
+Status: 📋 task brief (CMD0) · size: L · tier: core (C)
+Needs: `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-01`
 
 ## Split (CMD0 review)
 This L group is split into:

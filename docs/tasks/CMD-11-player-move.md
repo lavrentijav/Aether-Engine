@@ -1,7 +1,7 @@
 # CMD-11 — V-player: teleport, spawn, ride, item (umbrella)
 
 Status: 📋 umbrella brief (CMD0). Split into **CMD-11a** and **CMD-11b** (each about one session).
-core: yes. Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`.
+core: yes. Needs: `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-01`.
 
 ## Goal
 Vanilla movement/positioning and inventory-item commands, plus bringing the existing `/tp` and

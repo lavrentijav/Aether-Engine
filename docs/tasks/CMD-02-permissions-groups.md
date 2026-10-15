@@ -1,13 +1,17 @@
 # CMD-02 — Permission groups, inheritance, per-world context
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-01`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N)
+Needs: `oc/CMD-00N`, `oc/CMD-01`
 
 ## Goal
 Extend the permission core (CMD-01) with **groups**, **inheritance**, **per-world context** and
 meta (prefix/suffix), all resolved on the hot path without a global lock. The LuckPerms-style
-management UI/tracks/meta/web editor is a **plugin** (CMD-33); this task is only the storage +
-resolution the core and plugins read.
+management UI/tracks/meta/web editor is a further native plugin (CMD-33).
+
+**Tier (CMD0 review):** the **store and its resolution are a native plugin** (in-process Rust),
+not core. The core (CMD-01) keeps only the check API, op levels and a built-in default backed by
+`config.operators`; it works with this plugin disabled. This task implements the store as a native
+plugin (`needs: oc/CMD-00N`) that the core check calls through the service registry.
 
 ## Model
 - A `Group` has an id, a parent group (single inheritance is enough; a set is fine), a priority,

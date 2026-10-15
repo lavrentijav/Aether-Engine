@@ -3,7 +3,8 @@ id = "essentials-player"
 name = "Essentials Player"
 version = "0.1.0"
 api = "0.1"
-entry = "essentials-player.wasm"
+# native: a Rust crate in this workspace, linked in-process (CMD-00N).
+# No .wasm entry: the loader calls it directly, no WASM boundary.
 priority = 40
 
 capabilities = ["log", "config", "supports", "storage.kv", "players", "scheduler"]

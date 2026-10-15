@@ -1,6 +1,6 @@
 # essentials-player plugin — skeleton (CMD-38)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`) and the core player/UI API (`oc/CMD-32`).
+Status: 📋 skeleton (CMD0), **native tier** (in-process, CMD-00N). Needs the native loader (`oc/CMD-00N`) and the core player/UI API (`oc/CMD-32`).
 **No code until P1 is merged** — manifest and README only.
 
 - CMD task: **CMD-38** — `docs/tasks/CMD-38-essentials-player.md`

@@ -1,6 +1,6 @@
 # Permissions plugin — skeleton (CMD-33)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`) and the core permission groups
+Status: 📋 skeleton (CMD0), **native tier** (in-process, CMD-00N). Needs the native loader (`oc/CMD-00N`) and the core permission groups
 (`oc/CMD-02`). **No code until P1 is merged** — this directory holds the manifest and this README
 only; `entry` is a placeholder.
 

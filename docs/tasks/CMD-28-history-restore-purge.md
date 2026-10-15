@@ -1,12 +1,15 @@
 # CMD-28 — History: restore and purge
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-27`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N)
+Needs: `oc/CMD-00N`, `oc/CMD-27`
 
 ## Goal
 Two missing halves of the CoreProtect workflow: `/restore` (re-apply a previous change, the inverse
 of `/rollback`) and `/purge` (reclaim disk by deleting old history). `/rollback` already exists and
 writes recovered blocks to `/stash`.
+
+**Tier (CMD0 review):** native plugin (in-process Rust), like CMD-27. The core keeps the journal and
+the existing rollback; `/restore` `/purge` are added by the native plugin (`needs: oc/CMD-00N`).
 
 ## Commands
 | syntax | node | op | feedback |

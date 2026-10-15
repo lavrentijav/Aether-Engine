@@ -1,6 +1,6 @@
 # CMD-21a — V-data: data pack loader
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-20a`, `oc/CMD-20b`, `oc/CMD-20c`
 Parent/umbrella: `docs/tasks/CMD-21-function-datapack.md`
 

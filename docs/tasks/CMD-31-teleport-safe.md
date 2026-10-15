@@ -1,6 +1,6 @@
 # CMD-31 — Core API: teleport with safe-spot search
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: `oc/CMD-01`, `oc/P1`
 
 ## Goal
@@ -39,7 +39,7 @@ pub fn random_safe_spot(world, center, min_radius, max_radius, rng) -> Option<Bl
 - teleport through a portal vs command fires different causes; region `entry` deny cancels.
 - teleporting a player with a vehicle carries or dismounts per vanilla; passengers move together.
 - teleport into unloaded chunks loads them, bounded per tick.
-- exact teleport with `~` (from CMD-06) resolves before the call.
+- exact teleport with `~` (from CMD-06b) resolves before the call.
 - the existing `/tp`, `/spawn` behaviour is unchanged after the refactor.
 
 ## Done criteria

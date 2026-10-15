@@ -1,6 +1,6 @@
 # CMD-45 — Plugin: integrations
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/integrations`
+Status: 📋 task brief (CMD0) · size: M · tier: WASM plugin (W) · plugin: `plugins/integrations`
 Needs: `oc/P1`, `oc/PA3` (net capability), `oc/CMD-32`
 
 ## Goal

@@ -1,6 +1,6 @@
 # CMD-21c — V-data: /datapack, /reload
 
-Status: 📋 task brief (CMD0) · size: S · core: yes
+Status: 📋 task brief (CMD0) · size: S · tier: core (C)
 Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-21a`
 Parent/umbrella: `docs/tasks/CMD-21-function-datapack.md`
 

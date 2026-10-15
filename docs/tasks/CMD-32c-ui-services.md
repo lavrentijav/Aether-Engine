@@ -1,6 +1,6 @@
 # CMD-32c — Core API: UI primitives + service lookup
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: `oc/CMD-01`, `oc/P1`, `oc/CMD-32a`
 Parent/umbrella: `docs/tasks/CMD-32-player-api.md`
 

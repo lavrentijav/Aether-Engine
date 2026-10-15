@@ -1,7 +1,7 @@
 # CMD-33b — Plugin: permissions meta, tracks, editor
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/permissions`
-Needs: `oc/P1`, `oc/CMD-02`, `oc/CMD-33a`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N) · plugin: `plugins/permissions`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-02`, `oc/CMD-33a`
 Parent/umbrella: `docs/tasks/CMD-33-permissions-ui.md`
 
 ## Commands (LuckPerms reference)

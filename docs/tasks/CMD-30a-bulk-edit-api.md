@@ -1,7 +1,7 @@
-# CMD-30a — Core API: BulkEdit API + journal + undo
+# CMD-30a — Native API: BulkEdit API + journal + undo
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-01`, `oc/P1`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N)
+Needs: `oc/CMD-00N`, `oc/CMD-01`, `oc/P1`
 Parent/umbrella: `docs/tasks/CMD-30-bulk-edit.md`
 
 ## Goal

@@ -1,6 +1,6 @@
 # CMD-26 — `/aether world` management
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: `oc/CMD-05`, `oc/CMD-01`; a multi-world/dimension core (BACKLOG G9) must exist or this
 brief splits: the command surface is implementable once worlds can be loaded/unloaded.
 

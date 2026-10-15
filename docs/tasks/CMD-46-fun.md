@@ -1,6 +1,6 @@
 # CMD-46 — Plugin: fun / cosmetic
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/fun`
+Status: 📋 task brief (CMD0) · size: M · tier: WASM plugin (W) · plugin: `plugins/fun`
 Needs: `oc/P1`, `oc/CMD-32`
 
 ## Goal

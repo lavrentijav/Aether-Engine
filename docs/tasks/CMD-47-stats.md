@@ -1,6 +1,6 @@
 # CMD-47 — Plugin: stats
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/stats`
+Status: 📋 task brief (CMD0) · size: M · tier: WASM plugin (W) · plugin: `plugins/stats`
 Needs: `oc/P1`, `oc/PA2` (history read API)
 
 ## Goal

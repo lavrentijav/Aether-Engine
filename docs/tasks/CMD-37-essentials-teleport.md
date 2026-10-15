@@ -1,6 +1,6 @@
 # CMD-37 — Plugin: essentials-teleport (umbrella)
 
-Status: 📋 umbrella brief (CMD0). Split into **CMD-37a** and **CMD-37b**. core: no,
+Status: 📋 umbrella brief (CMD0). Split into **CMD-37a** and **CMD-37b**. tier: native plugin (N),
 plugin: `plugins/essentials-teleport`. Needs: `oc/P1`, `oc/CMD-31`.
 
 ## Goal

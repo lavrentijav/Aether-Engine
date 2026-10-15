@@ -1,6 +1,6 @@
 # CMD-43 — Plugin: shops
 
-Status: 📋 task brief (CMD0) · size: L · core: no · plugin: `plugins/shops`
+Status: 📋 task brief (CMD0) · size: L · tier: WASM plugin (W) · plugin: `plugins/shops`
 Needs: `oc/P1`, `oc/CMD-42`
 
 ## Split (CMD0 review)

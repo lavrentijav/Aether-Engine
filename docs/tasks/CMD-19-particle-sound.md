@@ -1,7 +1,7 @@
 # CMD-19 — V-data: particles and sounds
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
+Needs: `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-01`
 
 ## Goal
 Vanilla client-effects commands: spawn particles, play/stop sounds.

@@ -1,7 +1,7 @@
 # CMD-14 — V-data: `/data` (NBT read/modify)
 
-Status: 📋 task brief (CMD0) · size: L · core: yes
-Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
+Status: 📋 task brief (CMD0) · size: L · tier: core (C)
+Needs: `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-01`
 
 ## Split (CMD0 review)
 This L task is split into:
@@ -26,7 +26,7 @@ NBT storage; if the engine lacks entity/block-entity NBT or command storage, add
 | `/data remove <target> <path>` | `minecraft.command.data` | 2 | `Removed element ...` |
 
 `<target>` forms: `block <pos>`, `entity <targets>` (exactly one required), `storage <resource id>`.
-NBT path syntax (`foo.bar[0].baz`, `{key:value}` filters, `[]` all-elements) comes from CMD-06.
+NBT path syntax (`foo.bar[0].baz`, `{key:value}` filters, `[]` all-elements) comes from CMD-06b.
 
 ## Files
 - new `crates/aether-server/src/commands/data.rs`.

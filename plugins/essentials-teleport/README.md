@@ -1,6 +1,6 @@
 # essentials-teleport plugin — skeleton (CMD-37)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`) and the core teleport/safe-spot API
+Status: 📋 skeleton (CMD0), **native tier** (in-process, CMD-00N). Needs the native loader (`oc/CMD-00N`) and the core teleport/safe-spot API
 (`oc/CMD-31`). **No code until P1 is merged** — manifest and README only.
 
 - CMD task: **CMD-37** — `docs/tasks/CMD-37-essentials-teleport.md`

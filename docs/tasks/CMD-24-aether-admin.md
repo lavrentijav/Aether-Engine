@@ -1,6 +1,6 @@
 # CMD-24 — `/aether` admin: reload and backup
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-21` (reload of data packs)
 
 ## Goal

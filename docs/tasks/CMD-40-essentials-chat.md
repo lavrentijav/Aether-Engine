@@ -1,6 +1,6 @@
 # CMD-40 — Plugin: essentials-chat
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/essentials-chat`
+Status: 📋 task brief (CMD0) · size: M · tier: WASM plugin (W) · plugin: `plugins/essentials-chat`
 Needs: `oc/P1`, `oc/CMD-32` (player API), `oc/CMD-33` (prefix/suffix meta)
 
 ## Goal

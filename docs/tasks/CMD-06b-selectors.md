@@ -1,8 +1,8 @@
 # CMD-06b — Entity selector parser + selection semantics
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: `oc/CMD-03`, `oc/CMD-06a`
-Parent/umbrella: `docs/tasks/CMD-06-selectors-coordinates.md`
+Parent/umbrella: `docs/tasks/CMD-06b-selectors-coordinates.md`
 
 ## Goal
 The `@…` selector parser and the selection rules every command uses.

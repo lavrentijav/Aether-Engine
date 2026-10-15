@@ -1,7 +1,7 @@
 # CMD-36 — Plugin: WorldEdit-style editing
 
-Status: 📋 task brief (CMD0) · size: L → split · core: no · plugin: `plugins/worldedit`
-Needs: `oc/P1`, `oc/CMD-30`, `oc/CMD-06`
+Status: 📋 task brief (CMD0) · size: L → split · tier: native plugin (N) · plugin: `plugins/worldedit`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-30`, `oc/CMD-06b`
 
 ## Split (CMD0 review)
 | id | brief | contents | size |
@@ -37,7 +37,7 @@ volume over the limit errors before starting.
 
 ## Files
 - `plugins/worldedit/`: manifest, `src/`, README.
-- core bulk edit (CMD-30), selector/coordinate parser (CMD-06), region check (CMD-29) so a brush
+- core bulk edit (CMD-30), selector/coordinate parser (CMD-06b), region check (CMD-29) so a brush
   cannot edit a protected region without bypass.
 
 ## Edge cases to test explicitly

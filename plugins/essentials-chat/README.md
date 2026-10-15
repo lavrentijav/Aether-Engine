@@ -1,6 +1,6 @@
 # essentials-chat plugin — skeleton (CMD-40)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`), the player API (`oc/CMD-32`) and the
+Status: 📋 skeleton (CMD0), **WASM tier** (sandboxed). Needs the plugin host (`oc/P1`), the player API (`oc/CMD-32`) and the
 permissions plugin for prefix/suffix meta (`oc/CMD-33`). **No code until P1 is merged** — manifest
 and README only.
 

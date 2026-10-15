@@ -1,7 +1,7 @@
 # CMD-35b — Plugin: claims trust & limits
 
-Status: 📋 task brief (CMD0) · size: S · core: no · plugin: `plugins/claims`
-Needs: `oc/P1`, `oc/CMD-29b`, `oc/CMD-35a`
+Status: 📋 task brief (CMD0) · size: S · tier: native plugin (N) · plugin: `plugins/claims`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-29b`, `oc/CMD-35a`
 Parent/umbrella: `docs/tasks/CMD-35-claims-plugin.md`
 
 ## Commands (GriefPrevention reference)

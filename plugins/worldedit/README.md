@@ -1,6 +1,6 @@
 # WorldEdit plugin — skeleton (CMD-36)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`), the core bulk-edit API (`oc/CMD-30`)
+Status: 📋 skeleton (CMD0), **native tier** (in-process, CMD-00N). Needs the native loader (`oc/CMD-00N`), the core bulk-edit API (`oc/CMD-30`)
 and the selector/coordinate parser (`oc/CMD-06`). **No code until P1 is merged** — manifest and
 README only. Size L: split into `CMD-36a` (selection + fill + undo) and `CMD-36b` (clipboard,
 schematic, brushes) before assigning.

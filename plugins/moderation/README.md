@@ -1,6 +1,6 @@
 # moderation plugin — skeleton (CMD-41)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`), the player API (`oc/CMD-32`) and the
+Status: 📋 skeleton (CMD0), **native tier** (in-process, CMD-00N). Needs the native loader (`oc/CMD-00N`), the player API (`oc/CMD-32`) and the
 chat hook (`oc/CMD-40`). **No code until P1 is merged** — manifest and README only. Size L: split
 into `CMD-41a` (mute/warn/chat control) and `CMD-41b` (jail/vanish/freeze/sudo/report) before
 assigning.

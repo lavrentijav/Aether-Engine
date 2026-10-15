@@ -1,7 +1,7 @@
 # CMD-35 — Plugin: GriefPrevention-style claims
 
-Status: 📋 task brief (CMD0) · size: L · core: no · plugin: `plugins/claims`
-Needs: `oc/P1`, `oc/CMD-29`
+Status: 📋 task brief (CMD0) · size: L · tier: native plugin (N) · plugin: `plugins/claims`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-29`
 
 ## Split (CMD0 review)
 | id | brief | contents | size |

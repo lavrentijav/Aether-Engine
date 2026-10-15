@@ -1,6 +1,6 @@
 # CMD-06 — Selector and coordinate parser (umbrella)
 
-Status: 📋 umbrella brief (CMD0). Split into **CMD-06a** and **CMD-06b**. core: yes.
+Status: 📋 umbrella brief (CMD0). Split into **CMD-06a** and **CMD-06b**. tier: core (C).
 Needs: `oc/CMD-03`.
 
 ## Goal

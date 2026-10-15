@@ -1,6 +1,6 @@
 # CMD-07 — Console and RCON command sources
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: `oc/CMD-03`, `oc/CMD-01`
 
 ## Goal

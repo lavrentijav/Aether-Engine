@@ -1,7 +1,7 @@
 # CMD-41a — Plugin: moderation — mutes, warnings, temp bans, chat control
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/moderation`
-Needs: `oc/P1`, `oc/CMD-32a`, `oc/CMD-40`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N) · plugin: `plugins/moderation`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-32a`, `oc/CMD-40`
 Parent/umbrella: `docs/tasks/CMD-41-moderation.md`
 
 ## Commands

@@ -1,21 +1,32 @@
 [
   {
+    "id": "CMD-00N",
+    "title": "Native plugin loader (in-process tier)",
+    "brief": "docs/tasks/CMD-00N-native-loader.md",
+    "needs": [
+      "oc/P1"
+    ],
+    "size": "M",
+    "tier": "N"
+  },
+  {
     "id": "CMD-01",
-    "title": "Permissions core",
+    "title": "Permissions core (check API, op levels, op seed)",
     "brief": "docs/tasks/CMD-01-permissions-core.md",
     "needs": [],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-02",
-    "title": "Permission groups, inheritance, per-world context",
+    "title": "Permission groups, inheritance, per-world store",
     "brief": "docs/tasks/CMD-02-permissions-groups.md",
     "needs": [
+      "oc/CMD-00N",
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "N"
   },
   {
     "id": "CMD-03",
@@ -25,7 +36,7 @@
       "oc/CMD-01"
     ],
     "size": "L",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-04",
@@ -35,7 +46,7 @@
       "oc/CMD-03"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-05",
@@ -45,7 +56,7 @@
       "oc/CMD-03"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-06a",
@@ -55,7 +66,7 @@
       "oc/CMD-03"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-06b",
@@ -66,7 +77,7 @@
       "oc/CMD-06a"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-07",
@@ -77,7 +88,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-08",
@@ -89,7 +100,7 @@
       "oc/CMD-06b"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-09",
@@ -99,7 +110,7 @@
       "oc/CMD-05"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-10a",
@@ -111,7 +122,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-10b",
@@ -123,7 +134,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-11a",
@@ -135,7 +146,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-11b",
@@ -147,7 +158,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-12a",
@@ -159,7 +170,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-12b",
@@ -171,7 +182,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-13a",
@@ -183,7 +194,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-13b",
@@ -195,7 +206,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-14a",
@@ -207,7 +218,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-14b",
@@ -220,7 +231,7 @@
       "oc/CMD-14a"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-15a",
@@ -232,7 +243,7 @@
       "oc/CMD-06b"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-15b",
@@ -245,7 +256,7 @@
       "oc/CMD-15a"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-16",
@@ -257,7 +268,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-17a",
@@ -269,7 +280,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-17b",
@@ -281,7 +292,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-18",
@@ -292,7 +303,7 @@
       "oc/CMD-05"
     ],
     "size": "S",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-19",
@@ -304,7 +315,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-20a",
@@ -316,7 +327,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-20b",
@@ -328,7 +339,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-20c",
@@ -340,7 +351,7 @@
       "oc/CMD-01"
     ],
     "size": "S",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-21a",
@@ -354,7 +365,7 @@
       "oc/CMD-20c"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-21b",
@@ -366,7 +377,7 @@
       "oc/CMD-21a"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-21c",
@@ -378,7 +389,7 @@
       "oc/CMD-21a"
     ],
     "size": "S",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-22a",
@@ -390,7 +401,7 @@
       "oc/CMD-21b"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-22b",
@@ -403,7 +414,7 @@
       "oc/CMD-22a"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-23",
@@ -414,7 +425,7 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-24",
@@ -426,18 +437,19 @@
       "oc/CMD-21a"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-25",
-    "title": "/aether profile sub-tick profiler",
+    "title": "/aether profile sub-tick profiler (native)",
     "brief": "docs/tasks/CMD-25-aether-profile.md",
     "needs": [
+      "oc/CMD-00N",
       "oc/CMD-05",
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "N"
   },
   {
     "id": "CMD-26",
@@ -448,75 +460,77 @@
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-27",
-    "title": "History: lookup filters, /co, preview",
+    "title": "History: /co lookup filters + preview (native)",
     "brief": "docs/tasks/CMD-27-history-lookup.md",
     "needs": [
+      "oc/CMD-00N",
       "oc/CMD-06b",
       "oc/CMD-05",
       "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "N"
   },
   {
     "id": "CMD-28",
-    "title": "History: restore and purge",
+    "title": "History: /restore and /purge (native)",
     "brief": "docs/tasks/CMD-28-history-restore-purge.md",
     "needs": [
+      "oc/CMD-00N",
       "oc/CMD-27"
     ],
     "size": "M",
-    "core": true
+    "tier": "N"
   },
   {
     "id": "CMD-29a",
-    "title": "Core API: region index build",
+    "title": "Native API: region index build",
     "brief": "docs/tasks/CMD-29a-region-index-build.md",
     "needs": [
-      "oc/CMD-01",
-      "oc/P1"
+      "oc/CMD-00N",
+      "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "N"
   },
   {
     "id": "CMD-29b",
-    "title": "Core API: region protection check + hooks",
+    "title": "Native API: region protection check + hooks",
     "brief": "docs/tasks/CMD-29b-region-check-hooks.md",
     "needs": [
+      "oc/CMD-00N",
       "oc/CMD-01",
-      "oc/P1",
       "oc/CMD-29a"
     ],
     "size": "M",
-    "core": true
+    "tier": "N"
   },
   {
     "id": "CMD-30a",
-    "title": "Core API: BulkEdit API + journal + undo",
+    "title": "Native API: BulkEdit API + journal + undo",
     "brief": "docs/tasks/CMD-30a-bulk-edit-api.md",
     "needs": [
-      "oc/CMD-01",
-      "oc/P1"
+      "oc/CMD-00N",
+      "oc/CMD-01"
     ],
     "size": "M",
-    "core": true
+    "tier": "N"
   },
   {
     "id": "CMD-30b",
-    "title": "Core API: bulk edit publish (resend, light, budget)",
+    "title": "Native API: bulk edit publish (resend, light, budget)",
     "brief": "docs/tasks/CMD-30b-bulk-edit-publish.md",
     "needs": [
+      "oc/CMD-00N",
       "oc/CMD-01",
-      "oc/P1",
       "oc/CMD-30a"
     ],
     "size": "M",
-    "core": true
+    "tier": "N"
   },
   {
     "id": "CMD-31",
@@ -527,7 +541,7 @@
       "oc/P1"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-32a",
@@ -538,7 +552,7 @@
       "oc/P1"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-32b",
@@ -550,7 +564,7 @@
       "oc/CMD-32a"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-32c",
@@ -562,174 +576,174 @@
       "oc/CMD-32a"
     ],
     "size": "M",
-    "core": true
+    "tier": "C"
   },
   {
     "id": "CMD-33a",
-    "title": "Plugin: permissions nodes & parents",
+    "title": "Native plugin: permissions nodes & parents",
     "brief": "docs/tasks/CMD-33a-permissions-nodes.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-02"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-33b",
-    "title": "Plugin: permissions meta, tracks, editor",
+    "title": "Native plugin: permissions meta, tracks, editor",
     "brief": "docs/tasks/CMD-33b-permissions-meta-editor.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-02",
       "oc/CMD-33a"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-34a",
-    "title": "Plugin: regions model & shape commands",
+    "title": "Native plugin: regions model & shape commands",
     "brief": "docs/tasks/CMD-34a-regions-model.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-29b"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-34b",
-    "title": "Plugin: regions flags, members, bypass",
+    "title": "Native plugin: regions flags, members, bypass",
     "brief": "docs/tasks/CMD-34b-regions-flags-members.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-29b",
       "oc/CMD-34a"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-35a",
-    "title": "Plugin: claims model & shovel",
+    "title": "Native plugin: claims model & shovel",
     "brief": "docs/tasks/CMD-35a-claims-model.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-29b"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-35b",
-    "title": "Plugin: claims trust & limits",
+    "title": "Native plugin: claims trust & limits",
     "brief": "docs/tasks/CMD-35b-claims-trust.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-29b",
       "oc/CMD-35a"
     ],
     "size": "S",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-36a",
-    "title": "Plugin: WorldEdit selection & fill",
+    "title": "Native plugin: WorldEdit selection & fill",
     "brief": "docs/tasks/CMD-36a-worldedit-selection.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-30b",
       "oc/CMD-06b"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-36b",
-    "title": "Plugin: WorldEdit clipboard, schematics, brushes",
+    "title": "Native plugin: WorldEdit clipboard, schematics, brushes",
     "brief": "docs/tasks/CMD-36b-worldedit-clipboard.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-30b",
       "oc/CMD-36a"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-37a",
-    "title": "Plugin: essentials-teleport — homes, warps, spawn",
+    "title": "Native plugin: essentials-teleport — homes, warps, spawn",
     "brief": "docs/tasks/CMD-37a-teleport-homes-warps.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-31"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-37b",
-    "title": "Plugin: essentials-teleport — requests, back, vertical, rtp",
+    "title": "Native plugin: essentials-teleport — requests, back, vertical, rtp",
     "brief": "docs/tasks/CMD-37b-teleport-requests.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-31",
       "oc/CMD-37a"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-38a",
-    "title": "Plugin: essentials-player — movement & state",
+    "title": "Native plugin: essentials-player — movement & state",
     "brief": "docs/tasks/CMD-38a-player-basics.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-32a"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-38b",
-    "title": "Plugin: essentials-player — identity & info",
+    "title": "Native plugin: essentials-player — identity & info",
     "brief": "docs/tasks/CMD-38b-player-info.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-32a",
       "oc/CMD-32c",
       "oc/CMD-38a"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-39a",
-    "title": "Plugin: essentials-inv — inventory views",
+    "title": "Native plugin: essentials-inv — inventory views",
     "brief": "docs/tasks/CMD-39a-inv-view.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-32b"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-39b",
-    "title": "Plugin: essentials-inv — stations & kits",
+    "title": "Native plugin: essentials-inv — stations & kits",
     "brief": "docs/tasks/CMD-39b-stations-kits.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-32b",
       "oc/CMD-39a"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-40",
-    "title": "Plugin: essentials-chat (new names only, hooks core /msg)",
+    "title": "WASM plugin: essentials-chat (formatting; hooks core /msg)",
     "brief": "docs/tasks/CMD-40-essentials-chat.md",
     "needs": [
       "oc/P1",
@@ -737,58 +751,58 @@
       "oc/CMD-33b"
     ],
     "size": "M",
-    "core": false
+    "tier": "W"
   },
   {
     "id": "CMD-41a",
-    "title": "Plugin: moderation — mutes, warnings, temp bans, chat control",
+    "title": "Native plugin: moderation — mutes, warnings, temp bans, chat control",
     "brief": "docs/tasks/CMD-41a-moderation-chat.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-32a",
       "oc/CMD-40"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-41b",
-    "title": "Plugin: moderation — jail, vanish, freeze, sudo, report, history",
+    "title": "Native plugin: moderation — jail, vanish, freeze, sudo, report, history",
     "brief": "docs/tasks/CMD-41b-moderation-staff.md",
     "needs": [
-      "oc/P1",
+      "oc/CMD-00N",
       "oc/CMD-32a",
       "oc/CMD-40",
       "oc/CMD-41a"
     ],
     "size": "M",
-    "core": false
+    "tier": "N"
   },
   {
     "id": "CMD-42",
-    "title": "Plugin: economy (P2 port)",
+    "title": "WASM plugin: economy (P2 port)",
     "brief": "docs/tasks/CMD-42-economy.md",
     "needs": [
       "oc/P1",
       "oc/P2"
     ],
     "size": "M",
-    "core": false
+    "tier": "W"
   },
   {
     "id": "CMD-43a",
-    "title": "Plugin: shops — chest shops & admin shops",
+    "title": "WASM plugin: shops — chest shops & admin shops",
     "brief": "docs/tasks/CMD-43a-shops-chest.md",
     "needs": [
       "oc/P1",
       "oc/CMD-42"
     ],
     "size": "M",
-    "core": false
+    "tier": "W"
   },
   {
     "id": "CMD-43b",
-    "title": "Plugin: shops — auction house & /sell",
+    "title": "WASM plugin: shops — auction house & /sell",
     "brief": "docs/tasks/CMD-43b-auction.md",
     "needs": [
       "oc/P1",
@@ -796,11 +810,11 @@
       "oc/CMD-43a"
     ],
     "size": "M",
-    "core": false
+    "tier": "W"
   },
   {
     "id": "CMD-44",
-    "title": "Plugin: social",
+    "title": "WASM plugin: social",
     "brief": "docs/tasks/CMD-44-social.md",
     "needs": [
       "oc/P1",
@@ -808,11 +822,11 @@
       "oc/CMD-37b"
     ],
     "size": "S",
-    "core": false
+    "tier": "W"
   },
   {
     "id": "CMD-45",
-    "title": "Plugin: integrations",
+    "title": "WASM plugin: integrations",
     "brief": "docs/tasks/CMD-45-integrations.md",
     "needs": [
       "oc/P1",
@@ -820,11 +834,11 @@
       "oc/CMD-32c"
     ],
     "size": "M",
-    "core": false
+    "tier": "W"
   },
   {
     "id": "CMD-46",
-    "title": "Plugin: fun / cosmetic",
+    "title": "WASM plugin: fun / cosmetic",
     "brief": "docs/tasks/CMD-46-fun.md",
     "needs": [
       "oc/P1",
@@ -832,17 +846,17 @@
       "oc/CMD-32c"
     ],
     "size": "M",
-    "core": false
+    "tier": "W"
   },
   {
     "id": "CMD-47",
-    "title": "Plugin: stats",
+    "title": "WASM plugin: stats",
     "brief": "docs/tasks/CMD-47-stats.md",
     "needs": [
       "oc/P1",
       "oc/PA2"
     ],
     "size": "M",
-    "core": false
+    "tier": "W"
   }
 ]

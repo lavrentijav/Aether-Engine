@@ -1,7 +1,7 @@
 # CMD-22a — V-data: /execute modifiers
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-21b`
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
+Needs: `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-21b`
 Parent/umbrella: `docs/tasks/CMD-22-execute.md`
 
 ## Goal
@@ -21,7 +21,7 @@ CMD-22b.
 
 ## Files
 - new `crates/aether-server/src/commands/execute.rs`.
-- command tree source stack (CMD-03), selectors (CMD-06).
+- command tree source stack (CMD-03), selectors (CMD-06b).
 
 ## Edge cases to test explicitly
 - `/execute as @a at @s …` runs per player with their own position.

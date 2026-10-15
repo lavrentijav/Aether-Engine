@@ -1,6 +1,6 @@
 # CMD-21b — V-data: /function, /return, /test
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-21a`
 Parent/umbrella: `docs/tasks/CMD-21-function-datapack.md`
 

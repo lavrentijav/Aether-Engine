@@ -1,7 +1,7 @@
 # CMD-11a — V-player: teleport, spreadplayers, spawnpoint
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
+Needs: `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-01`
 Parent/umbrella: `docs/tasks/CMD-11-player-move.md`
 
 ## Goal

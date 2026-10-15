@@ -1,7 +1,7 @@
 # CMD-15 — V-data: `/scoreboard`
 
-Status: 📋 task brief (CMD0) · size: L · core: yes
-Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-06`
+Status: 📋 task brief (CMD0) · size: L · tier: core (C)
+Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-06b`
 
 ## Split (CMD0 review)
 This L task is split into:

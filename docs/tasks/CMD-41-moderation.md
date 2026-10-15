@@ -1,7 +1,7 @@
 # CMD-41 — Plugin: moderation
 
-Status: 📋 task brief (CMD0) · size: L → split · core: no · plugin: `plugins/moderation`
-Needs: `oc/P1`, `oc/CMD-32`, `oc/CMD-40`
+Status: 📋 task brief (CMD0) · size: L → split · tier: native plugin (N) · plugin: `plugins/moderation`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-32`, `oc/CMD-40`
 
 ## Split (CMD0 review)
 | id | brief | contents | size |

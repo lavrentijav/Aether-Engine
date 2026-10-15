@@ -1,6 +1,6 @@
 # CMD-01 — Permissions core
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: none
 
 ## Goal

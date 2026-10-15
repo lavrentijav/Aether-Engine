@@ -1,7 +1,7 @@
 # CMD-39a — Plugin: essentials-inv — inventory views
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/essentials-inv`
-Needs: `oc/P1`, `oc/CMD-32b`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N) · plugin: `plugins/essentials-inv`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-32b`
 Parent/umbrella: `docs/tasks/CMD-39-essentials-inv.md`
 
 ## Commands (EssentialsX reference)

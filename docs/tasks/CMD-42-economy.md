@@ -1,6 +1,6 @@
 # CMD-42 — Plugin: economy (P2 port)
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/economy`
+Status: 📋 task brief (CMD0) · size: M · tier: WASM plugin (W) · plugin: `plugins/economy`
 Needs: `oc/P1`, `oc/P2` (economy service WIT + ledger; BACKLOG PM1)
 
 ## Goal

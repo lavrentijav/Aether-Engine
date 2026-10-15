@@ -1,7 +1,7 @@
 # CMD-15a — V-data: scoreboard model + objectives
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-06`
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
+Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-06b`
 Parent/umbrella: `docs/tasks/CMD-15-scoreboard.md`
 
 ## Goal

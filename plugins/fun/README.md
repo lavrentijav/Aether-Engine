@@ -1,6 +1,6 @@
 # fun plugin — skeleton (CMD-46)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`) and the player/UI API (`oc/CMD-32`).
+Status: 📋 skeleton (CMD0), **WASM tier** (sandboxed). Needs the plugin host (`oc/P1`) and the player/UI API (`oc/CMD-32`).
 **No code until P1 is merged** — manifest and README only.
 
 - CMD task: **CMD-46** — `docs/tasks/CMD-46-fun.md`

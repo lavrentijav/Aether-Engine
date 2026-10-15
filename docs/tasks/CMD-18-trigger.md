@@ -1,6 +1,6 @@
 # CMD-18 — V-data: `/trigger`
 
-Status: 📋 task brief (CMD0) · size: S · core: yes
+Status: 📋 task brief (CMD0) · size: S · tier: core (C)
 Needs: `oc/CMD-15`, `oc/CMD-05`
 
 ## Goal

@@ -1,7 +1,7 @@
 # CMD-12 — V-world: block operations
 
-Status: 📋 task brief (CMD0) · size: L · core: yes
-Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
+Status: 📋 task brief (CMD0) · size: L · tier: core (C)
+Needs: `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-01`
 
 ## Split (CMD0 review)
 This L group is split into:
@@ -37,7 +37,7 @@ block coordinates may not exceed the world height; `destroy` drops items like br
 ## Files
 - new `crates/aether-server/src/commands/world_edit.rs`.
 - `crates/aether-server/src/placement.rs`, `game/provenance.rs`, `worldgen` (biome/fillbiome,
-  feature/template placement), `aether_world` block state parsing from CMD-06.
+  feature/template placement), `aether_world` block state parsing from CMD-06b.
 - if merged, call `bulk_edit` (CMD-30); the journal must show one grouped operation per command.
 
 ## Edge cases to test explicitly

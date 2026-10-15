@@ -1,7 +1,14 @@
-# CMD-30 — Core API: bulk edit
+# CMD-30 — Native: bulk edit
 
-Status: 📋 task brief (CMD0) · size: L · core: yes
-Needs: `oc/CMD-01`, `oc/P1`
+Status: 📋 task brief (CMD0) · size: L · tier: native plugin (N)
+Needs: `oc/CMD-00N`, `oc/CMD-01`, `oc/P1`
+
+## Tier (CMD0 review, 3-tier model)
+Reclassified from core to a **native plugin** (in-process Rust, `plugins/worldedit`). The core keeps
+only the **minimal hook**: the low-level block-write and per-section chunk-resend primitives in the
+world/session (already core), plus the journal API. The **batched write transaction, one-revision
+grouping, undo and the resend/light batching** live in the native plugin (CMD-30a/b plus CMD-36).
+The core does not depend on the plugin: with it disabled, ordinary placement still works.
 
 ## Split (CMD0 review)
 This L task is split into:

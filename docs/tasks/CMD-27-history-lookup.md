@@ -1,13 +1,17 @@
 # CMD-27 — History: lookup filters, `/co`, preview
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N)
+Needs: `oc/CMD-00N`, `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-01`
 
 ## Goal
 Extend the existing history commands (`commands/mod.rs`, `commands/query.rs`) with the
 CoreProtect-style filter grammar and root, so an operator migrating from CoreProtect can type the
 commands they know. `/inspect`, `/lookup`, `/rollback` already exist — this task adds syntax, not a
 new journal.
+
+**Tier (CMD0 review):** the **`/co` commands are a native plugin** (in-process Rust). The core keeps
+the journal and the existing `/inspect` `/lookup` `/rollback` `/audit` untouched; `/co` and the
+extended filter grammar live in the native plugin (`needs: oc/CMD-00N`).
 
 ## Commands
 | syntax | node | op | behaviour |

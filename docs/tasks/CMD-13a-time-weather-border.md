@@ -1,7 +1,7 @@
 # CMD-13a — V-world: time, weather, worldborder, spawn, default gamemode
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-06`, `oc/CMD-05`, `oc/CMD-01`
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
+Needs: `oc/CMD-06b`, `oc/CMD-05`, `oc/CMD-01`
 Parent/umbrella: `docs/tasks/CMD-13-world-ops.md`
 
 ## Commands (vanilla 1.21.11)

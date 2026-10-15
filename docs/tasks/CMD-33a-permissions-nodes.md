@@ -1,7 +1,7 @@
 # CMD-33a — Plugin: permissions nodes & parents
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/permissions`
-Needs: `oc/P1`, `oc/CMD-02`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N) · plugin: `plugins/permissions`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-02`
 Parent/umbrella: `docs/tasks/CMD-33-permissions-ui.md`
 
 ## Commands (LuckPerms reference; `lp` = `luckperms`)

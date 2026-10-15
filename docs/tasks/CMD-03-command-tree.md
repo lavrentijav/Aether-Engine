@@ -1,6 +1,6 @@
 # CMD-03 — Brigadier command tree (parse, suggest, dispatch)
 
-Status: 📋 task brief (CMD0) · size: L · core: yes
+Status: 📋 task brief (CMD0) · size: L · tier: core (C)
 Needs: `oc/CMD-01`
 
 ## Goal
@@ -20,7 +20,7 @@ only the subset needed (no reader/redirect modifiers beyond what vanilla uses co
 - literal (a fixed word, with aliases)
 - `string` (single word / greedy phrase / quoted, mirroring `StringArgumentType`)
 - `integer`, `long`, `float`, `double`, `bool`
-- `entity` / `entities` (feeds CMD-06), `block_pos` / `vec3` / `vec2` (coordinates), `block_state`,
+- `entity` / `entities` (feeds CMD-06b), `block_pos` / `vec3` / `vec2` (coordinates), `block_state`,
   `item_stack`, `nbt_compound`, `nbt_path`, `component`, `resource_location`, `resource_or_tag`,
   `game_profile`, `message` (greedy), `time`, `gamemode`, `difficulty`, `particle`, `score_holder`,
   `swizzle`, `angle`, `operation`, `rotation`, `uuid`

@@ -1,7 +1,7 @@
 # CMD-33 — Plugin: permissions UI (LuckPerms-style)
 
-Status: 📋 task brief (CMD0) · size: L · core: no · plugin: `plugins/permissions`
-Needs: `oc/P1`, `oc/CMD-02`
+Status: 📋 task brief (CMD0) · size: L · tier: native plugin (N) · plugin: `plugins/permissions`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-02`
 
 ## Split (CMD0 review)
 | id | brief | contents | size |

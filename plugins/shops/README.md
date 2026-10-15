@@ -1,6 +1,6 @@
 # shops plugin — skeleton (CMD-43)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`) and the economy plugin/service
+Status: 📋 skeleton (CMD0), **WASM tier** (sandboxed). Needs the plugin host (`oc/P1`) and the economy plugin/service
 (`oc/CMD-42`). **No code until P1 is merged** — manifest and README only.
 
 - CMD task: **CMD-43** — `docs/tasks/CMD-43-shops.md`

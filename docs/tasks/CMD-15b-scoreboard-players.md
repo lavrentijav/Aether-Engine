@@ -1,7 +1,7 @@
 # CMD-15b — V-data: /scoreboard players
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-06`, `oc/CMD-15a`
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
+Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-06b`, `oc/CMD-15a`
 Parent/umbrella: `docs/tasks/CMD-15-scoreboard.md`
 
 ## Commands (vanilla 1.21.11)

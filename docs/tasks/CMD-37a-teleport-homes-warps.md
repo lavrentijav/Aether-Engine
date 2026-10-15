@@ -1,7 +1,7 @@
 # CMD-37a — Plugin: essentials-teleport — homes, warps, spawn
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/essentials-teleport`
-Needs: `oc/P1`, `oc/CMD-31`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N) · plugin: `plugins/essentials-teleport`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-31`
 Parent/umbrella: `docs/tasks/CMD-37-essentials-teleport.md`
 
 ## Goal

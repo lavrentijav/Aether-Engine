@@ -1,7 +1,7 @@
-# CMD-29a — Core API: region index build
+# CMD-29a — Native API: region index build
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-01`, `oc/P1`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N)
+Needs: `oc/CMD-00N`, `oc/CMD-01`, `oc/P1`
 Parent/umbrella: `docs/tasks/CMD-29-region-index.md`
 
 ## Goal

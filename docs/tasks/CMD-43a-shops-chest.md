@@ -1,6 +1,6 @@
 # CMD-43a — Plugin: shops — chest shops & admin shops
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/shops`
+Status: 📋 task brief (CMD0) · size: M · tier: WASM plugin (W) · plugin: `plugins/shops`
 Needs: `oc/P1`, `oc/CMD-42`
 Parent/umbrella: `docs/tasks/CMD-43-shops.md`
 

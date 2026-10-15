@@ -1,6 +1,6 @@
 # stats plugin — skeleton (CMD-47)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`) and the history read API (`oc/PA2`).
+Status: 📋 skeleton (CMD0), **WASM tier** (sandboxed). Needs the plugin host (`oc/P1`) and the history read API (`oc/PA2`).
 **No code until P1 is merged** — manifest and README only.
 
 - CMD task: **CMD-47** — `docs/tasks/CMD-47-stats.md`

@@ -1,6 +1,6 @@
 # Regions plugin — skeleton (CMD-34)
 
-Status: 📋 skeleton (CMD0). Needs the plugin host (`oc/P1`) and the core region index/protection
+Status: 📋 skeleton (CMD0), **native tier** (in-process, CMD-00N). Needs the native loader (`oc/CMD-00N`) and the core region index/protection
 check (`oc/CMD-29`). **No code until P1 is merged** — manifest and README only.
 
 - CMD task: **CMD-34** — `docs/tasks/CMD-34-regions-plugin.md`

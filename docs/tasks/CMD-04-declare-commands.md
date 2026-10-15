@@ -1,6 +1,6 @@
 # CMD-04 — Declare Commands packet for every codec
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
+Status: 📋 task brief (CMD0) · size: M · tier: core (C)
 Needs: `oc/CMD-03`
 
 ## Goal

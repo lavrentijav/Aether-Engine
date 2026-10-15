@@ -1,6 +1,6 @@
 # CMD-21 — V-data: functions, data packs, reload, return, test
 
-Status: 📋 task brief (CMD0) · size: L · core: yes
+Status: 📋 task brief (CMD0) · size: L · tier: core (C)
 Needs: `oc/CMD-05`, `oc/CMD-01`, `oc/CMD-20`
 
 ## Split (CMD0 review)

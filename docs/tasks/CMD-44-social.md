@@ -1,6 +1,6 @@
 # CMD-44 — Plugin: social
 
-Status: 📋 task brief (CMD0) · size: S · core: no · plugin: `plugins/social`
+Status: 📋 task brief (CMD0) · size: S · tier: WASM plugin (W) · plugin: `plugins/social`
 Needs: `oc/P1`, `oc/CMD-32`, `oc/CMD-37` (teleport for `/tpparty`)
 
 ## Goal

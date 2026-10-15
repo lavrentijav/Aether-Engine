@@ -1,7 +1,7 @@
 # CMD-36b — Plugin: WorldEdit clipboard, schematics, brushes
 
-Status: 📋 task brief (CMD0) · size: M · core: no · plugin: `plugins/worldedit`
-Needs: `oc/P1`, `oc/CMD-30b`, `oc/CMD-36a`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N) · plugin: `plugins/worldedit`
+Needs: `oc/CMD-00N`, `oc/P1`, `oc/CMD-30b`, `oc/CMD-36a`
 Parent/umbrella: `docs/tasks/CMD-36-worldedit-plugin.md`
 
 ## Commands

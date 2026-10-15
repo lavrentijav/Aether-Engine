@@ -1,7 +1,7 @@
-# CMD-30b — Core API: bulk edit publish (resend, light, budget)
+# CMD-30b — Native API: bulk edit publish (resend, light, budget)
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-01`, `oc/P1`, `oc/CMD-30a`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N)
+Needs: `oc/CMD-00N`, `oc/CMD-01`, `oc/P1`, `oc/CMD-30a`
 Parent/umbrella: `docs/tasks/CMD-30-bulk-edit.md`
 
 ## Goal

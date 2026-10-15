@@ -1,7 +1,7 @@
-# CMD-29b — Core API: protection check + hook wiring
+# CMD-29b — Native API: protection check + hook wiring
 
-Status: 📋 task brief (CMD0) · size: M · core: yes
-Needs: `oc/CMD-01`, `oc/P1`, `oc/CMD-29a`
+Status: 📋 task brief (CMD0) · size: M · tier: native plugin (N)
+Needs: `oc/CMD-00N`, `oc/CMD-01`, `oc/P1`, `oc/CMD-29a`
 Parent/umbrella: `docs/tasks/CMD-29-region-index.md`
 
 ## Goal
