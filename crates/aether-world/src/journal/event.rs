@@ -250,6 +250,27 @@ impl<'a> Cur<'a> {
     fn u128(&mut self) -> Result<u128, DecodeError> {
         Ok(u128::from_be_bytes(self.take(16)?.try_into().unwrap()))
     }
+    /// An item uid in format `v`: version 1 wrote the old random 16-byte uids,
+    /// read back as their low 64 bits (history only: no live stack carries a
+    /// version-1 uid, so the narrowing cannot alias a current item).
+    fn uid(&mut self, v: u8) -> Result<ItemUid, DecodeError> {
+        Ok(ItemUid(if v == 1 {
+            self.u128()? as u64
+        } else {
+            self.u64()?
+        }))
+    }
+    /// An item type in format `v`: versions 1–2 wrote the registry name, a
+    /// `u32` length then UTF-8; a name this release does not know reads as air
+    /// rather than failing the whole event, so old history stays readable.
+    fn item(&mut self, v: u8) -> Result<ItemTypeId, DecodeError> {
+        if v >= 3 {
+            return Ok(ItemTypeId(self.u16()?));
+        }
+        let len = self.u32()? as usize;
+        let name = std::str::from_utf8(self.take(len)?).map_err(|_| DecodeError::Truncated)?;
+        Ok(ItemTypeId::vanilla(name).unwrap_or(ItemTypeId::AIR))
+    }
     fn place(&mut self) -> Result<Place, DecodeError> {
         match self.u8()? {
             PLACE_INVENTORY => Ok(Place::Inventory {
@@ -347,8 +368,10 @@ impl Event {
     /// Inverse of [`Event::encode`].
     pub fn decode(blob: &[u8]) -> Result<Event, DecodeError> {
         let mut c = Cur { b: blob, at: 0 };
+        // Older formats stay readable: history written by an earlier build must
+        // not turn `/inspect` and rollback into errors after an upgrade.
         let v = c.u8()?;
-        if v != FORMAT_VERSION {
+        if !(1..=FORMAT_VERSION).contains(&v) {
             return Err(DecodeError::Version(v));
         }
         let seq = c.u64()?;
@@ -363,30 +386,30 @@ impl Event {
                 to: BlockStateId(c.u32()?),
             },
             TAG_ITEM_MINT => EventBody::ItemMint {
-                uid: ItemUid(c.u64()?),
-                item: ItemTypeId(c.u16()?),
+                uid: c.uid(v)?,
+                item: c.item(v)?,
                 count: c.u8()?,
                 to: c.place()?,
             },
             TAG_ITEM_MOVE => EventBody::ItemMove {
-                uid: ItemUid(c.u64()?),
+                uid: c.uid(v)?,
                 count: c.u8()?,
                 from: c.place()?,
                 to: c.place()?,
             },
             TAG_ITEM_DESTROY => EventBody::ItemDestroy {
-                uid: ItemUid(c.u64()?),
+                uid: c.uid(v)?,
                 from: c.place()?,
             },
             TAG_ITEM_DERIVE => {
-                let uid = ItemUid(c.u64()?);
-                let item = ItemTypeId(c.u16()?);
+                let uid = c.uid(v)?;
+                let item = c.item(v)?;
                 let count = c.u8()?;
                 let to = c.place()?;
                 let n = c.u16()?;
                 let mut from = Vec::with_capacity(n as usize);
                 for _ in 0..n {
-                    from.push(ItemUid(c.u64()?));
+                    from.push(c.uid(v)?);
                 }
                 EventBody::ItemDerive {
                     uid,

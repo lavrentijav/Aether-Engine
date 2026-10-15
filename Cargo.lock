@@ -73,6 +73,7 @@ dependencies = [
  "aether-api",
  "aether-world",
  "aether-worldgen",
+ "criterion",
  "libc",
  "miniz_oxide",
  "postgres",
@@ -91,6 +92,7 @@ dependencies = [
  "aether-core",
  "criterion",
  "fjall",
+ "libc",
  "zstd",
 ]
 

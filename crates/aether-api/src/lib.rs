@@ -41,6 +41,8 @@ use aether_worldgen::ChunkGenerator;
 
 pub mod player;
 
+pub mod keys;
+
 // Public re-exports: the pieces callers most often need alongside `World`.
 pub use aether_core::math::{Aabb, Vec3 as Vector3};
 pub use aether_physics::{Body, PhysicsParams};
@@ -610,10 +612,19 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
     /// Store a server-level blob alongside the world.
     ///
     /// The world's backend is a plain key/value store shared by the sub-chunks,
-    /// the journal and its two indexes, each under its own leading byte. This
-    /// lets the layers above — player inventories, for one — use it too. The
-    /// caller owns its key space and must not collide with `C`, `E`, `X`, `P`,
-    /// `H`, `REG`, or a nine-byte sub-chunk key.
+    /// the journal and its indexes, and every layer above. Each subsystem is
+    /// told apart by the leading bytes of its keys, so the caller owns a key
+    /// space and must not collide with one already claimed. The full list is
+    /// [`crate::keys::KEY_PREFIXES`]; in brief:
+    ///
+    /// * sub-chunks — no prefix, a nine-byte coordinate key; never collide
+    ///   with a nine-byte key of your own;
+    /// * world: `REG`, `ITM`, `C`, `V`, `K`, `E`, `X`, `P`, `H`, `N`, `U`;
+    /// * server: `BT` (block ticks), `BF` (fluid ticks), `Wtime` (world time),
+    ///   `D` (player save), `F` (player inventory), `O` (block container).
+    ///
+    /// [`crate::keys`] and its test are the authority; add there before using a
+    /// new prefix here.
     pub fn put_meta(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
         self.storage.backend().put(key, value)
     }

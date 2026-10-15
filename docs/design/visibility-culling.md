@@ -1,8 +1,12 @@
 # Visibility culling — do not send what the player cannot see (planned, optional module)
 
-Status: 📋 planned. Not implemented; nothing in the code does this today (checked 2026-10-14:
-only the 5-block interaction `raycast` in `game/interact.rs` and the per-block `solid` / occlusion
-flag in `aether-world::registry::blocks` exist, both reusable here).
+Status: ✅ implemented, default **off** (2026-10-14). The section face graph and the reachable-set
+BFS live in `aether_world::visibility`; the cache, the per-player state, the stone masking and the
+per-tick reveal budget live in `crates/aether-server/src/visibility.rs`, wired through
+`players.rs::render` and the game tick. Config is `[visibility]` below. Not yet done: the optional
+ray refinement (point 4) and block-level buried-ore masking (point 6) — parsed and ignored; the real
+light of a hidden section (the codec reads one `BlockSource` for both blocks and light), and
+re-hiding a section that becomes hidden again. See [Known Issues A.16](../KNOWN_ISSUES.md).
 
 ## Goal
 

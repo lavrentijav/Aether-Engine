@@ -22,6 +22,9 @@ pub mod chunk;
 pub mod gen;
 pub mod inventory;
 pub mod items;
+#[allow(clippy::all)]
+#[rustfmt::skip]
+pub mod legacy_gen;
 pub mod play;
 pub mod registry;
 pub mod version;
@@ -31,6 +34,7 @@ use std::io;
 use aether_world::BlockStateId;
 
 use super::{BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
+use crate::inventory::Stack;
 use crate::players::PosLook;
 use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 use version::{Gen, Registries};
@@ -156,6 +160,16 @@ impl ProtocolCodec for Codec {
                 overworld,
                 data,
             } => send_known_registries(s, v, core, synced, *overworld, data)?,
+            // The older codecs never drive the modern login path; they carry
+            // their own registry dump. Reaching here would mean a `Version`
+            // wired to the wrong codec, so fail loudly rather than send a
+            // client a world with no registries.
+            Registries::None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "this version sends its own registries; the modern login path cannot serve it",
+                ))
+            }
         }
 
         // Add Resource Pack, offered while still in configuration so the
@@ -309,13 +323,19 @@ impl ProtocolCodec for Codec {
                     .var_int(self.0.entity_type("minecraft:player").unwrap_or(0))
                     .f64(pos.x)
                     .f64(pos.y)
-                    .f64(pos.z)
-                    // Velocity precedes the angles in this version.
-                    .bytes(&ZERO_VELOCITY)
-                    .u8(angle(pos.pitch))
+                    .f64(pos.z);
+                // Velocity precedes the angles from 1.21.9; before that it
+                // trails the object data as three shorts.
+                if self.0.gen >= Gen::V1_21_9 {
+                    p.bytes(&ZERO_VELOCITY);
+                }
+                p.u8(angle(pos.pitch))
                     .u8(angle(pos.yaw))
                     .u8(angle(pos.yaw)) // head yaw
                     .var_int(0); // no object data
+                if self.0.gen < Gen::V1_21_9 {
+                    play::write_velocity(self.0, &mut p, (0.0, 0.0, 0.0));
+                }
                 vec![p]
             }
             ServerEvent::DropItem {
@@ -339,21 +359,25 @@ impl ProtocolCodec for Codec {
                     .var_int(self.0.entity_type("minecraft:item").unwrap_or(0))
                     .f64(*x)
                     .f64(*y)
-                    .f64(*z)
-                    .bytes(&ZERO_VELOCITY)
-                    .u8(0)
-                    .u8(0)
-                    .u8(0)
-                    .var_int(0);
+                    .f64(*z);
+                if self.0.gen >= Gen::V1_21_9 {
+                    spawn.bytes(&ZERO_VELOCITY);
+                }
+                spawn.u8(0).u8(0).u8(0).var_int(0);
+                if self.0.gen < Gen::V1_21_9 {
+                    play::write_velocity(self.0, &mut spawn, (0.0, 0.0, 0.0));
+                }
 
                 let mut meta = PacketOut::new(self.0.packets.cb_set_entity_data);
                 meta.var_int(*entity_id)
                     .u8(ITEM_DATA_INDEX)
                     .var_int(META_ITEM_STACK);
-                match self.0.wire_item(*item) {
-                    Some(id) => inventory::write_item(&mut meta, id, *count as i32),
-                    None => inventory::write_empty(&mut meta),
-                }
+                // Through the compat-aware writer, not a raw wire id: a dropped
+                // item must show the same stand-in (and carry the real name)
+                // as the slot it came from, or dropping a spear on 1.21.1 would
+                // spawn a genuine trident.
+                let stack = Stack::new(*item, (*count).min(u8::MAX as u64) as u8);
+                play::write_stack(self.0, &mut meta, Some(&stack));
                 meta.u8(META_END);
                 vec![spawn, meta]
             }
@@ -401,11 +425,16 @@ impl ProtocolCodec for Codec {
                 // them, and the window then shows as empty with no error
                 // anywhere.
                 let mut open = PacketOut::new(self.0.packets.cb_open_screen);
-                open.var_int(STASH_WINDOW)
-                    .var_int(self.0.menu_double_chest)
-                    // The title is an *anonymous* NBT component, the same
-                    // shape System Chat uses in this generation.
-                    .bytes(&super::nbt::string(title).to_network());
+                open.var_int(STASH_WINDOW).var_int(self.0.menu_double_chest);
+                // 1.20.3 made the window title an *anonymous* NBT text
+                // component; 1.20.2 still reads a length-prefixed JSON string,
+                // so sending it the NBT way makes the client read the tag byte
+                // as the string length and disconnect.
+                if self.0.gen < Gen::V1_20_4 {
+                    open.string(&play::json_text(title));
+                } else {
+                    open.bytes(&super::nbt::string(title).to_network());
+                }
 
                 let mut items = PacketOut::new(self.0.packets.cb_container_set_content);
                 items
@@ -456,20 +485,7 @@ impl ProtocolCodec for Codec {
     }
 
     fn block_for_item(&self, item: &str) -> Option<BlockStateId> {
-        // Almost every placeable item shares its name with the block it places,
-        // so the registry answers this directly. This used to be a lookup in a
-        // seven-entry hotbar table, which meant every other block a player
-        // selected was placed as **stone** — the fallback at the end of the
-        // chain. A headless client found it in one run.
-        use aether_world::registry::blocks::default_state;
-        // The block's *default* state. Choosing a better one — a stair facing
-        // the player, a slab in the half they clicked — is the placement's job
-        // and needs context this method is not given; see DESIGN_NOTES §9.4.
-        if let Some(id) = default_state(item) {
-            return Some(id);
-        }
-        // The handful whose item and block names differ.
-        items::block_name_for_item(item).and_then(default_state)
+        block_for_item(item)
     }
 
     fn supports_containers(&self) -> bool {
@@ -494,25 +510,42 @@ impl ProtocolCodec for Codec {
                 Err(_) => ClientEvent::Ignored,
             },
             id if id == p.sb_set_creative_mode_slot => {
-                // Only the head of the stack is read: the count tells us
-                // whether anything is there, the id says what. The component
-                // arrays that follow are the client's business, and the rest
-                // of the packet is discarded either way.
                 let Ok(slot) = pin.u16() else {
                     return ClientEvent::Ignored;
                 };
-                let (item, count) = match pin.var_int() {
-                    Ok(0) | Err(_) => (None, 0),
-                    Ok(n) => (
-                        // An id this version has but the engine does not maps
-                        // to `AIR`, i.e. nothing: the item renders as air on
-                        // the way out, so it must not enter the inventory.
-                        pin.var_int()
-                            .ok()
-                            .and_then(|id| self.0.engine_item(id))
-                            .filter(|id| *id != aether_world::ItemTypeId::AIR),
-                        n.clamp(0, u8::MAX as i32) as u8,
-                    ),
+                let (item, count) = if self.0.gen < Gen::V1_20_5 {
+                    // Pre-1.20.5 `Slot`: a presence flag, then the id, an `i8`
+                    // count and NBT. Reading the presence byte as the count
+                    // (the 1.20.5 shape) would store one item of every stack
+                    // the client reports and silently destroy the rest.
+                    match pin.bool() {
+                        Ok(false) | Err(_) => (None, 0),
+                        Ok(true) => {
+                            let item = pin
+                                .var_int()
+                                .ok()
+                                .and_then(|id| self.0.engine_item(id))
+                                .filter(|id| *id != aether_world::ItemTypeId::AIR);
+                            (item, pin.u8().unwrap_or(0))
+                        }
+                    }
+                } else {
+                    // 1.20.5+: a VarInt count, then the id and the two data
+                    // component lists. Only the head of the stack is read; the
+                    // rest of the packet is discarded either way.
+                    match pin.var_int() {
+                        Ok(0) | Err(_) => (None, 0),
+                        Ok(n) => (
+                            // An id this version has but the engine does not
+                            // maps to `AIR`, i.e. nothing: it renders as air on
+                            // the way out, so it must not enter the inventory.
+                            pin.var_int()
+                                .ok()
+                                .and_then(|id| self.0.engine_item(id))
+                                .filter(|id| *id != aether_world::ItemTypeId::AIR),
+                            n.clamp(0, u8::MAX as i32) as u8,
+                        ),
+                    }
                 };
                 ClientEvent::CreativeSlot {
                     slot: slot as i16,
@@ -631,12 +664,26 @@ impl ProtocolCodec for Codec {
                 }
                 Err(_) => ClientEvent::Ignored,
             },
+            // `entity_action`. 1.21.6 dropped the sneak entries, moving sprint
+            // from 3/4 to 1/2 and sneaking to `player_input`; before that this
+            // packet carries both.
             id if id == p.sb_player_command => {
-                let _ = pin.var_int();
-                match pin.var_int() {
-                    Ok(1) => ClientEvent::Sprint(true),
-                    Ok(2) => ClientEvent::Sprint(false),
-                    _ => ClientEvent::Ignored,
+                let _ = pin.var_int(); // entity id
+                let action = pin.var_int();
+                if self.0.gen >= Gen::V1_21_6 {
+                    match action {
+                        Ok(1) => ClientEvent::Sprint(true),
+                        Ok(2) => ClientEvent::Sprint(false),
+                        _ => ClientEvent::Ignored,
+                    }
+                } else {
+                    match action {
+                        Ok(0) => ClientEvent::Input { sneak: true },
+                        Ok(1) => ClientEvent::Input { sneak: false },
+                        Ok(3) => ClientEvent::Sprint(true),
+                        Ok(4) => ClientEvent::Sprint(false),
+                        _ => ClientEvent::Ignored,
+                    }
                 }
             }
             id if id == p.sb_player_input => match pin.u8() {
@@ -735,6 +782,23 @@ impl ProtocolCodec for Codec {
     }
 }
 
+/// The block an item name places, if it places one.
+///
+/// Item names are version-independent (`minecraft:oak_stairs` is that name in
+/// every release), so the older codecs share this with the modern one. Almost
+/// every placeable item shares its name with the block it places.
+pub fn block_for_item(item: &str) -> Option<BlockStateId> {
+    use aether_world::registry::blocks::default_state;
+    // The block's *default* state. Choosing a better one — a stair facing the
+    // player, a slab in the half they clicked — is the placement's job and
+    // needs context this method is not given; see DESIGN_NOTES §9.4.
+    if let Some(id) = default_state(item) {
+        return Some(id);
+    }
+    // The handful whose item and block names differ.
+    items::block_name_for_item(item).and_then(default_state)
+}
+
 /// Write one container slot in this version's item format.
 ///
 /// A slot the item table cannot resolve is drawn as a barrier rather than
@@ -750,6 +814,12 @@ fn write_container_slot(v: &version::Version, p: &mut PacketOut, slot: &super::C
         .item_id(&slot.item)
         .or_else(|| v.item_id("minecraft:barrier"))
         .unwrap_or(0);
+    // Pre-1.20.5 a slot is NBT-based, so the name rides in `display.Name`
+    // rather than a data component.
+    if v.gen < Gen::V1_20_5 {
+        play::write_legacy_container_slot(p, id, slot.wire_count() as u8, &slot.label);
+        return;
+    }
     // The badge shows `wire_count`, which is one for anything past a stack;
     // the real number rides in the name. The wire could carry 4000 — the count
     // is a VarInt since 1.20.5 — but the client renders that badge into the
@@ -1199,6 +1269,102 @@ mod tests {
     }
 
     #[test]
+    fn a_pre_1_20_5_creative_slot_keeps_its_i8_count() {
+        // 764/765 `set_creative_mode_slot` carries the old NBT `Slot`:
+        // slot i16, present bool, itemId varint, count i8, nbt. The shared
+        // decoder read the presence byte as the 1.20.5 VarInt count, so every
+        // stack the client reported became one item.
+        for (v, proto) in [(&version::V1_20_2, 764), (&version::V1_20_4, 765)] {
+            let mut data = 36u16.to_be_bytes().to_vec();
+            data.push(1); // present
+            data.push(1); // itemId = stone
+            data.push(64); // i8 count
+            data.push(0); // TAG_End: no NBT
+            let pkt = RawPacket {
+                id: v.packets.sb_set_creative_mode_slot,
+                data,
+            };
+            match Codec(v).decode(&pkt, any_pos()) {
+                ClientEvent::CreativeSlot { slot, item, count } => {
+                    assert_eq!(slot, 36, "{proto}");
+                    assert_eq!(
+                        item,
+                        Some(crate::inventory::item("minecraft:stone")),
+                        "{proto}"
+                    );
+                    assert_eq!(count, 64, "{proto}: the i8 count must survive");
+                }
+                _ => panic!("{proto}: expected a creative slot"),
+            }
+        }
+        // 1.20.5 keeps the VarInt count form.
+        let mut data = 36u16.to_be_bytes().to_vec();
+        data.extend_from_slice(&[64, 1, 0, 0]); // count, id, two component counts
+        let pkt = RawPacket {
+            id: version::V1_20_5.packets.sb_set_creative_mode_slot,
+            data,
+        };
+        match Codec(&version::V1_20_5).decode(&pkt, any_pos()) {
+            ClientEvent::CreativeSlot { count, .. } => assert_eq!(count, 64),
+            _ => panic!("1.20.5: expected a creative slot"),
+        }
+    }
+
+    #[test]
+    fn entity_action_maps_per_release_through_1_21_5() {
+        // `entity_action` action ids: sneak is 0/1 and sprint 3/4 up to 1.21.5;
+        // 1.21.6 moved sprint to 1/2 and dropped the sneak entries (they come
+        // through `player_input` from then on). Decode action `a` on `v`.
+        let action = |v: &'static version::Version, a: i32| {
+            let pkt = RawPacket {
+                id: v.packets.sb_player_command,
+                data: vec![1, a as u8], // entity id 1, then the action
+            };
+            Codec(v).decode(&pkt, any_pos())
+        };
+        for (v, proto) in [
+            (&version::V1_20_2, 764),
+            (&version::V1_20_4, 765),
+            (&version::V1_20_5, 766),
+            (&version::V1_21_1, 767),
+            (&version::V1_21_3, 768),
+            (&version::V1_21_4, 769),
+            (&version::V1_21_5, 770),
+        ] {
+            assert!(
+                matches!(action(v, 0), ClientEvent::Input { sneak: true }),
+                "{proto}: action 0 starts sneaking"
+            );
+            assert!(
+                matches!(action(v, 1), ClientEvent::Input { sneak: false }),
+                "{proto}: action 1 stops sneaking"
+            );
+            assert!(
+                matches!(action(v, 3), ClientEvent::Sprint(true)),
+                "{proto}: action 3 starts sprinting"
+            );
+            assert!(
+                matches!(action(v, 4), ClientEvent::Sprint(false)),
+                "{proto}: action 4 stops sprinting"
+            );
+        }
+        for (v, proto) in [
+            (&version::V1_21_6, 771),
+            (&version::V1_21_8, 772),
+            (&version::V1_21_9, 773),
+        ] {
+            assert!(
+                matches!(action(v, 1), ClientEvent::Sprint(true)),
+                "{proto}: action 1 starts sprinting"
+            );
+            assert!(
+                matches!(action(v, 2), ClientEvent::Sprint(false)),
+                "{proto}: action 2 stops sprinting"
+            );
+        }
+    }
+
+    #[test]
     fn the_hotbar_we_hand_out_maps_back_to_its_blocks() {
         // Placement resolves the held item through this table, so every item
         // the join hotbar contains has to resolve back to the block it came
@@ -1332,6 +1498,41 @@ mod tests {
             crate::protocol::ContainerSlot::block("minecraft:stone", 32, "stone").with_quantity();
         assert_eq!(slot.wire_count(), 32);
         assert_eq!(slot.label, "stone", "no suffix when the badge suffices");
+    }
+
+    #[test]
+    fn open_container_title_is_json_on_1_20_2_and_nbt_from_1_20_3() {
+        // The stash window (`OpenContainer`) takes the same 1.20.3 title
+        // change as `OpenWindow`: 1.20.2's open_window.windowTitle is a
+        // length-prefixed JSON string, from 1.20.3 an anonymous NBT
+        // component. Sending NBT to a 1.20.2 client makes it read the tag byte
+        // as the string length and disconnect.
+        struct Empty;
+        impl BlockSource for Empty {
+            fn block_at(&self, _x: i32, _y: i32, _z: i32) -> BlockStateId {
+                BlockStateId::AIR
+            }
+        }
+        let ev = ServerEvent::OpenContainer {
+            title: "Stash".into(),
+            slots: Vec::new(),
+        };
+
+        let pkts = Codec(&version::V1_20_2).encode(&ev, &Empty);
+        assert_eq!(pkts.len(), 2, "open screen, then contents");
+        let body = pkts[0].body();
+        let mut pin = crate::proto::PacketIn::new(&body[1..]);
+        assert_eq!(pin.var_int().unwrap(), STASH_WINDOW);
+        assert_eq!(pin.var_int().unwrap(), version::V1_20_2.menu_double_chest);
+        assert_eq!(pin.string().unwrap(), r#"{"text":"Stash"}"#);
+
+        // 1.20.3 sends the NBT component form: tag byte then payload.
+        let pkts = Codec(&version::V1_20_4).encode(&ev, &Empty);
+        let body = pkts[0].body();
+        let mut pin = crate::proto::PacketIn::new(&body[1..]);
+        assert_eq!(pin.var_int().unwrap(), STASH_WINDOW);
+        assert_eq!(pin.var_int().unwrap(), version::V1_20_4.menu_double_chest);
+        assert_eq!(pin.u8().unwrap(), 0x08, "TAG_String NBT component");
     }
 
     #[test]
@@ -1545,6 +1746,55 @@ mod tests {
         assert_eq!(
             version::V26_1.packets.cb_update_mob_effect,
             version::V26_2.packets.cb_update_mob_effect
+        );
+    }
+
+    #[test]
+    fn a_dropped_spear_keeps_its_disguise_on_1_21_1() {
+        // The drop path must go through the compat-aware writer, or dropping
+        // a spear on 1.21.1 spawns a genuine trident with no marker — the
+        // disguise the item layer exists to preserve.
+        struct Empty;
+        impl BlockSource for Empty {
+            fn block_at(&self, _x: i32, _y: i32, _z: i32) -> BlockStateId {
+                BlockStateId::AIR
+            }
+        }
+        let v = &version::V1_21_1;
+        let spear = crate::inventory::item("minecraft:iron_spear");
+        let pkts = Codec(v).encode(
+            &ServerEvent::DropItem {
+                entity_id: 7,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                item: spear,
+                count: 1,
+            },
+            &Empty,
+        );
+        assert_eq!(pkts.len(), 2, "spawn + metadata");
+        let body = pkts[1].body();
+        assert_eq!(body[0] as i32, v.packets.cb_set_entity_data);
+        let mut pin = PacketIn::new(&body[1..]);
+        pin.var_int().unwrap(); // entity id
+        pin.u8().unwrap(); // metadata index
+        assert_eq!(pin.var_int().unwrap(), META_ITEM_STACK);
+        assert_eq!(pin.var_int().unwrap(), 1, "count");
+        let shown = pin.var_int().unwrap();
+        assert_eq!(shown, v.wire_stack_item(spear).unwrap().id);
+        assert_eq!(
+            v.engine_item(shown),
+            Some(crate::inventory::item("minecraft:trident"))
+        );
+        assert_eq!(pin.var_int().unwrap(), 2, "custom_name and lore added");
+        assert_eq!(pin.var_int().unwrap(), 0, "none removed");
+        assert_eq!(pin.var_int().unwrap(), v.component_custom_name);
+        let contains = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+        assert!(contains(body, b"Iron Spear"), "the real name rides along");
+        assert!(
+            contains(body, b"Aether: minecraft:iron_spear"),
+            "and the marker names the real item"
         );
     }
 }
