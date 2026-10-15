@@ -256,16 +256,31 @@ impl PlayerHandle {
                 self.codec.encode(ev, world)
             }
             // A single block change must be a carrier state too, or a placed
-            // or mined block would flip back to the stand-in.
-            ServerEvent::BlockChange { x, y, z, block } if table.is_some() => {
-                let t = table.expect("guarded by the match arm");
-                let remapped = ServerEvent::BlockChange {
-                    x: *x,
-                    y: *y,
-                    z: *z,
-                    block: t.display(*block),
-                };
-                self.codec.encode(&remapped, world)
+            // or mined block would flip back to the stand-in — and it must be
+            // masked, or a server-side write of a hidden block (`/setblock`,
+            // creative, `/rollback`) would leak it.
+            ServerEvent::BlockChange { x, y, z, block } => {
+                let block = crate::visibility::mask_block(self, world, *x, *y, *z, *block);
+                match table {
+                    Some(t) => {
+                        let remapped = ServerEvent::BlockChange {
+                            x: *x,
+                            y: *y,
+                            z: *z,
+                            block: t.display(block),
+                        };
+                        self.codec.encode(&remapped, world)
+                    }
+                    None => {
+                        let masked = ServerEvent::BlockChange {
+                            x: *x,
+                            y: *y,
+                            z: *z,
+                            block,
+                        };
+                        self.codec.encode(&masked, world)
+                    }
+                }
             }
             _ => self.codec.encode(ev, world),
         };

@@ -69,9 +69,23 @@ pub struct State {
     /// Set when a reveal plan hit the per-tick budget, so the next tick
     /// continues it instead of treating the plan as done.
     reveal_pending: bool,
+    /// Engine mode: the cells this client already holds real after a reveal,
+    /// so a later neighbour change does not re-send them. Cleared when the
+    /// column is unloaded or on reset.
+    revealed: HashSet<(i32, i32, i32)>,
 }
 
 impl State {
+    /// Remember a cell as revealed; `true` if it was not already.
+    pub fn mark_revealed(&mut self, pos: (i32, i32, i32)) -> bool {
+        self.revealed.insert(pos)
+    }
+
+    /// Whether a cell has already been revealed to this client.
+    pub fn is_revealed(&self, pos: &(i32, i32, i32)) -> bool {
+        self.revealed.contains(pos)
+    }
+
     /// Whether the cached reachable set already matches `section` and no
     /// in-view graph has changed since it was computed.
     pub fn is_fresh(&self, section: (i32, i32, i32)) -> bool {
@@ -141,6 +155,10 @@ impl State {
     /// Forget a column the client no longer has.
     pub fn forget(&mut self, cx: i32, cz: i32) {
         self.sent.remove(&(cx, cz));
+        // A re-streamed column is masked again, so its revealed cells are no
+        // longer what the client holds.
+        self.revealed
+            .retain(|(x, _, z)| x >> 4 != cx || z >> 4 != cz);
     }
 
     /// Drop everything: a respawn starts the client with an empty level, so
@@ -150,6 +168,7 @@ impl State {
         self.dirty = true;
         self.visible.clear();
         self.sent.clear();
+        self.revealed.clear();
         self.search_id = self.search_id.wrapping_add(1);
         self.planned_search = self.search_id;
         self.reveal_pending = false;
@@ -471,6 +490,58 @@ pub fn record_engine(handle: &PlayerHandle, cx: i32, cz: i32, masked: bool) {
     handle.visibility().record_sent(cx, cz, masked as u32);
 }
 
+/// Mask a single block change for a player, so a server-side write of a hidden
+/// block (`/setblock`, creative, `/rollback`) does not leak it.
+///
+/// `engine`: an enclosed hidden block becomes its surrounding block.
+/// `culling`: a change inside a section this player cannot see becomes the
+/// fill the client already holds (usually stone), so nothing appears until the
+/// section is revealed whole.
+pub fn mask_block(
+    handle: &PlayerHandle,
+    world: &dyn BlockSource,
+    x: i32,
+    y: i32,
+    z: i32,
+    block: BlockStateId,
+) -> BlockStateId {
+    if !crate::anti_xray_enabled() {
+        return block;
+    }
+    if crate::anti_xray_bypass(handle) {
+        return block;
+    }
+    match crate::anti_xray_config().mode {
+        AntiXrayMode::Engine => {
+            let hidden = hidden_states();
+            if hidden.contains(block) && is_buried(world, x, y, z) {
+                surrounding_block(world, hidden, x, y, z)
+            } else {
+                block
+            }
+        }
+        AntiXrayMode::Culling => {
+            if section_hidden(handle, world, x >> 4, y >> 4, z >> 4) {
+                fill_for(handle)
+            } else {
+                block
+            }
+        }
+    }
+}
+
+/// Whether section `(cx, cy, cz)` is hidden from this player in culling mode.
+fn section_hidden(
+    handle: &PlayerHandle,
+    world: &dyn BlockSource,
+    cx: i32,
+    cy: i32,
+    cz: i32,
+) -> bool {
+    ensure_visible(handle, world);
+    !handle.visibility().visible().contains(&(cx, cy, cz))
+}
+
 /// Forget a column the client no longer has.
 pub fn forget_column(handle: &PlayerHandle, cx: i32, cz: i32) {
     handle.visibility().forget(cx, cz);
@@ -582,33 +653,51 @@ fn engine_tick(players: &[Arc<PlayerHandle>], world: &dyn BlockSource) {
         return;
     }
     let hidden = hidden_states();
+    // A player's client holds every column within the view radius at its full
+    // height, so only the horizontal distance clips: a change far below or
+    // above still has to be revealed. Clipping on Y used to leave those ores
+    // hidden until the whole column re-streamed.
     let reach = crate::server_view_radius() * 16;
     for player in players {
         if crate::anti_xray_bypass(player) {
             continue;
         }
         let p = player.pos();
-        let (px, py, pz) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
-        for &(x, y, z) in &changed {
-            if (x - px).abs() > reach || (y - py).abs() > reach || (z - pz).abs() > reach {
-                continue;
+        let (px, pz) = (p.x.floor() as i32, p.z.floor() as i32);
+        // Collect and remember in one lock; emit with it released, because a
+        // render of the reveal may re-enter the state (culling masks the
+        // single block against the reachable set).
+        let to_send: Vec<(i32, i32, i32, BlockStateId)> = {
+            let mut st = player.visibility();
+            let mut out = Vec::new();
+            for &(x, y, z) in &changed {
+                if (x - px).abs() > reach || (z - pz).abs() > reach {
+                    continue;
+                }
+                for (nx, ny, nz, block) in revealed_neighbours(world, x, y, z, hidden) {
+                    // Do not re-send an ore this client already holds real.
+                    if st.mark_revealed((nx, ny, nz)) {
+                        out.push((nx, ny, nz, block));
+                    }
+                }
             }
-            for (nx, ny, nz, block) in revealed_neighbours(world, x, y, z, hidden) {
-                player.emit(
-                    &ServerEvent::BlockChange {
-                        x: nx,
-                        y: ny,
-                        z: nz,
-                        block,
-                    },
-                    world,
-                );
-            }
+            out
+        };
+        for (nx, ny, nz, block) in to_send {
+            player.emit(
+                &ServerEvent::BlockChange {
+                    x: nx,
+                    y: ny,
+                    z: nz,
+                    block,
+                },
+                world,
+            );
         }
     }
 }
 
-/// The six faces plus the changed cell itself.
+/// The six faces of the changed cell.
 const NEIGHBOURS: [(i32, i32, i32); 6] = [
     (-1, 0, 0),
     (1, 0, 0),
@@ -621,8 +710,8 @@ const NEIGHBOURS: [(i32, i32, i32); 6] = [
 /// The hidden blocks next to a cell that just changed and are now exposed, so
 /// the client must be sent them for real. A hidden block that is still buried
 /// stays hidden.
-fn revealed_neighbours(
-    world: &dyn BlockSource,
+fn revealed_neighbours<S: BlockSource + ?Sized>(
+    world: &S,
     x: i32,
     y: i32,
     z: i32,
@@ -642,7 +731,7 @@ fn revealed_neighbours(
 /// Whether every one of a cell's six neighbours is opaque, so the cell cannot
 /// be seen without removing one. The cell itself is assumed to be a hidden
 /// block (an opaque cube).
-fn is_buried(world: &dyn BlockSource, x: i32, y: i32, z: i32) -> bool {
+fn is_buried<S: BlockSource + ?Sized>(world: &S, x: i32, y: i32, z: i32) -> bool {
     NEIGHBOURS
         .iter()
         .all(|&(dx, dy, dz)| default_is_opaque(world.block_at(x + dx, y + dy, z + dz)))
@@ -658,12 +747,19 @@ pub fn hidden_states() -> &'static HiddenSet {
         .get_or_init(|| build_hidden_states(&crate::anti_xray_config().hidden_block_names()))
 }
 
-/// A dense membership set of block states, indexed by state id.
+/// A membership set of block states for engine mode.
 ///
-/// Engine mode asks this once per cell of every column it sends, so the lookup
-/// must be a single array index and a bit test — a hash set costs a SipHash per
-/// cell, which is a measurable share of a column encode.
+/// Engine mode asks this once per cell of every column it sends — hundreds of
+/// thousands of times per column — so the lookup has to stay in L1. The exact
+/// set is a dense bitset indexed by state id, but that is ~4 KB and a random
+/// access per cell. In front of it is a 512-bit "blocked" filter indexed by
+/// the low 9 bits of the state: almost every cell (stone, deepslate, air) is
+/// rejected by one L1-resident cache line and only a possible hit falls through
+/// to the exact bitset. A hash set was measured several times slower still.
 pub struct HiddenSet {
+    /// `filter[state & 511]`, set for every hidden state: a false positive
+    /// falls through to `bits`, a zero means definitely not hidden.
+    filter: [u64; 8],
     bits: Vec<u64>,
 }
 
@@ -684,19 +780,28 @@ impl HiddenSet {
             }
         }
         let mut bits = vec![0u64; (max as usize / 64) + 1];
+        let mut filter = [0u64; 8];
         for id in ids {
-            bits[id as usize / 64] |= 1u64 << (id % 64);
+            let id = id as usize;
+            bits[id / 64] |= 1u64 << (id % 64);
+            let lo = id & 511;
+            filter[lo / 64] |= 1u64 << (lo % 64);
         }
-        Self { bits }
+        Self { filter, bits }
     }
 
-    /// Whether `state` is in the set. A state past the highest built id is not.
+    /// Whether `state` is in the set.
     #[inline]
     pub fn contains(&self, state: BlockStateId) -> bool {
-        let id = state.raw() as usize;
+        let raw = state.raw() as usize;
+        let lo = raw & 511;
+        // The filter is one cache line; the exact bitset only runs on a hit.
+        if self.filter[lo / 64] & (1u64 << (lo % 64)) == 0 {
+            return false;
+        }
         self.bits
-            .get(id / 64)
-            .is_some_and(|word| word & (1u64 << (id % 64)) != 0)
+            .get(raw / 64)
+            .is_some_and(|word| word & (1u64 << (raw % 64)) != 0)
     }
 
     /// Whether no block is hidden.
@@ -724,18 +829,24 @@ fn normalize_block_name(raw: &str) -> String {
 /// A [`BlockSource`] for engine mode: a hidden block with all six neighbours
 /// opaque is reported as the block that surrounds it.
 ///
+/// Generic over the source it wraps, not `&dyn BlockSource`, so the inner read
+/// is a direct call rather than a second virtual dispatch per cell — the codec
+/// calls `block_at` for every cell twice (blocks and light), and a wrapper
+/// behind a trait object would double that. The codec still takes `&dyn
+/// BlockSource`; only the inner call inside the wrapper is monomorphized.
+///
 /// The wrapper is deliberately cheap for the common case: the hidden-set test
-/// is one array index and a bit test per cell, and the six-neighbour scan only
-/// runs for a cell that is already a hidden block.
-pub struct EngineColumn<'a> {
-    inner: &'a dyn BlockSource,
+/// is one L1-resident bit test per cell, and the six-neighbour scan only runs
+/// for a cell that is already a hidden block.
+pub struct EngineColumn<'a, S: BlockSource> {
+    inner: &'a S,
     hidden: &'a HiddenSet,
     masked: AtomicBool,
 }
 
-impl<'a> EngineColumn<'a> {
+impl<'a, S: BlockSource> EngineColumn<'a, S> {
     /// Wrap `inner`, hiding the blocks in `hidden`.
-    pub fn new(inner: &'a dyn BlockSource, hidden: &'a HiddenSet) -> Self {
+    pub fn new(inner: &'a S, hidden: &'a HiddenSet) -> Self {
         Self {
             inner,
             hidden,
@@ -749,17 +860,19 @@ impl<'a> EngineColumn<'a> {
         self.masked.load(Ordering::Relaxed)
     }
 
+    #[inline]
     fn substitute(&self, x: i32, y: i32, z: i32, block: BlockStateId) -> BlockStateId {
         if self.hidden.contains(block) && is_buried(self.inner, x, y, z) {
             self.masked.store(true, Ordering::Relaxed);
-            replace_block(y, block)
+            surrounding_block(self.inner, self.hidden, x, y, z)
         } else {
             block
         }
     }
 }
 
-impl BlockSource for EngineColumn<'_> {
+impl<S: BlockSource> BlockSource for EngineColumn<'_, S> {
+    #[inline]
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
         let block = self.inner.block_at(x, y, z);
         self.substitute(x, y, z, block)
@@ -776,7 +889,7 @@ impl BlockSource for EngineColumn<'_> {
                 let y = base_y + (i >> 8) as i32;
                 let z = base_z + ((i >> 4) & 15) as i32;
                 if is_buried(self.inner, x, y, z) {
-                    *slot = replace_block(y, *slot);
+                    *slot = surrounding_block(self.inner, self.hidden, x, y, z);
                     self.masked.store(true, Ordering::Relaxed);
                 }
             }
@@ -788,27 +901,34 @@ impl BlockSource for EngineColumn<'_> {
     }
 }
 
-/// What an enclosed hidden block is sent as: the block around it. Nether ores
-/// and ancient debris go to netherrack, anything below y=0 to deepslate, the
-/// rest to stone.
-fn replace_block(y: i32, ore: BlockStateId) -> BlockStateId {
-    let nether = blocks::block_of_state(ore)
-        .is_some_and(|(_, name)| name.contains("nether") || name.ends_with("ancient_debris"));
-    if nether {
-        cached_block(&NETHERRACK, "minecraft:netherrack")
-    } else if y < 0 {
-        cached_block(&DEEPSLATE, "minecraft:deepslate")
-    } else {
-        STONE
+/// What an enclosed hidden block is sent as: the block that actually surrounds
+/// it, so a deepslate-pocket ore becomes deepslate, a nether ore netherrack,
+/// and an andesite/tuff/gravel-pocket ore that block rather than a lone stone
+/// that a texture scanner would spot. The most frequent opaque non-hidden
+/// neighbour wins; with none (a cluster of ores) it falls back to stone.
+fn surrounding_block<S: BlockSource + ?Sized>(
+    world: &S,
+    hidden: &HiddenSet,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> BlockStateId {
+    let mut counts: Vec<(BlockStateId, u32)> = Vec::with_capacity(NEIGHBOURS.len());
+    for &(dx, dy, dz) in &NEIGHBOURS {
+        let b = world.block_at(x + dx, y + dy, z + dz);
+        if !default_is_opaque(b) || hidden.contains(b) {
+            continue;
+        }
+        match counts.iter_mut().find(|(s, _)| *s == b) {
+            Some((_, c)) => *c += 1,
+            None => counts.push((b, 1)),
+        }
     }
-}
-
-static DEEPSLATE: OnceLock<BlockStateId> = OnceLock::new();
-static NETHERRACK: OnceLock<BlockStateId> = OnceLock::new();
-
-/// A block's default state, resolved once.
-fn cached_block(cell: &'static OnceLock<BlockStateId>, name: &str) -> BlockStateId {
-    *cell.get_or_init(|| blocks::default_state(name).unwrap_or(STONE))
+    counts
+        .into_iter()
+        .max_by_key(|&(_, c)| c)
+        .map(|(s, _)| s)
+        .unwrap_or(STONE)
 }
 
 /// A [`BlockSource`] that reports a hidden section as a single repeated block.
@@ -914,6 +1034,7 @@ mod tests {
             planned_search: search_id,
             reveal_pending: false,
             bypass: false,
+            revealed: HashSet::new(),
         }
     }
 
@@ -1030,6 +1151,33 @@ mod tests {
         assert!(st.sent().is_empty(), "reset drops the old columns");
         assert!(st.visible().is_empty());
         assert!(st.reveal_step(32).is_empty());
+    }
+
+    #[test]
+    fn a_reveal_is_sent_once_and_reset_on_unload() {
+        // Engine mode must not re-send the same ore every time a neighbour
+        // changes, and must forget it when the column is streamed again.
+        let mut st = State::default();
+        assert!(st.mark_revealed((8, -20, 8)), "first reveal is new");
+        assert!(
+            !st.mark_revealed((8, -20, 8)),
+            "the same cell is not re-sent"
+        );
+        assert!(st.is_revealed(&(8, -20, 8)));
+
+        // A different cell in the same column is remembered too.
+        assert!(st.mark_revealed((8, -30, 8)));
+
+        // Unloading the column forgets both, so a re-stream can reveal again.
+        st.forget(0, 0);
+        assert!(!st.is_revealed(&(8, -20, 8)));
+        assert!(!st.is_revealed(&(8, -30, 8)));
+        assert!(st.mark_revealed((8, -20, 8)));
+
+        // A reveal in another column survives this column's unload.
+        assert!(st.mark_revealed((40, -20, 40)));
+        st.forget(0, 0);
+        assert!(st.is_revealed(&(40, -20, 40)));
     }
 
     #[test]
@@ -1327,13 +1475,14 @@ mod tests {
         blocks::default_state(name).expect("engine registry has the ore")
     }
 
-    /// A world that is solid stone except one ore cell and (when `open`) the
-    /// cell to its +X, which is air. Everything else above y=0 is air and
-    /// below is stone, so tests can place the ore anywhere.
+    /// A world with one ore cell, the six cells touching it filled with
+    /// `around` (or air on the +X face when `open`, so the ore is exposed),
+    /// and air everywhere else.
     struct OreWorld {
         ore: BlockStateId,
         at: (i32, i32, i32),
         open: bool,
+        around: BlockStateId,
     }
 
     impl BlockSource for OreWorld {
@@ -1343,8 +1492,8 @@ mod tests {
                 self.ore
             } else if self.open && (x, y, z) == (ox + 1, oy, oz) {
                 BlockStateId::AIR
-            } else if y < 0 || ((y - oy).abs() <= 1 && (x - ox).abs() <= 1 && (z - oz).abs() <= 1) {
-                STONE
+            } else if (y - oy).abs() <= 1 && (x - ox).abs() <= 1 && (z - oz).abs() <= 1 {
+                self.around
             } else {
                 BlockStateId::AIR
             }
@@ -1371,26 +1520,25 @@ mod tests {
             ore: ore("minecraft:diamond_ore"),
             at: (8, -20, 8),
             open: false,
+            around: ore("minecraft:deepslate"),
         };
         let column = EngineColumn::new(&world, &hidden);
         assert!(is_buried(&world, 8, -20, 8));
-        // Below y=0 the surrounding rock is deepslate.
-        assert_eq!(
-            column.block_at(8, -20, 8),
-            cached_block(&DEEPSLATE, "minecraft:deepslate")
-        );
+        // The substitute is the block actually around it, not a guess from y.
+        assert_eq!(column.block_at(8, -20, 8), ore("minecraft:deepslate"));
         assert!(column.masked_any(), "the caller must know to re-send");
-        // The stone beside it is untouched.
-        assert_eq!(column.block_at(9, -20, 8), STONE);
+        // The rock beside it is untouched.
+        assert_eq!(column.block_at(9, -20, 8), ore("minecraft:deepslate"));
     }
 
     #[test]
-    fn an_ore_above_zero_is_sent_as_stone() {
+    fn a_stone_pocket_ore_is_sent_as_stone() {
         let hidden = hidden_from(&["diamond_ore"]);
         let world = OreWorld {
             ore: ore("minecraft:diamond_ore"),
             at: (8, 20, 8),
             open: false,
+            around: STONE,
         };
         let column = EngineColumn::new(&world, &hidden);
         assert_eq!(column.block_at(8, 20, 8), STONE);
@@ -1403,12 +1551,10 @@ mod tests {
             ore: ore("minecraft:nether_quartz_ore"),
             at: (8, 40, 8),
             open: false,
+            around: ore("minecraft:netherrack"),
         };
         let column = EngineColumn::new(&world, &hidden);
-        assert_eq!(
-            column.block_at(8, 40, 8),
-            cached_block(&NETHERRACK, "minecraft:netherrack")
-        );
+        assert_eq!(column.block_at(8, 40, 8), ore("minecraft:netherrack"));
     }
 
     #[test]
@@ -1418,6 +1564,7 @@ mod tests {
             ore: ore("minecraft:diamond_ore"),
             at: (8, -20, 8),
             open: true,
+            around: ore("minecraft:deepslate"),
         };
         let column = EngineColumn::new(&world, &hidden);
         assert!(!is_buried(&world, 8, -20, 8));
@@ -1433,6 +1580,7 @@ mod tests {
             ore: ore("minecraft:diamond_ore"),
             at: (8, -20, 8),
             open: false,
+            around: ore("minecraft:deepslate"),
         };
         assert!(revealed_neighbours(&buried, 9, -20, 8, &hidden).is_empty());
 
@@ -1441,6 +1589,7 @@ mod tests {
             ore: ore("minecraft:diamond_ore"),
             at: (8, -20, 8),
             open: true,
+            around: ore("minecraft:deepslate"),
         };
         let revealed = revealed_neighbours(&open, 9, -20, 8, &hidden);
         assert_eq!(

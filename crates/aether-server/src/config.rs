@@ -281,7 +281,7 @@ impl Default for PluginsConfig {
 /// The permission node [`crate::ANTIXRAY_BYPASS_PERMISSION`] (currently held
 /// by operators) lets a player see everything; so does
 /// [`Self::bypass_players`] and `/visibility off`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct AntiXrayConfig {
     /// Whether the module runs at all. Off until proven.
@@ -292,7 +292,7 @@ pub struct AntiXrayConfig {
     /// accepted with or without the `minecraft:` namespace. Empty means the
     /// built-in ore list.
     pub hidden_blocks: Vec<String>,
-    /// `engine` mode only: the world the module applies to (empty = all).
+    /// The world the module applies to (empty = all).
     ///
     /// The server runs one world per process, so this is the per-world toggle
     /// for a deployment that shares a config across several world
@@ -310,6 +310,12 @@ pub struct AntiXrayConfig {
     /// Player names always allowed to bypass, in addition to the operators and
     /// the permission node.
     pub bypass_players: Vec<String>,
+    /// Deprecated (pre-AX1, used to live under `[visibility]`): accepted and
+    /// ignored, so an old file does not silently lose the key.
+    pub ray_refinement: Option<bool>,
+    /// Deprecated (pre-AX1): accepted and ignored. Engine mode is the
+    /// replacement for the old "buried ore masking" idea.
+    pub mask_buried_ores: Option<bool>,
 }
 
 impl Default for AntiXrayConfig {
@@ -323,6 +329,61 @@ impl Default for AntiXrayConfig {
             hidden_fill: HiddenFill::Stone,
             reveal_budget_per_tick: 32,
             bypass_players: Vec::new(),
+            ray_refinement: None,
+            mask_buried_ores: None,
+        }
+    }
+}
+
+/// The pre-AX1 `[visibility]` table, accepted for backward compatibility.
+///
+/// Before AX1 this was the whole module and always meant section culling, so a
+/// file that still uses it is migrated to `[anti_xray] mode = "culling"` by
+/// [`Config::migrate_legacy`], with a warning, rather than silently becoming
+/// `engine` (or, worse, nothing).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct LegacyVisibilityConfig {
+    /// Whether culling ran at all.
+    pub enabled: bool,
+    /// The margin, in blocks.
+    pub margin_blocks: i32,
+    /// What a hidden section was encoded as.
+    pub hidden_fill: HiddenFill,
+    /// Reserved then; ignored now.
+    pub ray_refinement: bool,
+    /// Reserved then; ignored now.
+    pub mask_buried_ores: bool,
+    /// Columns re-sent per tick.
+    pub reveal_budget_per_tick: u32,
+}
+
+impl Default for LegacyVisibilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            margin_blocks: 5,
+            hidden_fill: HiddenFill::Stone,
+            ray_refinement: false,
+            mask_buried_ores: false,
+            reveal_budget_per_tick: 32,
+        }
+    }
+}
+
+impl From<LegacyVisibilityConfig> for AntiXrayConfig {
+    fn from(l: LegacyVisibilityConfig) -> Self {
+        AntiXrayConfig {
+            enabled: l.enabled,
+            mode: AntiXrayMode::Culling,
+            hidden_blocks: Vec::new(),
+            worlds: Vec::new(),
+            margin_blocks: l.margin_blocks,
+            hidden_fill: l.hidden_fill,
+            reveal_budget_per_tick: l.reveal_budget_per_tick,
+            bypass_players: Vec::new(),
+            ray_refinement: Some(l.ray_refinement),
+            mask_buried_ores: Some(l.mask_buried_ores),
         }
     }
 }
@@ -526,6 +587,10 @@ pub struct Config {
     pub compat: CompatConfig,
     /// Optional anti-xray (buried-ore masking or section visibility culling).
     pub anti_xray: AntiXrayConfig,
+    /// The pre-AX1 `[visibility]` table, if the file still has one. Migrated
+    /// into `anti_xray` by [`Self::migrate_legacy`]; never read directly.
+    #[serde(default, rename = "visibility")]
+    legacy_visibility: Option<LegacyVisibilityConfig>,
     /// Authentication policy.
     pub auth: AuthConfig,
     /// Optional history mirror.
@@ -548,6 +613,50 @@ pub struct Config {
 }
 
 impl Config {
+    /// Apply pre-AX1 backward compatibility and return human-readable warnings.
+    ///
+    /// AX1 renamed `[visibility]` to `[anti_xray]`. The old table always meant
+    /// section culling, so a file that still has one is migrated to
+    /// `[anti_xray] mode = "culling"` with its old knobs instead of quietly
+    /// falling back to the new `engine` default or (with `enabled = true`)
+    /// doing nothing. If the file sets both, `[anti_xray]` wins. The old
+    /// `ray_refinement`/`mask_buried_ores` keys are accepted and reported as
+    /// ignored.
+    pub fn migrate_legacy(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if let Some(legacy) = self.legacy_visibility.take() {
+            let replaced = self.anti_xray == AntiXrayConfig::default();
+            if replaced {
+                self.anti_xray = legacy.into();
+                warnings.push(
+                    "`[visibility]` is deprecated: migrated to `[anti_xray] mode = \"culling\"`"
+                        .to_string(),
+                );
+            } else {
+                warnings.push(
+                    "`[visibility]` is deprecated and both it and `[anti_xray]` are set: \
+                     kept `[anti_xray]`, ignored `[visibility]`"
+                        .to_string(),
+                );
+            }
+        }
+        if self.anti_xray.ray_refinement.is_some() {
+            warnings.push(
+                "`ray_refinement` is deprecated and ignored (the section graph is the robust \
+                 part; see docs/design/visibility-culling.md)"
+                    .to_string(),
+            );
+        }
+        if self.anti_xray.mask_buried_ores.is_some() {
+            warnings.push(
+                "`mask_buried_ores` is deprecated: use `[anti_xray] mode = \"engine\"` (the \
+                 default) instead"
+                    .to_string(),
+            );
+        }
+        warnings
+    }
+
     /// Whether `name`, connecting from `ip`, is an operator. Names compare
     /// case-insensitively; an entry with an address also needs that address.
     pub fn is_operator(&self, name: &str, ip: Option<std::net::IpAddr>) -> bool {
@@ -871,7 +980,11 @@ impl Config {
     pub fn load_or_init(path: &str) -> Result<(Config, bool), String> {
         match std::fs::read_to_string(path) {
             Ok(text) => {
-                let cfg = toml::from_str(&text).map_err(|e| format!("parsing {path}: {e}"))?;
+                let mut cfg: Config =
+                    toml::from_str(&text).map_err(|e| format!("parsing {path}: {e}"))?;
+                for w in cfg.migrate_legacy() {
+                    crate::log::warn(&w);
+                }
                 Ok((cfg, false))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1016,6 +1129,69 @@ mod tests {
         let cfg: Config =
             toml::from_str("[anti_xray]\nhidden_blocks = [\"diamond_ore\"]\n").unwrap();
         assert_eq!(cfg.anti_xray.hidden_block_names(), vec!["diamond_ore"]);
+    }
+
+    #[test]
+    fn a_pre_ax1_visibility_config_is_migrated_to_culling() {
+        // The old `[visibility]` table always meant section culling. A server
+        // upgrading must keep hiding, not silently fall back to `engine`.
+        let mut cfg: Config = toml::from_str(
+            "[visibility]\nenabled = true\nmargin_blocks = 3\nhidden_fill = \"air\"\n\
+             mask_buried_ores = false\nray_refinement = false\nreveal_budget_per_tick = 8\n",
+        )
+        .unwrap();
+        let warnings = cfg.migrate_legacy();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("migrated to `[anti_xray]")),
+            "a migration warning is expected: {warnings:?}"
+        );
+        assert!(cfg.anti_xray.enabled, "the old enabled flag is kept");
+        assert_eq!(
+            cfg.anti_xray.mode,
+            AntiXrayMode::Culling,
+            "old configs were culling, not the new engine default"
+        );
+        assert_eq!(cfg.anti_xray.margin_blocks, 3);
+        assert_eq!(cfg.anti_xray.hidden_fill, HiddenFill::Air);
+        assert_eq!(cfg.anti_xray.reveal_budget_per_tick, 8);
+    }
+
+    #[test]
+    fn anti_xray_wins_when_both_sections_are_present() {
+        let mut cfg: Config = toml::from_str(
+            "[anti_xray]\nenabled = true\nmode = \"engine\"\n\n\
+             [visibility]\nenabled = false\n",
+        )
+        .unwrap();
+        let warnings = cfg.migrate_legacy();
+        assert!(
+            warnings.iter().any(|w| w.contains("kept `[anti_xray]`")),
+            "{warnings:?}"
+        );
+        assert_eq!(cfg.anti_xray.mode, AntiXrayMode::Engine);
+        assert!(cfg.anti_xray.enabled);
+    }
+
+    #[test]
+    fn the_deprecated_reserved_keys_are_accepted_and_reported() {
+        let mut cfg: Config = toml::from_str(
+            "[anti_xray]\nenabled = true\nray_refinement = true\nmask_buried_ores = true\n",
+        )
+        .unwrap();
+        let warnings = cfg.migrate_legacy();
+        assert!(
+            warnings.iter().any(|w| w.contains("ray_refinement")),
+            "ray_refinement must be reported: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("mask_buried_ores")),
+            "mask_buried_ores must be reported: {warnings:?}"
+        );
+        // Still parsed, engine mode still on.
+        assert!(cfg.anti_xray.enabled);
+        assert_eq!(cfg.anti_xray.mode, AntiXrayMode::Engine);
     }
 
     #[test]

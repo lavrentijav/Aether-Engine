@@ -72,7 +72,10 @@ Switchable: `[anti_xray] enabled = false` by default until it is proven; per wor
 - Collision and movement prediction: hidden = stone keeps the client from falling into "void";
   "omit/air" mode is only for spectators/flying and is riskier. Engine mode replaces an ore with
   the rock that already surrounded it, so collision never changes at all.
-- Light: hidden sections are sent with the light the real section has, so nothing flickers on reveal.
+- Light: a hidden section is sent with the stone's light, not the real section's — the codec asks
+  one `BlockSource` for both blocks and light, so masking one masks the other. For the common hidden
+  section (solid rock) those coincide; the gap is recorded in [Known Issues A.16](../KNOWN_ISSUES.md)
+  and needs the codec to read a second source.
 - Block updates and the journal do not change; this is purely the network send layer per player.
 - Every protocol version: hidden-section encoding goes through the same per-version chunk writer
   (single-valued palette on 1.18+, a full stone section before that); engine mode needs no codec

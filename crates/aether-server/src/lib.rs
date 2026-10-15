@@ -532,14 +532,36 @@ pub fn anti_xray_config() -> config::AntiXrayConfig {
         .unwrap_or_default()
 }
 
+/// Whether anti-xray is active for the running world, resolved once.
+///
+/// The block-write path calls this for every write, so the per-world test
+/// (`worlds`) is computed once after the config is installed rather than
+/// re-parsing the world directory each time. `0` means "not asked yet": a call
+/// before the config exists returns `false` without caching, so the answer
+/// becomes correct once startup installs it.
+static ANTI_XRAY_ACTIVE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 /// Whether anti-xray is on for the running world. A single load and branch,
 /// for the block write path, which must cost nothing on the default (off)
 /// configuration.
 #[inline]
 pub fn anti_xray_enabled() -> bool {
-    CONFIG
-        .get()
-        .is_some_and(|c| c.anti_xray.enabled && c.anti_xray.applies_to_world(&c.server.world_dir))
+    const ON: u8 = 1;
+    const OFF: u8 = 2;
+    use std::sync::atomic::Ordering;
+    match ANTI_XRAY_ACTIVE.load(Ordering::Relaxed) {
+        ON => true,
+        OFF => false,
+        _ => {
+            let on = CONFIG.get().is_some_and(|c| {
+                c.anti_xray.enabled && c.anti_xray.applies_to_world(&c.server.world_dir)
+            });
+            if CONFIG.get().is_some() {
+                ANTI_XRAY_ACTIVE.store(if on { ON } else { OFF }, Ordering::Relaxed);
+            }
+            on
+        }
+    }
 }
 
 /// Whether `handle` may see everything: an explicit `/visibility off`, the
