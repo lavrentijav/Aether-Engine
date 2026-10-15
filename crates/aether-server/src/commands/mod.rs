@@ -229,7 +229,7 @@ fn describe_body(
         EventBody::ItemDestroy { uid, reason, .. } => Some(format!(
             "  {ago} item {} destroyed ({})  #{}",
             uid.0,
-            destroy_reason(*reason),
+            reason.name(),
             e.seq
         )),
         EventBody::ItemMerge { into, from, count } => Some(format!(
@@ -245,24 +245,12 @@ fn describe_body(
             from.len(),
             e.seq
         )),
-    }
-}
-
-/// A short word for a destroy's reason, for a chat line.
-fn destroy_reason(reason: aether_world::journal::DestroyReason) -> &'static str {
-    use aether_world::journal::DestroyReason::*;
-    match reason {
-        Other => "other",
-        Consumed => "consumed",
-        Despawn => "despawned",
-        Burned => "burned",
-        Void => "void",
-        Explosion => "explosion",
-        Crafted => "crafted",
-        CreativeReplace => "replaced",
-        Command => "command",
-        Cactus => "cactus",
-        MergedAway => "merged",
+        EventBody::Custom { tag, bytes } => Some(format!(
+            "  {ago} {} custom event tag {tag} ({} bytes)  #{}",
+            actor_name(e.actor.0),
+            bytes.len(),
+            e.seq
+        )),
     }
 }
 

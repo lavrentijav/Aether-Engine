@@ -936,6 +936,74 @@ fn a_version_4_merge_and_destroy_reason_round_trip() {
 }
 
 #[test]
+fn every_core_code_sits_in_its_reserved_range() {
+    // The code space is split so a plugin's code can never collide with a
+    // core one. If a core code drifts into the custom range this fails.
+    for (code, _) in EVENT_KINDS {
+        assert!(
+            (event::TAG_CORE_MIN..=event::TAG_CORE_MAX).contains(code),
+            "core event tag {code} is outside {}..={}",
+            event::TAG_CORE_MIN,
+            event::TAG_CORE_MAX
+        );
+    }
+    for reason in DESTROY_REASONS {
+        let code = reason.code();
+        assert!(
+            (event::REASON_CORE_MIN..=event::REASON_CORE_MAX).contains(&code),
+            "core destroy reason {code} is outside {}..={}",
+            event::REASON_CORE_MIN,
+            event::REASON_CORE_MAX
+        );
+    }
+    assert_eq!(event::TAG_CUSTOM_MIN, event::TAG_CORE_MAX + 1);
+    assert_eq!(event::REASON_CUSTOM_MIN, event::REASON_CORE_MAX + 1);
+    assert_eq!(
+        event::EVENT_KIND_UNKNOWN.0,
+        0,
+        "0 is the reserved no-tag code"
+    );
+}
+
+#[test]
+fn a_custom_body_round_trips_and_its_payload_is_length_prefixed() {
+    // A plugin tag the core does not know must survive a round trip with its
+    // payload intact, and a cause behind it must still be readable — the
+    // length prefix is what lets a reader skip bytes it does not understand.
+    let e = Event {
+        seq: 3,
+        at_ms: 4,
+        actor: alice(),
+        cause: Some(2),
+        body: EventBody::Custom {
+            tag: event::TAG_CUSTOM_MIN + 5,
+            bytes: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00],
+        },
+    };
+    assert_eq!(Event::decode(&e.encode()), Ok(e.clone()));
+    assert_eq!(e.body.tag(), event::TAG_CUSTOM_MIN + 5);
+
+    // An empty payload is still a custom body, not a decode error.
+    let empty = Event {
+        body: EventBody::Custom {
+            tag: 200,
+            bytes: Vec::new(),
+        },
+        ..e.clone()
+    };
+    assert_eq!(Event::decode(&empty.encode()), Ok(empty));
+}
+
+#[test]
+fn an_unknown_tag_in_the_core_range_is_refused_not_read_as_custom() {
+    // Tags 1..=63 are the core's; a tag there this release does not know is a
+    // version problem, not a plugin's opaque body.
+    let mut b = header(4, alice().0);
+    b.push(7); // not a core tag, below TAG_CUSTOM_MIN
+    assert_eq!(Event::decode(&b), Err(DecodeError::UnknownTag(7)));
+}
+
+#[test]
 fn a_derived_item_and_a_cause_survive_a_round_trip() {
     let e = Event {
         seq: 9,

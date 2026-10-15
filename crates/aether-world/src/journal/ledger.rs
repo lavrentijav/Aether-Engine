@@ -178,6 +178,9 @@ impl Ledger {
                 inst.trail.push((e.seq, Place::Nowhere));
             }
             EventBody::ItemMerge { into, from, count } => self.merge(e.seq, *into, *from, *count),
+            // A plugin event: the core does not know what it did to items, so
+            // it changes nothing here.
+            EventBody::Custom { .. } => {}
         }
     }
 
