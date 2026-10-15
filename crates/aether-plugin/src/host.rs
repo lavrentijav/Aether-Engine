@@ -167,6 +167,27 @@ impl WasiView for StoreData {
 }
 
 impl StoreData {
+    /// Build a bare store for unit-testing the import bridges without a WASM
+    /// component or an engine. Not part of the public surface.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        plugin: &str,
+        capabilities: Vec<String>,
+        services: Arc<ServiceRegistry>,
+        backend: Arc<dyn HostBackend>,
+    ) -> StoreData {
+        StoreData {
+            plugin: plugin.to_string(),
+            capabilities,
+            config: BTreeMap::new(),
+            backend,
+            services,
+            limits: StoreLimitsBuilder::new().build(),
+            wasi: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+        }
+    }
+
     pub(crate) fn allowed(&self, capability: &str) -> bool {
         self.capabilities.iter().any(|c| c == capability)
     }

@@ -85,4 +85,86 @@ fn the_plugin_world_is_frozen_for_0_1_0() {
         "the export set of `world plugin` is frozen for 0.1.0: adding or removing \
          one refuses every component already built against it"
     );
+
+    // The **imports** of the frozen world are part of what a component is
+    // compiled against, too. Adding one is backward compatible (a component
+    // requests a subset), but removing or renaming one breaks every component
+    // that imports it — so pin the set.
+    let imports: BTreeSet<String> = world
+        .imports
+        .keys()
+        .map(|k| key_name(&resolve, k))
+        .collect();
+    let expected_imports: BTreeSet<String> =
+        FROZEN_IMPORTS.iter().map(|s| (*s).to_string()).collect();
+    assert_eq!(
+        imports, expected_imports,
+        "the import set of `world plugin` is part of the contract: removing or \
+         renaming an interface refuses components built against it"
+    );
+}
+
+/// The import interfaces of `world plugin` in `@0.1.0`: the `host` interface
+/// plus the shared types the world `use`s (`types` and the individual type
+/// names the `use` brings into scope).
+const FROZEN_IMPORTS: &[&str] = &[
+    "host",
+    "types",
+    "player",
+    "manifest-ack",
+    "decision",
+    "command-result",
+];
+
+/// Every SDK service interface the `aether:sdk/services` world imports. A
+/// dependent imports these; the host provides them. Pinned so a rename is
+/// caught, and so the set matches what the bridge implements.
+const SDK_SERVICE_INTERFACES: &[&str] = &[
+    "permissions",
+    "commands",
+    "messages",
+    "players",
+    "config",
+    "scheduler",
+    "cooldowns",
+    "confirm",
+];
+
+#[test]
+fn the_sdk_service_world_imports_every_service_interface() {
+    // The SDK package depends on `aether:plugin`, so both directories are
+    // parsed into one `Resolve`.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut resolve = Resolve::default();
+    resolve
+        .push_dir(root.join("wit"))
+        .expect("the plugin WIT must parse");
+    let (pkg, _) = resolve
+        .push_dir(root.join("wit-sdk"))
+        .expect("the SDK WIT must parse");
+    let package = &resolve.packages[pkg];
+    assert_eq!(package.name.namespace, "aether");
+    assert_eq!(package.name.name, "sdk");
+
+    let world = &resolve.worlds[package.worlds["services"]];
+    let imports: BTreeSet<String> = world
+        .imports
+        .keys()
+        .map(|k| key_name(&resolve, k))
+        .collect();
+    // The plugin host interfaces plus every SDK service; `aether:plugin/host`
+    // and `aether:plugin/types` are imported here so the combined world defines
+    // them once.
+    for name in SDK_SERVICE_INTERFACES {
+        assert!(
+            imports.iter().any(|i| i == name),
+            "`{name}` is missing from the SDK services world: {imports:?}"
+        );
+    }
+    // The plugin host interfaces (`host`, `types`) are imported here so the
+    // combined world defines `aether:plugin/types` exactly once.
+    assert!(
+        imports.contains("host") && imports.contains("types"),
+        "the plugin host interfaces must be imported once here: {imports:?}"
+    );
 }

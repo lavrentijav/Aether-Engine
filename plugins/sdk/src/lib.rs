@@ -160,16 +160,17 @@ impl NativePlugin for SdkPlugin {
 /// never a top-level command.
 #[derive(Default)]
 struct Commands {
-    specs: Mutex<HashMap<(String, String), CommandSpec>>,
-    /// Subcommands by `(caller, parent)` then subcommand name.
-    subs: Mutex<HashMap<(String, String), HashMap<String, CommandSpec>>>,
+    /// Root specs: caller id → command name → spec.
+    roots: Mutex<HashMap<String, HashMap<String, CommandSpec>>>,
+    /// Subcommands: caller id → parent name → subcommand name → spec.
+    subs: Mutex<HashMap<String, HashMap<String, HashMap<String, CommandSpec>>>>,
     backend: Arc<OnceLock<Arc<dyn HostBackend>>>,
 }
 
 impl Commands {
     fn new(backend: Arc<OnceLock<Arc<dyn HostBackend>>>) -> Commands {
         Commands {
-            specs: Mutex::new(HashMap::new()),
+            roots: Mutex::new(HashMap::new()),
             subs: Mutex::new(HashMap::new()),
             backend,
         }
@@ -188,18 +189,21 @@ impl Commands {
         // picks the subcommand out of the arguments.
         if let Some(parent) = spec.parent.clone().filter(|p| !p.is_empty()) {
             let mut subs = self.subs.lock().unwrap();
-            let by_name = subs.entry((caller.to_string(), parent)).or_default();
+            let by_name = subs
+                .entry(caller.to_string())
+                .or_default()
+                .entry(parent)
+                .or_default();
             if by_name.contains_key(&spec.name) {
                 return Err(format!("subcommand `{}` is already registered", spec.name));
             }
             by_name.insert(spec.name.clone(), spec);
             return Ok(());
         }
-        let key = (caller.to_string(), spec.name.clone());
         // Cheap duplicate check, then release the lock before the host call:
-        // `register_command` reaches the core registry, and holding `specs`
+        // `register_command` reaches the core registry, and holding `roots`
         // across a host call would risk a lock-order inversion for no reason.
-        if self.specs.lock().unwrap().contains_key(&key) {
+        if self.get(caller, &spec.name).is_some() {
             return Err(format!("command `{}` is already registered", spec.name));
         }
         // Register with the core registry first, so a core-name clash or a
@@ -208,21 +212,24 @@ impl Commands {
         if let Some(backend) = self.backend.get() {
             backend.register_command(caller, &spec.name, &node, spec.op)?;
         }
-        let mut specs = self.specs.lock().unwrap();
+        let mut roots = self.roots.lock().unwrap();
+        let by_name = roots.entry(caller.to_string()).or_default();
         // Re-check under the lock: a concurrent register that slipped past the
         // fast check above must not be silently overwritten.
-        if specs.contains_key(&key) {
+        if by_name.contains_key(&spec.name) {
             return Err(format!("command `{}` is already registered", spec.name));
         }
-        specs.insert(key, spec);
+        by_name.insert(spec.name.clone(), spec);
         Ok(())
     }
 
     fn get(&self, caller: &str, name: &str) -> Option<CommandSpec> {
-        self.specs
+        // Borrowed lookups take `&str` keys and allocate nothing.
+        self.roots
             .lock()
             .unwrap()
-            .get(&(caller.to_string(), name.to_string()))
+            .get(caller)
+            .and_then(|by_name| by_name.get(name))
             .cloned()
     }
 
@@ -246,7 +253,8 @@ impl Commands {
             self.subs
                 .lock()
                 .unwrap()
-                .get(&(caller.to_string(), name.to_string()))
+                .get(caller)
+                .and_then(|by_parent| by_parent.get(name))
                 .and_then(|by_name| by_name.get(first))
                 .cloned()
         });
@@ -761,9 +769,12 @@ impl SchedulerService for Scheduler {
 }
 
 /// Per-caller, per-key cooldowns: `(armed_tick, duration_ticks)`.
+///
+/// Nested so a lookup takes `&str` keys and allocates nothing on the query
+/// path; only arming a cooldown allocates.
 struct Cooldowns {
     clock: Arc<Clock>,
-    map: Mutex<HashMap<(String, String), (u64, u64)>>,
+    map: Mutex<HashMap<String, HashMap<String, (u64, u64)>>>,
 }
 
 impl Cooldowns {
@@ -779,20 +790,22 @@ impl CooldownsService for Cooldowns {
     fn ready(&self, caller: &str, key: &str, ticks: u64) -> bool {
         let now = self.clock.now();
         let mut map = self.map.lock().unwrap();
-        let entry = map.get_mut(&(caller.to_string(), key.to_string()));
-        match entry {
-            Some((armed, duration)) if now < *armed + *duration => false,
-            _ => {
-                map.insert((caller.to_string(), key.to_string()), (now, ticks.max(1)));
-                true
+        // Look up with borrowed keys; only reach for the entry API on a miss.
+        if let Some((armed, duration)) = map.get(caller).and_then(|m| m.get(key)) {
+            if now < *armed + *duration {
+                return false;
             }
         }
+        map.entry(caller.to_string())
+            .or_default()
+            .insert(key.to_string(), (now, ticks.max(1)));
+        true
     }
 
     fn remaining(&self, caller: &str, key: &str) -> u64 {
         let now = self.clock.now();
         let map = self.map.lock().unwrap();
-        match map.get(&(caller.to_string(), key.to_string())) {
+        match map.get(caller).and_then(|m| m.get(key)) {
             Some((armed, duration)) => (*armed + *duration).saturating_sub(now),
             None => 0,
         }
@@ -1545,5 +1558,87 @@ mod tests {
         confirm.request("a", &p, "really?", "delete");
         clock.set(CONFIRM_TICKS + 1);
         assert!(!confirm.check("a", &p, "delete"));
+    }
+}
+
+#[cfg(test)]
+mod cost {
+    //! Allocation tests for the hot paths. A thread-local counter, touched only
+    //! by the measuring thread, so parallel tests do not interfere.
+    use super::*;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        static ALLOCS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    struct Counting;
+
+    // SAFETY: delegates every allocation to `System`, only incrementing a
+    // thread-local counter first; the counter uses `try_with`, so it never
+    // panics (including during thread teardown).
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            ALLOCS.try_with(|c| c.set(c.get() + 1)).ok();
+            // SAFETY: `l` is the layout the caller passed, forwarded unchanged.
+            unsafe { System.alloc(l) }
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            // SAFETY: `p`/`l` are the pointer and layout the caller gave back.
+            unsafe { System.dealloc(p, l) }
+        }
+        unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+            ALLOCS.try_with(|c| c.set(c.get() + 1)).ok();
+            // SAFETY: as `alloc`, forwarded unchanged.
+            unsafe { System.alloc_zeroed(l) }
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+            ALLOCS.try_with(|c| c.set(c.get() + 1)).ok();
+            // SAFETY: `p`/`l` describe the existing block, `n` the new size; all
+            // forwarded unchanged to `System`.
+            unsafe { System.realloc(p, l, n) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: Counting = Counting;
+
+    /// Run `f`, returning how many allocations the current thread made.
+    fn measure<R>(f: impl FnOnce() -> R) -> (R, usize) {
+        ALLOCS.with(|c| c.set(0));
+        let r = f();
+        let n = ALLOCS.with(|c| c.get());
+        (r, n)
+    }
+
+    #[test]
+    fn an_idle_scheduler_advance_does_not_allocate() {
+        let clock = Arc::new(Clock::default());
+        let scheduler = Scheduler::new(clock);
+        scheduler.advance(0); // warm any lazy init
+        let (_, allocs) = measure(|| {
+            for n in 1..=1000 {
+                scheduler.advance(n);
+                let _ = scheduler.poll("a");
+            }
+        });
+        assert_eq!(allocs, 0, "an idle advance and poll must not allocate");
+    }
+
+    #[test]
+    fn hot_queries_do_not_allocate() {
+        let clock = Arc::new(Clock::default());
+        let cooldowns = Cooldowns::new(clock);
+        let commands = Commands::default();
+        let (_, allocs) = measure(|| {
+            for _ in 0..1000 {
+                // A cooldown that is not set: a pure read.
+                let _ = cooldowns.remaining("a", "home");
+                // An unknown command: an empty resolution.
+                let _ = commands.resolve("a", "nope", &[]);
+            }
+        });
+        assert_eq!(allocs, 0, "unknown-key reads must not allocate");
     }
 }

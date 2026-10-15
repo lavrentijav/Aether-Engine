@@ -693,3 +693,154 @@ impl bindings::aether::sdk::confirm::Host for StoreData {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::bindings::aether::sdk::{commands, messages, permissions};
+    use super::*;
+    use crate::host::StoreData;
+    use crate::{HostBackend, LogLevel};
+    use std::sync::Mutex;
+
+    /// A backend that records granted capabilities and log lines.
+    #[derive(Default)]
+    struct Rec {
+        granted: Vec<String>,
+        log: Mutex<Vec<String>>,
+    }
+
+    impl HostBackend for Rec {
+        fn kv_get(&self, _: &str, _: &str) -> Option<Vec<u8>> {
+            None
+        }
+        fn kv_put(&self, _: &str, _: &str, _: &[u8]) {}
+        fn kv_delete(&self, _: &str, _: &str) {}
+        fn kv_list(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn log(&self, plugin: &str, _: LogLevel, message: &str) {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("{plugin}: {message}"));
+        }
+        fn config(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn supports(&self, _: &str, _: &str) -> bool {
+            false
+        }
+        fn capabilities(&self, _: &str) -> Vec<String> {
+            self.granted.clone()
+        }
+    }
+
+    fn store(caps: &[&str]) -> (StoreData, Arc<Rec>) {
+        let backend = Arc::new(Rec {
+            granted: caps.iter().map(|c| (*c).to_string()).collect(),
+            log: Mutex::new(Vec::new()),
+        });
+        let data = StoreData::for_test(
+            "caller",
+            caps.iter().map(|c| (*c).to_string()).collect(),
+            Arc::new(ServiceRegistry::new()),
+            backend.clone(),
+        );
+        (data, backend)
+    }
+
+    fn player() -> Player {
+        Player {
+            id: 7,
+            name: "Steve".to_string(),
+            operator: false,
+        }
+    }
+
+    #[test]
+    fn an_unregistered_service_answers_the_neutral_value_and_logs() {
+        let (mut s, backend) = store(&[]);
+        // Permissions: deny / zero / empty.
+        assert!(!permissions::Host::check(&mut s, player(), "n".into()));
+        assert_eq!(permissions::Host::level(&mut s, player()), 0);
+        assert!(permissions::Host::groups(&mut s, player()).is_empty());
+        // A privileged call fails closed.
+        assert!(permissions::Host::grant(&mut s, "s".into(), "n".into(), true).is_err());
+        // Commands: empty usage/parse and an empty resolution.
+        assert_eq!(commands::Host::usage(&mut s, "home".into()), "");
+        assert!(commands::Host::parse(&mut s, "home".into(), vec![]).is_empty());
+        let r = commands::Host::resolve(&mut s, "home".into(), vec!["x".into()]);
+        assert!(r.subcommand.is_empty() && r.usage.is_empty());
+        assert_eq!(r.rest, vec!["x".to_string()]);
+        // Messages: no-op, no panic.
+        messages::Host::send(&mut s, player(), "hi".into());
+        messages::Host::broadcast(&mut s, "hi".into());
+        // Each refusal was logged with the service name.
+        let logged = backend.log.lock().unwrap();
+        assert!(
+            logged.iter().any(|l| l.contains("sdk.permissions")),
+            "{logged:?}"
+        );
+        assert!(
+            logged.iter().any(|l| l.contains("sdk.messages")),
+            "{logged:?}"
+        );
+    }
+
+    #[test]
+    fn the_bridge_forwards_and_the_provider_applies_the_gate() {
+        // With no provider the bridge fails closed.
+        let (mut s, _) = store(&["permissions.admin"]);
+        let err = permissions::Host::grant(&mut s, "s".into(), "n".into(), true).unwrap_err();
+        assert!(err.contains("unavailable"), "{err}");
+
+        // With a provider it forwards the caller id (capabilities are read by
+        // the provider from the backend); here the provider refuses.
+        let backend = Arc::new(Rec {
+            granted: Vec::new(),
+            log: Mutex::new(Vec::new()),
+        });
+        let services = Arc::new(ServiceRegistry::new());
+        let provider = Arc::new(RecordingPermissions::default());
+        register_permissions(&services, provider.clone()).unwrap();
+        let mut s = StoreData::for_test("caller", Vec::new(), services, backend);
+        let err = permissions::Host::grant(&mut s, "s".into(), "n".into(), true).unwrap_err();
+        assert_eq!(
+            provider.last_caller.lock().unwrap().as_deref(),
+            Some("caller")
+        );
+        assert!(err.contains("provider says no"), "{err}");
+    }
+
+    /// A permission provider that records the caller and always refuses.
+    #[derive(Default)]
+    struct RecordingPermissions {
+        last_caller: Mutex<Option<String>>,
+    }
+
+    impl PermissionsService for RecordingPermissions {
+        fn check(&self, _: &str, _: &Player, _: &str) -> bool {
+            false
+        }
+        fn require(&self, _: &str, _: &Player, _: &str) -> bool {
+            false
+        }
+        fn level(&self, _: &str, _: &Player) -> u8 {
+            0
+        }
+        fn groups(&self, _: &str, _: &Player) -> Vec<String> {
+            Vec::new()
+        }
+        fn meta(&self, _: &str, _: &Player, _: &str) -> Option<String> {
+            None
+        }
+        fn grant(&self, caller: &str, _: &str, _: &str, _: bool) -> Result<(), String> {
+            *self.last_caller.lock().unwrap() = Some(caller.to_string());
+            Err("provider says no".to_string())
+        }
+        fn revoke(&self, caller: &str, _: &str, _: &str) -> Result<(), String> {
+            *self.last_caller.lock().unwrap() = Some(caller.to_string());
+            Err("provider says no".to_string())
+        }
+    }
+}
