@@ -156,16 +156,56 @@ fn login_and_play(
     next_eid: &AtomicI32,
     registry: &SharedRegistry,
 ) -> io::Result<()> {
-    let Some(name) = codec.read_login_start(s)? else {
+    let Some(claimed) = codec.read_login_start(s)? else {
         return Ok(());
     };
-    if !cfg.may_join(&name) {
+    // The vanilla username rule, enforced for every login including offline:
+    // a padded or homoglyph claim must not be admitted as a near-copy of a
+    // locked name.
+    if !crate::auth::valid_username(&claimed) {
         crate::log::info(&format!(
-            "[x] {name} refused: not on the whitelist ({})",
+            "[x] {} refused: invalid username ({})",
+            protocol::json_escape(&claimed),
+            ip.map(|i| i.to_string()).unwrap_or_default()
+        ));
+        return protocol::kick_login(s, "Invalid username.");
+    }
+    // Per-address login rate limit, before any Mojang traffic or game work.
+    if !crate::auth::rate_limit_allow(ip) {
+        crate::log::warn(&format!(
+            "[x] {claimed} refused: too many login attempts from {}",
+            ip.map(|i| i.to_string()).unwrap_or_default()
+        ));
+        return protocol::kick_login(s, "Too many login attempts; try again in a minute.");
+    }
+    if !cfg.may_join(&claimed) {
+        crate::log::info(&format!(
+            "[x] {claimed} refused: not on the whitelist ({})",
             ip.map(|i| i.to_string()).unwrap_or_default()
         ));
         return protocol::kick_login(s, "You are not on this server's whitelist.");
     }
+    // Online/hybrid authentication, before compression is enabled: the
+    // encryption handshake runs in the uncompressed login state, and Set
+    // Compression must come *after* the encryption switch or the client reads
+    // the compressed frame as ciphertext.
+    let (name, uuid_override, properties, authenticated) =
+        match crate::auth::authenticate(s, codec, &cfg.auth, world, &claimed, ip)? {
+            crate::auth::Admission::Offline => (claimed, None, Vec::new(), false),
+            crate::auth::Admission::Online(profile) => {
+                (profile.name, Some(profile.uuid), profile.properties, true)
+            }
+            crate::auth::Admission::Refused(reason) => {
+                crate::log::info(&format!(
+                    "[x] {claimed} refused: {reason} ({})",
+                    ip.map(|i| i.to_string()).unwrap_or_default()
+                ));
+                return protocol::kick_login(s, &reason);
+            }
+            // The client left during the handshake; there is nothing to admit
+            // and no one to tell.
+            crate::auth::Admission::Ended => return Ok(()),
+        };
     // Between Login Start and Login Success, and nowhere else: every version
     // this server speaks takes Set Compression at login id 0x03, so the switch
     // belongs here rather than repeated in nineteen codecs. Both directions
@@ -177,6 +217,11 @@ fn login_and_play(
     let eid = next_eid.fetch_add(1, Ordering::Relaxed);
     let world_spawn = world_spawn(world);
     let mut player = Player::spawn(eid, name.clone(), world_spawn);
+    // An authenticated player keeps their Mojang uuid — inventory, ops and
+    // journal all key on it.
+    if let Some(uuid) = uuid_override {
+        player.uuid = uuid;
+    }
     // The same player logging in again — a client that reconnected before
     // the server noticed the old connection die — replaces the old session,
     // as in vanilla. Its thread saves the player on the way out; wait for
@@ -276,15 +321,18 @@ fn login_and_play(
         max_players: cfg.server.max_players,
         view_radius: cfg.server.clamped_view_radius(),
         resource_pack: pack,
+        online: authenticated,
+        properties: properties.clone(),
     };
 
     codec.complete_login(s, &params)?;
     crate::log::info(&format!(
-        "[+] {} joined (eid {}, {} via {}, from {})",
+        "[+] {} joined (eid {}, {} via {}, {} auth, from {})",
         player.name,
         eid,
         player.uuid_hyphenated(),
         codec.version_name(),
+        if authenticated { "online" } else { "offline" },
         ip.map(|i| i.to_string()).unwrap_or_else(|| "?".into())
     ));
 
@@ -371,7 +419,16 @@ fn login_and_play(
         pitch: player.pitch,
         on_ground: false,
     };
-    let handle = registry.join(eid, player.uuid, player.name.clone(), ip, codec, &*s, pos)?;
+    let handle = registry.join(
+        eid,
+        player.uuid,
+        player.name.clone(),
+        ip,
+        properties,
+        codec,
+        &*s,
+        pos,
+    )?;
     // Remember which pack this client was offered: only the compat one may
     // turn carrier states on (see `PlayerHandle::pack_table`).
     if compat_offered {
@@ -476,6 +533,19 @@ fn login_and_play(
     );
     crate::plugins::after_player_leave(&handle);
     result
+}
+
+/// Decode a client's resource-pack status packet body.
+///
+/// The wire value is a small VarInt; a value this server does not know (or a
+/// malformed body) is [`protocol::PackStatus::Unknown`], never "loaded". This
+/// is the exact parse the play loop runs, extracted so the range check is
+/// testable — reading it as a `u8` once turned a 256 into "loaded".
+fn parse_pack_status(data: &[u8]) -> protocol::PackStatus {
+    match PacketIn::new(data).var_int() {
+        Ok(v) => protocol::PackStatus::from_wire(v),
+        Err(_) => protocol::PackStatus::Unknown,
+    }
 }
 
 /// The resource pack to offer a client of `codec`'s release, and whether it is
@@ -616,10 +686,7 @@ fn play_loop(
         // moment it loads the pack the whole view is re-sent with carriers —
         // and until then (or after a decline) the plain stand-in stands.
         if handle.codec.resource_pack_status_id() == Some(pkt.id) {
-            let status = match PacketIn::new(&pkt.data).var_int() {
-                Ok(v) => protocol::PackStatus::from_wire(v),
-                Err(_) => protocol::PackStatus::Unknown,
-            };
+            let status = parse_pack_status(&pkt.data);
             if handle.set_pack_status(status) {
                 streamer.center(last_chunk, true);
             }
@@ -1865,5 +1932,38 @@ mod placement_tests {
             assert_eq!(pack.url, "https://example/plain.zip", "format {bad}");
             assert!(!compat, "format {bad} must not enable carriers");
         }
+    }
+
+    #[test]
+    fn a_resource_pack_status_is_decoded_with_a_range_check() {
+        // Review 1 (`RP1-f`) regression, at the exact parse the play loop runs:
+        // a real `resource_pack_receive` body is a VarInt. 256 encodes as
+        // `0x80 0x02`; read as a `u8` it used to become 0 — "loaded" — and
+        // hand a client that never loaded the pack the carrier states.
+        use crate::protocol::PackStatus;
+        let varint = |mut v: u32| {
+            let mut out = Vec::new();
+            loop {
+                if v < 0x80 {
+                    out.push(v as u8);
+                    return out;
+                }
+                out.push((v as u8 & 0x7f) | 0x80);
+                v >>= 7;
+            }
+        };
+        assert_eq!(parse_pack_status(&varint(0)), PackStatus::Loaded);
+        assert_eq!(parse_pack_status(&varint(1)), PackStatus::Declined);
+        assert_eq!(parse_pack_status(&varint(4)), PackStatus::Downloaded);
+        for wire in [6u32, 7, 255, 256, 300, 65536, u32::MAX] {
+            assert_eq!(
+                parse_pack_status(&varint(wire)),
+                PackStatus::Unknown,
+                "wire {wire} must not read as loaded"
+            );
+        }
+        // A malformed body is unknown, not a panic.
+        assert_eq!(parse_pack_status(&[]), PackStatus::Unknown);
+        assert_eq!(parse_pack_status(&[0x80, 0x80]), PackStatus::Unknown);
     }
 }

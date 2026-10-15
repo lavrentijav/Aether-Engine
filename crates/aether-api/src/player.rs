@@ -86,7 +86,10 @@ impl Player {
 /// Vanilla uses a name-based (MD5) UUID; a real client in offline mode does not
 /// verify it, so a stable FNV-based value with the version/variant nibbles set
 /// is sufficient and keeps this crate dependency-free.
-fn offline_uuid(name: &str) -> u128 {
+///
+/// Public so `/aether auth migrate` can find the offline uuid a name used
+/// before it became premium.
+pub fn offline_uuid(name: &str) -> u128 {
     let seed = format!("OfflinePlayer:{name}");
     // Two FNV-1a passes to fill 128 bits.
     let lo = fnv1a64(seed.as_bytes(), 0xcbf2_9ce4_8422_2325);

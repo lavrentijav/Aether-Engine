@@ -74,6 +74,9 @@ pub const PLAYER_SAVE: &[u8] = b"D";
 pub const PLAYER_INVENTORY: &[u8] = b"F";
 /// A block container's contents.
 pub const BLOCK_CONTAINER: &[u8] = b"O";
+/// Premium-name locks: which Mojang uuid a name that completed online auth
+/// belongs to. Sub-keys `AUTHn`/`AUTHu`.
+pub const AUTH_LOCK: &[u8] = b"AUTH";
 
 /// Every top-level key prefix in a world's KV store, and its owner.
 ///
@@ -148,6 +151,10 @@ pub const KEY_PREFIXES: &[KeyClaim] = &[
     KeyClaim {
         owner: "block container",
         prefix: BLOCK_CONTAINER,
+    },
+    KeyClaim {
+        owner: "premium name lock",
+        prefix: AUTH_LOCK,
     },
 ];
 

@@ -686,6 +686,12 @@ pub struct JoinParams {
     pub resource_pack: crate::config::ResourcePackConfig,
     /// The mode the player joins in.
     pub game_mode: GameMode,
+    /// Whether the player authenticated with Mojang. Carried into the 26.2+
+    /// play Login packet's `online_mode` field.
+    pub online: bool,
+    /// Skin and cape properties from the session server, if any. Empty for an
+    /// offline login.
+    pub properties: Vec<crate::auth::api::Property>,
 }
 
 /// Which game mode the server runs.
@@ -845,6 +851,14 @@ pub trait ProtocolCodec: Sync + Send {
     /// Read the client's login request and return the username it asked for.
     /// `None` means the client sent something else and the connection is over.
     fn read_login_start(&self, s: &mut Conn) -> io::Result<Option<String>>;
+
+    /// Whether this version's clientbound Encryption Request ends with the
+    /// `should_authenticate` boolean that 1.19 and 1.19.2 added (and 1.19.3
+    /// removed). The Encryption Request and Response ids are `0x01` in every
+    /// version this server speaks, so only the extra field is version-gated.
+    fn encryption_request_has_should_authenticate(&self) -> bool {
+        false
+    }
 
     /// Acknowledge the login and drive the client all the way into the play
     /// state — for modern versions that includes the whole configuration
@@ -1104,6 +1118,28 @@ mod tests {
         let spear = crate::inventory::item("minecraft:iron_spear");
         let trident = crate::inventory::item("minecraft:trident");
         assert_eq!(c.resolve_reported_item(spear, trident), spear);
+    }
+
+    #[test]
+    fn a_pack_status_out_of_range_is_unknown_not_loaded() {
+        // Review 1 (`RP1-f`): the status was read as a raw VarInt and cast with
+        // `as u8`, so 256 wrapped to 0 — "loaded" — and turned carriers on for
+        // a client that never loaded the pack. `from_wire` maps the known
+        // values and everything else to `Unknown`.
+        assert_eq!(PackStatus::from_wire(0), PackStatus::Loaded);
+        assert_eq!(PackStatus::from_wire(1), PackStatus::Declined);
+        assert_eq!(PackStatus::from_wire(2), PackStatus::Failed);
+        assert_eq!(PackStatus::from_wire(3), PackStatus::Accepted);
+        assert_eq!(PackStatus::from_wire(4), PackStatus::Downloaded);
+        assert_eq!(PackStatus::from_wire(5), PackStatus::InvalidUrl);
+        // The regression: 256 must NOT become Loaded.
+        for out_of_range in [256, 257, 512, 65536, -1, i32::MAX, i32::MIN] {
+            assert_eq!(
+                PackStatus::from_wire(out_of_range),
+                PackStatus::Unknown,
+                "wire {out_of_range} must not be Loaded"
+            );
+        }
     }
 
     #[test]

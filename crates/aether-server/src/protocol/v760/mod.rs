@@ -113,6 +113,11 @@ impl ProtocolCodec for Codec {
         Ok(Some(PacketIn::new(&p.data).string()?))
     }
 
+    fn encryption_request_has_should_authenticate(&self) -> bool {
+        // 1.19.2 only; see the v759 codec.
+        true
+    }
+
     fn complete_login(&self, s: &mut Conn, p: &JoinParams) -> io::Result<()> {
         // Login Success: UUID as 16 raw bytes, username, empty property list.
         PacketOut::new(0x02)

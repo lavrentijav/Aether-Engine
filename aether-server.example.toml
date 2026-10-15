@@ -65,6 +65,19 @@ pack_format = 0     # the pack's format; must match the release's table (e.g. 15
 dir = "packs/compat"   # where build.js writes packs (not read by the server)
 client_jar = ""     # vanilla client jar build.js reads textures from; never shipped
 
+[auth]
+# Who may claim a name. "offline" (default): anyone may join under any name.
+# "online": every client must complete Mojang's encryption handshake. "hybrid":
+# a name that belongs (or has ever belonged) to a premium account is locked to
+# it and must pass online auth; everyone else joins offline. Locked names are
+# remembered in the world store.
+mode = "offline"
+session_server = "https://sessionserver.mojang.com"
+profile_api = "https://api.mojang.com"
+lookup_timeout_ms = 3000     # how long a Mojang HTTP call may take
+on_lookup_failure = "offline" # hybrid, API unreachable: "offline" or "deny"
+login_rate_per_min = 10      # login attempts per address per minute; 0 disables
+
 [database]
 # Mirror the world history into PostgreSQL for querying (needs
 # `--features postgres`). Leave url empty to disable. The mirror is derived

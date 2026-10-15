@@ -116,7 +116,7 @@ impl PacketOut {
     /// Frame this packet for `c` and write it.
     pub fn send(&self, c: &mut Conn) -> io::Result<()> {
         let frame = frame_packet(&self.buf, c.threshold);
-        c.stream.write_all(&frame)
+        c.write_frame(&frame)
     }
 
     /// Frame this packet for an arbitrary writer at an explicit threshold.
@@ -167,6 +167,10 @@ pub struct Conn {
     /// Body length at or above which a frame is deflated; `None` while the
     /// connection is still uncompressed.
     threshold: Option<usize>,
+    /// The online-mode stream cipher, shared with every clone of this socket
+    /// (the socket's own reader, and the outbox writer). `None` until the
+    /// encryption handshake completes.
+    crypt: Option<std::sync::Arc<std::sync::Mutex<crate::auth::crypto::Crypt>>>,
 }
 
 /// Set Compression, login state. The same id in every version this server
@@ -174,12 +178,30 @@ pub struct Conn {
 pub const SET_COMPRESSION: i32 = 0x03;
 
 impl Conn {
-    /// Wrap a freshly accepted socket. Framing starts uncompressed.
+    /// Wrap a freshly accepted socket. Framing starts uncompressed and
+    /// unencrypted.
     pub fn new(stream: TcpStream) -> Self {
         Self {
             stream,
             threshold: None,
+            crypt: None,
         }
+    }
+
+    /// Switch both directions to AES/CFB8 with `secret`.
+    ///
+    /// Called once, immediately after the client's Encryption Response and
+    /// before anything else is written — every byte after this point is
+    /// encrypted, in both directions.
+    pub fn enable_encryption(&mut self, secret: &[u8; crate::auth::crypto::SECRET_LEN]) {
+        self.crypt = Some(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::auth::crypto::Crypt::new(secret),
+        )));
+    }
+
+    /// Whether the stream is encrypted.
+    pub fn encrypted(&self) -> bool {
+        self.crypt.is_some()
     }
 
     /// Announce compression to the client and switch this connection to it.
@@ -209,6 +231,9 @@ impl Conn {
         Ok(Self {
             stream: self.stream.try_clone()?,
             threshold: self.threshold,
+            // The cipher is *shared*, not copied: the outbox writer and the
+            // connection's own reader must advance the same encryption stream.
+            crypt: self.crypt.clone(),
         })
     }
 
@@ -223,9 +248,18 @@ impl Conn {
         self.stream.set_write_timeout(dur)
     }
 
-    /// Write bytes that are already framed.
+    /// Write bytes that are already framed, encrypting them when the stream
+    /// is encrypted. Framing happens first: the cipher covers the length
+    /// prefix too.
     pub fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
-        self.stream.write_all(frame)
+        match &self.crypt {
+            None => self.stream.write_all(frame),
+            Some(crypt) => {
+                let mut buf = frame.to_vec();
+                crypt.lock().unwrap().encrypt(&mut buf);
+                self.stream.write_all(&buf)
+            }
+        }
     }
 
     /// Close the socket in both directions. A thread blocked reading or
@@ -278,6 +312,15 @@ impl<'a> PacketIn<'a> {
             io::ErrorKind::InvalidData,
             "varint too long",
         ))
+    }
+
+    /// How many bytes remain unread.
+    ///
+    /// A length field must be checked against this before it is used to
+    /// allocate: a VarInt can name up to `0x7FFF_FFFF`, and `vec![0; len]`
+    /// for that is a remote out-of-memory.
+    pub fn remaining(&self) -> usize {
+        self.buf.len().saturating_sub(self.pos)
     }
 
     /// Read a length-prefixed string.
@@ -460,7 +503,35 @@ pub struct RawPacket {
 /// sent frame neither desyncs the stream nor pins the thread forever.
 pub fn read_packet(c: &mut Conn) -> io::Result<Option<RawPacket>> {
     let threshold = c.threshold;
-    read_packet_from(&mut c.stream, threshold)
+    match &c.crypt {
+        // Decrypt each read in place before it is interpreted: from the byte
+        // after the Encryption Response onward, even the length varint is
+        // encrypted.
+        Some(crypt) => {
+            let mut r = DecryptReader {
+                inner: &mut c.stream,
+                crypt,
+            };
+            read_packet_from(&mut r, threshold)
+        }
+        None => read_packet_from(&mut c.stream, threshold),
+    }
+}
+
+/// A `Read` that decrypts everything it hands back.
+struct DecryptReader<'a> {
+    inner: &'a mut TcpStream,
+    crypt: &'a std::sync::Arc<std::sync::Mutex<crate::auth::crypto::Crypt>>,
+}
+
+impl Read for DecryptReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.crypt.lock().unwrap().decrypt(&mut buf[..n]);
+        }
+        Ok(n)
+    }
 }
 
 /// Read a frame from an arbitrary reader at an explicit compression state.
@@ -718,6 +789,40 @@ mod tests {
             "second frame carries the inflated size"
         );
         assert!(len2 < 200, "1 KiB of one byte should deflate, got {len2}");
+    }
+
+    #[test]
+    fn encrypted_frames_round_trip_in_both_directions() {
+        // Both ends turn encryption on with the same secret; what the server
+        // writes, the client must read back, and vice versa. This is the one
+        // integration the crypto unit tests cannot cover: the cipher has to
+        // cover the length prefix, not just the body.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let secret = [0x5Au8; crate::auth::crypto::SECRET_LEN];
+
+        let mut server = Conn::new(server);
+        let mut client = Conn::new(client);
+        server.enable_encryption(&secret);
+        client.enable_encryption(&secret);
+        assert!(server.encrypted() && client.encrypted());
+
+        PacketOut::new(0x2A)
+            .string("hello")
+            .u16(25565)
+            .send(&mut server)
+            .unwrap();
+        let pkt = read_packet(&mut client).unwrap().unwrap();
+        assert_eq!(pkt.id, 0x2A);
+        let mut pin = PacketIn::new(&pkt.data);
+        assert_eq!(pin.string().unwrap(), "hello");
+        assert_eq!(pin.u16().unwrap(), 25565);
+
+        PacketOut::new(0x07).var_int(300).send(&mut client).unwrap();
+        let pkt = read_packet(&mut server).unwrap().unwrap();
+        assert_eq!(pkt.id, 0x07);
+        assert_eq!(PacketIn::new(&pkt.data).var_int().unwrap(), 300);
     }
 
     #[test]
