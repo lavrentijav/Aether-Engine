@@ -1,0 +1,14 @@
+{
+  "note": "Carrier assignments for the per-version compat resource packs (task RP1, Part B).",
+  "help": "A checked-in, stable record of which engine block is re-skinned on which release and on which carrier state. `gen_pack.js` expands each entry to every state of the block and writes compat/pack_gen/<release>.rs. Entries are appended, never reshuffled, so a state a client already cached keeps its meaning across regenerations. `carrierProps` names the base state of the carrier; where the carrier has a `note` property the generator bumps it per source state, so a multi-state block gets distinct carrier states. The carrier's properties must exist, with the same values, in the target release, or the codec's own block translation would not land on this exact state.",
+  "assignments": [
+    {
+      "release": "1.20.1",
+      "protocol": 763,
+      "packFormat": 15,
+      "block": "minecraft:pale_oak_planks",
+      "carrier": "minecraft:note_block",
+      "carrierProps": { "instrument": "harp", "note": 1, "powered": "false" }
+    }
+  ]
+}

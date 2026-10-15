@@ -536,6 +536,45 @@ pub enum MetaValue {
     Pose(i32),
 }
 
+/// How a client got on with a resource pack it was offered.
+///
+/// The wire value is a small VarInt in every release that reports one. It is
+/// kept as an enum rather than the raw number so the server cannot silently
+/// misread it — a VarInt of 256 cast to a `u8` is `0`, or "loaded".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackStatus {
+    /// The client downloaded and applied the pack.
+    Loaded,
+    /// The client refused it.
+    Declined,
+    /// The download failed.
+    Failed,
+    /// The client accepted the offer and is downloading.
+    Accepted,
+    /// The download finished and is being applied.
+    Downloaded,
+    /// The URL the server gave was invalid.
+    InvalidUrl,
+    /// A value this server does not know; treated as "not loaded".
+    Unknown,
+}
+
+impl PackStatus {
+    /// Read the wire VarInt. Anything outside the known range is
+    /// [`PackStatus::Unknown`], never an out-of-range `u8`.
+    pub fn from_wire(value: i32) -> Self {
+        match value {
+            0 => PackStatus::Loaded,
+            1 => PackStatus::Declined,
+            2 => PackStatus::Failed,
+            3 => PackStatus::Accepted,
+            4 => PackStatus::Downloaded,
+            5 => PackStatus::InvalidUrl,
+            _ => PackStatus::Unknown,
+        }
+    }
+}
+
 /// What a client asked for, parsed out of its version's packets.
 pub enum ClientEvent {
     /// Updated position and/or look.
@@ -621,6 +660,12 @@ pub enum ClientEvent {
     ChangeGameMode(GameMode),
     /// Middle-click on a block (creative pick).
     PickBlock { x: i32, y: i32, z: i32 },
+    /// Where the client got to with the resource pack it was offered.
+    ///
+    /// Only [`PackStatus::Loaded`] means the compat pack's carrier blocks are
+    /// safe to send; anything else — including never reporting at all — leaves
+    /// the plain stand-in in place. See `compat::pack`.
+    ResourcePackStatus(PackStatus),
     /// Anything this server does not act on (keep-alive replies, animations,
     /// ...).
     Ignored,
@@ -695,6 +740,94 @@ impl std::str::FromStr for GameMode {
         }
     }
 }
+
+/// The starter hotbar for a codec whose player has a **client-side**
+/// inventory — the pre-1.20.2 codecs (protocols ≤ 763).
+///
+/// Those codecs do not run the gameplay path: they never render arbitrary
+/// stacks and never receive a creative slot report, so the server knows
+/// nothing about what the player holds unless it put it there. This is what it
+/// puts there, as engine item *names* (not ids, which differ per release), so
+/// each codec resolves them through the compat item table to its own numbering
+/// — see [`legacy_codec_item_hooks`]. Every entry is present, by the same name,
+/// in every supported release, so a slot is never left empty.
+pub const STARTER_HOTBAR: [(&str, u8); 7] = [
+    ("minecraft:stone", 64),
+    ("minecraft:cobblestone", 64),
+    ("minecraft:dirt", 64),
+    ("minecraft:sand", 64),
+    ("minecraft:gravel", 64),
+    ("minecraft:glass", 64),
+    ("minecraft:sandstone", 64),
+];
+
+/// The compat item table for a pre-1.20.2 codec's protocol id, if this layer
+/// knows it. `None` for a protocol the layer does not cover — including the
+/// 1.20.2+ codecs, which take their table from their shared `Version`.
+pub(crate) fn legacy_item_table(protocol: i32) -> Option<&'static compat::items::ItemTable> {
+    let t = match protocol {
+        47 => &compat::items::V1_8,
+        755 => &compat::items::V1_17,
+        756 => &compat::items::V1_17_1,
+        757 => &compat::items::V1_18,
+        758 => &compat::items::V1_18_2,
+        759 => &compat::items::V1_19,
+        760 => &compat::items::V1_19_2,
+        761 => &compat::items::V1_19_3,
+        762 => &compat::items::V1_19_4,
+        763 => &compat::items::V1_20_1,
+        _ => return None,
+    };
+    Some(t)
+}
+
+/// The item half of the compat layer, bound to a pre-1.20.2 codec.
+///
+/// The old codecs predate the gameplay path, so they render no arbitrary
+/// stacks; three things on their join and placement path still need the item
+/// layer, and this one macro installs all three so no codec repeats the
+/// binding:
+///
+/// * [`ProtocolCodec::initial_hotbar`] — only for a codec that actually sends
+///   the hotbar to the client (`$hotbar`); for the 1.17–1.20.1 codecs, which
+///   do not, it stays empty. Seeding the *server* inventory for a client that
+///   was never handed those items would make `held_item` fictional and change
+///   which block the placement path thinks is held;
+/// * [`ProtocolCodec::block_for_item`] says which block a held item places —
+///   the placement packet names only the hand, so the server must already know
+///   what is in it;
+/// * [`ProtocolCodec::resolve_reported_item`] keeps the real engine item when a
+///   client echoes a stand-in back, exactly as the wired codecs do per slot;
+/// * [`ProtocolCodec::resource_pack_status_id`] names the play-state packet
+///   that reports the pack status, so the session can turn the compat pack's
+///   carriers on for a client that loaded it.
+macro_rules! legacy_codec_item_hooks {
+    ($proto:expr, $status:expr, $hotbar:expr) => {
+        fn initial_hotbar(&self) -> Vec<(String, u8)> {
+            if !$hotbar {
+                return Vec::new();
+            }
+            super::STARTER_HOTBAR
+                .iter()
+                .map(|(name, count)| ((*name).to_owned(), *count))
+                .collect()
+        }
+
+        fn block_for_item(&self, item: &str) -> Option<BlockStateId> {
+            super::modern::block_for_item(item)
+        }
+
+        fn resolve_reported_item(&self, server: ItemTypeId, reported: ItemTypeId) -> ItemTypeId {
+            super::legacy_item_table($proto)
+                .map_or(reported, |t| t.resolve_reported(server, reported))
+        }
+
+        fn resource_pack_status_id(&self) -> Option<i32> {
+            Some($status)
+        }
+    };
+}
+pub(crate) use legacy_codec_item_hooks;
 
 /// One wire dialect: how neutral state becomes packets and back.
 pub trait ProtocolCodec: Sync + Send {
@@ -795,6 +928,19 @@ pub trait ProtocolCodec: Sync + Send {
     /// report, which is right for a version whose ids the engine itself uses.
     fn resolve_reported_item(&self, _server: ItemTypeId, reported: ItemTypeId) -> ItemTypeId {
         reported
+    }
+
+    /// The packet id of the client's resource-pack status reply **in the play
+    /// state**, when this codec reads it there.
+    ///
+    /// The reply says whether the client loaded the pack a `[compat.pack]`
+    /// offered; the server shows carrier block states only to a client whose
+    /// status is `successfully_loaded` (see `compat::pack`). The default is
+    /// `None`: the server never learns the status, so that client keeps the
+    /// plain stand-in. This is the safe default — 1.20.2 and later answer in
+    /// the configuration phase, which this server does not decode.
+    fn resource_pack_status_id(&self) -> Option<i32> {
+        None
     }
 }
 
@@ -914,6 +1060,55 @@ mod tests {
     }
 
     #[test]
+    fn the_pre_1_20_2_codecs_are_wired_into_the_item_layer() {
+        // 1.8.9 and 1.17-1.20.1 keep the client-trusting subset, so they render
+        // no arbitrary stacks; but their join hotbar, their block placement and
+        // the stand-in round trip all go through the compat item tables now.
+        for proto in [47, 755, 756, 757, 758, 759, 760, 761, 762, 763] {
+            let c = codec_for(proto).unwrap_or_else(|| panic!("no codec for {proto}"));
+            assert!(!c.full_gameplay(), "{proto} must stay on the old subset");
+            let table =
+                legacy_item_table(proto).unwrap_or_else(|| panic!("no compat table for {proto}"));
+
+            // The starter hotbar is seeded only for a codec that sends it to
+            // the client — 1.8.9 does, 1.17–1.20.1 do not (they rely on the
+            // creative menu), so theirs stays empty and the placement path
+            // keeps its stone fallback.
+            let hotbar = c.initial_hotbar();
+            if proto == 47 {
+                assert_eq!(hotbar.len(), STARTER_HOTBAR.len(), "{proto}");
+                for (name, count) in &hotbar {
+                    assert!(*count > 0, "{proto}: {name} with no count");
+                    assert!(
+                        table.wire(crate::inventory::item(name)).is_some(),
+                        "{proto}: {name} has no stand-in"
+                    );
+                }
+            } else {
+                assert!(hotbar.is_empty(), "{proto} must not seed a hotbar");
+            }
+
+            // The held block item decides what a placement places.
+            assert_eq!(
+                c.block_for_item("minecraft:stone"),
+                Some(aether_api::block_ids::STONE),
+                "{proto}"
+            );
+            assert_eq!(c.block_for_item("minecraft:diamond_sword"), None, "{proto}");
+
+            // A version that shows a spear as a trident resolves the echo back
+            // to the real spear, exactly as the wired codecs do per slot.
+            let spear = crate::inventory::item("minecraft:iron_spear");
+            let trident = crate::inventory::item("minecraft:trident");
+            if let Some(w) = table.wire(spear) {
+                if w.disguised && table.engine(w.id) == Some(trident) {
+                    assert_eq!(c.resolve_reported_item(spear, trident), spear, "{proto}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn an_old_codec_places_blocks_and_keeps_a_spear_through_a_trident() {
         let c = codec_for(767).unwrap();
         assert_eq!(
@@ -923,6 +1118,60 @@ mod tests {
         let spear = crate::inventory::item("minecraft:iron_spear");
         let trident = crate::inventory::item("minecraft:trident");
         assert_eq!(c.resolve_reported_item(spear, trident), spear);
+    }
+
+    #[test]
+    fn a_pack_status_out_of_range_is_unknown_not_loaded() {
+        // Review 1 (`RP1-f`): the status was read as a raw VarInt and cast with
+        // `as u8`, so 256 wrapped to 0 — "loaded" — and turned carriers on for
+        // a client that never loaded the pack. `from_wire` maps the known
+        // values and everything else to `Unknown`.
+        assert_eq!(PackStatus::from_wire(0), PackStatus::Loaded);
+        assert_eq!(PackStatus::from_wire(1), PackStatus::Declined);
+        assert_eq!(PackStatus::from_wire(2), PackStatus::Failed);
+        assert_eq!(PackStatus::from_wire(3), PackStatus::Accepted);
+        assert_eq!(PackStatus::from_wire(4), PackStatus::Downloaded);
+        assert_eq!(PackStatus::from_wire(5), PackStatus::InvalidUrl);
+        // The regression: 256 must NOT become Loaded.
+        for out_of_range in [256, 257, 512, 65536, -1, i32::MAX, i32::MIN] {
+            assert_eq!(
+                PackStatus::from_wire(out_of_range),
+                PackStatus::Unknown,
+                "wire {out_of_range} must not be Loaded"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pre_1_20_2_codecs_report_their_play_state_pack_status_id() {
+        // Every old codec decodes the pack status; 1.20.2+ answer in the
+        // configuration phase and report `None`, so their clients keep the
+        // plain stand-in rather than waiting on a status this server never
+        // reads.
+        for proto in [47, 755, 756, 757, 758, 759, 760, 761, 762, 763] {
+            assert!(
+                codec_for(proto)
+                    .unwrap()
+                    .resource_pack_status_id()
+                    .is_some(),
+                "{proto} must report a status id"
+            );
+        }
+        for proto in [764, 767, 773, 774] {
+            assert!(
+                codec_for(proto)
+                    .unwrap()
+                    .resource_pack_status_id()
+                    .is_none(),
+                "{proto} answers in config, not play"
+            );
+        }
+        // The ids are the release's own `resource_pack_receive`.
+        assert_eq!(codec_for(47).unwrap().resource_pack_status_id(), Some(0x19));
+        assert_eq!(
+            codec_for(763).unwrap().resource_pack_status_id(),
+            Some(0x24)
+        );
     }
 
     #[test]

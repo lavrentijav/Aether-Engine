@@ -25,9 +25,12 @@ pub mod registry;
 
 use std::io;
 
-use aether_world::BlockStateId;
+use aether_world::{BlockStateId, ItemTypeId};
 
-use super::{json_escape, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
+use super::{
+    json_escape, legacy_codec_item_hooks, BlockSource, ClientEvent, JoinParams, ProtocolCodec,
+    ServerEvent,
+};
 use crate::players::PosLook;
 use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 
@@ -89,6 +92,8 @@ impl ProtocolCodec for Codec {
     fn protocol_id(&self) -> i32 {
         PROTOCOL
     }
+
+    legacy_codec_item_hooks!(PROTOCOL, 0x21, false);
 
     fn supports(&self, protocol: i32) -> bool {
         protocol == PROTOCOL

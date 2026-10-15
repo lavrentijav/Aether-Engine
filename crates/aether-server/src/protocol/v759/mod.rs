@@ -21,9 +21,12 @@ pub mod registry;
 
 use std::io;
 
-use aether_world::BlockStateId;
+use aether_world::{BlockStateId, ItemTypeId};
 
-use super::{json_escape, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
+use super::{
+    json_escape, legacy_codec_item_hooks, BlockSource, ClientEvent, JoinParams, ProtocolCodec,
+    ServerEvent,
+};
 use crate::players::PosLook;
 use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 
@@ -94,6 +97,8 @@ impl ProtocolCodec for Codec {
     fn protocol_id(&self) -> i32 {
         PROTOCOL
     }
+
+    legacy_codec_item_hooks!(PROTOCOL, 0x23, false);
 
     fn read_login_start(&self, s: &mut Conn) -> io::Result<Option<String>> {
         // Login Start: the username comes first. Whatever follows it in this

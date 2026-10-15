@@ -16,7 +16,7 @@ use aether_world::BlockStateId;
 
 use crate::config::Config;
 use crate::players::{PosLook, SharedRegistry};
-use crate::proto::{read_packet, Conn};
+use crate::proto::{read_packet, Conn, PacketIn};
 use crate::protocol::{self, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::stored::{self, Stored};
 
@@ -305,6 +305,11 @@ fn login_and_play(
         .map(|s| s.mode)
         .unwrap_or(cfg.server.game_mode);
 
+    // A release with a generated compat pack gets *that* pack; everyone else
+    // keeps whatever `[resource_pack]` offers. `compat_offered` says which this
+    // client got, so the status gate can tell the compat pack apart from the
+    // operator's plain one.
+    let (pack, compat_offered) = select_resource_pack(cfg, codec);
     let params = JoinParams {
         game_mode,
         entity_id: eid,
@@ -315,7 +320,7 @@ fn login_and_play(
         pitch: player.pitch,
         max_players: cfg.server.max_players,
         view_radius: cfg.server.clamped_view_radius(),
-        resource_pack: cfg.resource_pack.clone(),
+        resource_pack: pack,
         online: authenticated,
         properties: properties.clone(),
     };
@@ -424,6 +429,11 @@ fn login_and_play(
         &*s,
         pos,
     )?;
+    // Remember which pack this client was offered: only the compat one may
+    // turn carrier states on (see `PlayerHandle::pack_table`).
+    if compat_offered {
+        handle.set_compat_pack_offered();
+    }
     // Seed the visibility bookkeeping with the masked first burst: what the
     // client holds, and the reachable set those masks came from, so the reveal
     // planner never re-sends a column it already sent and never forgets one it
@@ -523,6 +533,45 @@ fn login_and_play(
     );
     crate::plugins::after_player_leave(&handle);
     result
+}
+
+/// Decode a client's resource-pack status packet body.
+///
+/// The wire value is a small VarInt; a value this server does not know (or a
+/// malformed body) is [`protocol::PackStatus::Unknown`], never "loaded". This
+/// is the exact parse the play loop runs, extracted so the range check is
+/// testable — reading it as a `u8` once turned a 256 into "loaded".
+fn parse_pack_status(data: &[u8]) -> protocol::PackStatus {
+    match PacketIn::new(data).var_int() {
+        Ok(v) => protocol::PackStatus::from_wire(v),
+        Err(_) => protocol::PackStatus::Unknown,
+    }
+}
+
+/// The resource pack to offer a client of `codec`'s release, and whether it is
+/// the compat pack.
+///
+/// `[compat.pack]` wins for a release the compat layer generated a pack for —
+/// its carrier blocks need exactly that pack — and only then. Every other
+/// release, and every server with the compat packs off, keeps whatever
+/// `[resource_pack]` offers and gets `false`. The caller remembers which was
+/// offered, so only a client that loaded the *compat* pack can be shown
+/// carriers; the operator's plain pack must not enable them.
+fn select_resource_pack(
+    cfg: &Config,
+    codec: &dyn ProtocolCodec,
+) -> (crate::config::ResourcePackConfig, bool) {
+    if cfg.compat.pack.active() {
+        if let Some(table) = crate::protocol::compat::pack::table_for(codec.protocol_id()) {
+            // The pack the operator configured must declare this release's own
+            // `pack_format`; a mismatch is a pack for another release and would
+            // not be applied, so fall through to `[resource_pack]`.
+            if cfg.compat.pack.offers_format(table.pack_format) {
+                return (cfg.compat.pack.offer(), true);
+            }
+        }
+    }
+    (cfg.resource_pack.clone(), false)
 }
 
 /// Whether handling `event` can move, make or use up items. Movement and the
@@ -632,6 +681,17 @@ fn play_loop(
             }
         };
         last_heard = Instant::now();
+        // The client's resource-pack status, if its codec reports one. Only a
+        // `successfully_loaded` client may be shown carrier states, so the
+        // moment it loads the pack the whole view is re-sent with carriers —
+        // and until then (or after a decline) the plain stand-in stands.
+        if handle.codec.resource_pack_status_id() == Some(pkt.id) {
+            let status = parse_pack_status(&pkt.data);
+            if handle.set_pack_status(status) {
+                streamer.center(last_chunk, true);
+            }
+            continue;
+        }
         let full = handle.full();
         let dead = full && handle.game().dead;
         let event = handle.codec.decode(&pkt, handle.pos());
@@ -989,6 +1049,10 @@ fn play_loop(
                     handle.emit(&ServerEvent::Chat("You are not an operator.".into()), world);
                 }
             }
+            // Handled in the read loop, before this dispatch: it decides
+            // whether the compat pack's carriers may be shown, and re-sends
+            // the view when they may.
+            ClientEvent::ResourcePackStatus(_) => {}
             ClientEvent::Ignored => {}
         }
     }
@@ -1809,5 +1873,97 @@ mod placement_tests {
         let p = at(0.5, 64.0, 0.5);
         assert!(!stands_in_block(p, 5, 64, 5));
         assert!(!stands_in_block(p, 0, 60, 0), "well below them");
+    }
+
+    #[test]
+    fn the_plain_resource_pack_never_counts_as_the_compat_pack() {
+        // Review 1 blocker: with `[compat.pack]` off but `[resource_pack]` set,
+        // a 1.20.1 client is offered the operator's pack and gets `false`, so
+        // its `successfully_loaded` reply cannot turn carriers on.
+        let cfg: Config =
+            toml::from_str("[resource_pack]\nurl = \"https://example/plain.zip\"\n").unwrap();
+        let codec = crate::protocol::codec_for(763).unwrap();
+        let (pack, compat) = select_resource_pack(&cfg, codec);
+        assert_eq!(pack.url, "https://example/plain.zip");
+        assert!(!compat, "the plain pack is not the compat pack");
+
+        // And a release with no generated table gets the plain pack too, even
+        // with the compat packs on.
+        let cfg: Config = toml::from_str(
+            "[resource_pack]\nurl = \"https://example/plain.zip\"\n\
+             [compat.pack]\nenabled = true\nurl = \"https://example/compat.zip\"\n\
+             pack_format = 15\n",
+        )
+        .unwrap();
+        let (pack, compat) = select_resource_pack(&cfg, crate::protocol::codec_for(47).unwrap());
+        assert_eq!(
+            pack.url, "https://example/plain.zip",
+            "1.8 has no compat pack"
+        );
+        assert!(!compat);
+    }
+
+    #[test]
+    fn the_compat_pack_is_offered_only_when_its_pack_format_matches() {
+        let codec = crate::protocol::codec_for(763).unwrap();
+        let table = crate::protocol::compat::pack::table_for(763).unwrap();
+
+        // The right format: offered.
+        let cfg: Config = toml::from_str(&format!(
+            "[compat.pack]\nenabled = true\nurl = \"https://example/compat.zip\"\n\
+             hash = \"abc\"\npack_format = {}\n",
+            table.pack_format
+        ))
+        .unwrap();
+        let (pack, compat) = select_resource_pack(&cfg, codec);
+        assert_eq!(pack.url, "https://example/compat.zip");
+        assert!(compat, "the compat pack is the offered one");
+
+        // The wrong format (or none): not offered — the pack is for another
+        // release, so the plain `[resource_pack]` applies instead.
+        for bad in [0u32, table.pack_format + 1] {
+            let cfg: Config = toml::from_str(&format!(
+                "[resource_pack]\nurl = \"https://example/plain.zip\"\n\
+                 [compat.pack]\nenabled = true\nurl = \"https://example/compat.zip\"\n\
+                 pack_format = {bad}\n",
+            ))
+            .unwrap();
+            let (pack, compat) = select_resource_pack(&cfg, codec);
+            assert_eq!(pack.url, "https://example/plain.zip", "format {bad}");
+            assert!(!compat, "format {bad} must not enable carriers");
+        }
+    }
+
+    #[test]
+    fn a_resource_pack_status_is_decoded_with_a_range_check() {
+        // Review 1 (`RP1-f`) regression, at the exact parse the play loop runs:
+        // a real `resource_pack_receive` body is a VarInt. 256 encodes as
+        // `0x80 0x02`; read as a `u8` it used to become 0 — "loaded" — and
+        // hand a client that never loaded the pack the carrier states.
+        use crate::protocol::PackStatus;
+        let varint = |mut v: u32| {
+            let mut out = Vec::new();
+            loop {
+                if v < 0x80 {
+                    out.push(v as u8);
+                    return out;
+                }
+                out.push((v as u8 & 0x7f) | 0x80);
+                v >>= 7;
+            }
+        };
+        assert_eq!(parse_pack_status(&varint(0)), PackStatus::Loaded);
+        assert_eq!(parse_pack_status(&varint(1)), PackStatus::Declined);
+        assert_eq!(parse_pack_status(&varint(4)), PackStatus::Downloaded);
+        for wire in [6u32, 7, 255, 256, 300, 65536, u32::MAX] {
+            assert_eq!(
+                parse_pack_status(&varint(wire)),
+                PackStatus::Unknown,
+                "wire {wire} must not read as loaded"
+            );
+        }
+        // A malformed body is unknown, not a panic.
+        assert_eq!(parse_pack_status(&[]), PackStatus::Unknown);
+        assert_eq!(parse_pack_status(&[0x80, 0x80]), PackStatus::Unknown);
     }
 }

@@ -151,6 +151,74 @@ impl ResourcePackConfig {
     }
 }
 
+/// `[compat.pack]` settings: the per-version resource packs that re-skin only
+/// the block stand-ins. See `docs/design/compat-resource-pack.md`.
+///
+/// The server still only *points* at a pack; a generated pack is produced at
+/// build/deploy time by `tools/pack/build.js` and served by the operator (or by
+/// whatever hosts `url`). A client only ever sees a carrier block state when
+/// its pack status is `successfully_loaded`, so this being off — or a client
+/// declining it — leaves the plain compat stand-in in place.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CompatPackConfig {
+    /// Offer the generated per-version compat pack. Off by default.
+    pub enabled: bool,
+    /// Download URL the client fetches the pack from. Empty disables the
+    /// offer even when `enabled` is set.
+    pub url: String,
+    /// SHA-1 of the pack file, lowercase hex. Clients cache on this.
+    pub hash: String,
+    /// Whether the client must accept the pack to keep playing. `false` by
+    /// default: a declined pack falls back to the plain stand-in rather than
+    /// disconnecting.
+    pub required: bool,
+    /// The `pack_format` the configured pack declares. Enforced against the
+    /// generated carrier table's own format: a mismatch means the pack is for a
+    /// different release, so the compat pack is not offered to that client
+    /// (the plain `[resource_pack]`, if any, applies instead). `0` never
+    /// matches a real table, so leaving it unset keeps the pack off.
+    pub pack_format: u32,
+    /// Directory the generated packs live in (used by `tools/pack/build.js`,
+    /// not read by the server).
+    pub dir: String,
+    /// Vanilla client jar the pack textures are read from at build time. Never
+    /// shipped or read by the server at run time.
+    pub client_jar: String,
+}
+
+impl CompatPackConfig {
+    /// Whether a compat pack should be offered at all.
+    pub fn active(&self) -> bool {
+        self.enabled && !self.url.is_empty()
+    }
+
+    /// Whether the configured pack may be offered to a release whose generated
+    /// carrier table declares `format`. The contract the resource pack rests
+    /// on: the pack's `pack_format` must be the release's.
+    pub fn offers_format(&self, format: u32) -> bool {
+        self.pack_format != 0 && self.pack_format == format
+    }
+
+    /// The resource-pack offer to send, in the shape every codec already
+    /// knows how to encode.
+    pub fn offer(&self) -> ResourcePackConfig {
+        ResourcePackConfig {
+            url: self.url.clone(),
+            hash: self.hash.clone(),
+            required: self.required,
+        }
+    }
+}
+
+/// `[compat]` settings: the version-compatibility layer's optional extras.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CompatConfig {
+    /// The per-version stand-in resource packs.
+    pub pack: CompatPackConfig,
+}
+
 /// `[plugins]` settings: where WebAssembly plugins live and their limits.
 ///
 /// The table is both the global settings and the per-plugin overrides:
@@ -360,6 +428,8 @@ pub struct Config {
     pub server: ServerConfig,
     /// Optional resource pack offered on join.
     pub resource_pack: ResourcePackConfig,
+    /// The compat layer's optional extras: the per-version stand-in packs.
+    pub compat: CompatConfig,
     /// Optional anti-xray / visibility culling.
     pub visibility: VisibilityConfig,
     /// Authentication policy.
@@ -617,6 +687,18 @@ url = ""
 hash = ""
 required = false
 
+[compat.pack]
+# The per-version compat packs that re-skin only the block stand-ins. Generated
+# by tools/pack/build.js; see docs/design/compat-resource-pack.md. Only a client
+# whose pack status is successfully_loaded sees carrier states.
+enabled = false
+url = ""
+hash = ""
+required = false
+pack_format = 0
+dir = "packs/compat"
+client_jar = ""
+
 [auth]
 # Who may claim a name. "offline" (default): anyone may join under any name.
 # "online": every client must complete Mojang's encryption handshake. "hybrid":
@@ -805,6 +887,37 @@ mod tests {
         assert!(cfg.visibility.enabled);
         assert_eq!(cfg.visibility.hidden_fill, HiddenFill::Air);
         assert_eq!(cfg.visibility.margin_blocks, 2);
+    }
+
+    #[test]
+    fn the_compat_pack_is_off_by_default_and_parses_its_settings() {
+        let cfg = Config::default();
+        assert!(!cfg.compat.pack.active(), "the compat packs are opt-in");
+        assert!(
+            !cfg.compat.pack.required,
+            "a declined pack falls back to the stand-in"
+        );
+
+        let cfg: Config = toml::from_str(
+            "[compat.pack]\nenabled = true\nurl = \"https://example/pack.zip\"\n\
+             hash = \"abc123\"\npack_format = 15\n",
+        )
+        .unwrap();
+        assert!(cfg.compat.pack.active());
+        let offer = cfg.compat.pack.offer();
+        assert_eq!(offer.url, "https://example/pack.zip");
+        assert_eq!(offer.hash, "abc123");
+        assert!(!offer.required, "required stays false unless asked for");
+        // The format contract: the pack is offered only for a matching format,
+        // and an unset format (0) matches nothing.
+        assert!(cfg.compat.pack.offers_format(15));
+        assert!(!cfg.compat.pack.offers_format(0));
+        assert!(!cfg.compat.pack.offers_format(46));
+        assert!(!CompatPackConfig::default().offers_format(0));
+
+        // `enabled` alone, with no URL, offers nothing.
+        let cfg: Config = toml::from_str("[compat.pack]\nenabled = true\n").unwrap();
+        assert!(!cfg.compat.pack.active());
     }
 
     #[test]
