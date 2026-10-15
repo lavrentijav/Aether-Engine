@@ -100,9 +100,14 @@ permission-checked like any command — a core name is refused, never shadowed.
 ## Placeholders
 
 `%player%` expands to the clicking player's name wherever a menu string is used
-(titles, item names/lore, messages, commands). Plugin-provided placeholders are
-an optional integration not yet wired; an unknown placeholder is left verbatim
-rather than blanked.
+(titles, item names/lore, messages, commands). An unknown placeholder is left
+verbatim rather than blanked.
+
+Plugin-provided placeholders are **not** resolved by this plugin: a shared
+`placeholders` service is being added to the SDK plugin (queue SB1), and that
+service is the one place they should resolve. Until it lands, only `%player%`
+expands; the expansion hook is `plugins/menus` `Menus::expand`, which will call
+the service for each `%name%` left in the text.
 
 ## Building on this
 

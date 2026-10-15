@@ -343,11 +343,25 @@ impl Menus {
         }
     }
 
-    /// Expand the placeholders a menu may use. `%player%` is always known;
-    /// anything else is left verbatim (a plugin-provided placeholder is an
-    /// optional integration, and an unknown one must not silently vanish).
+    /// Expand the placeholders a menu may use.
+    ///
+    /// `%player%` is built in and always expanded here. Anything else is left
+    /// verbatim: an unknown placeholder must not silently vanish.
+    ///
+    /// **Hook for the shared placeholders service (SB1).** SB1 moves a
+    /// `placeholders` service into the SDK plugin; that service is the single
+    /// place plugin-provided placeholders should resolve, and this method is
+    /// where it plugs in — after the built-in substitutions, for each `%name%`
+    /// the text still contains. It is deliberately **not** implemented yet, to
+    /// avoid a second, divergent placeholder engine; when SB1 lands, resolve
+    /// through `self.services()` and leave a name it does not know verbatim.
     fn expand(&self, text: &str, player: &Player) -> String {
-        text.replace("%player%", &player.name)
+        // --- built-in placeholders -----------------------------------------
+        let text = text.replace("%player%", &player.name);
+        // --- hook: shared `placeholders` service (SB1) ---------------------
+        // TODO(SB1): `placeholder(services, text, player)` when the service
+        // exists. Do not grow a local engine here.
+        text
     }
 
     fn log(&self, message: &str) {
