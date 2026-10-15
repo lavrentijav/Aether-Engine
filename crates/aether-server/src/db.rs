@@ -37,7 +37,9 @@
 
 #[cfg(feature = "postgres")]
 use aether_world::journal::EventSink;
-use aether_world::journal::{Event, EventBody, Place};
+use aether_world::journal::{
+    Event, EventBody, Place, DESTROY_REASONS, EVENT_KINDS, EVENT_KIND_UNKNOWN,
+};
 use aether_world::registry::items::display_name;
 
 /// The schema. Applied on connect, so a fresh database needs no setup step.
@@ -57,7 +59,7 @@ CREATE TABLE IF NOT EXISTS aether_events (
     at_ms       BIGINT NOT NULL,
     at          TIMESTAMPTZ GENERATED ALWAYS AS (to_timestamp(at_ms / 1000.0)) STORED,
     actor       UUID NOT NULL,
-    kind        TEXT NOT NULL,
+    kind        SMALLINT NOT NULL,
     x           INTEGER,
     y           INTEGER,
     z           INTEGER,
@@ -80,6 +82,16 @@ ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS derived_from BIGINT[];
 ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS reason       SMALLINT;
 CREATE INDEX IF NOT EXISTS aether_events_cause     ON aether_events (cause) WHERE cause IS NOT NULL;
 CREATE INDEX IF NOT EXISTS aether_events_derived   ON aether_events USING GIN (derived_from) WHERE derived_from IS NOT NULL;
+CREATE TABLE IF NOT EXISTS aether_event_kinds (
+    code   SMALLINT PRIMARY KEY,
+    name   TEXT NOT NULL,
+    custom BOOLEAN NOT NULL DEFAULT false
+);
+CREATE TABLE IF NOT EXISTS aether_destroy_reasons (
+    code   SMALLINT PRIMARY KEY,
+    name   TEXT NOT NULL,
+    custom BOOLEAN NOT NULL DEFAULT false
+);
 ";
 
 /// Columns and their types, in the order [`row_values`] produces them.
@@ -95,7 +107,7 @@ const COLUMNS: [(&str, &str); 19] = [
     ("seq", "bigint"),
     ("at_ms", "bigint"),
     ("actor", "uuid"),
-    ("kind", "text"),
+    ("kind", "smallint"),
     ("x", "integer"),
     ("y", "integer"),
     ("z", "integer"),
@@ -147,10 +159,104 @@ fn migration_for_column(name: &str, udt: &str) -> Option<(String, bool)> {
     if udt == udt_name(want) {
         return None;
     }
+    if name == "kind" {
+        // The old `kind` was the body's *name* text; its code is recoverable,
+        // so map it rather than `USING NULL`. `USING NULL` here would erase
+        // every event's type, which is the one thing the mirror is for.
+        return Some((kind_migration_statement(), false));
+    }
     Some((
         format!("ALTER TABLE aether_events ALTER COLUMN {name} TYPE {want} USING NULL"),
         name == "item_uid",
     ))
+}
+
+/// The `ALTER TABLE` that turns the old text `kind` column into the smallint
+/// code, one `CASE` arm per core kind. Rows whose text matches no core kind (a
+/// plugin's, from before this table) land on the reserved
+/// [`EVENT_KIND_UNKNOWN`] code rather than failing the column's `NOT NULL`.
+pub fn kind_migration_statement() -> String {
+    let mut sql =
+        String::from("ALTER TABLE aether_events ALTER COLUMN kind TYPE smallint USING (CASE kind");
+    for (code, name) in EVENT_KINDS {
+        sql.push_str(&format!(" WHEN '{name}' THEN {code}"));
+    }
+    sql.push_str(&format!(" ELSE {} END)", EVENT_KIND_UNKNOWN.0));
+    sql
+}
+
+/// The rows of the `aether_event_kinds` table: every core tag from
+/// [`EVENT_KINDS`], plus the reserved `unknown` code `0` the kind migration
+/// falls back to. The table and the wire tags share one source.
+fn event_kind_rows() -> Vec<(u8, &'static str)> {
+    let mut rows = vec![EVENT_KIND_UNKNOWN];
+    rows.extend(EVENT_KINDS.iter().copied());
+    rows
+}
+
+/// The rows of the `aether_destroy_reasons` table, from [`DESTROY_REASONS`].
+fn destroy_reason_rows() -> Vec<(u8, &'static str)> {
+    DESTROY_REASONS
+        .iter()
+        .map(|r| (r.code(), r.name()))
+        .collect()
+}
+
+/// Build a code table's upsert: one `INSERT … VALUES … ON CONFLICT (code) DO
+/// UPDATE` from `rows`, so reconnecting an existing mirror refreshes the names
+/// and adds a code a newer release introduced without touching custom rows.
+fn code_table_upsert(table: &str, rows: &[(u8, &'static str)]) -> String {
+    let values: Vec<String> = rows
+        .iter()
+        .map(|(code, name)| format!("({code}, '{name}', false)"))
+        .collect();
+    format!(
+        "INSERT INTO {table} (code, name, custom) VALUES {} \
+         ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, custom = EXCLUDED.custom",
+        values.join(", ")
+    )
+}
+
+/// The upsert that seeds [`event_kind_rows`] into `aether_event_kinds`.
+pub fn event_kind_upsert() -> String {
+    code_table_upsert("aether_event_kinds", &event_kind_rows())
+}
+
+/// The upsert that seeds [`destroy_reason_rows`] into `aether_destroy_reasons`.
+pub fn destroy_reason_upsert() -> String {
+    code_table_upsert("aether_destroy_reasons", &destroy_reason_rows())
+}
+
+/// The `aether_events_named` view: the raw mirror joined to both code tables
+/// for `kind_name`/`reason_name` and with the item name resolved from the
+/// uid's mint row, so a human `SELECT * FROM aether_events_named` reads like
+/// the old text columns.
+///
+/// Built from [`COLUMNS`] so it cannot drift from the table. The item name is
+/// a scalar subquery rather than a join: a uid has exactly one mint row with a
+/// name, and a join would multiply a row were that ever untrue.
+pub fn named_view_sql() -> String {
+    let mut cols = vec!["e.at".to_string()];
+    for (name, _) in COLUMNS.iter() {
+        if *name == "item_name" {
+            cols.push(
+                "COALESCE(e.item_name, (SELECT m.item_name FROM aether_events m \
+                 WHERE m.item_uid = e.item_uid AND m.item_name IS NOT NULL LIMIT 1)) AS item_name"
+                    .to_string(),
+            );
+        } else {
+            cols.push(format!("e.{name}"));
+        }
+    }
+    cols.push("k.name AS kind_name".to_string());
+    cols.push("r.name AS reason_name".to_string());
+    format!(
+        "CREATE OR REPLACE VIEW aether_events_named AS SELECT {} \
+         FROM aether_events e \
+         LEFT JOIN aether_event_kinds k ON k.code = e.kind \
+         LEFT JOIN aether_destroy_reasons r ON r.code = e.reason",
+        cols.join(", ")
+    )
 }
 
 /// The `ALTER TABLE` statements that bring an existing `aether_events` onto
@@ -237,6 +343,9 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
     v[0] = Some(e.seq.to_string());
     v[1] = Some(e.at_ms.to_string());
     v[2] = Some(uuid_text(e.actor.0));
+    // `kind` is the body's smallint tag. The `aether_event_kinds` table turns
+    // it back into a name for a reader; the tag itself is the storage.
+    v[3] = Some(e.body.tag().to_string());
     if let Some((x, y, z)) = e.position() {
         v[4] = Some(x.to_string());
         v[5] = Some(y.to_string());
@@ -247,7 +356,6 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
     }
     match &e.body {
         EventBody::BlockSet { from, to, .. } => {
-            v[3] = Some("block_set".into());
             v[9] = Some(from.0.to_string());
             v[10] = Some(to.0.to_string());
         }
@@ -257,7 +365,6 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
             count,
             to,
         } => {
-            v[3] = Some("item_mint".into());
             v[11] = Some(uid_text(uid.0));
             v[12] = Some(display_name(*item));
             v[13] = Some(count.to_string());
@@ -269,20 +376,17 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
             to,
             count,
         } => {
-            v[3] = Some("item_move".into());
             v[11] = Some(uid_text(uid.0));
             v[13] = Some(count.to_string());
             v[14] = Some(place_text(from));
             v[15] = Some(place_text(to));
         }
         EventBody::ItemDestroy { uid, from, reason } => {
-            v[3] = Some("item_destroy".into());
             v[11] = Some(uid_text(uid.0));
             v[14] = Some(place_text(from));
-            v[18] = Some((*reason as u8).to_string());
+            v[18] = Some(reason.code().to_string());
         }
         EventBody::ItemMerge { into, from, count } => {
-            v[3] = Some("item_merge".into());
             v[11] = Some(uid_text(into.0));
             v[13] = Some(count.to_string());
             v[17] = Some(format!("{{{}}}", uid_text(from.0)));
@@ -294,7 +398,6 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
             to,
             from,
         } => {
-            v[3] = Some("item_derive".into());
             v[11] = Some(uid_text(uid.0));
             v[12] = Some(display_name(*item));
             v[13] = Some(count.to_string());
@@ -302,6 +405,10 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
             let list: Vec<String> = from.iter().map(|u| uid_text(u.0)).collect();
             v[17] = Some(format!("{{{}}}", list.join(",")));
         }
+        // A plugin event: its kind is the tag, set above, and the core has no
+        // columns for a payload it does not understand. The bytes stay in the
+        // journal; the mirror records only that the tag happened.
+        EventBody::Custom { .. } => {}
     }
     v[16] = e.cause.map(|c| c.to_string());
     v
@@ -372,9 +479,27 @@ mod live {
             let mut c = Client::connect(&self.url, NoTls).map_err(|e| e.to_string())?;
             c.batch_execute(SCHEMA).map_err(|e| e.to_string())?;
             migrate(&mut c)?;
+            // The code tables are seeded from the Rust consts and the view is
+            // (re)built *after* the migration: on an old text-`kind` mirror
+            // the view's `k.code = e.kind` join only type-checks once `kind`
+            // is a smallint.
+            seed_code_tables(&mut c)?;
+            c.batch_execute(&named_view_sql())
+                .map_err(|e| e.to_string())?;
             self.client = Some(c);
             Ok(())
         }
+    }
+
+    /// Upsert the core code tables from the Rust consts. Doing it on every
+    /// connect is what adds a code a newer release introduced, while leaving
+    /// any `custom = true` rows a plugin owns untouched.
+    fn seed_code_tables(c: &mut Client) -> Result<(), String> {
+        c.batch_execute(&event_kind_upsert())
+            .map_err(|e| e.to_string())?;
+        c.batch_execute(&destroy_reason_upsert())
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Bring an existing table onto [`COLUMNS`], creating nothing.
@@ -565,12 +690,12 @@ mod live_tests {
                 &[&BASE],
             )
             .unwrap();
-        assert_eq!(row.get::<_, String>(0), "block_set");
+        assert_eq!(row.get::<_, i16>(0), 1, "block_set is tag 1");
         assert_eq!(row.get::<_, i32>(1), -3, "cx from an arithmetic shift");
         assert_eq!(row.get::<_, i32>(2), 1, "cz");
         assert_eq!(row.get::<_, i64>(3), 1);
 
-        let kinds: Vec<String> = client
+        let kinds: Vec<i16> = client
             .query(
                 "SELECT kind FROM aether_events WHERE seq >= $1 ORDER BY seq",
                 &[&BASE],
@@ -579,7 +704,7 @@ mod live_tests {
             .iter()
             .map(|r| r.get(0))
             .collect();
-        assert_eq!(kinds, ["block_set", "item_mint", "item_destroy"]);
+        assert_eq!(kinds, [1, 2, 4], "block_set, item_mint, item_destroy");
 
         clear(&mut client);
     }
@@ -643,7 +768,7 @@ mod tests {
     fn a_block_event_fills_the_block_columns_and_leaves_the_item_ones_null() {
         let v = row_values(&block_event());
         assert_eq!(v.len(), NCOLS);
-        assert_eq!(v[3].as_deref(), Some("block_set"));
+        assert_eq!(v[3].as_deref(), Some("1"), "block_set is tag 1");
         assert_eq!(v[9].as_deref(), Some("3"));
         assert_eq!(v[10].as_deref(), Some("1"));
         assert!(v[11].is_none() && v[12].is_none() && v[13].is_none());
@@ -667,7 +792,7 @@ mod tests {
             },
         };
         let v = row_values(&e);
-        assert_eq!(v[3].as_deref(), Some("item_mint"));
+        assert_eq!(v[3].as_deref(), Some("2"), "item_mint is tag 2");
         assert_eq!(v[11].as_deref(), Some("9"), "item uid, decimal");
         assert_eq!(v[12].as_deref(), Some("minecraft:diamond"));
         assert_eq!(v[13].as_deref(), Some("64"));
@@ -691,7 +816,7 @@ mod tests {
             },
         };
         let v = row_values(&destroy);
-        assert_eq!(v[3].as_deref(), Some("item_destroy"));
+        assert_eq!(v[3].as_deref(), Some("4"), "item_destroy is tag 4");
         assert_eq!(v[18].as_deref(), Some("1"), "consumed is reason 1");
 
         let merge = Event {
@@ -706,7 +831,7 @@ mod tests {
             },
         };
         let v = row_values(&merge);
-        assert_eq!(v[3].as_deref(), Some("item_merge"));
+        assert_eq!(v[3].as_deref(), Some("6"), "item_merge is tag 6");
         assert_eq!(v[11].as_deref(), Some("1"), "item_uid is the destination");
         assert_eq!(v[13].as_deref(), Some("3"));
         assert_eq!(v[17].as_deref(), Some("{2}"), "the source uid");
@@ -770,6 +895,7 @@ mod tests {
         let sql = insert_statement(1);
         assert!(sql.contains("$1::text::bigint"), "seq");
         assert!(sql.contains("$3::text::uuid"), "actor");
+        assert!(sql.contains("$4::text::smallint"), "kind");
         assert!(sql.contains("$5::text::integer"), "x");
         assert!(sql.contains("$12::text::bigint"), "item_uid");
         assert!(sql.contains("$16::text::text"), "place_to");
@@ -786,6 +912,95 @@ mod tests {
         let sql = insert_statement(1);
         assert!(sql.contains("VALUES ($1::text::bigint,"));
         assert!(!sql.contains(",("), "no stray empty tuple");
+    }
+
+    #[test]
+    fn a_custom_event_row_carries_its_tag_as_the_kind_code() {
+        let e = Event {
+            seq: 1,
+            at_ms: 2,
+            actor: ActorId(1),
+            cause: None,
+            body: EventBody::Custom {
+                tag: 200,
+                bytes: vec![1, 2, 3],
+            },
+        };
+        let v = row_values(&e);
+        assert_eq!(v[3].as_deref(), Some("200"), "the custom tag is the kind");
+        // The core has no column for a payload it does not understand.
+        assert!(v[11].is_none() && v[12].is_none() && v[18].is_none());
+    }
+
+    #[test]
+    fn the_kind_migration_maps_every_core_name_to_its_code() {
+        let sql = kind_migration_statement();
+        assert!(sql.starts_with("ALTER TABLE aether_events ALTER COLUMN kind TYPE smallint USING"));
+        for (code, name) in EVENT_KINDS {
+            assert!(
+                sql.contains(&format!("WHEN '{name}' THEN {code}")),
+                "missing {name} -> {code} in: {sql}"
+            );
+        }
+        // The old text kind is migrated by mapping, never dropped.
+        assert!(
+            !sql.contains("USING NULL"),
+            "kind must not be erased: {sql}"
+        );
+        assert!(sql.contains(&format!("ELSE {} END", EVENT_KIND_UNKNOWN.0)));
+    }
+
+    #[test]
+    fn a_text_kind_column_is_migrated_by_its_name_not_dropped() {
+        let mut existing = current_schema();
+        for (name, udt) in &mut existing {
+            if name == "kind" {
+                *udt = "text".to_string();
+            }
+        }
+        let plan = migration_plan(&existing);
+        assert_eq!(plan.statements.len(), 1, "{:?}", plan.statements);
+        assert_eq!(plan.statements[0], kind_migration_statement());
+        assert!(!plan.item_uids_lost);
+    }
+
+    #[test]
+    fn the_code_table_upserts_seed_every_core_code_with_custom_false() {
+        let kinds = event_kind_upsert();
+        assert!(kinds.contains("INSERT INTO aether_event_kinds (code, name, custom)"));
+        assert!(kinds.contains("(1, 'block_set', false)"));
+        assert!(kinds.contains("(6, 'item_merge', false)"));
+        assert!(kinds.contains(&format!("({}, 'unknown', false)", EVENT_KIND_UNKNOWN.0)));
+        assert!(kinds.contains("ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name"));
+
+        let reasons = destroy_reason_upsert();
+        assert!(reasons.contains("INSERT INTO aether_destroy_reasons (code, name, custom)"));
+        assert!(reasons.contains("(0, 'other', false)"));
+        assert!(reasons.contains("(1, 'consumed', false)"));
+        assert!(reasons.contains("(10, 'merged_away', false)"));
+        assert!(reasons.contains("ON CONFLICT (code) DO UPDATE"));
+    }
+
+    #[test]
+    fn the_named_view_joins_both_code_tables_and_resolves_the_item_name() {
+        let sql = named_view_sql();
+        assert!(sql.starts_with("CREATE OR REPLACE VIEW aether_events_named AS SELECT"));
+        assert!(sql.contains("kind_name"));
+        assert!(sql.contains("reason_name"));
+        assert!(sql.contains("LEFT JOIN aether_event_kinds k ON k.code = e.kind"));
+        assert!(sql.contains("LEFT JOIN aether_destroy_reasons r ON r.code = e.reason"));
+        // The item name comes from the uid's mint row when the event row has
+        // none of its own (a move or a destroy).
+        assert!(sql.contains("COALESCE(e.item_name"));
+        assert!(sql.contains("m.item_uid = e.item_uid"));
+        // Every physical column is selected, so the view cannot silently drop
+        // one added to COLUMNS later.
+        for (name, _) in COLUMNS {
+            assert!(
+                sql.contains(&format!("e.{name}")) || sql.contains("*"),
+                "{name}"
+            );
+        }
     }
 
     /// `COLUMNS` as `information_schema.columns` would report a table already

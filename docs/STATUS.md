@@ -61,7 +61,7 @@ modern versions run a server-side survival game).
 | Filter language shared by `/lookup` and `/rollback` (`player:` `time:` `block:` `action:` `radius:`) + paged chat output (`/page`) | ✅ |
 | Recovery stash: a rollback returns what was *placed* (not the world's current content), grouped by block + state tags | ✅ |
 | Stash chest window on 1.21.11 — glass frame, page arrows; chat listing on versions without container support | 🚧 Preview |
-| History mirror into PostgreSQL, batched off the game thread, idempotent inserts (`--features postgres`) | ✅ |
+| History mirror into PostgreSQL, batched off the game thread, idempotent inserts (`--features postgres`). `kind` is the body's `smallint` tag and `reason` its code; `aether_event_kinds`/`aether_destroy_reasons` are upserted from the Rust consts on connect, and `aether_events_named` joins them (plus the item name resolved from the uid's mint row) so a human query reads as text | ✅ |
 | Quantity dialogue in the stash window: eight adjust buttons (±1, ±16, ±32, ±64) around the item, cancel and confirm; the ceiling is the entry's whole count, not a stack | ✅ |
 | Slot counts above 64 on the wire (VarInt since 1.20.5) — a recovery manifest shows its real number | ✅ |
 | Handing items over splits into stacks of 64; what will not fit becomes a `minecraft:item` entity at the player's feet and is picked back up on contact | ✅ |
