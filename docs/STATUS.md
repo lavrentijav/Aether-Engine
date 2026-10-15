@@ -71,6 +71,7 @@ modern versions run a server-side survival game).
 | Survival mode (`game_mode` in config): broken blocks drop to the player | ✅ |
 | Slash commands from 1.19+ clients: the client sends these on their own packet, not as chat, so a chat-only decoder never saw a single one | ✅ |
 | Command tree declared at join ("Declare Commands"), so the server's commands complete and colour in a real client | ✅ |
+| Permission core: vanilla op levels 0–4, a lower-case node model with allow/deny/op defaults, one `check(level, node, op)` for the command registry, the plugin commands and `is_operator`, and a built-in `op` group (level 4) seeded add-only from `config.operators` (`permissions.rs`, CMD-01); groups/inheritance/per-world/meta are CMD-02 | ✅ |
 | Shape updates when a neighbour changes: fences, walls, panes and stair corners settle both ways, not only towards a block that already existed | ✅ |
 | The vanilla generator serves a live join — 289 columns in ~21 s cold at view radius 8, inside five seconds once cached | ✅ |
 | Vanilla surface rules interpreted from the pack, all conditions including `temperature`, `steep`, `hole` and badlands banding — 99.9998% of blocks against the game's own surface stage | ✅ |

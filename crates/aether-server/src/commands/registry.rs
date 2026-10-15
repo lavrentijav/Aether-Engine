@@ -614,6 +614,12 @@ pub fn register_plugin(name: &str, plugin: &str, node: &str, op: u8) -> Result<(
             op: op.min(4),
         },
     );
+    // Declare the node so a permission check resolves it explicitly rather
+    // than falling to the fail-closed default. A public command allows
+    // everyone; a gated one stays operator-only, with the op level enforced
+    // separately by the check. Non-destructive, so an operator's own setting
+    // (CMD-02) is kept.
+    let _ = crate::permissions::declare_command_node(node, op);
     Ok(())
 }
 
