@@ -1,0 +1,20 @@
+[package]
+name = "aether-sdk-plugin"
+description = "The Aether plugin SDK, provided as a native plugin: a thin, in-process service host that other plugins (native or WASM) call for common helpers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "aether_sdk_plugin"
+
+[dependencies]
+# The host trait a native plugin implements, plus the service traits and the
+# shared `Player`/`CommandResult` types this provider uses.
+aether-plugin = { workspace = true }
+
+[lints]
+workspace = true

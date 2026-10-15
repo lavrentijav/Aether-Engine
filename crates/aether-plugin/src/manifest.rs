@@ -12,6 +12,22 @@ use serde::Deserialize;
 /// rather than run against an interface it was not written for.
 pub const API_VERSION: &str = "0.1";
 
+/// Which plugin tier a manifest describes.
+///
+/// `wasm` (the default) is a WebAssembly component loaded from `entry`;
+/// `native` is in-process Rust compiled into the server, loaded from the
+/// build-time registry instead. The two share the manifest, the event bus and
+/// the enable/priority/`requires` rules; only the instantiation differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginTier {
+    /// A `wasm32-wasip2` component (the default).
+    #[default]
+    Wasm,
+    /// In-process Rust, trusted-by-install.
+    Native,
+}
+
 /// Event names as they appear in `subscribe`. The manifest spells them the
 /// same as the WIT exports so a plugin author has one vocabulary.
 pub const EVENT_BEFORE_BLOCK_BREAK: &str = "before-block-break";
@@ -42,8 +58,18 @@ pub struct Manifest {
     /// The plugin API version this component was built against.
     #[serde(default = "default_api")]
     pub api: String,
-    /// The `.wasm` component, relative to the manifest's directory.
+    /// The `.wasm` component, relative to the manifest's directory. Ignored for
+    /// a `native` plugin, which is compiled in.
+    #[serde(default)]
     pub entry: String,
+    /// Which tier this manifest describes. Defaults to `wasm`.
+    #[serde(default)]
+    pub tier: PluginTier,
+    /// Services this plugin requires at load: `name@version`, e.g.
+    /// `sdk.permissions@0.1`. A missing service refuses the load with a clear
+    /// error rather than letting the plugin half-run.
+    #[serde(default)]
+    pub requires: Vec<String>,
     /// Human-readable name for logs; the id is used when absent.
     #[serde(default)]
     pub name: String,
@@ -102,6 +128,15 @@ impl Manifest {
         self.commands.iter().any(|c| c == name)
     }
 
+    /// The services this plugin requires, parsed from `requires`. An invalid
+    /// entry is reported so a manifest typo fails the load loudly.
+    pub fn required_services(&self) -> Result<Vec<crate::service::ServiceRef>, String> {
+        self.requires
+            .iter()
+            .map(|s| crate::service::ServiceRef::parse(s))
+            .collect()
+    }
+
     /// The display name used in logs.
     pub fn label(&self) -> &str {
         if self.name.is_empty() {
@@ -126,7 +161,9 @@ pub fn load(path: &Path) -> Result<ManifestFile, String> {
     if manifest.id.is_empty() {
         return Err(format!("{}: `id` must not be empty", path.display()));
     }
-    if manifest.entry.is_empty() {
+    // A native plugin is compiled in and has no component file; only a WASM
+    // manifest must name its `entry`.
+    if manifest.tier == PluginTier::Wasm && manifest.entry.is_empty() {
         return Err(format!("{}: `entry` must not be empty", path.display()));
     }
     if !manifest
@@ -191,6 +228,47 @@ tick_period = 20
     fn deny_on_fault_is_opt_in() {
         let m: Manifest = toml::from_str("id=\"g\"\nentry=\"g.wasm\"\ndeny_on_fault=true").unwrap();
         assert!(m.deny_on_fault);
+    }
+
+    #[test]
+    fn the_tier_defaults_to_wasm_and_native_needs_no_entry() {
+        let m: Manifest = toml::from_str(GOOD).unwrap();
+        assert_eq!(m.tier, PluginTier::Wasm, "wasm is the default tier");
+
+        // A native manifest names no component file; `entry` may be empty.
+        let native: Manifest =
+            toml::from_str("id=\"sdk\"\ntier=\"native\"\nrequires=[\"sdk.permissions@0.1\"]")
+                .unwrap();
+        assert_eq!(native.tier, PluginTier::Native);
+        assert!(native.entry.is_empty());
+        let refs = native.required_services().unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "sdk.permissions");
+        assert_eq!(refs[0].version, "0.1");
+
+        // A malformed requirement fails loudly.
+        let bad: Manifest =
+            toml::from_str("id=\"x\"\nentry=\"x.wasm\"\nrequires=[\"nope\"]").unwrap();
+        assert!(bad.required_services().is_err());
+    }
+
+    #[test]
+    fn a_native_manifest_loads_without_an_entry_file() {
+        let dir = std::env::temp_dir();
+        let file = dir.join("aether-plugin-native-manifest.toml");
+        std::fs::write(&file, "id=\"sdk\"\ntier=\"native\"").unwrap();
+        let loaded = load(&file).expect("a native manifest needs no entry");
+        assert_eq!(loaded.manifest.tier, PluginTier::Native);
+        std::fs::remove_file(&file).ok();
+
+        // A wasm manifest still must name its entry.
+        let wasm = dir.join("aether-plugin-wasm-manifest.toml");
+        std::fs::write(&wasm, "id=\"hello\"").unwrap();
+        assert!(
+            load(&wasm).is_err(),
+            "a wasm manifest without entry is refused"
+        );
+        std::fs::remove_file(&wasm).ok();
     }
 
     #[test]

@@ -23,6 +23,9 @@
 
 mod host;
 pub mod manifest;
+pub mod native;
+pub mod sdk;
+pub mod service;
 
 /// The generated component-model bindings for the `plugin` world.
 ///
@@ -39,7 +42,9 @@ pub mod bindings {
 use std::fmt;
 
 pub use host::{discover, HostBackend, HostConfig, PluginHost};
-pub use manifest::{Manifest, ManifestFile};
+pub use manifest::{Manifest, ManifestFile, PluginTier};
+pub use native::{NativeContext, NativePlugin, NativeRegistration};
+pub use service::{ServiceRef, ServiceRegistry};
 
 /// Re-exported event types, so the server and the examples name the same WIT
 /// types this host binds.

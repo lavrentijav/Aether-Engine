@@ -1,0 +1,93 @@
+/// The Aether SDK service interfaces, package `aether:sdk@0.1`.
+///
+/// These are the helpers the **native** SDK plugin (`plugins/sdk`) provides:
+/// a dependent plugin — native or WASM — imports only the interfaces it uses
+/// and calls them; the host forwards each call to the registered provider.
+///
+/// The package is versioned independently of the frozen `aether:plugin@0.1.0`
+/// world, and a breaking change bumps it (`aether:sdk@0.2`); a host may keep
+/// several versions registered at once. Adding an interface or a function is
+/// additive: a component that does not import it is unaffected.
+package aether:sdk@0.1.0;
+
+/// Permission checks and administration (the owner's motivating example).
+///
+/// The permission *model* is core (CMD-01/02); this interface is only the
+/// facade the SDK fronts it with. Until the core lands the provider fails
+/// closed, so a dependent sees deny/`0` rather than a wrong answer.
+interface permissions {
+    use aether:plugin/types@0.1.0.{player};
+
+    /// Whether `p` holds `node`.
+    check: func(p: player, node: string) -> bool;
+    /// `check`, plus the host's standard "no permission" reply on denial.
+    require: func(p: player, node: string) -> bool;
+    /// `p`'s op level, `0..=4`.
+    level: func(p: player) -> u8;
+    /// Whether `p`'s level is at least `level`.
+    has-level: func(p: player, level: u8) -> bool;
+    /// The groups `p` belongs to.
+    groups: func(p: player) -> list<string>;
+    /// Whether `p` is in `group`.
+    in-group: func(p: player, group: string) -> bool;
+    /// A meta value (`prefix`, `suffix`, `weight`, …), if set.
+    meta: func(p: player, key: string) -> option<string>;
+    /// Grant or deny `node` to `subject` (a player name or `group:<name>`).
+    /// Requires the `permissions.admin` capability.
+    grant: func(subject: string, node: string, value: bool) -> result<_, string>;
+    /// Remove an explicit `node` from `subject`. Requires `permissions.admin`.
+    revoke: func(subject: string, node: string) -> result<_, string>;
+}
+
+/// Command registration and argument parsing.
+interface commands {
+    /// The kind of a declared argument, which fixes its parsing and any
+    /// default suggestions.
+    enum arg-kind {
+        word,
+        integer,
+        player,
+        item,
+        text,
+    }
+
+    /// One declared argument.
+    record arg {
+        name: string,
+        kind: arg-kind,
+        required: bool,
+        /// Static completions offered for this argument (may be empty).
+        choices: list<string>,
+        help: string,
+    }
+
+    /// A command the SDK should register and dispatch. Subcommands are
+    /// separate specs naming their `parent`, so the shape stays a flat list.
+    record command-spec {
+        name: string,
+        parent: option<string>,
+        permission: option<string>,
+        usage: string,
+        description: string,
+        args: list<arg>,
+    }
+
+    /// Register a command spec. Refused on a name clash or a bad spec.
+    register: func(spec: command-spec) -> result<_, string>;
+    /// The usage line for a registered command.
+    usage: func(name: string) -> string;
+    /// Parse `args` against the registered spec, returning `(name, value)`
+    /// pairs for the arguments that were supplied.
+    parse: func(name: string, args: list<string>) -> list<tuple<string, string>>;
+}
+
+/// A world importing the plugin host interface plus every SDK service
+/// interface, so the host can generate **one** linker entry covering all the
+/// imports a dependent component may use. Importing both here is what keeps
+/// `aether:plugin/types` defined once (the SDK interfaces `use` it too).
+world services {
+    import aether:plugin/types@0.1.0;
+    import aether:plugin/host@0.1.0;
+    import permissions;
+    import commands;
+}

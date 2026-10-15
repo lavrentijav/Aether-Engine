@@ -18,7 +18,9 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use crate::bindings::aether::plugin::host::Host as _HostTrait;
 use crate::bindings::aether::plugin::types::{CommandResult, Decision, LogLevel, Player};
 use crate::bindings::Plugin;
-use crate::manifest::{self, ManifestFile};
+use crate::manifest::{self, ManifestFile, PluginTier};
+use crate::native::{NativeContext, NativePlugin};
+use crate::service::ServiceRegistry;
 use crate::{Error, Result};
 
 /// Host services a plugin may call. The server implements this over the world
@@ -86,11 +88,18 @@ impl Default for HostConfig {
 }
 
 /// The store data every import and export call sees.
-struct StoreData {
-    plugin: String,
-    capabilities: Vec<String>,
+///
+/// `pub(crate)` because the SDK import bridge in [`crate::sdk`] implements the
+/// generated `aether:sdk` host traits on it, reading the caller's id and
+/// capabilities.
+pub(crate) struct StoreData {
+    pub(crate) plugin: String,
+    pub(crate) capabilities: Vec<String>,
     config: BTreeMap<String, String>,
     backend: Arc<dyn HostBackend>,
+    /// The shared service registry, so a WASM component can call the native
+    /// SDK services through the generated `aether:sdk` imports.
+    pub(crate) services: Arc<ServiceRegistry>,
     limits: StoreLimits,
     /// A context that grants the component nothing: no filesystem preopens,
     /// no environment, no arguments, closed stdin and a sink for stdout and
@@ -111,19 +120,24 @@ impl WasiView for StoreData {
 }
 
 impl StoreData {
-    fn allowed(&self, capability: &str) -> bool {
+    pub(crate) fn allowed(&self, capability: &str) -> bool {
         self.capabilities.iter().any(|c| c == capability)
     }
 
     /// Refuse an ungranted call: log the denial and answer with the neutral
     /// value. Panicking would let a manifest typo take the server down, which
     /// is exactly what a sandbox is for.
-    fn deny(&self, capability: &str, what: &str) {
+    pub(crate) fn deny(&self, capability: &str, what: &str) {
         self.backend.log(
             &self.plugin,
             LogLevel::Warn,
             &format!("capability `{capability}` not granted; refused {what}"),
         );
+    }
+
+    /// Log a warning tagged with this plugin's id.
+    pub(crate) fn warn(&self, message: &str) {
+        self.backend.log(&self.plugin, LogLevel::Warn, message);
     }
 }
 
@@ -187,11 +201,27 @@ impl _HostTrait for StoreData {
     }
 }
 
-/// One instantiated plugin.
+/// The instantiation behind a loaded plugin: a WASM component in its store, or
+/// an in-process native plugin.
+enum Kind {
+    Wasm {
+        store: Store<StoreData>,
+        // Boxed: the generated instance bindings are several hundred bytes,
+        // and a native plugin's variant is a single pointer, so an unboxed
+        // enum would make every plugin entry carry the WASM size.
+        bindings: Box<Plugin>,
+    },
+    Native(Box<dyn NativePlugin>),
+}
+
+/// One loaded plugin, either tier. Carries the manifest, the effective
+/// capabilities and config (needed to build a native [`NativeContext`]) and the
+/// fault/disable bookkeeping shared by both tiers.
 struct LoadedPlugin {
     manifest: manifest::Manifest,
-    store: Store<StoreData>,
-    bindings: Plugin,
+    kind: Kind,
+    capabilities: Vec<String>,
+    config: BTreeMap<String, String>,
     faults: u32,
     disabled: bool,
 }
@@ -200,6 +230,508 @@ impl LoadedPlugin {
     /// Whether this plugin should receive `event` right now.
     fn receives(&self, event: &str) -> bool {
         !self.disabled && self.manifest.subscribes(event)
+    }
+
+    /// Set the epoch deadline for a WASM plugin; a no-op for a native one,
+    /// which has no interruptible clock.
+    fn set_deadline(&mut self, ms: u64) {
+        if let Kind::Wasm { store, .. } = &mut self.kind {
+            store.set_epoch_deadline(ms);
+        }
+    }
+
+    /// Call one of the `before-*` hooks, whichever tier this plugin is.
+    #[allow(clippy::too_many_arguments)]
+    fn call_before_block_break(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: &str,
+    ) -> std::result::Result<Decision, String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_before_block_break(store, p, x, y, z, block)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                Ok(n.before_block_break(&mut ctx, p, x, y, z, block))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn call_before_block_place(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: &str,
+    ) -> std::result::Result<Decision, String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_before_block_place(store, p, x, y, z, block)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                Ok(n.before_block_place(&mut ctx, p, x, y, z, block))
+            }
+        }
+    }
+
+    fn call_before_use_item(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        item: &str,
+    ) -> std::result::Result<Decision, String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_before_use_item(store, p, item)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                Ok(n.before_use_item(&mut ctx, p, item))
+            }
+        }
+    }
+
+    fn call_before_attack(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        target: u64,
+    ) -> std::result::Result<Decision, String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_before_attack(store, p, target)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                Ok(n.before_attack(&mut ctx, p, target))
+            }
+        }
+    }
+
+    fn call_before_chat(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        message: &str,
+    ) -> std::result::Result<Decision, String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_before_chat(store, p, message)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                Ok(n.before_chat(&mut ctx, p, message))
+            }
+        }
+    }
+
+    fn call_before_container_click(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        window: u32,
+        slot: i32,
+    ) -> std::result::Result<Decision, String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_before_container_click(store, p, window, slot)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                Ok(n.before_container_click(&mut ctx, p, window, slot))
+            }
+        }
+    }
+
+    fn call_after_player_join(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+    ) -> std::result::Result<(), String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_after_player_join(store, p)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                n.after_player_join(&mut ctx, p);
+                Ok(())
+            }
+        }
+    }
+
+    fn call_after_player_leave(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+    ) -> std::result::Result<(), String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_after_player_leave(store, p)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                n.after_player_leave(&mut ctx, p);
+                Ok(())
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn call_after_block_break(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: &str,
+    ) -> std::result::Result<(), String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_after_block_break(store, p, x, y, z, block)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                n.after_block_break(&mut ctx, p, x, y, z, block);
+                Ok(())
+            }
+        }
+    }
+
+    fn call_after_entity_death(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        entity: u64,
+        killer: Option<u64>,
+    ) -> std::result::Result<(), String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_after_entity_death(store, entity, killer)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                n.after_entity_death(&mut ctx, entity, killer);
+                Ok(())
+            }
+        }
+    }
+
+    fn call_after_damage(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        entity: u64,
+        amount: f64,
+        source: &str,
+    ) -> std::result::Result<(), String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_after_damage(store, entity, amount, source)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                n.after_damage(&mut ctx, entity, amount, source);
+                Ok(())
+            }
+        }
+    }
+
+    fn call_after_craft(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        item: &str,
+        count: u32,
+    ) -> std::result::Result<(), String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_after_craft(store, p, item, count)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                n.after_craft(&mut ctx, p, item, count);
+                Ok(())
+            }
+        }
+    }
+
+    fn call_after_enchant(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        item: &str,
+        level: u32,
+    ) -> std::result::Result<(), String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_after_enchant(store, p, item, level)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                n.after_enchant(&mut ctx, p, item, level);
+                Ok(())
+            }
+        }
+    }
+
+    fn call_on_tick(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        n: u64,
+    ) -> std::result::Result<(), String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => {
+                bindings.call_on_tick(store, n).map_err(|e| e.to_string())
+            }
+            Kind::Native(p) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                p.on_tick(&mut ctx, n);
+                Ok(())
+            }
+        }
+    }
+
+    fn call_on_command(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        name: &str,
+        args: &[String],
+    ) -> std::result::Result<CommandResult, String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { store, bindings } => bindings
+                .call_on_command(store, p, name, args)
+                .map_err(|e| e.to_string()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                let result = n
+                    .on_command(&mut ctx, p, name, args)
+                    .unwrap_or(CommandResult {
+                        handled: false,
+                        lines: Vec::new(),
+                    });
+                Ok(result)
+            }
+        }
     }
 }
 
@@ -240,6 +772,9 @@ pub struct PluginHost {
     engine: Engine,
     config: HostConfig,
     backend: Arc<dyn HostBackend>,
+    /// Cross-plugin services, published by native providers (the SDK) and
+    /// resolved by dependents before they load and again at call time.
+    services: Arc<ServiceRegistry>,
     plugins: Vec<LoadedPlugin>,
     /// Wall-clock time actually spent **inside plugin calls** since the
     /// current tick began. `None` until the first [`on_tick`], so before any
@@ -273,6 +808,7 @@ impl PluginHost {
             engine,
             config,
             backend,
+            services: Arc::new(ServiceRegistry::new()),
             plugins: Vec::new(),
             tick_used: None,
             tick_budget,
@@ -348,8 +884,43 @@ impl PluginHost {
         }
     }
 
-    /// Instantiate one plugin. `capabilities` is the effective grant (already
-    /// intersected by the caller); `config` are the operator's values.
+    /// The services this host provides, so a caller can register a native
+    /// provider into them before dependents load.
+    pub fn services(&self) -> &Arc<ServiceRegistry> {
+        &self.services
+    }
+
+    /// Refuse to load a plugin whose `requires` are not all satisfied.
+    ///
+    /// A missing service is a configuration error with a name attached, not a
+    /// runtime surprise: the dependent is not added and the error says which
+    /// service and points at the provider.
+    fn check_requires(&self, manifest: &manifest::Manifest) -> Result<()> {
+        let required = manifest.required_services().map_err(Error::new)?;
+        for service in required {
+            if !self.services.contains(&service) {
+                return Err(Error::new(format!(
+                    "plugin `{}` requires service `{service}`, which is not registered \
+                     (is the provider plugin enabled?)",
+                    manifest.id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse a second plugin under an id already loaded.
+    fn reject_duplicate(&self, id: &str) -> Result<()> {
+        if self.plugins.iter().any(|p| p.manifest.id == id) {
+            return Err(Error::new(format!(
+                "plugin `{id}` is already loaded: manifest ids must be unique"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Instantiate one WASM plugin. `capabilities` is the effective grant
+    /// (already intersected by the caller); `config` are the operator's values.
     ///
     /// A component that fails to load or whose `init` returns `Err` is not
     /// added, but one bad plugin never stops the others: the error is
@@ -361,14 +932,16 @@ impl PluginHost {
         config: &BTreeMap<String, String>,
     ) -> Result<()> {
         let manifest = file.manifest.clone();
-        // Ids are the KV namespace and the log tag; two plugins sharing one
-        // would read and rewrite each other's state.
-        if self.plugins.iter().any(|p| p.manifest.id == manifest.id) {
+        if manifest.tier != PluginTier::Wasm {
             return Err(Error::new(format!(
-                "plugin `{}` is already loaded: manifest ids must be unique",
-                manifest.id
+                "plugin `{}` is `{:?}`, not a WASM component",
+                manifest.id, manifest.tier
             )));
         }
+        // Ids are the KV namespace and the log tag; two plugins sharing one
+        // would read and rewrite each other's state.
+        self.reject_duplicate(&manifest.id)?;
+        self.check_requires(&manifest)?;
         let entry = manifest.entry_path(&file.dir);
         if !entry.is_file() {
             return Err(Error::new(format!(
@@ -384,7 +957,13 @@ impl PluginHost {
         // `std`-linked component can use its allocator and panic machinery
         // without gaining a way out of the sandbox.
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
-        Plugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |d: &mut StoreData| d)?;
+        // One linker call covers every import a component may use: the plugin
+        // host interface (`host`), the shared types, and the SDK services.
+        // Using the combined world avoids defining `aether:plugin/types` twice,
+        // which two separate `add_to_linker` calls would do. A component that
+        // imports none of the SDK interfaces (the frozen `@0.1.0` ones
+        // included) is unaffected.
+        crate::sdk::Services::add_to_linker::<_, HasSelf<_>>(&mut linker, |d: &mut StoreData| d)?;
 
         let memory = self.config.memory_mib.saturating_mul(1024 * 1024);
         let limits = StoreLimitsBuilder::new()
@@ -395,6 +974,7 @@ impl PluginHost {
             capabilities: capabilities.to_vec(),
             config: config.clone(),
             backend: Arc::clone(&self.backend),
+            services: Arc::clone(&self.services),
             limits,
             wasi: WasiCtxBuilder::new().build(),
             table: ResourceTable::new(),
@@ -427,8 +1007,58 @@ impl PluginHost {
         self.ensure_ticker()?;
         self.plugins.push(LoadedPlugin {
             manifest,
-            store,
-            bindings,
+            kind: Kind::Wasm {
+                store,
+                bindings: Box::new(bindings),
+            },
+            capabilities: capabilities.to_vec(),
+            config: config.clone(),
+            faults: 0,
+            disabled: false,
+        });
+        self.sort();
+        Ok(())
+    }
+
+    /// Load one native plugin. `plugin` is a fresh instance from the build-time
+    /// registry; `capabilities`/`config` are the operator's effective values.
+    ///
+    /// Native plugins are trusted-by-install, so there is no sandbox and no
+    /// `init` fuel: `init` may register services and load state, and a panic is
+    /// the operator's problem, not something the host can contain.
+    pub fn add_native(
+        &mut self,
+        file: &ManifestFile,
+        capabilities: &[String],
+        config: &BTreeMap<String, String>,
+        mut plugin: Box<dyn NativePlugin>,
+    ) -> Result<()> {
+        let manifest = file.manifest.clone();
+        if manifest.tier != PluginTier::Native {
+            return Err(Error::new(format!(
+                "plugin `{}` is `{:?}`, not a native plugin",
+                manifest.id, manifest.tier
+            )));
+        }
+        self.reject_duplicate(&manifest.id)?;
+        self.check_requires(&manifest)?;
+        let services = Arc::clone(&self.services);
+        let backend = Arc::clone(&self.backend);
+        let mut ctx = NativeContext {
+            id: &manifest.id,
+            capabilities,
+            config,
+            services: &services,
+            backend: &backend,
+        };
+        plugin.init(&mut ctx).map_err(|e| {
+            Error::new(format!("native plugin `{}` refused init: {e}", manifest.id))
+        })?;
+        self.plugins.push(LoadedPlugin {
+            manifest,
+            kind: Kind::Native(plugin),
+            capabilities: capabilities.to_vec(),
+            config: config.clone(),
             faults: 0,
             disabled: false,
         });
@@ -457,12 +1087,28 @@ impl PluginHost {
 
     /// Call `shutdown` on every plugin, best effort.
     pub fn shutdown(&mut self) {
+        let services = Arc::clone(&self.services);
+        let backend = Arc::clone(&self.backend);
         for p in &mut self.plugins {
             if p.disabled {
                 continue;
             }
-            p.store.set_epoch_deadline(self.config.budget_ms.max(1));
-            let _ = p.bindings.call_shutdown(&mut p.store);
+            match &mut p.kind {
+                Kind::Wasm { store, bindings } => {
+                    store.set_epoch_deadline(self.config.budget_ms.max(1));
+                    let _ = bindings.call_shutdown(store);
+                }
+                Kind::Native(n) => {
+                    let mut ctx = NativeContext {
+                        id: &p.manifest.id,
+                        capabilities: &p.capabilities,
+                        config: &p.config,
+                        services: &services,
+                        backend: &backend,
+                    };
+                    n.shutdown(&mut ctx);
+                }
+            }
         }
     }
 
@@ -496,8 +1142,14 @@ impl PluginHost {
     fn before(
         &mut self,
         event: &str,
-        mut f: impl FnMut(&mut LoadedPlugin) -> wasmtime::Result<Decision>,
+        mut f: impl FnMut(
+            &mut LoadedPlugin,
+            &Arc<ServiceRegistry>,
+            &Arc<dyn HostBackend>,
+        ) -> std::result::Result<Decision, String>,
     ) -> Decision {
+        let services = Arc::clone(&self.services);
+        let backend = Arc::clone(&self.backend);
         for i in 0..self.plugins.len() {
             if !self.plugins[i].receives(event) {
                 continue;
@@ -515,12 +1167,9 @@ impl PluginHost {
                 }
                 continue;
             }
-            self.plugins[i].store.set_epoch_deadline(ms);
+            self.plugins[i].set_deadline(ms);
             let started = Instant::now();
-            let r = {
-                let pl = &mut self.plugins[i];
-                f(pl)
-            };
+            let r = f(&mut self.plugins[i], &services, &backend);
             self.charge_tick(started, ms, r.is_err());
             match r {
                 Ok(Decision::Allow) => {}
@@ -544,8 +1193,14 @@ impl PluginHost {
     fn observe(
         &mut self,
         event: &str,
-        mut f: impl FnMut(&mut LoadedPlugin) -> wasmtime::Result<()>,
+        mut f: impl FnMut(
+            &mut LoadedPlugin,
+            &Arc<ServiceRegistry>,
+            &Arc<dyn HostBackend>,
+        ) -> std::result::Result<(), String>,
     ) {
+        let services = Arc::clone(&self.services);
+        let backend = Arc::clone(&self.backend);
         for i in 0..self.plugins.len() {
             if !self.plugins[i].receives(event) {
                 continue;
@@ -554,12 +1209,9 @@ impl PluginHost {
             if ms == 0 {
                 continue;
             }
-            self.plugins[i].store.set_epoch_deadline(ms);
+            self.plugins[i].set_deadline(ms);
             let started = Instant::now();
-            let r = {
-                let pl = &mut self.plugins[i];
-                f(pl)
-            };
+            let r = f(&mut self.plugins[i], &services, &backend);
             self.charge_tick(started, ms, r.is_err());
             if let Err(e) = r {
                 self.fault(i, event, e);
@@ -578,9 +1230,8 @@ impl PluginHost {
         z: i32,
         block: &str,
     ) -> Decision {
-        self.before(manifest::EVENT_BEFORE_BLOCK_BREAK, |pl| {
-            pl.bindings
-                .call_before_block_break(&mut pl.store, p, x, y, z, block)
+        self.before(manifest::EVENT_BEFORE_BLOCK_BREAK, |pl, s, b| {
+            pl.call_before_block_break(s, b, p, x, y, z, block)
         })
     }
 
@@ -593,38 +1244,36 @@ impl PluginHost {
         z: i32,
         block: &str,
     ) -> Decision {
-        self.before(manifest::EVENT_BEFORE_BLOCK_PLACE, |pl| {
-            pl.bindings
-                .call_before_block_place(&mut pl.store, p, x, y, z, block)
+        self.before(manifest::EVENT_BEFORE_BLOCK_PLACE, |pl, s, b| {
+            pl.call_before_block_place(s, b, p, x, y, z, block)
         })
     }
 
     /// `before-use-item`.
     pub fn before_use_item(&mut self, p: &Player, item: &str) -> Decision {
-        self.before(manifest::EVENT_BEFORE_USE_ITEM, |pl| {
-            pl.bindings.call_before_use_item(&mut pl.store, p, item)
+        self.before(manifest::EVENT_BEFORE_USE_ITEM, |pl, s, b| {
+            pl.call_before_use_item(s, b, p, item)
         })
     }
 
     /// `before-attack`.
     pub fn before_attack(&mut self, p: &Player, target: u64) -> Decision {
-        self.before(manifest::EVENT_BEFORE_ATTACK, |pl| {
-            pl.bindings.call_before_attack(&mut pl.store, p, target)
+        self.before(manifest::EVENT_BEFORE_ATTACK, |pl, s, b| {
+            pl.call_before_attack(s, b, p, target)
         })
     }
 
     /// `before-chat`.
     pub fn before_chat(&mut self, p: &Player, message: &str) -> Decision {
-        self.before(manifest::EVENT_BEFORE_CHAT, |pl| {
-            pl.bindings.call_before_chat(&mut pl.store, p, message)
+        self.before(manifest::EVENT_BEFORE_CHAT, |pl, s, b| {
+            pl.call_before_chat(s, b, p, message)
         })
     }
 
     /// `before-container-click`.
     pub fn before_container_click(&mut self, p: &Player, window: u32, slot: i32) -> Decision {
-        self.before(manifest::EVENT_BEFORE_CONTAINER_CLICK, |pl| {
-            pl.bindings
-                .call_before_container_click(&mut pl.store, p, window, slot)
+        self.before(manifest::EVENT_BEFORE_CONTAINER_CLICK, |pl, s, b| {
+            pl.call_before_container_click(s, b, p, window, slot)
         })
     }
 
@@ -632,54 +1281,50 @@ impl PluginHost {
 
     /// `after-player-join`.
     pub fn after_player_join(&mut self, p: &Player) {
-        self.observe(manifest::EVENT_AFTER_PLAYER_JOIN, |pl| {
-            pl.bindings.call_after_player_join(&mut pl.store, p)
+        self.observe(manifest::EVENT_AFTER_PLAYER_JOIN, |pl, s, b| {
+            pl.call_after_player_join(s, b, p)
         });
     }
 
     /// `after-player-leave`.
     pub fn after_player_leave(&mut self, p: &Player) {
-        self.observe(manifest::EVENT_AFTER_PLAYER_LEAVE, |pl| {
-            pl.bindings.call_after_player_leave(&mut pl.store, p)
+        self.observe(manifest::EVENT_AFTER_PLAYER_LEAVE, |pl, s, b| {
+            pl.call_after_player_leave(s, b, p)
         });
     }
 
     /// `after-block-break`.
     pub fn after_block_break(&mut self, p: &Player, x: i32, y: i32, z: i32, block: &str) {
-        self.observe(manifest::EVENT_AFTER_BLOCK_BREAK, |pl| {
-            pl.bindings
-                .call_after_block_break(&mut pl.store, p, x, y, z, block)
+        self.observe(manifest::EVENT_AFTER_BLOCK_BREAK, |pl, s, b| {
+            pl.call_after_block_break(s, b, p, x, y, z, block)
         });
     }
 
     /// `after-entity-death`.
     pub fn after_entity_death(&mut self, entity: u64, killer: Option<u64>) {
-        self.observe(manifest::EVENT_AFTER_ENTITY_DEATH, |pl| {
-            pl.bindings
-                .call_after_entity_death(&mut pl.store, entity, killer)
+        self.observe(manifest::EVENT_AFTER_ENTITY_DEATH, |pl, s, b| {
+            pl.call_after_entity_death(s, b, entity, killer)
         });
     }
 
     /// `after-damage`.
     pub fn after_damage(&mut self, entity: u64, amount: f64, source: &str) {
-        self.observe(manifest::EVENT_AFTER_DAMAGE, |pl| {
-            pl.bindings
-                .call_after_damage(&mut pl.store, entity, amount, source)
+        self.observe(manifest::EVENT_AFTER_DAMAGE, |pl, s, b| {
+            pl.call_after_damage(s, b, entity, amount, source)
         });
     }
 
     /// `after-craft`.
     pub fn after_craft(&mut self, p: &Player, item: &str, count: u32) {
-        self.observe(manifest::EVENT_AFTER_CRAFT, |pl| {
-            pl.bindings.call_after_craft(&mut pl.store, p, item, count)
+        self.observe(manifest::EVENT_AFTER_CRAFT, |pl, s, b| {
+            pl.call_after_craft(s, b, p, item, count)
         });
     }
 
     /// `after-enchant`.
     pub fn after_enchant(&mut self, p: &Player, item: &str, level: u32) {
-        self.observe(manifest::EVENT_AFTER_ENCHANT, |pl| {
-            pl.bindings
-                .call_after_enchant(&mut pl.store, p, item, level)
+        self.observe(manifest::EVENT_AFTER_ENCHANT, |pl, s, b| {
+            pl.call_after_enchant(s, b, p, item, level)
         });
     }
 
@@ -689,6 +1334,8 @@ impl PluginHost {
     /// when `n` is on their period.
     pub fn on_tick(&mut self, n: u64) {
         self.begin_tick();
+        let services = Arc::clone(&self.services);
+        let backend = Arc::clone(&self.backend);
         for i in 0..self.plugins.len() {
             if !self.plugins[i].receives(manifest::EVENT_ON_TICK) {
                 continue;
@@ -701,12 +1348,9 @@ impl PluginHost {
             if ms == 0 {
                 continue;
             }
-            self.plugins[i].store.set_epoch_deadline(ms);
+            self.plugins[i].set_deadline(ms);
             let started = Instant::now();
-            let r = {
-                let pl = &mut self.plugins[i];
-                pl.bindings.call_on_tick(&mut pl.store, n)
-            };
+            let r = self.plugins[i].call_on_tick(&services, &backend, n);
             self.charge_tick(started, ms, r.is_err());
             if let Err(e) = r {
                 self.fault(i, manifest::EVENT_ON_TICK, e);
@@ -728,6 +1372,8 @@ impl PluginHost {
             return None;
         }
         let event = manifest::EVENT_ON_COMMAND;
+        let services = Arc::clone(&self.services);
+        let backend = Arc::clone(&self.backend);
         for i in 0..self.plugins.len() {
             if !self.plugins[i].receives(event) || !self.plugins[i].manifest.serves_command(name) {
                 continue;
@@ -736,12 +1382,9 @@ impl PluginHost {
             if ms == 0 {
                 continue;
             }
-            self.plugins[i].store.set_epoch_deadline(ms);
+            self.plugins[i].set_deadline(ms);
             let started = Instant::now();
-            let r = {
-                let pl = &mut self.plugins[i];
-                pl.bindings.call_on_command(&mut pl.store, p, name, args)
-            };
+            let r = self.plugins[i].call_on_command(&services, &backend, p, name, args);
             self.charge_tick(started, ms, r.is_err());
             match r {
                 Ok(result) if result.handled => return Some(result),

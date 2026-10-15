@@ -1,0 +1,17 @@
+[package]
+name = "aether-plugin-sdk"
+description = "Thin typed client for dependent plugins: generated `aether:sdk` bindings, the `dependent` world and a prelude. No logic — the SDK itself is the native `plugins/sdk` plugin."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Guest half of the component model; the WIT is read from the host's own copy,
+# so the two cannot drift.
+wit-bindgen = "0.57"
+
+[lints]
+workspace = true
