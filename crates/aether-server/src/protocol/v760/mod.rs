@@ -113,7 +113,7 @@ impl ProtocolCodec for Codec {
         Ok(Some(PacketIn::new(&p.data).string()?))
     }
 
-    fn encryption_request_has_should_authenticate(&self) -> bool {
+    fn encryption_response_has_verify_token_flag(&self) -> bool {
         // 1.19.2 only; see the v759 codec.
         true
     }

@@ -1,11 +1,19 @@
 //! The hybrid decision table, and the online encryption/`hasJoined`
 //! handshake that feeds it.
 //!
-//! The handshake itself is version-independent apart from one boolean: the
-//! Encryption Request and Response are login packets `0x01` in every version
-//! this server speaks. A version that carries the 1.19.x
-//! `should_authenticate` field says so through
-//! [`ProtocolCodec::encryption_request_has_should_authenticate`].
+//! The handshake is version-independent apart from two layout flags, both
+//! keyed off the protocol id by the codec:
+//!
+//! * the clientbound Encryption Request carries a trailing `should_authenticate`
+//!   boolean from 1.20.5 (protocol 766) on — see
+//!   [`ProtocolCodec::encryption_request_has_should_authenticate`];
+//! * the serverbound Encryption Response carries a `has_verify_token` boolean
+//!   (plus salt and signature) only in 1.19/1.19.2 — see
+//!   [`ProtocolCodec::encryption_response_has_verify_token_flag`].
+//!
+//! Everything else — the `0x01` ids, the `SHA-1(serverId + secret + publicKey)`
+//! hash, AES/CFB8 with the secret as key and IV — is the same for every
+//! version.
 //!
 //! Every login logs which mode it used ([`Admission`]), so an operator can
 //! see who is online and who was turned away.
@@ -317,32 +325,105 @@ fn online_login(
     req.var_int(public_key.len() as i32).bytes(public_key);
     req.var_int(TOKEN_LEN as i32).bytes(&token);
     if codec.encryption_request_has_should_authenticate() {
-        // 1.19/1.19.2 only. We do not want chat signing, and the client still
-        // returns the shared secret and verify token.
-        req.bool(false);
+        // Present from 1.20.5 (protocol 766) on. `true` asks the client to
+        // call Mojang's `joinServer` with this hash before answering, which is
+        // exactly what makes our later `hasJoined` succeed; sending `false`
+        // skips that and the session is never registered.
+        req.bool(true);
     }
     if req.send(s).is_err() {
+        log::info(&format!(
+            "[auth] {name}: could not send the Encryption Request (socket gone)"
+        ));
         return Ok(OnlineOutcome::Dropped);
     }
 
     let p = match read_packet(s) {
         Ok(Some(p)) => p,
         // EOF, a timeout or a socket error: the client is gone. A vanilla
-        // client with an invalid session does exactly this.
-        Ok(None) | Err(_) => return Ok(OnlineOutcome::Dropped),
+        // client with an invalid session does exactly this — it cannot call
+        // `joinServer`, so it closes without answering.
+        Ok(None) => {
+            log::info(&format!(
+                "[auth] {name}: client sent nothing after the Encryption Request (idle timeout)"
+            ));
+            return Ok(OnlineOutcome::Dropped);
+        }
+        Err(e) => {
+            log::info(&format!(
+                "[auth] {name}: client disconnected after the Encryption Request ({e})"
+            ));
+            return Ok(OnlineOutcome::Dropped);
+        }
     };
     if p.id != ENCRYPTION_RESPONSE {
+        // A Login-phase Disconnect is 0x00; anything else here is a client
+        // that did not follow the handshake.
+        log::info(&format!(
+            "[auth] {name}: expected Encryption Response (0x01), got 0x{:02x}",
+            p.id
+        ));
         return Ok(OnlineOutcome::BadResponse);
     }
     let mut pin = PacketIn::new(&p.data);
-    let (Ok(secret_enc), Ok(token_enc)) = (read_byte_array(&mut pin), read_byte_array(&mut pin))
-    else {
+    let Ok(secret_enc) = read_byte_array(&mut pin) else {
+        log::info(&format!(
+            "[auth] {name}: Encryption Response shared-secret field is malformed"
+        ));
         return Ok(OnlineOutcome::BadResponse);
+    };
+    let token_enc = if codec.encryption_response_has_verify_token_flag() {
+        // 1.19/1.19.2: a boolean sits between the secret and the token. We
+        // always send the verify-token form, so a client that answers with the
+        // salt/signature form instead cannot be completed — refuse it rather
+        // than read the salt as a length.
+        match pin.bool() {
+            Ok(true) => {}
+            _ => {
+                log::info(&format!(
+                    "[auth] {name}: 1.19.x Encryption Response did not carry a verify token"
+                ));
+                return Ok(OnlineOutcome::BadResponse);
+            }
+        }
+        match read_byte_array(&mut pin) {
+            Ok(v) => v,
+            Err(_) => {
+                log::info(&format!(
+                    "[auth] {name}: Encryption Response verify-token field is malformed"
+                ));
+                return Ok(OnlineOutcome::BadResponse);
+            }
+        }
+    } else {
+        match read_byte_array(&mut pin) {
+            Ok(v) => v,
+            Err(_) => {
+                log::info(&format!(
+                    "[auth] {name}: Encryption Response verify-token field is malformed"
+                ));
+                return Ok(OnlineOutcome::BadResponse);
+            }
+        }
     };
     let (Some(secret), Some(tok)) = (key.decrypt(&secret_enc), key.decrypt(&token_enc)) else {
+        log::info(&format!(
+            "[auth] {name}: Encryption Response did not RSA-decrypt (bad PKCS#1 padding)"
+        ));
         return Ok(OnlineOutcome::BadResponse);
     };
-    if tok != token || secret.len() != crypto::SECRET_LEN {
+    if tok != token {
+        log::info(&format!(
+            "[auth] {name}: Encryption Response verify token did not match"
+        ));
+        return Ok(OnlineOutcome::BadResponse);
+    }
+    if secret.len() != crypto::SECRET_LEN {
+        log::info(&format!(
+            "[auth] {name}: Encryption Response shared secret is {} bytes, expected {}",
+            secret.len(),
+            crypto::SECRET_LEN
+        ));
         return Ok(OnlineOutcome::BadResponse);
     }
     let mut secret16 = [0u8; crypto::SECRET_LEN];
@@ -356,13 +437,21 @@ fn online_login(
     let hash = crypto::server_id_hash(server_id, &secret16, public_key);
     match api.has_joined(name, &hash, ip) {
         Ok(Some(profile)) => Ok(OnlineOutcome::Ok(profile)),
-        Ok(None) => Ok(OnlineOutcome::NoSession),
+        Ok(None) => {
+            log::info(&format!(
+                "[auth] {name}: Mojang hasJoined said no session for this client"
+            ));
+            Ok(OnlineOutcome::NoSession)
+        }
         // Every transport or status failure is a *service* failure, not proof
         // that the client has no session. `ApiError::Unreachable` (timeout,
         // connection failure), `Status(5xx)` and `Decode` all mean "could not
         // ask", so they follow `on_lookup_failure` rather than admitting a
         // locked name offline.
-        Err(_) => Ok(OnlineOutcome::ApiDown),
+        Err(e) => {
+            log::info(&format!("[auth] {name}: Mojang hasJoined failed ({e:?})"));
+            Ok(OnlineOutcome::ApiDown)
+        }
     }
 }
 
@@ -522,6 +611,38 @@ mod tests {
         (Conn::new(server), client)
     }
 
+    /// A client that answers with the **1.19/1.19.2** Encryption Response:
+    /// `shared secret, has_verify_token=true, verify token`.
+    fn handshake_pair_1192(key: &ServerKey) -> (Conn, std::net::TcpStream) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let mut peer = client.try_clone().unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let key_der = key.public_der().to_vec();
+        std::thread::spawn(move || {
+            let Some(req) = read_client_frame(&mut peer) else {
+                return;
+            };
+            let token = req_token(&req);
+            let enc_secret = rsa_encrypt(&key_der, &[9u8; crypto::SECRET_LEN]);
+            let enc_token = rsa_encrypt(&key_der, &token);
+            let mut body = Vec::new();
+            body.push(0x01); // packet id
+            write_varint(&mut body, enc_secret.len() as i32);
+            body.extend_from_slice(&enc_secret);
+            body.push(0x01); // has_verify_token = true
+            write_varint(&mut body, enc_token.len() as i32);
+            body.extend_from_slice(&enc_token);
+            let mut frame = Vec::new();
+            write_varint(&mut frame, body.len() as i32);
+            frame.extend_from_slice(&body);
+            let _ = peer.write_all(&frame);
+        });
+        (Conn::new(server), client)
+    }
+
     /// Read one frame, or `None` on EOF (the server sent nothing).
     fn read_client_frame(s: &mut std::net::TcpStream) -> Option<Vec<u8>> {
         use std::io::Read;
@@ -569,6 +690,71 @@ mod tests {
         let key = RsaPublicKey::from_public_key_der(der).unwrap();
         key.encrypt(&mut rand::thread_rng(), Pkcs1v15Encrypt, data)
             .unwrap()
+    }
+
+    /// Run the handshake and capture the exact clientbound Encryption Request
+    /// body (`id + payload`) the server would send, by having the "client"
+    /// read one frame and then drop.
+    fn capture_encryption_request(codec: &'static dyn ProtocolCodec) -> Vec<u8> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let mut peer = client.try_clone().unwrap();
+        let (server, _) = listener.accept().unwrap();
+        std::thread::spawn(move || {
+            if let Some(req) = read_client_frame(&mut peer) {
+                let _ = tx.send(req);
+            }
+            let _ = peer.shutdown(std::net::Shutdown::Both);
+        });
+        let mock = Mock::new(Ok(None), Ok(Some(0xAAAA)));
+        let _ = authenticate(
+            &mut Conn::new(server),
+            codec,
+            &cfg(AuthMode::Online, LookupFailure::Offline),
+            &MapStore::default(),
+            super::super::test_key(),
+            &mock,
+            &LookupCache::new(),
+            &BounceCache::new(),
+            "Notch",
+            None,
+        )
+        .unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the server sends an Encryption Request")
+    }
+
+    /// Decode an Encryption Request body against the reference layout
+    /// (PrismarineJS `minecraft-data`, generated from the vanilla protocol)
+    /// and return whether it consumed exactly the whole body.
+    ///
+    /// The reference layout is
+    /// `serverId:string, publicKey:buffer, verifyToken:buffer[, shouldAuthenticate:bool]`.
+    /// Any leftover byte — or an `Err` reading a field — means the packet is
+    /// not the shape a client of that version expects.
+    fn reference_request_consumed(body: &[u8], has_should_authenticate: bool) -> bool {
+        let mut p = PacketIn::new(body);
+        let id = p.var_int().unwrap();
+        assert_eq!(id, ENCRYPTION_REQUEST);
+        let _server_id = p.string().unwrap();
+        let klen = p.var_int().unwrap() as usize;
+        for _ in 0..klen {
+            if p.u8().is_err() {
+                return false;
+            }
+        }
+        let tlen = p.var_int().unwrap() as usize;
+        for _ in 0..tlen {
+            if p.u8().is_err() {
+                return false;
+            }
+        }
+        if has_should_authenticate && p.bool().is_err() {
+            return false;
+        }
+        p.remaining() == 0
     }
 
     fn write_varint(out: &mut Vec<u8>, v: i32) {
@@ -657,6 +843,81 @@ mod tests {
             0,
             "never reached Mojang"
         );
+    }
+
+    /// The reference layout: `should_authenticate` on the clientbound
+    /// Encryption Request is present from 1.20.5 (protocol 766) onward, and
+    /// absent before that. This table is the PrismarineJS `minecraft-data`
+    /// field lists, which are generated from the game's own protocol.
+    #[test]
+    fn every_codec_gates_should_authenticate_by_protocol() {
+        for proto in [
+            47, 755, 756, 757, 758, 759, 760, 761, 762, 763, 764, 765, 766, 767, 768, 769, 770,
+            771, 772, 773, 774, 775, 776, 777,
+        ] {
+            let Some(codec) = crate::protocol::codec_for(proto) else {
+                panic!("no codec for {proto}");
+            };
+            assert_eq!(
+                codec.encryption_request_has_should_authenticate(),
+                proto >= 766,
+                "protocol {proto}: should_authenticate presence",
+            );
+        }
+    }
+
+    /// The live bug: a 1.21.11 client disconnected on the Encryption Request
+    /// because the packet was one byte short (the `should_authenticate` bool
+    /// was missing), while 1.20.4 must not carry it. This pins the exact bytes
+    /// against the reference field list.
+    #[test]
+    fn the_encryption_request_matches_the_reference_layout() {
+        // 1.21.11 and 26.x: the bool is present.
+        for proto in [766, 770, 774, 775, 776, 777] {
+            let codec = crate::protocol::codec_for(proto).unwrap();
+            let body = capture_encryption_request(codec);
+            assert!(
+                reference_request_consumed(&body, true),
+                "protocol {proto} must end with the should_authenticate bool",
+            );
+        }
+        // 1.20.4 and earlier: no bool, and adding one would be a stray byte.
+        for proto in [47, 759, 760, 763, 764, 765] {
+            let codec = crate::protocol::codec_for(proto).unwrap();
+            let body = capture_encryption_request(codec);
+            assert!(
+                reference_request_consumed(&body, false),
+                "protocol {proto} must not carry the bool",
+            );
+            assert!(
+                !reference_request_consumed(&body, true),
+                "protocol {proto}: a bool here would be a stray byte",
+            );
+        }
+    }
+
+    /// The 1.19/1.19.2 Encryption Response has a `has_verify_token` boolean
+    /// between the secret and the token; later versions do not. Reading it
+    /// wrong desynchronises the packet and the token never matches.
+    #[test]
+    fn the_1_19_2_encryption_response_boolean_is_read() {
+        // 760 (1.19.2) answers in the flag form; the server must authenticate.
+        let mock = Mock::new(online_profile("Notch"), Ok(Some(0xAAAA)));
+        let (mut s, _c) = handshake_pair_1192(super::super::test_key());
+        let a = authenticate(
+            &mut s,
+            crate::protocol::codec_for(760).unwrap(),
+            &cfg(AuthMode::Online, LookupFailure::Offline),
+            &MapStore::default(),
+            super::super::test_key(),
+            &mock,
+            &LookupCache::new(),
+            &BounceCache::new(),
+            "Notch",
+            None,
+        )
+        .unwrap();
+        assert!(matches!(a, Admission::Online(_)));
     }
 
     #[test]
