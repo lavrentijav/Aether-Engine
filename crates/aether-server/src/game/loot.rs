@@ -49,11 +49,11 @@ pub enum NumberProvider {
 }
 
 impl NumberProvider {
-    /// The provider as an integer draw (uniform inclusive on the floored
-    /// bounds, as vanilla's `getInt`).
+    /// The provider as an integer draw (vanilla's `getInt`, which is
+    /// `Math.round(getFloat)`); uniform bounds are floored to integers.
     pub fn get_i32(&self, rng: &mut Rng) -> i32 {
         match *self {
-            Self::Constant(v) => v.floor() as i32,
+            Self::Constant(v) => v.round() as i32,
             Self::Uniform { min, max } => {
                 let (lo, hi) = (min.floor() as i32, max.floor() as i32);
                 if hi <= lo {
@@ -706,9 +706,18 @@ fn apply_function(f: &Function, st: &mut LootStack, ctx: &LootContext, rng: &mut
             st.count = n.clamp(0, 255) as u8;
         }
         Function::ExplosionDecay => {
+            // Vanilla decays per *item*, not per stack: each item survives
+            // independently with probability `1 / radius`.
             if let Some(r) = ctx.explosion_radius {
-                if r > 1.0 && rng.f32() >= 1.0 / r {
-                    st.count = 0;
+                if r > 1.0 {
+                    let keep = 1.0 / r;
+                    let mut n = 0u8;
+                    for _ in 0..st.count {
+                        if rng.f32() < keep {
+                            n += 1;
+                        }
+                    }
+                    st.count = n;
                 }
             }
         }
@@ -726,14 +735,18 @@ fn apply_function(f: &Function, st: &mut LootStack, ctx: &LootContext, rng: &mut
             if level <= 0 {
                 return;
             }
-            // Vanilla: `grow(round(level * count.getFloat))`, the bonus
-            // clamped to `limit` (0 = unlimited). Drawing the float and
-            // scaling it gives 0..level, not `getInt * level` (which is only
-            // ever 0 or level).
-            let extra = (count.get_f32(rng) * level as f32).round() as i32;
-            let cap = if *limit == 0 { i32::MAX } else { *limit as i32 };
-            let add = extra.clamp(0, cap);
-            st.count = (st.count as i32 + add).clamp(0, 255) as u8;
+            // Vanilla: `grow(round(level * count.getFloat))`, then
+            // `limitSize(limit)` — which caps the *total* stack, not the
+            // bonus. Drawing the float and scaling it gives 0..level, not
+            // `getInt * level` (only ever 0 or level).
+            let extra = (count.get_f32(rng) * level as f32).round().max(0.0) as i32;
+            let total = st.count as i32 + extra;
+            let total = if *limit == u32::MAX {
+                total
+            } else {
+                total.min(*limit as i32)
+            };
+            st.count = total.clamp(0, 255) as u8;
         }
         Function::EnchantRandomly
         | Function::EnchantWithLevels
@@ -966,6 +979,14 @@ fn resolve_entry_nested(entry: &mut Entry, tables: &LootTables, stack: &mut Vec<
             let id = id.clone();
             if let Some(t) = tables.table_impl(&id, stack) {
                 entry.kind = EntryKind::Nested(t);
+            }
+        }
+        EntryKind::Nested(t) => {
+            // An inline table parsed in place; resolve references inside it.
+            for pool in &mut Arc::make_mut(t).pools {
+                for entry in &mut pool.entries {
+                    resolve_entry_nested(entry, tables, stack);
+                }
             }
         }
         EntryKind::Alternatives(c) | EntryKind::Group(c) | EntryKind::Sequence(c) => {
@@ -1204,12 +1225,17 @@ fn parse_entry(
                 expand: j.bool_or("expand", false),
             }
         }
-        "minecraft:loot_table" => EntryKind::LootTable(
-            j.str_of("value")
-                .or_else(|| j.str_of("name"))
-                .unwrap_or("")
-                .to_owned(),
-        ),
+        "minecraft:loot_table" => match j.get("value").or_else(|| j.get("name")) {
+            // An inline table object: parse it here so the roll needs no
+            // registry lookup. `equipment/trial_chamber` is entirely inline.
+            Some(v @ Json::Obj(_)) => EntryKind::Nested(Arc::new(parse_table("", v, tags, warn)?)),
+            _ => EntryKind::LootTable(
+                j.str_of("value")
+                    .or_else(|| j.str_of("name"))
+                    .unwrap_or("")
+                    .to_owned(),
+            ),
+        },
         "minecraft:alternatives" => EntryKind::Alternatives(parse_children(j, tags, warn)?),
         "minecraft:group" => EntryKind::Group(parse_children(j, tags, warn)?),
         "minecraft:sequence" => EntryKind::Sequence(parse_children(j, tags, warn)?),
@@ -1322,13 +1348,15 @@ fn parse_condition(
         "minecraft:match_tool" => {
             let pred = j.get("predicate")?;
             // Any predicate key we do not model makes the condition impossible
-            // rather than permissive.
+            // rather than permissive — and is recorded so the gap is visible.
             let known = ["items", "predicates"];
-            if pred
-                .as_obj()
-                .is_some_and(|m| m.keys().any(|k| !known.contains(&k.as_str())))
-            {
-                return Some(Condition::Impossible);
+            if let Some(obj) = pred.as_obj() {
+                for k in obj.keys() {
+                    if !known.contains(&k.as_str()) {
+                        note(warn, "match_tool-predicate", k);
+                        return Some(Condition::Impossible);
+                    }
+                }
             }
             let items = pred.get("items").map(|v| match v {
                 Json::Str(s) => vec![s.to_owned()],
@@ -1353,11 +1381,13 @@ fn parse_condition(
                 out
             });
             let predicates = pred.get("predicates");
-            if predicates
-                .and_then(Json::as_obj)
-                .is_some_and(|m| m.keys().any(|k| k != "minecraft:enchantments"))
-            {
-                return Some(Condition::Impossible);
+            if let Some(obj) = predicates.and_then(Json::as_obj) {
+                for k in obj.keys() {
+                    if k != "minecraft:enchantments" {
+                        note(warn, "match_tool-predicate", k);
+                        return Some(Condition::Impossible);
+                    }
+                }
             }
             let enchants = predicates
                 .and_then(|p| p.get("minecraft:enchantments"))
@@ -1411,17 +1441,21 @@ fn parse_condition(
             // evaluated here; fail closed rather than match by accident.
             // `type`, `flags`, `components` and `type_specific` are handled.
             let known = ["type", "flags", "components", "type_specific"];
-            if pred
-                .as_obj()
-                .is_some_and(|m| m.keys().any(|k| !known.contains(&k.as_str())))
-            {
-                return Some(Condition::Impossible);
+            if let Some(obj) = pred.as_obj() {
+                for k in obj.keys() {
+                    if !known.contains(&k.as_str()) {
+                        note(warn, "entity_properties-predicate", k);
+                        return Some(Condition::Impossible);
+                    }
+                }
             }
-            if pred.get("flags").and_then(Json::as_obj).is_some_and(|m| {
-                m.keys()
-                    .any(|k| !["is_on_fire", "is_baby", "is_sneaking"].contains(&k.as_str()))
-            }) {
-                return Some(Condition::Impossible);
+            if let Some(obj) = pred.get("flags").and_then(Json::as_obj) {
+                for k in obj.keys() {
+                    if !["is_on_fire", "is_baby", "is_sneaking"].contains(&k.as_str()) {
+                        note(warn, "entity_properties-flag", k);
+                        return Some(Condition::Impossible);
+                    }
+                }
             }
             let (kind, kind_tag) = match pred.get("type") {
                 Some(Json::Str(s)) => {
@@ -1455,19 +1489,24 @@ fn parse_condition(
                 for (k, v) in obj {
                     match v {
                         Json::Str(s) => components.push((k.clone(), s.clone())),
-                        _ => return Some(Condition::Impossible),
+                        _ => {
+                            note(warn, "entity_properties-component", k);
+                            return Some(Condition::Impossible);
+                        }
                     }
                 }
             }
             // `type_specific` must name a concrete entity type and carry only
-            // int/bool fields.
+            // int/bool fields; a range (`{"min":…}`) is not modelled.
             let type_specific = match pred.get("type_specific").and_then(Json::as_obj) {
                 None => None,
                 Some(obj) => {
                     let Some(ty) = obj.get("type").and_then(Json::as_str) else {
+                        note(warn, "entity_properties-type_specific", "no-type");
                         return Some(Condition::Impossible);
                     };
                     if ty.starts_with('#') {
+                        note(warn, "entity_properties-type_specific", "tag-type");
                         return Some(Condition::Impossible);
                     }
                     let mut fields = Vec::new();
@@ -1478,7 +1517,10 @@ fn parse_condition(
                         match v {
                             Json::Num(n) => fields.push((k.clone(), PredValue::Int(*n as i64))),
                             Json::Bool(b) => fields.push((k.clone(), PredValue::Bool(*b))),
-                            _ => return Some(Condition::Impossible),
+                            _ => {
+                                note(warn, "entity_properties-type_specific", k);
+                                return Some(Condition::Impossible);
+                            }
                         }
                     }
                     Some((with_ns(ty), fields))
@@ -1613,11 +1655,17 @@ fn parse_function_inner(
                 .get("count")
                 .map(parse_number)
                 .unwrap_or(NumberProvider::Constant(1.0));
-            let limit = j.i32_or("limit", 0);
+            // `limit` is optional (`ExtraCodecs.POSITIVE_INT.optionalFieldOf
+            // ("limit", Integer.MAX_VALUE)`): absent means no cap.
+            let limit = j
+                .get("limit")
+                .and_then(Json::as_f64)
+                .map(|v| v.max(0.0) as u32)
+                .unwrap_or(u32::MAX);
             Function::EnchantedCountIncrease {
                 enchantment,
                 count,
-                limit: limit.max(0) as u32,
+                limit,
             }
         }
         "minecraft:enchant_randomly" => {
@@ -1796,6 +1844,114 @@ mod tests {
         assert!((counts[1] as f64 / total - 1.0 / 3.0).abs() < 0.02);
         assert!((counts[2] as f64 / total - 1.0 / 3.0).abs() < 0.02);
         assert!((counts[3] as f64 / total - 1.0 / 6.0).abs() < 0.02);
+    }
+
+    /// Vanilla `limit` caps the *total* stack via `limitSize`, not the bonus.
+    /// The bogged table is `limit:1` over a `uniform 0..1` count, so no drop
+    /// may exceed one even with looting III.
+    #[test]
+    fn enchanted_count_increase_limit_caps_the_total() {
+        let t = table_from(
+            r#"{"pools":[{"rolls":1,"entries":[
+                {"type":"minecraft:item","name":"minecraft:arrow",
+                 "functions":[
+                   {"function":"minecraft:set_count","add":false,
+                    "count":{"type":"minecraft:uniform","min":0,"max":1}},
+                   {"function":"minecraft:enchanted_count_increase",
+                    "enchantment":"minecraft:looting",
+                    "count":{"type":"minecraft:uniform","min":0,"max":1},
+                    "limit":1}]}]}]}"#,
+        );
+        let ctx = LootContext {
+            enchants: [("minecraft:looting".to_owned(), 3)].into_iter().collect(),
+            ..Default::default()
+        };
+        let mut rng = Rng::new(23);
+        let mut saw_one = false;
+        for _ in 0..50_000 {
+            let out = t.roll(&ctx, &mut rng);
+            let n = out.first().map_or(0, |s| s.count);
+            assert!(n <= 1, "limit 1 must cap the total, got {n}");
+            saw_one |= n == 1;
+        }
+        assert!(saw_one);
+    }
+
+    /// A constant number provider is `Math.round(getFloat)` (vanilla's
+    /// default `getInt`), not a floor.
+    #[test]
+    fn constant_number_provider_rounds() {
+        let mut rng = Rng::new(1);
+        assert_eq!(NumberProvider::Constant(2.4).get_i32(&mut rng), 2);
+        assert_eq!(NumberProvider::Constant(2.5).get_i32(&mut rng), 3);
+        assert_eq!(NumberProvider::Constant(2.6).get_i32(&mut rng), 3);
+    }
+
+    /// `explosion_decay` decays per item, not per stack: each of the three
+    /// items survives independently at radius 2 (probability 1/2).
+    #[test]
+    fn explosion_decay_is_per_item() {
+        let t = table_from(
+            r#"{"pools":[{"rolls":1,"entries":[
+                {"type":"minecraft:item","name":"minecraft:diamond",
+                 "functions":[
+                   {"function":"minecraft:set_count","add":false,"count":3},
+                   {"function":"minecraft:explosion_decay"}]}]}]}"#,
+        );
+        let ctx = LootContext {
+            explosion_radius: Some(2.0),
+            ..Default::default()
+        };
+        let mut rng = Rng::new(31);
+        let mut counts = [0u64; 4];
+        for _ in 0..120_000 {
+            let out = t.roll(&ctx, &mut rng);
+            let n = out.first().map_or(0, |s| s.count);
+            assert!(n <= 3);
+            counts[n as usize] += 1;
+        }
+        // Binomial(3, 1/2): each count must appear, so it is not all-or-nothing.
+        for (k, c) in counts.iter().enumerate() {
+            assert!(*c > 0, "count {k} never occurred: {counts:?}");
+        }
+        let mean: f64 = counts.iter().enumerate().map(|(k, c)| k as f64 * *c as f64).sum::<f64>()
+            / 120_000.0;
+        assert!((mean - 1.5).abs() < 0.05, "mean was {mean}");
+    }
+
+    /// An inline `loot_table` value object resolves to its own loot.
+    #[test]
+    fn inline_loot_table_value_yields_items() {
+        let t = table_from(
+            r#"{"pools":[{"rolls":1,"entries":[
+                {"type":"minecraft:loot_table","value":{
+                   "pools":[{"rolls":1,"entries":[
+                     {"type":"minecraft:item","name":"minecraft:emerald"}]}]}}]}]}"#,
+        );
+        let mut rng = Rng::new(1);
+        let out = t.roll(&LootContext::default(), &mut rng);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].item, "minecraft:emerald");
+    }
+
+    /// The pack's fully-inline `equipment/trial_chamber` table now produces
+    /// loot rather than silently nothing.
+    #[test]
+    fn real_inline_equipment_table_yields_items() {
+        let Ok(root) = std::env::var("AETHER_VANILLA_PACK") else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let tables = LootTables::open(&root);
+        let t = tables
+            .table("minecraft:equipment/trial_chamber")
+            .expect("trial_chamber table");
+        let mut rng = Rng::new(1);
+        let mut any = false;
+        for _ in 0..200 {
+            any |= !t.roll(&LootContext::default(), &mut rng).is_empty();
+        }
+        assert!(any, "the inline table must produce loot, not nothing");
     }
 
     #[test]
@@ -2359,6 +2515,19 @@ mod tests {
         );
         let wheat = tables.block_table("minecraft:wheat").expect("wheat table");
         assert_eq!(wheat.functions.len(), 1, "root explosion_decay");
+        // The pool-deleting predicates are named, not just the condition type.
+        assert!(
+            skipped
+                .iter()
+                .any(|s| s == "entity_properties-predicate:equipment"),
+            "the smelting-alternative equipment predicate should be recorded: {skipped:?}"
+        );
+        assert!(
+            skipped
+                .iter()
+                .any(|s| s == "entity_properties-predicate:vehicle"),
+            "the zombie's vehicle predicate should be recorded: {skipped:?}"
+        );
     }
 
     /// Every table in the pack must parse; the ones that do not are printed.
