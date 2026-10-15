@@ -143,7 +143,7 @@ mod imp {
             tick_budget_ms: cfg.plugins.tick_budget_ms.max(1),
             memory_mib: cfg.plugins.memory_mib.max(1),
             max_faults: cfg.plugins.max_faults.max(1),
-            ..HostConfig::default()
+            init_fuel: cfg.plugins.init_fuel.max(1),
         };
         let mut host = match PluginHost::new(host_config, backend) {
             Ok(h) => h,

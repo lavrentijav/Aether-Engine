@@ -165,6 +165,10 @@ pub struct PluginsConfig {
     pub memory_mib: u64,
     /// Traps a plugin may take before the host disables it.
     pub max_faults: u32,
+    /// Fuel granted to a plugin's instantiation and `init`. Bounds how much
+    /// first-time work a plugin may do at load, independently of the per-call
+    /// time budget.
+    pub init_fuel: u64,
     /// Per-plugin overrides, keyed by manifest id.
     #[serde(flatten)]
     pub plugins: std::collections::BTreeMap<String, PluginEntry>,
@@ -178,6 +182,7 @@ impl Default for PluginsConfig {
             tick_budget_ms: 25,
             memory_mib: 64,
             max_faults: 5,
+            init_fuel: 100_000_000,
             plugins: std::collections::BTreeMap::new(),
         }
     }
@@ -488,6 +493,7 @@ budget_ms = 5        # per-call time budget before a running plugin is interrupt
 tick_budget_ms = 25  # shared budget for all plugins across one tick
 memory_mib = 64      # per-plugin linear-memory cap
 max_faults = 5       # traps before the host disables a plugin
+init_fuel = 100000000  # fuel for a plugin's instantiation and init
 
 # Per-plugin overrides are tables named for the plugin's manifest id, e.g.
 # [plugins.hello]

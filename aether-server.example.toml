@@ -69,6 +69,7 @@ budget_ms = 5        # per-call time budget before a running plugin is interrupt
 tick_budget_ms = 25  # shared budget for all plugins across one tick
 memory_mib = 64      # per-plugin linear-memory cap
 max_faults = 5       # traps before the host disables a plugin
+init_fuel = 100000000  # fuel for a plugin's instantiation and init
 
 # Per-plugin overrides are tables named for the plugin's manifest id, e.g.
 # [plugins.hello]

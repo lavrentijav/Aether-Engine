@@ -288,6 +288,31 @@ fn the_shared_tick_budget_bounds_all_plugins_together() {
 }
 
 #[test]
+fn init_is_bounded_by_the_configured_fuel() {
+    // `init_fuel` is operator-tunable; a budget too small for a plugin's
+    // first-time work must fail the load rather than run unbounded.
+    let backend = Arc::new(TestBackend::default());
+    let config = HostConfig {
+        init_fuel: 1,
+        ..HostConfig::default()
+    };
+    let mut h = PluginHost::new(config, backend).unwrap();
+    let (m, caps, cfg) = recorder("r", 0, &[], &[], &[]);
+    let err = h.add(&m, &caps, &cfg).unwrap_err();
+    assert!(
+        h.ids().is_empty(),
+        "a plugin out of init fuel must not load"
+    );
+    let _ = err;
+
+    // The default budget loads the same plugin fine.
+    let (mut h2, _backend) = host();
+    let (m2, caps2, cfg2) = recorder("r", 0, &[], &[], &[]);
+    h2.add(&m2, &caps2, &cfg2).unwrap();
+    assert_eq!(h2.ids(), vec!["r".to_string()]);
+}
+
+#[test]
 fn no_epoch_ticker_until_a_plugin_loads() {
     let (mut h, _backend) = host();
     assert!(
