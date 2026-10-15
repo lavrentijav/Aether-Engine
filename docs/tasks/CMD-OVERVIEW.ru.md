@@ -44,9 +44,28 @@
 
 ## Все 47 задач
 
-`C` = core, `P` = plugin. «Зависит» — другие CMD-задачи этого же манифеста.
+**Легенда:**
+
+- **C / P** — где живёт задача: **C** = core (ядро), **P** = plugin (плагин). Выбор по правилу из
+  `CONTRIBUTING.md` («Core or plugin?»), см. раздел выше.
+- **размер** — оценка объёма: **S** ≈ одна сессия агента, **M** ≈ 2–4 коммита, **L** — большой,
+  дробить перед выдачей.
+- **L→split** — задача помечена L и уже описана с разбиением на под-задачи (`CMD-36a/b`,
+  `CMD-41a/b`) внутри брифа; в манифесте это одна строка, чтобы id оставались стабильными.
+- **зависит** — id задач **этого же** манифеста, которые должны быть готовы раньше (граф строго
+  назад, порядок строк — топологический).
+- **внешние зависимости** (не CMD-задачи, а ветки/сервисы проекта):
+  **P1** — хост плагинов (WASM, события, реестры; **в main ещё нет**),
+  **P2** — сервис экономики (WIT + ledger),
+  **PA1** — UI-API плагинов (окна, title/bossbar),
+  **PA2** — read-only API истории журнала,
+  **PA3** — сетевой доступ плагинов (HTTP).
+- **op level** в брифах — ванильный уровень доступа 0–4 (0 всем … 4 владелец);
+  **permission node** — узел прав (например `minecraft.command.ban`), проверяется ядром прав
+  (CMD-01/02). Если узел не задан явно — действует уровень.
 
 ### Инфраструктура команд (core)
+
 | id | что | C/P | размер | зависит |
 |---|---|---|---|---|
 | CMD-01 | Ядро прав: узлы, op-level 0–4, default true/false/op | C | M | — |
@@ -58,25 +77,30 @@
 | CMD-07 | Консоль и RCON как источники команд | C | M | CMD-03, CMD-01 |
 
 ### Ванильные команды — ядро
-**V-admin**
+
+#### V-admin
+
 | id | что | C/P | размер | зависит |
 |---|---|---|---|---|
 | CMD-08 | `/op /deop /ban /ban-ip /banlist /pardon /pardon-ip /kick /whitelist` | C | M | CMD-05, CMD-01, CMD-06 |
 | CMD-09 | `/stop /save-all /save-on /save-off /list /seed /version /setidletimeout /transfer /publish` | C | M | CMD-05 |
 
-**V-player**
+#### V-player
+
 | id | что | C/P | размер | зависит |
 |---|---|---|---|---|
 | CMD-10 | `/clear /effect /enchant /experience /attribute /damage` | C | L | CMD-06, CMD-05, CMD-01 |
 | CMD-11 | `/teleport /tp /spreadplayers /spawnpoint /spectate /ride /item /kill` | C | L | CMD-06, CMD-05, CMD-01 |
 
-**V-world**
+#### V-world
+
 | id | что | C/P | размер | зависит |
 |---|---|---|---|---|
 | CMD-12 | `/setblock /fill /clone /fillbiome /place /forceload` | C | L | CMD-06, CMD-05, CMD-01 |
 | CMD-13 | `/time /weather /worldborder /setworldspawn /gamerule /difficulty /tick /locate /defaultgamemode /waypoint` | C | L | CMD-06, CMD-05, CMD-01 |
 
-**V-data**
+#### V-data
+
 | id | что | C/P | размер | зависит |
 |---|---|---|---|---|
 | CMD-14 | `/data` (NBT чтение/правка блоков, сущностей, storage) | C | L | CMD-06, CMD-05, CMD-01 |
@@ -90,6 +114,7 @@
 | CMD-22 | `/execute` (модификаторы, условия, store) | C | L | CMD-06, CMD-05, CMD-15, CMD-21 |
 
 ### Серверные операции и история (core)
+
 | id | что | C/P | размер | зависит |
 |---|---|---|---|---|
 | CMD-23 | `/tps /mspt /gc /plugins /restart /debug /perf /jfr` | C | M | CMD-05, CMD-01 |
@@ -100,6 +125,7 @@
 | CMD-28 | История: `/restore` и `/purge` | C | M | CMD-27 |
 
 ### Core API для плагинов
+
 | id | что | C/P | размер | зависит |
 |---|---|---|---|---|
 | CMD-29 | Индекс регионов (R-tree по чанкам) + проверка защиты | C | L | CMD-01, P1 |
@@ -108,6 +134,7 @@
 | CMD-32 | Player/UI API (окна, title/bossbar, эффекты, scheduler) — PA1 | C | L | CMD-01, P1 |
 
 ### Плагины
+
 | id | что | C/P | размер | зависит |
 |---|---|---|---|---|
 | CMD-33 | Права-UI (`/lp`, треки, meta, веб-редактор) | P | L | P1, CMD-02 |
