@@ -86,6 +86,26 @@ one commit each, with a test reproducing the review's sequence:
 * **property test** (`J10-fixtest`): random window reports never grow the spear
   multiset; pure moves conserve it exactly.
 
+## Round-2 fixes (QP-review-2, J10-fix8 … J10-fix11)
+
+`docs/tasks/QP-review-2.md` confirmed F1–F6 fixed and found N1–N3:
+
+* **N1** (`J10-fix8`): the carried item now has priority over the slot's own
+  value, so a swap of a stand-in onto a same-wire slot is a *move*, not an
+  echo; and the empty-slot arm shadows *any* picked-up item, not only a
+  disguised one. Test `a_swap_of_a_stand_in_onto_a_same_wire_slot_keeps_the_real_item`.
+* **N2** (`Merge main` `18051ac` + `J10-fix9`): merged `main` (1.20.2/1.20.4
+  gameplay, visibility, brewing) and added 764 → `V1_20_2`, 765 → `V1_20_4` to
+  `table_for`, regenerating both item tables. Block tables byte-identical to
+  `main`.
+* **N3** (`J10-fix10`): the property test now drives a faithful client model
+  (no ambiguous echo) and after every step asserts `server == client`,
+  `shadow == cursor`, the full multiset never loses an entry, and the spear
+  count is invariant.
+* **F7** (`J10-fix11`): campfire/soul_campfire map to `flint_and_steel` on 1.8
+  instead of stone (1.8 has no `fire` item); the residual — block `fire` vs item
+  flint and steel — is documented.
+
 ## Left / interface note for the J5 (J9) agent
 
 The per-move logic keys off `compat::items::table_for(handle.codec.protocol_id())`.
