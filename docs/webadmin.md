@@ -1,0 +1,108 @@
+# Web admin (native plugin `plugins/webadmin`)
+
+> **Read this in other languages:** [Русский 🇷🇺](webadmin.ru.md)
+>
+> Stage **WEB1** of [`tasks/QUEUE-WEB-admin.md`](tasks/QUEUE-WEB-admin.md): a read-only HTTP
+> server inside the plugin for live ops. The map and the time slider are WEB2; relations are WEB3.
+
+The web admin is a **native plugin** (tier N): compiled into `aether-server`, enabled and disabled
+like any other plugin, and linked in-process so it can read live game state without a serialization
+boundary. It writes nothing — there is no world write from the web in this stage.
+
+## Architecture
+
+```
+aether-server ── publishes ──▶ plugin host service registry ──▶ plugins/webadmin
+   │  `ops@0.1` (ServerOps, crates/aether-ops trait)                 │
+   │  TPS/MSPT · memory · players · regions · profiles/inventories   │  HTTP/1.1 (std::net)
+   ▼                                                                  ▼
+ game tick ── samples ──▶ crates/aether-server/src/web.rs      plain HTML + small inline JS
+```
+
+* `crates/aether-ops` — the **one** shared crate: the `OpsService` trait and its serialisable
+  views (`Dashboard`, `RegionStat`, `PlayerEntry`, `PlayerProfile`, `InventoryView`). The server
+  implements it; the plugin reads it. Neither names the other's internals, and the core builds and
+  runs with the plugin absent.
+* `crates/aether-server/src/web.rs` — the server half: tick-window metrics, the region sampler, the
+  per-player profile store and the `OpsService` implementation. `plugins.rs` registers it as
+  `ops@0.1` **before** the native plugins load, so the plugin's `requires = ["ops@0.1"]` resolves.
+* `plugins/webadmin` — the HTTP server, token auth and pages. No framework, no external CDN.
+
+## Enabling it
+
+Plugins are off when `[plugins] dir` is empty. Set it, then enable the web admin:
+
+```toml
+[plugins]
+dir = "plugins"                 # plugin discovery must be on (as for any plugin)
+
+[plugins.webadmin]
+enabled = true
+bind = "127.0.0.1:8090"         # default; loopback only
+token = "change-me"             # optional; omit to use `/webadmin token`
+```
+
+No secret is compiled in. If `token` is omitted (or empty), the only way in is the in-game command
+`/webadmin token` (operator level 3), which mints a **one-time** token valid for five minutes and
+prints it; issuing a new one invalidates the old. The token reaches the browser as an `HttpOnly`
+cookie after the login form, or directly as `?token=` (handy for `curl`).
+
+## Pages
+
+| Path | What it shows |
+|------|---------------|
+| `/` | **Dashboard**: TPS, MSPT (mean and slowest), players online/max, memory, uptime, ticks, columns sent. Auto-refreshes every 2 s from `/api/…`. |
+| `/regions` | **Heaviest regions**: a ranked table and a coloured heat grid, one cell per 32×32-chunk region. |
+| `/players` | Every known player: state, address, first/last seen, playtime. |
+| `/player?id=<uuid\|name>` | Profile: first/last seen, playtime, addresses seen, and live position/health/food/mode when online. |
+| `/inventory?id=<uuid\|name>` | **Inventory viewer**: live when online, from the saved store when offline; main inventory + hotbar + offhand, armour, the held slot. |
+| `/api/dashboard`, `/api/regions`, `/api/players`, `/api/player?id=`, `/api/inventory?id=` | The same data as JSON. |
+
+Everything is read-only. Unknown routes are 404; non-`GET` requests other than `POST /login` are 405.
+
+## The region metrics — what is sampled and what is not
+
+The region table is deliberately cheap: it samples **once a second** on the tick thread and reads
+only snapshots, never per-block on the hot path. Each field is:
+
+| Column | Meaning |
+|--------|---------|
+| `entities` | non-player entities standing in the region at the sample |
+| `block_entities` | loaded containers (chests, furnaces, hoppers, brewing stands) in the region |
+| `block_updates` | scheduled block/fluid ticks still pending in the region |
+| `redstone_updates` | **always zero** until the redstone engine is wired to the server (it is a standalone crate today) |
+| `chunk_sends` | columns sent to clients (join burst and streamer) whose centre is in the region, since the last sample |
+| `cost` | `entities + 2·block_entities + block_updates + redstone + chunk_sends/4` — ranking only |
+
+Regions not touched in a window decay (cost halves, dropped at `samples == 0`), so the heat map is a
+short moving average rather than a lifetime total. The numbers are a **sample**, not a profiler: a
+spike between two samples is not attributed. This is the "cheap, sampled" figure the brief asks for;
+the in-engine profiler is a later task.
+
+## Security notes
+
+* Binds to loopback by default; the operator must opt into another interface.
+* Read-only: the HTTP layer has no route that could write the world, and the `ops` service trait has
+  no method that could.
+* The token comparison is length-checked and byte-accumulated, not an early-exit `==`.
+* Responses carry `Cache-Control: no-store`; the cookie is `HttpOnly; SameSite=Strict`.
+* No secrets in git: `token` is operator config (a sample file has none), and the one-time token is
+  generated from `/dev/urandom` at runtime.
+
+## Limits
+
+* One thread per connection, no keep-alive (the server closes after each response). Fine for an
+  operator console on loopback; not built for public traffic.
+* The profile store keeps the last 16 addresses per player.
+* The ender chest view is in the shape (`InventoryView::ender`) but the engine has no ender chest
+  yet, so it is empty.
+* The engine does not persist a player's first-join time or playtime anywhere else; the web admin's
+  store (`WB` + uuid in the world KV) is the only record, written on join and leave.
+
+## Tests
+
+* `crates/aether-server/src/web.rs` — region indexing, uuid handling, inventory view shaping, the
+  tick window.
+* `plugins/webadmin` — auth (config and one-time tokens, cookie parsing, constant compare), HTTP
+  parsing (method/path/query/headers, percent decoding, response encoding), routing, and page
+  rendering against a mock `OpsService`.

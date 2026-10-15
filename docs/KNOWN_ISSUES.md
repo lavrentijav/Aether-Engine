@@ -110,6 +110,12 @@
     - **A dependent generates its own bindings.** `wit-bindgen` 0.57 cannot export a world from a separate bindings crate, so `crates/aether-plugin-sdk` ships the `dependent` world and the `requires!` macro, and a dependent runs `generate!` in-crate (see `plugins/examples/greet`). The prelude re-exports the generated service modules; there are no typed `permissions()`/`commands()` resource handles, because the WIT is stateless.
     - **`requires!` is unenforced.** The macro emits a `REQUIRES` constant that nothing reads; the host reads the dependency from `plugin.toml`, so the two are kept in step by the author.
     - **The capability gate is in the service layer.** `plugins/sdk` checks `permissions.admin` on grant/revoke and `messages.send`/`messages.broadcast` on sends, reading the host's record of the caller's effective grant by caller id. Native dependents are trusted-by-install, so the gate is a consistency check for them, not a sandbox.
+20. **The web admin (WEB1) is new; its region metrics are a sample.** `plugins/webadmin` is a native plugin serving a read-only dashboard, heaviest regions, players and inventories over loopback HTTP, and `crates/aether-server/src/web.rs` publishes the `ops@0.1` service it reads (see [webadmin.md](webadmin.md)). Known limits:
+    - **Regions are sampled, not profiled.** The table is rebuilt once a second from snapshots and decays; a spike between samples is not attributed. `redstone_updates` is always zero until the redstone engine is wired (it is a standalone crate today), and `chunk_sends` counts the join burst and streamer per region since the last sample, not every packet.
+    - **The profile store is the only record of first/last seen and playtime.** Nothing else in the engine persists them; `WB` + uuid in the world KV is written on join and leave, so a player who has never joined since this stage has no row.
+    - **No ender chest.** The view has the field, the engine has no ender chest.
+    - **Loopback HTTP, no TLS and no public hardening.** A thread per connection, no keep-alive; the token (config or a five-minute one-time `/webadmin token`) is the only gate.
+    - **Plugins must be enabled.** Like every plugin, the web admin only loads when `[plugins] dir` is set; there is no separate switch that turns it on with plugins off.
 
 ### B. Known Deviations Registry (Phase 1 — accepted on purpose)
 These are **not bugs** in Phase 1 — they are documented, temporary compatibility gaps that must be recorded in the engine config and closed in Phase 2.
