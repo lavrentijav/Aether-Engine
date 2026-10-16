@@ -4,7 +4,8 @@
 #
 # Most settings can also come from the environment, which wins over this file:
 # AETHER_HOST, AETHER_PORT, AETHER_WORLD_DIR, AETHER_WORLDGEN_DATA,
-# AETHER_CACHE_DIR, AETHER_OPERATORS, AETHER_WHITELIST, AETHER_DATABASE_URL.
+# AETHER_CACHE_DIR, AETHER_OPERATORS, AETHER_WHITELIST, AETHER_DATABASE_URL,
+# AETHER_RCON_ENABLED, AETHER_RCON_ADDRESS, AETHER_RCON_PASSWORD, AETHER_RCON_PORT.
 
 # Who may run administrative commands: "name", or "name@1.2.3.4" to also
 # require that address. This server is offline-mode, so a bare name is a claim
@@ -48,6 +49,16 @@ world_dir = "world"   # persistent world directory, created on first run
 autosave_secs = 30    # how often block edits are flushed to disk
 watchdog_secs = 60    # exit (for a supervisor to restart) if the tick stalls this long; 0 only warns
 status_secs = 300     # a status line in the log this often; 0 disables
+
+[rcon]
+# The RCON remote-console protocol, off by default. It runs commands with the
+# console's authority (op level 4), so it needs a password: enabling it with an
+# empty password is a startup error. Bound to loopback unless you name another
+# address, and warned about when it is reachable off this machine.
+enabled = false
+address = "127.0.0.1"   # loopback by default, like [server] host
+password = ""           # required when enabled; AETHER_RCON_PASSWORD overrides
+port = 25575            # vanilla RCON port
 
 [resource_pack]
 # Offered on join so older clients can render blocks their version lacks.

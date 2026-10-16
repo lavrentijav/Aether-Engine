@@ -19,6 +19,7 @@
 //! which is why the mode has to be per-player state and cannot be inferred
 //! from the packet.
 
+pub mod console;
 pub mod pager;
 pub mod query;
 pub mod registry;
@@ -33,7 +34,9 @@ use crate::protocol::ServerEvent;
 use crate::session::DemoWorld;
 use pager::Pager;
 use query::{Context, Query};
-use tree::{Ctx, Deny, Node, Requirement};
+use tree::{Ctx, Deny, Node, Requirement, Source};
+
+pub use tree::ServerKind;
 
 /// Per-player command state: inspect mode, and the last answer to page
 /// through.
@@ -75,6 +78,9 @@ pub const RESERVED_COMMANDS: &[&str] = &[
     "food",
     "heal",
     "visibility",
+    // server lifecycle (console/RCON)
+    "stop",
+    "save-all",
     // messaging
     "msg",
     "tell",
@@ -120,6 +126,17 @@ pub fn dispatch(
     tree::execute(text, handle, registry, world)
 }
 
+/// Like [`dispatch`], but for any command source. This is how the console and
+/// RCON run a typed line through the same tree as a player.
+pub fn dispatch_source(
+    text: &str,
+    source: Source,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+) -> Reply {
+    tree::run_command(text, source, registry, world)
+}
+
 /// The history, `/help` and `/aether` commands — the ones that live in this
 /// module — as tree nodes.
 pub(crate) fn core_nodes() -> Vec<Node> {
@@ -136,12 +153,33 @@ pub(crate) fn core_nodes() -> Vec<Node> {
         // the tree-driven `/help` (CMD-05) replaces it.
         tree::greedy("help", &["?"], Requirement::None, exec_help),
         tree::greedy("aether", &[], Requirement::Fn(require_admin), exec_aether),
+        // The server-lifecycle commands the console and RCON need. CMD-09
+        // expands this group (`/list`, `/seed`, `/version`, save-on/off); the
+        // save/stop path here is the same one the shutdown watcher uses.
+        tree::simple(
+            "stop",
+            &[],
+            Requirement::Level {
+                op: 4,
+                node: "minecraft.command.stop",
+            },
+            exec_stop,
+        ),
+        tree::simple(
+            "save-all",
+            &[],
+            Requirement::Level {
+                op: 4,
+                node: "minecraft.command.save-all",
+            },
+            exec_save_all,
+        ),
     ]
 }
 
 /// The `/aether` permission gate, enforced by the tree.
-pub fn require_admin(handle: &PlayerHandle) -> Result<(), Deny> {
-    if crate::is_operator(handle) {
+pub fn require_admin(source: &Source) -> Result<(), Deny> {
+    if source.is_operator() {
         Ok(())
     } else {
         Err(Deny::Message(
@@ -150,31 +188,70 @@ pub fn require_admin(handle: &PlayerHandle) -> Result<(), Deny> {
     }
 }
 
+/// `/stop` — ask the server to stop cleanly.
+///
+/// It only requests the stop; the shutdown watcher ([`crate::ops`]) performs
+/// the save and exit, so the console, RCON and a signal all leave the same
+/// way. No reply is required by vanilla, but one is sent so an RCON client is
+/// not left waiting for a response that will never come as the socket closes.
+fn exec_stop(_ctx: &mut Ctx) -> Reply {
+    crate::ops::request_stop();
+    Reply::one("Stopping the server")
+}
+
+/// `/save-all` — flush every dirty chunk and pending queue to disk.
+fn exec_save_all(ctx: &mut Ctx) -> Reply {
+    crate::game::blockticks::save(ctx.world);
+    crate::game::fluids::save(ctx.world);
+    match ctx.world.flush() {
+        Ok(()) => Reply::one("Saved the game"),
+        Err(e) => Reply::one(format!("Saving failed: {e}")),
+    }
+}
+
 fn exec_inspect(ctx: &mut Ctx) -> Reply {
-    toggle_inspect(ctx.handle)
+    match ctx.player() {
+        Some(handle) => toggle_inspect(handle),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_lookup(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    lookup(&args, ctx.handle, ctx.registry, ctx.world)
+    match ctx.player() {
+        Some(handle) => lookup(&args, handle, ctx.registry, ctx.world),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_rollback(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    rollback(&args, ctx.handle, ctx.registry, ctx.world)
+    match ctx.player() {
+        Some(handle) => rollback(&args, handle, ctx.registry, ctx.world),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_page(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    page(&args, ctx.handle)
+    match ctx.player() {
+        Some(handle) => page(&args, handle),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_inventory(ctx: &mut Ctx) -> Reply {
-    inventory(ctx.handle, ctx.world)
+    match ctx.player() {
+        Some(handle) => inventory(handle, ctx.world),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_stash(ctx: &mut Ctx) -> Reply {
-    crate::stash::open_command(ctx.handle, ctx.world)
+    match ctx.player() {
+        Some(handle) => crate::stash::open_command(handle, ctx.world),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_audit(ctx: &mut Ctx) -> Reply {
@@ -187,12 +264,12 @@ fn exec_cache(ctx: &mut Ctx) -> Reply {
 
 fn exec_help(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    help(&args, ctx.handle)
+    help(&args, ctx.source)
 }
 
 fn exec_aether(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    aether_admin(&args, ctx.handle, ctx.world)
+    aether_admin(&args, ctx.world)
 }
 
 /// The one place a plugin command is reached from: the tree found no core
@@ -229,7 +306,7 @@ pub(crate) fn plugin_command(text: &str, handle: &PlayerHandle) -> Option<Reply>
 /// the Mojang uuid they now own. Migration is deliberately manual — the
 /// server cannot know a fresh online login is the same person as an old
 /// offline one.
-fn aether_admin(args: &[&str], _handle: &PlayerHandle, world: &DemoWorld) -> Reply {
+fn aether_admin(args: &[&str], world: &DemoWorld) -> Reply {
     match args {
         ["auth", "migrate", name] => migrate_offline_player(name, world),
         _ => Reply::one("Usage: /aether auth migrate <name>"),
@@ -310,7 +387,7 @@ pub fn permitted_level(level: u8, node: &str, op: u8) -> bool {
 ///
 /// This is a stop-gap until the real tree-driven `/help` (CMD-05): it makes the catalogue
 /// discoverable while each command is stubbed with its own `not implemented yet (CMD-nn)`.
-fn help(args: &[&str], handle: &PlayerHandle) -> Reply {
+fn help(args: &[&str], source: Source) -> Reply {
     if let Some(name) = args.first() {
         return match registry::find(name) {
             Some(e) => Reply::one(format!(
@@ -326,7 +403,7 @@ fn help(args: &[&str], handle: &PlayerHandle) -> Reply {
     lines.push(format!(
         "({} commands pending, {} runnable now)",
         registry::CORE.len(),
-        if crate::is_operator(handle) {
+        if source.is_operator() {
             "all"
         } else {
             "level-0"

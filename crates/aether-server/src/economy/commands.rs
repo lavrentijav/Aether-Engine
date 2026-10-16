@@ -25,7 +25,7 @@ use aether_world::journal::{now_ms, ActorId, EventBody, Place};
 use super::model::{Money, TradeError};
 use super::{Economy, MarketFilter};
 use crate::commands::query::parse_duration_ms;
-use crate::commands::tree::{self, Ctx, Deny, Node, Requirement};
+use crate::commands::tree::{self, Ctx, Deny, Node, Requirement, Source};
 use crate::commands::Reply;
 use crate::players::{PlayerHandle, SharedRegistry};
 use crate::session::DemoWorld;
@@ -62,11 +62,11 @@ fn disabled() -> Reply {
 /// The `/econ` gate, enforced by the tree. With no economy installed the
 /// disabled reply is what the caller must see, so the gate lets the executor
 /// deliver it — the check only bites once an economy exists.
-pub fn require_econ_op(handle: &PlayerHandle) -> Result<(), Deny> {
+pub fn require_econ_op(source: &Source) -> Result<(), Deny> {
     if crate::economy::get().is_none() {
         return Ok(());
     }
-    if crate::is_operator(handle) {
+    if source.is_operator() {
         Ok(())
     } else {
         Err(Deny::Message("that command is for operators".into()))
@@ -78,7 +78,10 @@ fn exec_balance(ctx: &mut Ctx) -> Reply {
         return disabled();
     };
     let args = ctx.refs();
-    balance(&args, ctx.handle, ctx.registry, econ)
+    match ctx.player() {
+        Some(handle) => balance(&args, handle, ctx.registry, econ),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_pay(ctx: &mut Ctx) -> Reply {
@@ -86,7 +89,10 @@ fn exec_pay(ctx: &mut Ctx) -> Reply {
         return disabled();
     };
     let args = ctx.refs();
-    pay(&args, ctx.handle, ctx.registry, econ)
+    match ctx.player() {
+        Some(handle) => pay(&args, handle, ctx.registry, econ),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_sell(ctx: &mut Ctx) -> Reply {
@@ -94,7 +100,10 @@ fn exec_sell(ctx: &mut Ctx) -> Reply {
         return disabled();
     };
     let args = ctx.refs();
-    sell(&args, ctx.handle, ctx.world, econ)
+    match ctx.player() {
+        Some(handle) => sell(&args, handle, ctx.world, econ),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_market(ctx: &mut Ctx) -> Reply {
@@ -102,7 +111,10 @@ fn exec_market(ctx: &mut Ctx) -> Reply {
         return disabled();
     };
     let args = ctx.refs();
-    market(&args, ctx.handle, ctx.registry, ctx.world, econ)
+    match ctx.player() {
+        Some(handle) => market(&args, handle, ctx.registry, ctx.world, econ),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_buy(ctx: &mut Ctx) -> Reply {
@@ -110,14 +122,20 @@ fn exec_buy(ctx: &mut Ctx) -> Reply {
         return disabled();
     };
     let args = ctx.refs();
-    buy(&args, ctx.handle, ctx.registry, ctx.world, econ)
+    match ctx.player() {
+        Some(handle) => buy(&args, handle, ctx.registry, ctx.world, econ),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_listings(ctx: &mut Ctx) -> Reply {
     let Some(econ) = ctx.econ else {
         return disabled();
     };
-    listings(ctx.handle, econ)
+    match ctx.player() {
+        Some(handle) => listings(handle, econ),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_unlist(ctx: &mut Ctx) -> Reply {
@@ -125,7 +143,10 @@ fn exec_unlist(ctx: &mut Ctx) -> Reply {
         return disabled();
     };
     let args = ctx.refs();
-    unlist(&args, ctx.handle, ctx.registry, ctx.world, econ)
+    match ctx.player() {
+        Some(handle) => unlist(&args, handle, ctx.registry, ctx.world, econ),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_econ(ctx: &mut Ctx) -> Reply {
@@ -133,7 +154,10 @@ fn exec_econ(ctx: &mut Ctx) -> Reply {
         return disabled();
     };
     let args = ctx.refs();
-    admin(&args, ctx.handle, ctx.registry, econ)
+    match ctx.player() {
+        Some(handle) => admin(&args, handle, ctx.registry, econ),
+        None => ctx.needs_player(),
+    }
 }
 
 /// `/econ give <player> <amount> [reason]` — the only way money enters the

@@ -99,15 +99,8 @@ pub const CORE: &[Entry] = &[
         "admin",
     ),
     // V-admin: server control & info (CMD-09).
-    e("stop", &[], "minecraft.command.stop", 4, "CMD-09", "server"),
-    e(
-        "save-all",
-        &[],
-        "minecraft.command.save-all",
-        4,
-        "CMD-09",
-        "server",
-    ),
+    // `/stop` and `/save-all` are implemented by CMD-07 (the console/RCON
+    // sources need a lifecycle), so they are in `RESERVED_COMMANDS`, not here.
     e(
         "save-on",
         &[],
@@ -652,6 +645,7 @@ pub fn help_lines() -> Vec<String> {
         "  /gamemode /give /summon /tp /time /heal /food /kill /killall /spawn /inventory".into(),
     );
     lines.push("  /balance /pay /sell /market /buy /listings /unlist /econ".into());
+    lines.push("  /stop /save-all".into());
     lines
 }
 
@@ -768,8 +762,8 @@ mod tests {
         // Implemented core names...
         assert!(register_plugin("give", "p", "p.give", 0).is_err());
         assert!(register_plugin("gamemode", "p", "p.gm", 0).is_err());
-        // ...and specified-but-unimplemented ones (`/stop` is a CMD-09 stub).
-        assert!(register_plugin("stop", "p", "p.stop", 4).is_err());
+        // ...and specified-but-unimplemented ones (`/save-on` is a CMD-09 stub).
+        assert!(register_plugin("save-on", "p", "p.saveon", 4).is_err());
         assert!(core_owns("stop") && core_owns("give") && !core_owns("myplugin_cmd"));
     }
 

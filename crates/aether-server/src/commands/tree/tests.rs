@@ -427,11 +427,11 @@ fn unknown_literal_and_trailing_input_use_the_vanilla_errors() {
 // Requirements
 // ---------------------------------------------------------------------------
 
-fn always_hidden(_h: &PlayerHandle) -> Result<(), Deny> {
+fn always_hidden(_h: &Source) -> Result<(), Deny> {
     Err(Deny::Hidden)
 }
 
-fn always_denied(_h: &PlayerHandle) -> Result<(), Deny> {
+fn always_denied(_h: &Source) -> Result<(), Deny> {
     Err(Deny::Message("nope".into()))
 }
 
@@ -792,8 +792,8 @@ fn help_still_explains_a_single_command() {
     // `/help <command>` works again: the node is greedy, so an argument is
     // accepted rather than rejected as "incorrect argument".
     assert_eq!(
-        one(&env, &env.tester, "/help stop"),
-        "/stop — minecraft.command.stop (op level 4), planned in CMD-09"
+        one(&env, &env.tester, "/help save-on"),
+        "/save-on — minecraft.command.save-on (op level 4), planned in CMD-09"
     );
     assert!(
         run(&env, &env.tester, "/help")
@@ -803,8 +803,8 @@ fn help_still_explains_a_single_command() {
     );
     // The `?` alias routes to the same node.
     assert_eq!(
-        one(&env, &env.tester, "/? stop"),
-        "/stop — minecraft.command.stop (op level 4), planned in CMD-09"
+        one(&env, &env.tester, "/? save-on"),
+        "/save-on — minecraft.command.save-on (op level 4), planned in CMD-09"
     );
 }
 
@@ -812,13 +812,13 @@ fn help_still_explains_a_single_command() {
 fn the_stub_registry_is_on_the_tree() {
     let env = env();
     // A specified-but-unimplemented command answers with its task id, and its
-    // op level is enforced by the tree.
+    // op level is enforced by the tree. (`/stop` and `/save-all` are CMD-07.)
     assert_eq!(
-        one(&env, &env.tester, "/stop"),
-        "/stop is not implemented yet (CMD-09)"
+        one(&env, &env.tester, "/save-on"),
+        "/save-on is not implemented yet (CMD-09)"
     );
     assert_eq!(
-        one(&env, &env.bob, "/stop"),
+        one(&env, &env.bob, "/save-on"),
         "You do not have permission to run this command."
     );
     assert_eq!(

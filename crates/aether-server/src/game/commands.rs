@@ -9,15 +9,15 @@
 use aether_api::Vector3;
 
 use super::{entities, interact, mobs};
-use crate::commands::tree::{self, Ctx, Deny, Node, Requirement};
+use crate::commands::tree::{self, Ctx, Deny, Node, Requirement, Source};
 use crate::commands::Reply;
 use crate::players::{PlayerHandle, SharedRegistry};
 use crate::protocol::{GameMode, ServerEvent};
 use crate::session::DemoWorld;
 
 /// The op gate for the gameplay verbs, with the historical message.
-pub fn require_op(handle: &PlayerHandle) -> Result<(), Deny> {
-    if crate::is_operator(handle) {
+pub fn require_op(source: &Source) -> Result<(), Deny> {
+    if source.is_operator() {
         Ok(())
     } else {
         Err(Deny::Message("You are not an operator.".into()))
@@ -55,7 +55,10 @@ pub fn nodes() -> Vec<Node> {
 
 fn exec_gamemode(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    Reply(gamemode(&args, ctx.handle, ctx.registry, ctx.world))
+    match ctx.player() {
+        Some(handle) => Reply(gamemode(&args, handle, ctx.registry, ctx.world)),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_time(ctx: &mut Ctx) -> Reply {
@@ -65,12 +68,18 @@ fn exec_time(ctx: &mut Ctx) -> Reply {
 
 fn exec_give(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    Reply(give(&args, ctx.handle, ctx.registry, ctx.world))
+    match ctx.player() {
+        Some(handle) => Reply(give(&args, handle, ctx.registry, ctx.world)),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_summon(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    Reply(summon(&args, ctx.handle))
+    match ctx.player() {
+        Some(handle) => Reply(summon(&args, handle)),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_killall(_ctx: &mut Ctx) -> Reply {
@@ -78,21 +87,33 @@ fn exec_killall(_ctx: &mut Ctx) -> Reply {
 }
 
 fn exec_kill(ctx: &mut Ctx) -> Reply {
-    Reply(kill(ctx.handle, ctx.registry, ctx.world))
+    match ctx.player() {
+        Some(handle) => Reply(kill(handle, ctx.registry, ctx.world)),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_spawn(ctx: &mut Ctx) -> Reply {
-    Reply(spawn(ctx.handle, ctx.registry, ctx.world))
+    match ctx.player() {
+        Some(handle) => Reply(spawn(handle, ctx.registry, ctx.world)),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_msg(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    Reply(msg(&args, ctx.handle, ctx.registry, ctx.world))
+    match ctx.player() {
+        Some(handle) => Reply(msg(&args, handle, ctx.registry, ctx.world)),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_tp(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    Reply(tp(&args, ctx.handle, ctx.registry, ctx.world))
+    match ctx.player() {
+        Some(handle) => Reply(tp(&args, handle, ctx.registry, ctx.world)),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_block(ctx: &mut Ctx) -> Reply {
@@ -102,16 +123,25 @@ fn exec_block(ctx: &mut Ctx) -> Reply {
 
 fn exec_food(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    Reply(food(&args, ctx.handle))
+    match ctx.player() {
+        Some(handle) => Reply(food(&args, handle)),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_heal(ctx: &mut Ctx) -> Reply {
-    Reply(heal(ctx.handle))
+    match ctx.player() {
+        Some(handle) => Reply(heal(handle)),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_visibility(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    Reply(visibility(&args, ctx.handle, ctx.world))
+    match ctx.player() {
+        Some(handle) => Reply(visibility(&args, handle, ctx.world)),
+        None => ctx.needs_player(),
+    }
 }
 
 /// `/gamemode <survival|creative> [player]`.
