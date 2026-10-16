@@ -88,6 +88,65 @@ pub trait HostBackend: Send + Sync {
         Vec::new()
     }
 
+    /// Play a named sound to one player, for a menu's `[sound]` action. The
+    /// default does nothing, so a host with no world (a test) still satisfies
+    /// the trait; the server plays it through the core sound event.
+    fn play_sound(&self, _plugin: &str, _player: u64, _name: &str) {}
+
+    /// Give `count` of `item` (a `minecraft:` name) to a player, dropping
+    /// whatever does not fit at their feet, for a menu's `[give]` action.
+    /// Returns how many could **not** be handed over. The default gives
+    /// nothing and reports all `count` as leftover, so a host without an
+    /// inventory model (a test) fails closed rather than pretending.
+    fn give_item(&self, _plugin: &str, _player: u64, _item: &str, count: u32) -> u64 {
+        count as u64
+    }
+
+    // --- virtual menus (the core window API) --------------------------------
+    //
+    // The native `plugins/menus` host calls these to draw server-invented
+    // windows. The core guarantees a click on one never moves an item; the
+    // backend only translates the neutral menu item into a window slot. A host
+    // with no window support (a test, a stripped build) answers the neutral
+    // value, so the menus plugin degrades rather than panics.
+
+    /// Open a virtual menu window for `player` (a session entity id). `items`
+    /// not in `0..layout.slot_count()` are ignored. Returns whether a window
+    /// was opened.
+    fn open_menu(
+        &self,
+        _plugin: &str,
+        _player: u64,
+        _menu: u64,
+        _title: &str,
+        _layout: crate::menus::MenuLayout,
+        _items: &[crate::menus::MenuItem],
+    ) -> bool {
+        false
+    }
+
+    /// Replace one slot of an open menu, or clear it with `None`.
+    fn set_menu_slot(
+        &self,
+        _plugin: &str,
+        _player: u64,
+        _menu: u64,
+        _slot: u32,
+        _item: Option<&crate::menus::MenuItem>,
+    ) -> bool {
+        false
+    }
+
+    /// Close an open menu.
+    fn close_menu(&self, _plugin: &str, _player: u64, _menu: u64) {}
+
+    /// Run `command` (without the leading slash) for a player, or on the
+    /// console when `player` is `None`; returns the reply lines. Used by the
+    /// menus `[command]`/`[console]` actions.
+    fn run_command(&self, _plugin: &str, _player: Option<u64>, _command: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// `permissions`: whether the online player with session id `id` holds
     /// `node` for a command needing `op`.
     ///
@@ -1267,6 +1326,12 @@ impl PluginHost {
         // imports none of the SDK interfaces (the frozen `@0.1.0` ones
         // included) is unaffected.
         crate::sdk::Services::add_to_linker::<_, HasSelf<_>>(&mut linker, |d: &mut StoreData| d)?;
+        // The menus service interface, so a WASM dependent that imports it
+        // links and its calls forward to the native menus provider.
+        crate::menus_svc::Services::add_to_linker::<_, HasSelf<_>>(
+            &mut linker,
+            |d: &mut StoreData| d,
+        )?;
 
         let memory = self.config.memory_mib.saturating_mul(1024 * 1024);
         let limits = StoreLimitsBuilder::new()
@@ -1580,6 +1645,71 @@ impl PluginHost {
         })
     }
 
+    /// A click on a virtual menu window, delivered **only to the native
+    /// plugin that opened it** (`owner`).
+    ///
+    /// There is no manifest subscription and no WASM path: a menu click is a
+    /// private channel between the core and the native plugin that owns the
+    /// window (in practice the menus service host). It is not an event other
+    /// plugins observe, so it cannot be cancelled and is never counted against
+    /// the event budget it is not part of. The owner tag keeps every other
+    /// native plugin from observing every menu's clicks.
+    pub fn menu_click(
+        &mut self,
+        owner: &str,
+        p: &Player,
+        menu: u64,
+        slot: i32,
+        button: i8,
+        mode: i32,
+    ) {
+        let services = Arc::clone(&self.services);
+        let backend = Arc::clone(&self.backend);
+        for i in 0..self.plugins.len() {
+            if self.plugins[i].disabled || self.plugins[i].manifest.id != owner {
+                continue;
+            }
+            let id = self.plugins[i].manifest.id.clone();
+            let capabilities = self.plugins[i].capabilities.clone();
+            let config = self.plugins[i].config.clone();
+            if let Kind::Native(n) = &mut self.plugins[i].kind {
+                let mut ctx = NativeContext {
+                    id: &id,
+                    capabilities: &capabilities,
+                    config: &config,
+                    services: &services,
+                    backend: &backend,
+                };
+                n.on_menu_click(&mut ctx, p, menu, slot, button, mode);
+            }
+        }
+    }
+
+    /// A player closed a virtual menu window: tell the native plugin that owns
+    /// it.
+    pub fn menu_close(&mut self, owner: &str, p: &Player, menu: u64) {
+        let services = Arc::clone(&self.services);
+        let backend = Arc::clone(&self.backend);
+        for i in 0..self.plugins.len() {
+            if self.plugins[i].disabled || self.plugins[i].manifest.id != owner {
+                continue;
+            }
+            let id = self.plugins[i].manifest.id.clone();
+            let capabilities = self.plugins[i].capabilities.clone();
+            let config = self.plugins[i].config.clone();
+            if let Kind::Native(n) = &mut self.plugins[i].kind {
+                let mut ctx = NativeContext {
+                    id: &id,
+                    capabilities: &capabilities,
+                    config: &config,
+                    services: &services,
+                    backend: &backend,
+                };
+                n.on_menu_close(&mut ctx, p, menu);
+            }
+        }
+    }
+
     // --- after-* -------------------------------------------------------
 
     /// `after-player-join`.
@@ -1697,6 +1827,49 @@ impl PluginHost {
         }
         None
     }
+
+    /// `on-command` for a **specific** plugin, resolved by the caller from the
+    /// core command registry rather than the manifest's static command list.
+    ///
+    /// A plugin that registers commands at runtime (the menus host's
+    /// declarative `open_commands`) cannot list them in a static manifest, so
+    /// the core registry — the source of truth for who owns a name — tells the
+    /// server which plugin to ask. Ownership is already decided there, so this
+    /// does not re-check `serves_command`; it only checks the plugin exists and
+    /// is subscribed and enabled.
+    pub fn on_command_for(
+        &mut self,
+        plugin: &str,
+        p: &Player,
+        name: &str,
+        args: &[String],
+    ) -> Option<CommandResult> {
+        let event = manifest::EVENT_ON_COMMAND;
+        let services = Arc::clone(&self.services);
+        let backend = Arc::clone(&self.backend);
+        for i in 0..self.plugins.len() {
+            if self.plugins[i].manifest.id != plugin || !self.plugins[i].receives(event) {
+                continue;
+            }
+            let ms = self.call_budget_ms();
+            if ms == 0 {
+                return None;
+            }
+            self.plugins[i].set_deadline(ms);
+            let started = Instant::now();
+            let r = self.plugins[i].call_on_command(&services, &backend, p, name, args);
+            self.charge_tick(started, ms, r.is_err());
+            return match r {
+                Ok(result) if result.handled => Some(result),
+                Ok(_) => None,
+                Err(e) => {
+                    self.fault(i, event, e);
+                    None
+                }
+            };
+        }
+        None
+    }
 }
 
 /// The config handed to `init` as JSON. Written by hand: it is flat and made
@@ -1731,4 +1904,103 @@ fn json_string(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::{Manifest, PluginTier};
+    use crate::native::{NativeContext, NativePlugin, NativeRegistration};
+    use std::sync::Mutex;
+
+    /// A backend with no world: the menu-click routing test needs none.
+    #[derive(Default)]
+    struct Null;
+
+    impl HostBackend for Null {
+        fn kv_get(&self, _: &str, _: &str) -> Option<Vec<u8>> {
+            None
+        }
+        fn kv_put(&self, _: &str, _: &str, _: &[u8]) {}
+        fn kv_delete(&self, _: &str, _: &str) {}
+        fn kv_list(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn log(&self, _: &str, _: LogLevel, _: &str) {}
+        fn config(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn supports(&self, _: &str, _: &str) -> bool {
+            false
+        }
+    }
+
+    /// Records which plugin id received a menu click.
+    static CLICKS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    struct Clicker;
+
+    impl NativePlugin for Clicker {
+        fn init(&mut self, _ctx: &mut NativeContext) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn on_menu_click(
+            &mut self,
+            ctx: &mut NativeContext,
+            _p: &Player,
+            _menu: u64,
+            _slot: i32,
+            _button: i8,
+            _mode: i32,
+        ) {
+            CLICKS.lock().unwrap().push(ctx.id.to_string());
+        }
+    }
+
+    fn native(id: &str) -> NativeRegistration {
+        NativeRegistration {
+            manifest: Manifest {
+                id: id.to_string(),
+                version: "0.0.0".to_string(),
+                api: "0.1".to_string(),
+                entry: String::new(),
+                name: String::new(),
+                priority: 0,
+                capabilities: vec![],
+                subscribe: vec![],
+                commands: vec![],
+                requires: Vec::new(),
+                tick_period: 1,
+                deny_on_fault: false,
+                tier: PluginTier::Native,
+            },
+            new: || Box::new(Clicker),
+        }
+    }
+
+    #[test]
+    fn a_menu_click_reaches_only_the_owning_native_plugin() {
+        let mut host = PluginHost::new(HostConfig::default(), Arc::new(Null)).unwrap();
+        for id in ["alpha", "beta"] {
+            let reg = native(id);
+            let file = ManifestFile {
+                dir: std::path::PathBuf::new(),
+                manifest: reg.manifest,
+            };
+            host.add_native(&file, &[], &BTreeMap::new(), (reg.new)())
+                .unwrap();
+        }
+        CLICKS.lock().unwrap().clear();
+        let p = Player {
+            id: 1,
+            name: "Steve".to_string(),
+            operator: false,
+        };
+        host.menu_click("alpha", &p, 7, 0, 0, 0);
+        assert_eq!(
+            CLICKS.lock().unwrap().as_slice(),
+            ["alpha"],
+            "only the owner sees its menus' clicks"
+        );
+    }
 }

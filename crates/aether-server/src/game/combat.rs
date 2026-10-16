@@ -469,7 +469,7 @@ pub fn wear_held(handle: &PlayerHandle, world: &DemoWorld, n: u16) {
         let p = handle.pos();
         handle.emit(
             &ServerEvent::Sound {
-                name: "minecraft:entity.item.break",
+                name: "minecraft:entity.item.break".into(),
                 category: 7,
                 x: p.x,
                 y: p.y,

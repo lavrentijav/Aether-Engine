@@ -23,6 +23,8 @@
 
 mod host;
 pub mod manifest;
+pub mod menus;
+pub mod menus_svc;
 pub mod native;
 pub mod placeholders;
 pub mod sdk;

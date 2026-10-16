@@ -60,6 +60,21 @@ mod imp {
         out
     }
 
+    /// A command a plugin asked to run from inside a host callback, held for
+    /// execution **after** the host lock is released.
+    ///
+    /// Running it inline would re-enter the one `HOST` mutex: a menu's
+    /// `[command]` reaches `commands::dispatch`, which for a non-core name
+    /// calls back into `plugins::on_command`, which locks `HOST` again on the
+    /// same thread — a self-deadlock. So the backend only records the command;
+    /// `menu_click` drains and dispatches it once the guard has dropped.
+    struct DeferredCommand {
+        plugin: String,
+        /// `Some` for a player command, `None` for `[console]`.
+        player: Option<u64>,
+        command: String,
+    }
+
     /// The world, operator config and player registry behind the host imports.
     struct ServerBackend {
         world: Arc<DemoWorld>,
@@ -70,6 +85,9 @@ mod imp {
         /// keyed by caller id, so the gate applies to native and WASM
         /// dependents alike.
         granted: Mutex<std::collections::BTreeMap<String, Vec<String>>>,
+        /// Commands requested from inside a host callback (see
+        /// [`DeferredCommand`]), drained outside the lock.
+        pending: Mutex<Vec<DeferredCommand>>,
     }
 
     impl ServerBackend {
@@ -197,6 +215,103 @@ mod imp {
                 .get(plugin)
                 .cloned()
                 .unwrap_or_default()
+        }
+
+        // --- virtual menus --------------------------------------------------
+
+        fn open_menu(
+            &self,
+            plugin: &str,
+            player: u64,
+            menu: u64,
+            title: &str,
+            layout: aether_plugin::menus::MenuLayout,
+            items: &[aether_plugin::menus::MenuItem],
+        ) -> bool {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return false;
+            };
+            let shape = menu_shape(layout);
+            let mut slots: Vec<Option<crate::inventory::Stack>> = vec![None; shape.slot_count()];
+            for it in items {
+                if let Some(cell) = slots.get_mut(it.slot as usize) {
+                    *cell = menu_stack(it);
+                }
+            }
+            // The owner is recorded with the window, so a later click is
+            // delivered only to the plugin that opened it.
+            crate::game::window::open_menu(&handle, &self.world, plugin, menu, shape, title, slots);
+            true
+        }
+
+        fn set_menu_slot(
+            &self,
+            _plugin: &str,
+            player: u64,
+            menu: u64,
+            slot: u32,
+            item: Option<&aether_plugin::menus::MenuItem>,
+        ) -> bool {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return false;
+            };
+            // Only update a menu that is still the one open; a late update must
+            // not touch whatever window replaced it.
+            if crate::game::window::open_menu_id(&handle) != Some(menu) {
+                return false;
+            }
+            let stack = item.and_then(menu_stack);
+            crate::game::window::set_menu_slot(&handle, &self.world, slot as usize, stack);
+            true
+        }
+
+        fn close_menu(&self, _plugin: &str, player: u64, menu: u64) {
+            if let Some(handle) = self.registry.by_entity(player as i32) {
+                crate::game::window::close_menu(&handle, &self.world, menu);
+            }
+        }
+
+        /// Play a menu sound to one player, through the core sound event. The
+        /// name is taken verbatim (a bare name gets `minecraft:`), so a plugin
+        /// can name any sound event the client knows.
+        fn play_sound(&self, _plugin: &str, player: u64, name: &str) {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return;
+            };
+            let p = handle.pos();
+            handle.emit(
+                &crate::protocol::ServerEvent::sound_at(name.to_string(), p.x, p.y, p.z),
+                &*self.world,
+            );
+        }
+
+        /// Give items through the core's own `give_or_drop`, so a menu `[give]`
+        /// behaves exactly like `/give`: whatever does not fit is dropped,
+        /// owned, at the player's feet and journalled. Returns the leftover
+        /// count (0 on success); an unknown item name gives nothing.
+        fn give_item(&self, _plugin: &str, player: u64, item: &str, count: u32) -> u64 {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return count as u64;
+            };
+            let Some(id) = aether_world::ItemTypeId::vanilla(item) else {
+                return count as u64;
+            };
+            let (_taken, left) =
+                crate::ground::give_or_drop(&handle, &self.registry, &self.world, id, count as u64);
+            left
+        }
+
+        /// Record a command to run after the host lock is released. It is
+        /// **not** dispatched here: dispatching inline would re-enter `HOST`
+        /// (a `[command]` reaching `plugins::on_command` locks it again on the
+        /// same thread) and deadlock the tick. `menu_click` drains the queue.
+        fn run_command(&self, plugin: &str, player: Option<u64>, command: &str) -> Vec<String> {
+            self.pending.lock().unwrap().push(DeferredCommand {
+                plugin: plugin.to_string(),
+                player,
+                command: command.to_string(),
+            });
+            Vec::new()
         }
 
         /// The permission core, fronted for the SDK's `permissions` service.
@@ -530,6 +645,45 @@ mod imp {
     /// The custom journal tag the staff plugin's audit events use.
     pub const STAFF_JOURNAL_TAG: u8 = aether_world::journal::event::TAG_CUSTOM_MIN;
 
+    /// Dispatch every command a host callback deferred, once no host lock is
+    /// held. Player commands go through the core dispatcher (the same gate as
+    /// any typed command); `[console]` has no dispatcher yet, so it is logged
+    /// and dropped rather than silently run as the player.
+    fn drain_deferred(backend: &Arc<ServerBackend>) {
+        let pending: Vec<DeferredCommand> = {
+            let mut q = backend.pending.lock().unwrap();
+            std::mem::take(&mut *q)
+        };
+        for cmd in pending {
+            let DeferredCommand {
+                plugin,
+                player,
+                command,
+            } = cmd;
+            let Some(id) = player else {
+                crate::log::warn(&format!(
+                    "plugin `{plugin}`: `[console] {command}` ignored (no console dispatch yet)"
+                ));
+                continue;
+            };
+            let Some(handle) = backend.registry.by_entity(id as i32) else {
+                continue;
+            };
+            let text = if command.starts_with('/') {
+                command
+            } else {
+                format!("/{command}")
+            };
+            if let Some(reply) =
+                crate::commands::dispatch(&text, &handle, &backend.registry, &backend.world)
+            {
+                for line in reply.0 {
+                    handle.emit(&ServerEvent::Chat(line), &*backend.world);
+                }
+            }
+        }
+    }
+
     /// An empty plugin-facing page.
     fn empty_page() -> HistoryPage {
         HistoryPage {
@@ -553,6 +707,45 @@ mod imp {
                 empty_page()
             }
         }
+    }
+
+    /// Map a neutral menu layout onto the server's window shape.
+    fn menu_shape(layout: aether_plugin::menus::MenuLayout) -> crate::game::player::MenuShape {
+        use crate::game::player::MenuShape as S;
+        use aether_plugin::menus::MenuLayout as L;
+        match layout {
+            L::Chest1 => S::Chest1,
+            L::Chest2 => S::Chest2,
+            L::Chest3 => S::Chest3,
+            L::Chest4 => S::Chest4,
+            L::Chest5 => S::Chest5,
+            L::Chest6 => S::Chest6,
+            L::Dispenser => S::Dispenser,
+            L::Hopper => S::Hopper,
+        }
+    }
+
+    /// Translate a neutral menu item into a display-only server stack, or
+    /// `None` for an empty slot. An item the world's registry does not know is
+    /// drawn as a barrier rather than dropped, so a slot never silently
+    /// vanishes and shifts the menu around it.
+    fn menu_stack(item: &aether_plugin::menus::MenuItem) -> Option<crate::inventory::Stack> {
+        if item.item.is_empty() || item.count == 0 {
+            return None;
+        }
+        let id = match aether_world::ItemTypeId::vanilla(&item.item) {
+            Some(id) => id,
+            None => crate::inventory::item("minecraft:barrier"),
+        };
+        let count = item.count.clamp(1, 64) as u8;
+        Some(crate::inventory::Stack::menu_item(
+            id,
+            count,
+            item.name.clone(),
+            item.lore.clone(),
+            item.glint,
+            item.model,
+        ))
     }
 
     /// A UUID from the two halves the component model carries.
@@ -677,6 +870,10 @@ mod imp {
     }
 
     static HOST: OnceLock<Mutex<PluginHost>> = OnceLock::new();
+    /// The concrete backend, so a menu click can drain deferred commands
+    /// outside the host lock (the [`PluginHost`] holds it only as
+    /// `Arc<dyn HostBackend>` and cannot reach the concrete queue).
+    static BACKEND: OnceLock<Arc<ServerBackend>> = OnceLock::new();
 
     /// Load every plugin the operator configured. Called once at startup.
     pub fn install(cfg: &Arc<Config>, world: &Arc<DemoWorld>, registry: &SharedRegistry) {
@@ -688,7 +885,12 @@ mod imp {
             config: Arc::clone(cfg),
             registry: Arc::clone(registry),
             granted: Mutex::new(std::collections::BTreeMap::new()),
+            pending: Mutex::new(Vec::new()),
         });
+        // Kept so a menu click can drain the deferred-command queue **after**
+        // the host lock is released; the host itself cannot reach the
+        // concrete backend to do that.
+        let _ = BACKEND.set(Arc::clone(&backend));
         // Kept so each plugin's effective grant can be recorded for the SDK's
         // capability gate; `host` takes ownership of the other handle.
         let grant_sink = Arc::clone(&backend);
@@ -714,7 +916,21 @@ mod imp {
         // before it loads. The SDK is the only one today; it is a plugin like
         // any other, disabled by `[plugins.sdk] enabled = false`, and a
         // dependent that needs it then refuses to load with a clear error.
-        install_native(&mut host, cfg, &grant_sink);
+        //
+        // The live-ops service the web admin reads is published before the
+        // native plugins, so `webadmin`'s `requires = ["ops@0.1"]` resolves.
+        let ops = Arc::new(aether_ops::OpsHandle(Arc::new(crate::web::ServerOps::new(
+            Arc::clone(world),
+            Arc::clone(registry),
+            Arc::clone(cfg),
+        ))));
+        if let Err(e) = host
+            .services()
+            .register(aether_ops::SERVICE, aether_ops::VERSION, ops)
+        {
+            crate::log::warn(&format!("ops service not registered: {e}"));
+        }
+        install_native(&mut host, cfg, &grant_sink, world);
         for file in discover(Path::new(&cfg.plugins.dir)) {
             let id = file.manifest.id.clone();
             let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
@@ -771,15 +987,20 @@ mod imp {
     }
 
     /// Add the compiled-in native plugins, in dependency order: the SDK first
-    /// (so the sidebar's optional permission checks resolve it), then the
-    /// sidebar.
+    /// (so the sidebar's optional permission checks and the web admin's
+    /// `requires` resolve), then the sidebar, then the admin web interface.
     ///
     /// A native plugin is a plugin like any other — same manifest, enable
     /// flag and load error handling — except that it is compiled in and
     /// reaches the host through the in-process [`PluginHost::add_native`]
     /// rather than a `.wasm` file. Loading them before the on-disk discovery is
     /// what lets a WASM dependent's `requires` be satisfied.
-    fn install_native(host: &mut PluginHost, cfg: &Arc<Config>, grant_sink: &Arc<ServerBackend>) {
+    fn install_native(
+        host: &mut PluginHost,
+        cfg: &Arc<Config>,
+        grant_sink: &Arc<ServerBackend>,
+        world: &Arc<DemoWorld>,
+    ) {
         install_native_one(
             host,
             cfg,
@@ -794,6 +1015,13 @@ mod imp {
             aether_sidebar_plugin::registration(),
             "native sidebar",
         );
+        install_native_one(
+            host,
+            cfg,
+            grant_sink,
+            aether_menus_plugin::registration(),
+            "native menus",
+        );
         // The staff plugin is independent of the SDK; it self-registers its
         // commands and drives the core's `staff_*` hooks.
         install_native_one(
@@ -803,6 +1031,37 @@ mod imp {
             aether_staff_plugin::registration(),
             "native staff",
         );
+
+        // The admin web interface is the one native plugin that needs the live
+        // world, which the server attaches here — the plugin host gives a
+        // native plugin no world handle, by design. It also resolves the
+        // live-ops service, published by `install` above.
+        let id = "webadmin".to_string();
+        let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
+        if !entry.enabled() {
+            crate::log::info(&format!("plugin `{id}` disabled by config"));
+            return;
+        }
+        let registration = aether_webadmin::registration();
+        let caps = effective_capabilities(&registration.manifest.capabilities, &entry.capabilities);
+        let file = ManifestFile {
+            dir: std::path::PathBuf::new(),
+            manifest: registration.manifest,
+        };
+        let plugin = Box::new(aether_webadmin::WebAdminPlugin::with_world(Arc::clone(
+            world,
+        )));
+        match host.add_native(&file, &caps, &entry.config, plugin) {
+            Ok(()) => {
+                grant_sink
+                    .granted
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), caps.clone());
+                crate::log::info(&format!("plugin     : {id} (native web admin)"));
+            }
+            Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
+        }
     }
 
     /// Load one compiled-in native plugin from its build-time registration.
@@ -819,14 +1078,14 @@ mod imp {
             crate::log::info(&format!("plugin `{id}` disabled by config"));
             return;
         }
+        // Native plugins ask the operator for no host capabilities of their
+        // own; a service method still checks its *caller's* capabilities.
+        let caps = effective_capabilities(&registration.manifest.capabilities, &entry.capabilities);
         let file = ManifestFile {
             // Native plugins are compiled in; there is no directory.
             dir: std::path::PathBuf::new(),
             manifest: registration.manifest,
         };
-        // Native plugins ask the operator for no host capabilities of their
-        // own; a service method still checks its *caller's* capabilities.
-        let caps = effective_capabilities(&file.manifest.capabilities, &entry.capabilities);
         match host.add_native(&file, &caps, &entry.config, (registration.new)()) {
             Ok(()) => {
                 grant_sink
@@ -834,6 +1093,9 @@ mod imp {
                     .lock()
                     .unwrap()
                     .insert(id.clone(), caps.clone());
+                // Route the plugin's declared commands through the core
+                // registry, with the same ownership check as any other.
+                register_commands(&file.manifest);
                 crate::log::info(&format!("plugin     : {id} ({what})"));
             }
             Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
@@ -955,6 +1217,38 @@ mod imp {
         })
     }
 
+    /// A click on a virtual menu: delivered to the plugin that owns it. The
+    /// core has already guaranteed the click cannot move an item, so this only
+    /// dispatches.
+    ///
+    /// The host lock is taken for the callback and **released before any
+    /// command the callback asked to run is dispatched** — otherwise a
+    /// `[command]` action would re-enter the host to reach a plugin command
+    /// and hang the tick. See [`DeferredCommand`].
+    pub fn menu_click(
+        handle: &PlayerHandle,
+        owner: &str,
+        menu: u64,
+        slot: i32,
+        button: i8,
+        mode: i32,
+    ) {
+        with((), |h| {
+            h.menu_click(owner, &player(handle), menu, slot, button, mode)
+        });
+        if let Some(backend) = BACKEND.get() {
+            drain_deferred(backend);
+        }
+    }
+
+    /// A virtual menu was closed; tell the plugin that owns it.
+    pub fn menu_close(handle: &PlayerHandle, owner: &str, menu: u64) {
+        with((), |h| h.menu_close(owner, &player(handle), menu));
+        if let Some(backend) = BACKEND.get() {
+            drain_deferred(backend);
+        }
+    }
+
     pub fn after_player_join(handle: &PlayerHandle) {
         with((), |h| h.after_player_join(&player(handle)));
     }
@@ -983,9 +1277,16 @@ mod imp {
     }
 
     /// A plugin command, if one is registered. `None` lets the built-ins run.
+    ///
+    /// The **core command registry** is the source of truth for who owns a
+    /// name, so the plugin is resolved from it and asked directly — a plugin
+    /// that registered a command at runtime (a declarative menu's
+    /// `open_commands`) cannot be found through a static manifest list.
     pub fn on_command(handle: &PlayerHandle, name: &str, args: &[String]) -> Option<Vec<String>> {
+        let entry = crate::commands::registry::plugin_command(name)?;
         with(None, |h| {
-            h.on_command(&player(handle), name, args).map(|r| r.lines)
+            h.on_command_for(&entry.plugin, &player(handle), name, args)
+                .map(|r| r.lines)
         })
     }
 
@@ -1062,6 +1363,96 @@ mod imp {
                 .expect("registered");
             assert_eq!(entry.plugin, "registers_test_plugin");
             assert_eq!(entry.op, 3);
+        }
+
+        /// A throwaway world on a temp store, for the plugin-host e2e test.
+        fn test_world(seed: u64) -> crate::session::DemoWorld {
+            use aether_api::{FjallStore, World};
+            let dir =
+                std::env::temp_dir().join(format!("aether-mn1-host-{}-{seed}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let store = FjallStore::open(&dir).expect("temp store");
+            let generator =
+                crate::worldgen::Generator::load("", "", seed).expect("noise generator");
+            let revision = generator.revision();
+            let cfg = crate::gencache::CacheConfig {
+                root: String::new(),
+                ..Default::default()
+            };
+            let generator = crate::gencache::Cached::with_revision(generator, seed, revision, &cfg);
+            World::new(store, generator)
+        }
+
+        /// The deadlock repro from review 1 (B1), end to end through the real
+        /// host: a declarative menu whose button runs a **plugin** command.
+        /// Before the fix the click held the `HOST` lock and the command's
+        /// dispatch re-locked it on the same thread, hanging forever; the click
+        /// is run on a worker thread and joined with a timeout so a regression
+        /// fails the test instead of hanging the suite.
+        #[test]
+        fn a_menu_command_action_runs_without_deadlocking_the_host() {
+            use std::sync::Arc;
+            use std::time::Duration;
+
+            let dir = std::env::temp_dir().join(format!("aether-mn1-e2e-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let menus_dir = dir.join("menus");
+            std::fs::create_dir_all(&menus_dir).unwrap();
+            std::fs::write(
+                menus_dir.join("shop.toml"),
+                r#"
+name = "shop"
+title = "Shop"
+layout = "chest3"
+open_commands = ["shop"]
+
+[[item]]
+slot = 0
+material = "minecraft:stone"
+name = "Reopen"
+actions = ["[command] menu shop"]
+"#,
+            )
+            .unwrap();
+            let plugins_dir = dir.join("plugins");
+            std::fs::create_dir_all(&plugins_dir).unwrap();
+
+            let mut cfg = crate::config::Config::default();
+            cfg.plugins.dir = plugins_dir.to_string_lossy().into_owned();
+            let mut entry = crate::config::PluginEntry::default();
+            entry.config.insert(
+                "menus_dir".to_string(),
+                menus_dir.to_string_lossy().into_owned(),
+            );
+            cfg.plugins.plugins.insert("menus".to_string(), entry);
+            let cfg = Arc::new(cfg);
+
+            let world = Arc::new(test_world(31));
+            let registry: crate::players::SharedRegistry =
+                Arc::new(crate::players::Registry::default());
+            let handle = crate::players::PlayerHandle::for_test(9001, "Steve");
+            registry.insert_for_test(Arc::clone(&handle));
+
+            super::install(&cfg, &world, &registry);
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let world2 = Arc::clone(&world);
+            let handle2 = Arc::clone(&handle);
+            std::thread::spawn(move || {
+                // `/shop` registers at load; open it, then click its button.
+                let _ = super::on_command(&handle2, "shop", &[]);
+                // Bind the id first: a `MutexGuard` in an `if let` scrutinee
+                // lives for the whole body, and `click` takes the same lock.
+                let id = handle2.game().window.as_ref().map(|w| w.id);
+                if let Some(id) = id {
+                    crate::game::window::click(&handle2, &world2, id, 0, 0, 0);
+                }
+                let _ = tx.send(());
+            });
+            rx.recv_timeout(Duration::from_secs(15))
+                .expect("a `[command]` menu action deadlocked the plugin host");
+            // The button's command re-opened the menu.
+            assert!(handle.game().window.is_some());
         }
 
         #[test]
@@ -1165,6 +1556,16 @@ mod imp {
     pub fn before_container_click(_h: &PlayerHandle, _w: u32, _s: i32) -> Option<String> {
         None
     }
+    pub fn menu_click(
+        _h: &PlayerHandle,
+        _owner: &str,
+        _menu: u64,
+        _slot: i32,
+        _button: i8,
+        _mode: i32,
+    ) {
+    }
+    pub fn menu_close(_h: &PlayerHandle, _owner: &str, _menu: u64) {}
     pub fn after_player_join(_h: &PlayerHandle) {}
     pub fn after_player_leave(_h: &PlayerHandle) {}
     pub fn after_entity_death(_e: u64, _k: Option<u64>) {}

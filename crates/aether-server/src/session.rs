@@ -407,6 +407,7 @@ fn login_and_play(
             for pkt in packets {
                 pkt.send(s)?;
             }
+            crate::web::note_chunk_send(cx, cz);
             loaded.insert((cx, cz));
         }
     }
@@ -531,6 +532,7 @@ fn login_and_play(
             world,
         );
     }
+    crate::web::on_join(&handle, world);
 
     // Now fill out the rest of the view radius. The player is placed and
     // playable by this point, so the remaining columns arrive as scenery
@@ -570,6 +572,7 @@ fn login_and_play(
         );
     }
     crate::plugins::after_player_leave(&handle);
+    crate::web::on_leave(&handle, world);
     result
 }
 
@@ -1728,6 +1731,7 @@ fn resolve_creative_report(
             uid: aether_world::journal::ledger::mint_uid(),
             damage: 0,
             potion: None,
+            display: None,
         });
     }
     match resolution {

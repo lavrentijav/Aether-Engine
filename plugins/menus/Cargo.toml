@@ -1,0 +1,23 @@
+[package]
+name = "aether-menus-plugin"
+description = "The Aether menus plugin, provided as a native plugin: a shared, safe chest-menu host (builder + declarative files) that every other plugin opens menus through."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "aether_menus_plugin"
+
+[dependencies]
+# The host trait a native plugin implements, plus the menus service model
+# (`MenuItem`, `MenuAction`, …) and the shared `Player` type.
+aether-plugin = { workspace = true }
+# Declarative `menus/*.toml` parsing.
+serde = { workspace = true }
+toml = { workspace = true }
+
+[lints]
+workspace = true

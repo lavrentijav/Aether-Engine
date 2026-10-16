@@ -118,6 +118,13 @@ fn active() -> &'static Mutex<HashSet<Pos>> {
     M.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Call `f` for every loaded container's position, without the `Vec` copy.
+pub fn for_each_position(f: &mut dyn FnMut(Pos)) {
+    for &p in all().lock().unwrap().keys() {
+        f(p);
+    }
+}
+
 /// Key for the container at a block position.
 ///
 /// Thirteen bytes (three `i32`s) under the reserved `O` prefix (see

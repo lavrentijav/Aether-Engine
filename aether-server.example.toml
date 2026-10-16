@@ -140,6 +140,18 @@ init_fuel = 100000000  # fuel for a plugin's instantiation and init
 # enabled = true
 # config = { persist = "true" }
 
+# The web admin is a compiled-in native plugin (no .wasm), read-only, and only
+# loads when `dir` above is set. See docs/webadmin.md.
+# [plugins.webadmin]
+# enabled = true
+# bind = "127.0.0.1:8090"   # loopback only; the token is the gate
+# token = "change-me"       # optional; omit to use `/webadmin token` in game
+# max_conns = 32            # most simultaneous connections served
+# max_per_ip = 8            # most simultaneous connections from one address
+# request_deadline_ms = 10000   # absolute per-request deadline (slowloris guard)
+# rate_per_sec = 50         # expensive-endpoint (tile/history) rate; 0 disables
+# rate_burst = 200          # burst allowance for the rate limit
+
 [cache]
 # Unmodified generated columns are cached on disk so the generator does not
 # recompute the same terrain on every restart. Pure speed: every entry is

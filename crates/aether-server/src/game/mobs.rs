@@ -736,7 +736,7 @@ pub fn tick(
                             actions.push(Action::Tracked(
                                 id,
                                 crate::protocol::ServerEvent::Sound {
-                                    name: "minecraft:entity.creeper.primed",
+                                    name: "minecraft:entity.creeper.primed".into(),
                                     category: 5,
                                     x: pos.x,
                                     y: pos.y,
