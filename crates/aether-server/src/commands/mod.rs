@@ -341,7 +341,7 @@ fn migrate_offline_player(name: &str, world: &DemoWorld) -> Reply {
 /// node's default resolves from the store, and the command's `op` level is the
 /// floor. This is the single gate the core stubs and plugin commands both use.
 pub fn permitted(handle: &PlayerHandle, node: &str, op: u8) -> bool {
-    crate::permissions::check(crate::permissions::level(&handle.name, handle.ip), node, op)
+    crate::permissions::check_for(&handle.name, handle.ip, node, op)
 }
 
 /// The level half of [`permitted`], without a handle: the decision itself, so

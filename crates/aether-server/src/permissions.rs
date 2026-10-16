@@ -1,5 +1,6 @@
-//! The permission core: op levels, permission nodes, and the one check every
-//! command and hot-path gate goes through.
+//! The permission core: op levels, permission nodes, groups and inheritance,
+//! per-world context and the one check every command and hot-path gate goes
+//! through.
 //!
 //! Before CMD-01 the only gate was [`crate::is_operator`] — a name looked up in
 //! `config.operators`. That boolean is now a thin wrapper over this module, and
@@ -13,23 +14,35 @@
 //!   segment is rejected: a malformed node is a deny, never a match.
 //! * a node's **default** is `true` / `false` / `op`.
 //!
-//! A check resolves in this order:
+//! A check resolves the **explicit** nodes first, then the default:
 //!
-//! 1. an explicit per-player grant or deny (empty today; CMD-02 fills it),
-//! 2. the node's declared default:
+//! 1. the subject's own nodes (per-player grants/denies), then
+//! 2. each group the subject belongs to, directly or by inheritance, in a total
+//!    order: highest group [`priority`](Group::priority) first, then the
+//!    shallowest inheritance depth (child before parent), then the group id —
+//!    see [`Store::holders`]. The first holder with a node for the key decides.
+//! 3. the node's declared default:
 //!    * `Allow` — the node adds no operator requirement; the command's own op
 //!      level is the only remaining gate;
 //!    * `Deny`  — no one, operator or not;
 //!    * `Op`    — an operator (level ≥ 1), and still at least the op level;
-//! 3. nothing declared — the node is unknown, and defaults to `op`: only an
+//! 4. nothing declared — the node is unknown, and defaults to `op`: only an
 //!    operator, never `true`. A typo therefore fails closed.
 //!
 //! The command's own **op level** is a floor that always applies — a command
-//! entry naming `op = 3` is not runnable below level 3 whatever its node says —
-//! and an unknown or `op` node additionally requires an operator. Command nodes
-//! are registered with that rule (op 0 → `Allow`, op > 0 → `Op`), so a
-//! command's effective requirement is exactly its op level, as it was before
-//! this module existed.
+//! entry naming `op = 3` is not runnable below level 3 whatever its node says,
+//! explicit grants included — and an unknown or `op` node additionally requires
+//! an operator. Command nodes are registered with that rule (op 0 → `Allow`,
+//! op > 0 → `Op`), so a command's effective requirement is exactly its op
+//! level, as it was before this module existed.
+//!
+//! ## Context
+//!
+//! A node may carry a **context** — today a dimension/world key. A context of
+//! `None` is "everywhere" (a global node); `Some("overworld")` only applies in
+//! that world. Within one holder a context-specific node beats the global one,
+//! and a node whose context does not match the query is skipped. Callers that
+//! have no world pass `None`; [`check_in`] carries the context when they do.
 //!
 //! ## `config.operators` is a seed, not the source of truth
 //!
@@ -42,21 +55,40 @@
 //! fat-fingered config edit cannot quietly strip the owner. The `op` group
 //! cannot be deleted.
 //!
+//! ## Snapshot reads, off-tick writes
+//!
+//! The store is an immutable snapshot behind an `Arc`. A check clones the
+//! current `Arc` ([`snapshot`]) and resolves against it; a write builds a fresh
+//! copy of the store off the tick, then swaps the pointer ([`update`]). A
+//! concurrent reader therefore always sees a whole, consistent store — never a
+//! half-applied edit — and there is no `Mutex` on the hot path. The store is
+//! the only thing the check touches; the lock is a brief `RwLock` around the
+//! `Arc` clone.
+//!
+//! ## On disk
+//!
 //! The store is **persisted** to `<world_dir>/permissions.toml`, written
 //! atomically (temp file + rename), so the add-only rule holds **across a
 //! restart**: the file is loaded first, the config is then merged in, and a
 //! name the file already holds survives even when the config no longer lists
-//! it. Without persistence the rule would only hold within one process, which
-//! is why CMD-01 owns the file.
+//! it. The format is described in `docs/design/permissions.md`.
 //!
 //! Groups, inheritance and per-world context are CMD-02; CMD-01 is the level /
-//! node model, the store and the [`check`] API. The server is the only consumer
-//! today, so the module lives here rather than in `aether-api`.
+//! node model and the store. The server is the only consumer today, so the
+//! module lives here rather than in `aether-api`.
+//!
+//! The CMD-02 brief proposed making the store a **native plugin** called from
+//! the core check. It is kept in the core instead: the check is on the hot path
+//! for every command, the block gates, `is_operator` and the SDK service, and
+//! the native loader has no synchronous per-node check hook a plugin could
+//! answer yet (the same limit that leaves `aether.staff.vanish.see`
+//! unresolved). The store, its write API and its file are shaped so the move
+//! behind a service is mechanical once that hook exists; see Known Issues 26.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -94,7 +126,7 @@ impl From<u8> for Level {
     }
 }
 
-/// The value a node resolves to when no per-player grant/deny applies.
+/// The value a node resolves to when no explicit grant/deny applies.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeDefault {
@@ -133,6 +165,36 @@ fn valid_segment(seg: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
+/// The map key for a node plus its context. A global node is the bare name; a
+/// context-specific one is `node#context`. A node can never contain `#`
+/// ([`valid_node`]), so the split is unambiguous, and an empty context is the
+/// global one.
+fn node_key(node: &str, context: Option<&str>) -> String {
+    match context {
+        Some(c) if !c.is_empty() => format!("{node}#{c}"),
+        _ => node.to_string(),
+    }
+}
+
+/// Split an encoded key back into `(node, context)`.
+fn split_key(key: &str) -> (&str, Option<&str>) {
+    match key.split_once('#') {
+        Some((node, ctx)) => (node, Some(ctx)),
+        None => (key, None),
+    }
+}
+
+/// Look `node` up in one holder's map: a matching context-specific node beats
+/// the global one, and the global one is the fallback everywhere.
+fn lookup(nodes: &BTreeMap<String, bool>, node: &str, context: Option<&str>) -> Option<bool> {
+    if let Some(ctx) = context.filter(|c| !c.is_empty()) {
+        if let Some(v) = nodes.get(&node_key(node, Some(ctx))) {
+            return Some(*v);
+        }
+    }
+    nodes.get(&node_key(node, None)).copied()
+}
+
 /// One group member on the wire: an optional required address, omitted for a
 /// bare name. TOML has no null, so `None` is an absent `addr` key.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -141,15 +203,93 @@ struct Member {
     addr: Option<String>,
 }
 
-/// A group of players at one permission level.
+/// A holder's display/chat meta. Every field is optional; a missing value is
+/// inherited from the next holder in priority order ([`Store::meta_of`]).
 ///
-/// CMD-01 has only the built-in [`OP_GROUP`]; inheritance and meta are CMD-02.
+/// `weight` is the LuckPerms-style sort weight, kept as `Option` so an unset
+/// value does not shadow a group's: a player with no explicit weight inherits
+/// the highest-precedence group's.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Meta {
+    /// Chat prefix, raw (the chat layer renders colour codes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// Chat suffix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
+    /// Sort weight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<i32>,
+}
+
+impl Meta {
+    /// Whether every field is unset.
+    pub fn is_empty(&self) -> bool {
+        self.prefix.is_none() && self.suffix.is_none() && self.weight.is_none()
+    }
+
+    /// A meta value by the SDK's key spelling (`prefix`/`suffix`/`weight`).
+    pub fn get(&self, key: &str) -> Option<String> {
+        match key {
+            "prefix" => self.prefix.clone(),
+            "suffix" => self.suffix.clone(),
+            "weight" => self.weight.map(|w| w.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Set a meta value by key, rejecting an unknown key or a non-integer
+    /// weight. An empty value clears the key. Prefix/suffix keep their exact
+    /// spelling (a trailing space is part of a prefix).
+    pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        match key {
+            "prefix" => self.prefix = keep_if_nonempty(value),
+            "suffix" => self.suffix = keep_if_nonempty(value),
+            "weight" => {
+                let value = value.trim();
+                self.weight = match value {
+                    "" => None,
+                    v => Some(
+                        v.parse()
+                            .map_err(|_| format!("weight `{v}` is not an integer"))?,
+                    ),
+                }
+            }
+            other => return Err(format!("unknown meta key `{other}`")),
+        }
+        Ok(())
+    }
+}
+
+fn keep_if_nonempty(value: &str) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+/// A group of players at one permission level, with an inheritance parent, a
+/// priority, explicit nodes and meta.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Group {
     id: String,
     level: Level,
     builtin: bool,
+    /// Sort priority: a higher value resolves first. Ties break by id.
+    #[serde(default)]
+    pub priority: i32,
+    /// Parent groups, inherited child-then-parent. Sorted for a stable file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parents: Vec<String>,
+    /// Explicit nodes, encoded by [`node_key`] (`node` or `node#context`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    nodes: BTreeMap<String, bool>,
+    /// Prefix/suffix/weight meta.
+    #[serde(default, skip_serializing_if = "Meta::is_empty")]
+    meta: Meta,
     /// Member name (lower-cased) → its binding. A bare entry has no address.
+    #[serde(default)]
     members: BTreeMap<String, Member>,
 }
 
@@ -167,6 +307,46 @@ impl Group {
     /// Whether this group is built in — and therefore not deletable.
     pub fn is_builtin(&self) -> bool {
         self.builtin
+    }
+
+    /// The group's parents.
+    pub fn parents(&self) -> &[String] {
+        &self.parents
+    }
+
+    /// The group's explicit nodes, as `(node, context, value)`.
+    pub fn nodes(&self) -> impl Iterator<Item = (&str, Option<&str>, bool)> {
+        self.nodes
+            .iter()
+            .map(|(k, v)| (split_key(k).0, split_key(k).1, *v))
+    }
+
+    /// The group's meta.
+    pub fn meta(&self) -> &Meta {
+        &self.meta
+    }
+
+    /// A node on this group, context-aware.
+    pub fn node(&self, node: &str, context: Option<&str>) -> Option<bool> {
+        lookup(&self.nodes, node, context)
+    }
+
+    /// Set (or clear, with `None`) a node on this group.
+    pub fn set_node(&mut self, node: &str, context: Option<&str>, value: Option<bool>) {
+        let key = node_key(node, context);
+        match value {
+            Some(v) => {
+                self.nodes.insert(key, v);
+            }
+            None => {
+                self.nodes.remove(&key);
+            }
+        }
+    }
+
+    /// Set this group's meta by key.
+    pub fn set_meta(&mut self, key: &str, value: &str) -> Result<(), String> {
+        self.meta.set(key, value)
     }
 
     /// The members, lower-cased, with their required address if any.
@@ -191,15 +371,75 @@ impl Group {
     }
 }
 
-/// The permission store: node defaults and groups.
+/// A subject's explicit per-player state: nodes and meta.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Player {
+    /// Explicit nodes, encoded by [`node_key`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    nodes: BTreeMap<String, bool>,
+    /// The player's own meta, which outranks every group's.
+    #[serde(default, skip_serializing_if = "Meta::is_empty")]
+    meta: Meta,
+}
+
+impl Player {
+    /// A node on this player, context-aware.
+    pub fn node(&self, node: &str, context: Option<&str>) -> Option<bool> {
+        lookup(&self.nodes, node, context)
+    }
+
+    /// The player's meta.
+    pub fn meta(&self) -> &Meta {
+        &self.meta
+    }
+
+    /// The number of explicit nodes.
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Whether the player has no explicit nodes.
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+}
+
+/// A holder of nodes and meta: a player or a group. The resolution walks both
+/// through this one lens.
+trait Holder {
+    fn holder_nodes(&self) -> &BTreeMap<String, bool>;
+    fn holder_meta(&self) -> &Meta;
+}
+
+impl Holder for Player {
+    fn holder_nodes(&self) -> &BTreeMap<String, bool> {
+        &self.nodes
+    }
+    fn holder_meta(&self) -> &Meta {
+        &self.meta
+    }
+}
+
+impl Holder for Group {
+    fn holder_nodes(&self) -> &BTreeMap<String, bool> {
+        &self.nodes
+    }
+    fn holder_meta(&self) -> &Meta {
+        &self.meta
+    }
+}
+
+/// The permission store: node defaults, groups and per-player nodes.
 ///
-/// The server holds one process-wide instance behind a lock (see [`store`]);
-/// [`Store`] is public so the model can be unit-tested and reused by CMD-02.
+/// Immutable in practice: a write clones the whole store, edits the copy, and
+/// swaps it in ([`update`]). The public methods take `&mut self` so the model
+/// can be built and unit-tested directly.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Store {
     nodes: BTreeMap<String, NodeDefault>,
     groups: BTreeMap<String, Group>,
+    players: BTreeMap<String, Player>,
 }
 
 impl Default for Store {
@@ -216,6 +456,7 @@ impl Store {
         let mut store = Store {
             nodes: BTreeMap::new(),
             groups: BTreeMap::new(),
+            players: BTreeMap::new(),
         };
         store.normalize();
         store
@@ -228,6 +469,8 @@ impl Store {
     fn normalize(&mut self) {
         for group in self.groups.values_mut() {
             group.level = Level::new(group.level.get());
+            group.parents.sort();
+            group.parents.dedup();
         }
         let op = self
             .groups
@@ -236,11 +479,77 @@ impl Store {
                 id: OP_GROUP.to_string(),
                 level: OP_LEVEL,
                 builtin: true,
+                priority: 0,
+                parents: Vec::new(),
+                nodes: BTreeMap::new(),
+                meta: Meta::default(),
                 members: BTreeMap::new(),
             });
         op.id = OP_GROUP.to_string();
         op.level = OP_LEVEL;
         op.builtin = true;
+    }
+
+    /// Reject an inheritance cycle (or a parent that does not exist) before the
+    /// store is used. Called on load, and by [`Store::set_parent`], so a cycle
+    /// is a load error rather than an infinite recursion.
+    pub fn validate(&self) -> Result<(), String> {
+        // 0 unvisited, 1 on the stack, 2 done.
+        let mut state: BTreeMap<&str, u8> = BTreeMap::new();
+        for id in self.groups.keys() {
+            let mut stack = Vec::new();
+            self.visit(id, &mut state, &mut stack)?;
+        }
+        Ok(())
+    }
+
+    fn visit<'a>(
+        &'a self,
+        id: &'a str,
+        state: &mut BTreeMap<&'a str, u8>,
+        stack: &mut Vec<&'a str>,
+    ) -> Result<(), String> {
+        match state.get(id).copied().unwrap_or(0) {
+            2 => return Ok(()),
+            1 => {
+                let start = stack.iter().position(|s| *s == id).unwrap_or(0);
+                let mut path: Vec<&str> = stack[start..].to_vec();
+                path.push(id);
+                return Err(format!("inheritance cycle: {}", path.join(" -> ")));
+            }
+            _ => {}
+        }
+        state.insert(id, 1);
+        stack.push(id);
+        if let Some(group) = self.groups.get(id) {
+            for parent in &group.parents {
+                if self.groups.contains_key(parent) {
+                    self.visit(parent, state, stack)?;
+                }
+            }
+        }
+        stack.pop();
+        state.insert(id, 2);
+        Ok(())
+    }
+
+    /// Whether `from` reaches `target` through parent links. Used to reject a
+    /// parent edge that would close a cycle.
+    fn reaches(&self, from: &str, target: &str) -> bool {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut stack: Vec<&str> = vec![from];
+        while let Some(id) = stack.pop() {
+            if id == target {
+                return true;
+            }
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(group) = self.groups.get(id) {
+                stack.extend(group.parents.iter().map(|p| p.as_str()));
+            }
+        }
+        false
     }
 
     /// Declare (or redeclare) a node's default.
@@ -267,7 +576,13 @@ impl Store {
         self.groups.values()
     }
 
-    /// The ids of every group `name`, from `ip`, belongs to.
+    /// The named player's explicit state, if any.
+    pub fn player(&self, name: &str) -> Option<&Player> {
+        self.players.get(&name.to_ascii_lowercase())
+    }
+
+    /// The ids of every group `name`, from `ip`, belongs to. Direct membership
+    /// only; inheritance is folded in by [`Store::holders`].
     pub fn groups_of(&self, name: &str, ip: Option<IpAddr>) -> Vec<String> {
         self.groups
             .values()
@@ -276,8 +591,7 @@ impl Store {
             .collect()
     }
 
-    /// Create a non-built-in group. CMD-01 only needs this for tests and for
-    /// the shape CMD-02 will extend; the built-in `op` group already exists.
+    /// Create a non-built-in group. The built-in `op` group already exists.
     pub fn create_group(&mut self, id: &str, level: Level) -> Result<(), String> {
         if id.is_empty() {
             return Err("a group id is empty".to_string());
@@ -291,6 +605,10 @@ impl Store {
                 id: id.to_string(),
                 level,
                 builtin: false,
+                priority: 0,
+                parents: Vec::new(),
+                nodes: BTreeMap::new(),
+                meta: Meta::default(),
                 members: BTreeMap::new(),
             },
         );
@@ -305,9 +623,127 @@ impl Store {
             Some(g) if g.builtin => Err(format!("the built-in group `{id}` cannot be deleted")),
             Some(_) => {
                 self.groups.remove(id);
+                // No dangling parent edges: a deleted group is no longer an
+                // ancestor.
+                for group in self.groups.values_mut() {
+                    group.parents.retain(|p| p != id);
+                }
                 Ok(())
             }
         }
+    }
+
+    /// Set a group's priority.
+    pub fn set_priority(&mut self, id: &str, priority: i32) -> Result<(), String> {
+        let group = self
+            .groups
+            .get_mut(id)
+            .ok_or_else(|| format!("no group `{id}`"))?;
+        group.priority = priority;
+        Ok(())
+    }
+
+    /// Add `parent` as a parent of `child`, refusing a missing group or an edge
+    /// that would create a cycle.
+    pub fn set_parent(&mut self, child: &str, parent: &str) -> Result<(), String> {
+        if !self.groups.contains_key(child) {
+            return Err(format!("no group `{child}`"));
+        }
+        if !self.groups.contains_key(parent) {
+            return Err(format!("no group `{parent}`"));
+        }
+        if child == parent || self.reaches(parent, child) {
+            return Err(format!(
+                "adding parent `{parent}` to `{child}` would create an inheritance cycle"
+            ));
+        }
+        let group = self.groups.get_mut(child).expect("checked above");
+        if !group.parents.iter().any(|p| p == parent) {
+            group.parents.push(parent.to_string());
+            group.parents.sort();
+        }
+        Ok(())
+    }
+
+    /// Remove `parent` from `child`'s parents.
+    pub fn remove_parent(&mut self, child: &str, parent: &str) -> Result<(), String> {
+        let group = self
+            .groups
+            .get_mut(child)
+            .ok_or_else(|| format!("no group `{child}`"))?;
+        group.parents.retain(|p| p != parent);
+        Ok(())
+    }
+
+    /// Set or clear an explicit node on a group.
+    pub fn set_group_node(
+        &mut self,
+        group: &str,
+        node: &str,
+        context: Option<&str>,
+        value: Option<bool>,
+    ) -> Result<(), String> {
+        if !valid_node(node) {
+            return Err(format!("`{node}` is not a legal permission node"));
+        }
+        let group = self
+            .groups
+            .get_mut(group)
+            .ok_or_else(|| format!("no group `{group}`"))?;
+        group.set_node(node, context, value);
+        Ok(())
+    }
+
+    /// Set a group's meta by key.
+    pub fn set_group_meta(&mut self, group: &str, key: &str, value: &str) -> Result<(), String> {
+        let group = self
+            .groups
+            .get_mut(group)
+            .ok_or_else(|| format!("no group `{group}`"))?;
+        group.set_meta(key, value)
+    }
+
+    /// Set or clear an explicit node on a player.
+    pub fn set_player_node(
+        &mut self,
+        name: &str,
+        node: &str,
+        context: Option<&str>,
+        value: Option<bool>,
+    ) -> Result<(), String> {
+        if !valid_node(node) {
+            return Err(format!("`{node}` is not a legal permission node"));
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a player name is empty".to_string());
+        }
+        let player = self.players.entry(name.to_ascii_lowercase()).or_default();
+        match value {
+            Some(v) => {
+                player.nodes.insert(node_key(node, context), v);
+            }
+            None => {
+                player.nodes.remove(&node_key(node, context));
+            }
+        }
+        if player.is_empty() && player.meta.is_empty() {
+            self.players.remove(&name.to_ascii_lowercase());
+        }
+        Ok(())
+    }
+
+    /// Set a player's meta by key.
+    pub fn set_player_meta(&mut self, name: &str, key: &str, value: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a player name is empty".to_string());
+        }
+        self.players
+            .entry(name.to_ascii_lowercase())
+            .or_default()
+            .meta
+            .set(key, value)
     }
 
     /// Add `name` to `group`, optionally requiring `addr`. Returns whether the
@@ -369,7 +805,7 @@ impl Store {
     }
 
     /// A player's effective level: the highest level among the groups they
-    /// belong to, or none.
+    /// belong to directly, or none.
     pub fn level_of(&self, name: &str, ip: Option<IpAddr>) -> Level {
         self.groups
             .values()
@@ -377,6 +813,111 @@ impl Store {
             .map(|g| g.level)
             .max()
             .unwrap_or(Level::NONE)
+    }
+
+    /// The holders a resolution walks, highest precedence first: the player
+    /// first, then every reachable group ordered by `(priority desc, depth asc,
+    /// id asc)`.
+    ///
+    /// `depth` is `0` for a group the player is in directly, `1` for its
+    /// parent, and so on: a child's node therefore beats a parent's at the same
+    /// priority, while a higher-priority group anywhere in the tree beats a
+    /// lower one. The order is total (`depth` then `id` break every tie), so a
+    /// resolution is reproducible.
+    fn holders<'a>(&'a self, name: &str, ip: Option<IpAddr>) -> Vec<&'a dyn Holder> {
+        let mut out: Vec<&dyn Holder> = Vec::new();
+        if let Some(player) = self.player(name) {
+            out.push(player);
+        }
+
+        // Breadth-first from every direct group, keeping the shallowest depth
+        // at which each group is reached.
+        let mut depth: BTreeMap<String, usize> = BTreeMap::new();
+        let mut level: Vec<String> = self
+            .groups
+            .values()
+            .filter(|g| g.contains(name, ip))
+            .map(|g| g.id.clone())
+            .collect();
+        let mut d = 0usize;
+        while !level.is_empty() {
+            let mut next: Vec<String> = Vec::new();
+            for id in level {
+                if let Some(&seen) = depth.get(&id) {
+                    if seen <= d {
+                        continue;
+                    }
+                }
+                depth.insert(id.clone(), d);
+                if let Some(group) = self.groups.get(&id) {
+                    next.extend(group.parents.iter().cloned());
+                }
+            }
+            level = next;
+            d += 1;
+            // `validate` rejects cycles, but never loop if a hand-built store
+            // slipped one through.
+            if d > self.groups.len() + 1 {
+                break;
+            }
+        }
+
+        let mut order: Vec<(i32, usize, &str)> = depth
+            .iter()
+            .filter_map(|(id, &dep)| self.groups.get(id).map(|g| (g.priority, dep, id.as_str())))
+            .collect();
+        order.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(b.2)));
+        for (_, _, id) in order {
+            out.push(&self.groups[id]);
+        }
+        out
+    }
+
+    /// The explicit node a `(name, ip)` subject holds for `node` in `context`,
+    /// or `None` when no holder (player or group) has one.
+    pub fn explicit(
+        &self,
+        name: &str,
+        ip: Option<IpAddr>,
+        node: &str,
+        context: Option<&str>,
+    ) -> Option<bool> {
+        for holder in self.holders(name, ip) {
+            if let Some(value) = lookup(holder.holder_nodes(), node, context) {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    /// The decision: may a player at `level` use `node`, in `context`, for a
+    /// command needing `op`?
+    ///
+    /// A malformed node is denied outright. An explicit node (player or group,
+    /// in [`Store::holders`] order) decides next, but only at or above the
+    /// command's `op` floor — an explicit grant cannot lower a command's op
+    /// level. With no explicit node the declared default resolves as in
+    /// [`Store::check`].
+    pub fn resolve(
+        &self,
+        level: Level,
+        name: &str,
+        ip: Option<IpAddr>,
+        node: &str,
+        context: Option<&str>,
+        op: u8,
+    ) -> bool {
+        if !valid_node(node) {
+            return false;
+        }
+        // The command's op level is a floor whatever the node says.
+        if level.get() < Level::new(op).get() {
+            return false;
+        }
+        if let Some(value) = self.explicit(name, ip, node, context) {
+            return value;
+        }
+        self.check(level, node, op)
     }
 
     /// The decision: may a player at `level` use `node`, for a command needing
@@ -402,16 +943,39 @@ impl Store {
         }
     }
 
+    /// A meta value for `(name, ip)`, resolved the way nodes are: the player
+    /// first, then groups in precedence order.
+    pub fn meta_of(&self, name: &str, ip: Option<IpAddr>, key: &str) -> Option<String> {
+        for holder in self.holders(name, ip) {
+            if let Some(value) = holder.holder_meta().get(key) {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    /// The effective prefix for `(name, ip)`.
+    pub fn prefix_of(&self, name: &str, ip: Option<IpAddr>) -> Option<String> {
+        self.meta_of(name, ip, "prefix")
+    }
+
+    /// The effective suffix for `(name, ip)`.
+    pub fn suffix_of(&self, name: &str, ip: Option<IpAddr>) -> Option<String> {
+        self.meta_of(name, ip, "suffix")
+    }
+
     /// Encode the store as TOML.
     pub fn to_toml(&self) -> Result<String, String> {
         toml::to_string(self).map_err(|e| format!("cannot encode permissions: {e}"))
     }
 
-    /// Decode a store, restoring the invariants a hand-edited file could break.
+    /// Decode a store, restoring the invariants a hand-edited file could break
+    /// and rejecting an inheritance cycle.
     pub fn from_toml(text: &str) -> Result<Store, String> {
         let mut store: Store =
             toml::from_str(text).map_err(|e| format!("cannot parse permissions: {e}"))?;
         store.normalize();
+        store.validate()?;
         Ok(store)
     }
 
@@ -446,10 +1010,10 @@ impl Store {
     }
 }
 
-/// The process-wide store, created empty on first use.
-fn store() -> &'static RwLock<Store> {
-    static STORE: OnceLock<RwLock<Store>> = OnceLock::new();
-    STORE.get_or_init(|| RwLock::new(Store::new()))
+/// The process-wide snapshot, created with the default store on first use.
+fn snapshot() -> &'static RwLock<Arc<Store>> {
+    static SNAPSHOT: OnceLock<RwLock<Arc<Store>>> = OnceLock::new();
+    SNAPSHOT.get_or_init(|| RwLock::new(Arc::new(Store::new())))
 }
 
 /// Where the process-wide store persists, set by [`install`]. Absent when the
@@ -459,12 +1023,21 @@ fn path() -> &'static OnceLock<PathBuf> {
     &PATH
 }
 
-fn read() -> RwLockReadGuard<'static, Store> {
-    store().read().unwrap_or_else(|e| e.into_inner())
+/// Clone the current snapshot. This is the only lock a reader takes, and it is
+/// held just long enough to bump the `Arc` refcount — never across a check.
+pub fn snapshot_store() -> Arc<Store> {
+    snapshot().read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-fn write() -> RwLockWriteGuard<'static, Store> {
-    store().write().unwrap_or_else(|e| e.into_inner())
+/// Apply `f` to a fresh copy of the store and swap it in. A writer's clone and
+/// edit happen under the write lock (writes are admin-rare, never the hot
+/// path); readers only ever see a complete snapshot.
+fn update<R>(f: impl FnOnce(&mut Store) -> R) -> R {
+    let mut guard = snapshot().write().unwrap_or_else(|e| e.into_inner());
+    let mut next = (**guard).clone();
+    let result = f(&mut next);
+    *guard = Arc::new(next);
+    result
 }
 
 /// Install the permission core from the config: load the persisted store, seed
@@ -503,7 +1076,7 @@ pub fn install(cfg: &Config) {
     {
         let _ = declare_command_node_in(&mut store, c.node, c.op);
     }
-    *write() = store;
+    *snapshot().write().unwrap_or_else(|e| e.into_inner()) = Arc::new(store);
     if added > 0 {
         crate::log::info(&format!(
             "permissions: seeded {added} operator(s) into the `{OP_GROUP}` group"
@@ -517,7 +1090,7 @@ pub fn install(cfg: &Config) {
 /// Persist the process-wide store to its file. A no-op before [`install`].
 pub fn save() -> Result<(), String> {
     match path().get() {
-        Some(p) => read().save(p),
+        Some(p) => snapshot_store().save(p),
         None => Ok(()),
     }
 }
@@ -531,7 +1104,7 @@ pub fn save() -> Result<(), String> {
 /// malformed node is an error, so a caller can refuse the command rather than
 /// register a dead one.
 pub fn declare_command_node(node: &str, op: u8) -> Result<(), String> {
-    declare_command_node_in(&mut write(), node, op)
+    update(|store| declare_command_node_in(store, node, op))
 }
 
 fn declare_command_node_in(store: &mut Store, node: &str, op: u8) -> Result<(), String> {
@@ -553,7 +1126,7 @@ fn declare_command_node_in(store: &mut Store, node: &str, op: u8) -> Result<(), 
 /// has a store — including a test — can grant operator rights without resetting
 /// everything else the store holds. Add-only, exactly like [`Store::seed_operators`].
 pub fn seed_operators(entries: &[String]) -> usize {
-    write().seed_operators(entries)
+    update(|store| store.seed_operators(entries))
 }
 
 /// A lock that serialises tests which mutate or depend on the process-wide
@@ -571,12 +1144,12 @@ pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// A player's effective level in the process-wide store.
 pub fn level(name: &str, ip: Option<IpAddr>) -> Level {
-    read().level_of(name, ip)
+    snapshot_store().level_of(name, ip)
 }
 
 /// The groups `name`, from `ip`, belongs to, in the process-wide store.
 pub fn groups_of(name: &str, ip: Option<IpAddr>) -> Vec<String> {
-    read().groups_of(name, ip)
+    snapshot_store().groups_of(name, ip)
 }
 
 /// Whether `name`, from `ip`, is an operator (level ≥ 1).
@@ -584,19 +1157,55 @@ pub fn is_operator(name: &str, ip: Option<IpAddr>) -> bool {
     level(name, ip).get() >= 1
 }
 
-/// The process-wide [`Store::check`].
+/// The process-wide [`Store::check`]: the default/op-level half of resolution,
+/// with no explicit nodes. Kept for callers that only have a level.
 pub fn check(level: Level, node: &str, op: u8) -> bool {
-    read().check(level, node, op)
+    snapshot_store().check(level, node, op)
+}
+
+/// The process-wide resolved check for a subject: explicit nodes, groups,
+/// inheritance and the declared default, for a global (context-free) node.
+pub fn check_for(name: &str, ip: Option<IpAddr>, node: &str, op: u8) -> bool {
+    check_in(name, ip, node, None, op)
+}
+
+/// The process-wide resolved check in a context (a dimension/world key).
+pub fn check_in(name: &str, ip: Option<IpAddr>, node: &str, context: Option<&str>, op: u8) -> bool {
+    let store = snapshot_store();
+    let level = store.level_of(name, ip);
+    store.resolve(level, name, ip, node, context, op)
+}
+
+/// A meta value (prefix/suffix/weight) for `(name, ip)`.
+pub fn meta(name: &str, ip: Option<IpAddr>, key: &str) -> Option<String> {
+    snapshot_store().meta_of(name, ip, key)
+}
+
+/// Grant or deny `node` to a player, persist, and swap the snapshot in.
+pub fn set_node(
+    subject: &str,
+    node: &str,
+    context: Option<&str>,
+    value: bool,
+) -> Result<(), String> {
+    update(|store| store.set_player_node(subject, node, context, Some(value)))?;
+    save()
+}
+
+/// Remove an explicit `node` from a player.
+pub fn unset_node(subject: &str, node: &str, context: Option<&str>) -> Result<(), String> {
+    update(|store| store.set_player_node(subject, node, context, None))?;
+    save()
 }
 
 /// Declare a node's default in the process-wide store.
 pub fn declare_node(node: &str, default: NodeDefault) -> Result<(), String> {
-    write().declare_node(node, default)
+    update(|store| store.declare_node(node, default))
 }
 
 /// A node's declared default in the process-wide store.
 pub fn node_default(node: &str) -> Option<NodeDefault> {
-    read().node_default(node)
+    snapshot_store().node_default(node)
 }
 
 #[cfg(test)]
@@ -884,5 +1493,418 @@ root = {}
         // The file was written.
         assert!(dir.join(STORE_FILE).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- CMD-02: groups, inheritance, context, meta -----------------------
+
+    /// Build a store with a plain group, a member, and one node.
+    fn fixture() -> Store {
+        let mut s = Store::new();
+        s.create_group("moderator", Level::new(2)).unwrap();
+        s.add_member("moderator", "alice", None).unwrap();
+        s.declare_node("test.node", NodeDefault::Deny).unwrap();
+        s
+    }
+
+    #[test]
+    fn a_group_node_grants_a_node_the_default_would_deny() {
+        let mut s = fixture();
+        // The default is `op`, so a level-2 member would fail `test.node`.
+        assert!(!s.resolve(
+            s.level_of("alice", None),
+            "alice",
+            None,
+            "test.node",
+            None,
+            0
+        ));
+        // An explicit grant on her group makes it pass.
+        s.set_group_node("moderator", "test.node", None, Some(true))
+            .unwrap();
+        assert!(s.resolve(
+            s.level_of("alice", None),
+            "alice",
+            None,
+            "test.node",
+            None,
+            0
+        ));
+        // A non-member is unaffected.
+        assert!(!s.resolve(Level::NONE, "bob", None, "test.node", None, 0));
+    }
+
+    #[test]
+    fn child_group_grant_is_overridden_by_a_player_level_deny() {
+        let mut s = fixture();
+        s.set_group_node("moderator", "test.node", None, Some(true))
+            .unwrap();
+        assert!(s.resolve(Level::new(2), "alice", None, "test.node", None, 0));
+        // The player's own explicit deny outranks the group grant.
+        s.set_player_node("alice", "test.node", None, Some(false))
+            .unwrap();
+        assert!(!s.resolve(Level::new(2), "alice", None, "test.node", None, 0));
+        // Removing it restores the group grant.
+        s.set_player_node("alice", "test.node", None, None).unwrap();
+        assert!(s.resolve(Level::new(2), "alice", None, "test.node", None, 0));
+    }
+
+    #[test]
+    fn priority_orders_groups_and_a_tie_breaks_by_group_id() {
+        let mut s = Store::new();
+        s.create_group("alpha", Level::new(1)).unwrap();
+        s.create_group("beta", Level::new(1)).unwrap();
+        s.add_member("alpha", "carol", None).unwrap();
+        s.add_member("beta", "carol", None).unwrap();
+        s.declare_node("test.node", NodeDefault::Deny).unwrap();
+
+        // Equal priority: the lower id (`alpha`) resolves first.
+        s.set_group_node("alpha", "test.node", None, Some(true))
+            .unwrap();
+        s.set_group_node("beta", "test.node", None, Some(false))
+            .unwrap();
+        assert!(
+            s.resolve(Level::new(1), "carol", None, "test.node", None, 0),
+            "equal priority must break by group id (alpha first)"
+        );
+
+        // Raising beta's priority makes it win despite the higher id.
+        s.set_priority("beta", 10).unwrap();
+        assert!(
+            !s.resolve(Level::new(1), "carol", None, "test.node", None, 0),
+            "the higher-priority group must win"
+        );
+    }
+
+    #[test]
+    fn a_child_group_node_beats_its_parent_at_equal_priority() {
+        let mut s = Store::new();
+        s.create_group("child", Level::new(1)).unwrap();
+        s.create_group("parent", Level::new(1)).unwrap();
+        s.set_parent("child", "parent").unwrap();
+        s.add_member("child", "dave", None).unwrap();
+        s.declare_node("test.node", NodeDefault::Deny).unwrap();
+
+        // No node on the parent: the child's inherited member sees the default.
+        s.set_group_node("parent", "test.node", None, Some(false))
+            .unwrap();
+        s.set_group_node("child", "test.node", None, Some(true))
+            .unwrap();
+        assert!(
+            s.resolve(Level::new(1), "dave", None, "test.node", None, 0),
+            "the child's node must beat the parent's at equal priority"
+        );
+
+        // Give the parent a higher priority and it wins.
+        s.set_priority("parent", 5).unwrap();
+        assert!(!s.resolve(Level::new(1), "dave", None, "test.node", None, 0));
+    }
+
+    #[test]
+    fn a_per_world_node_beats_the_global_one_and_only_there() {
+        let mut s = fixture();
+        s.set_group_node("moderator", "test.node", None, Some(true))
+            .unwrap();
+        s.set_group_node("moderator", "test.node", Some("overworld"), Some(false))
+            .unwrap();
+
+        // In the overworld the context node wins...
+        assert!(!s.resolve(
+            Level::new(2),
+            "alice",
+            None,
+            "test.node",
+            Some("overworld"),
+            0
+        ));
+        // ...and elsewhere the global grant applies.
+        assert!(s.resolve(Level::new(2), "alice", None, "test.node", Some("nether"), 0));
+        assert!(s.resolve(Level::new(2), "alice", None, "test.node", None, 0));
+
+        // A player context deny outranks an inherited global grant.
+        s.set_player_node("alice", "test.node", Some("overworld"), Some(false))
+            .unwrap();
+        assert!(!s.resolve(
+            Level::new(2),
+            "alice",
+            None,
+            "test.node",
+            Some("overworld"),
+            0
+        ));
+    }
+
+    #[test]
+    fn an_explicit_grant_cannot_lower_a_commands_op_floor() {
+        let mut s = fixture();
+        s.set_player_node("alice", "test.node", None, Some(true))
+            .unwrap();
+        // The command wants op 3; alice is level 2, so the grant is not enough.
+        assert!(!s.resolve(Level::new(2), "alice", None, "test.node", None, 3));
+        // At the floor (3) the grant decides against the `op` default.
+        assert!(s.resolve(Level::new(3), "alice", None, "test.node", None, 3));
+    }
+
+    #[test]
+    fn an_inheritance_cycle_is_rejected_at_load() {
+        let text = r#"
+[groups.a]
+id = "a"
+level = 1
+builtin = false
+parents = ["b"]
+
+[groups.b]
+id = "b"
+level = 1
+builtin = false
+parents = ["a"]
+"#;
+        let err = Store::from_toml(text).unwrap_err();
+        assert!(err.contains("cycle"), "{err}");
+        // A self-parent is a cycle too.
+        let text = r#"
+[groups.a]
+id = "a"
+level = 1
+builtin = false
+parents = ["a"]
+"#;
+        assert!(Store::from_toml(text).is_err());
+    }
+
+    #[test]
+    fn set_parent_refuses_a_cycle() {
+        let mut s = Store::new();
+        s.create_group("a", Level::new(1)).unwrap();
+        s.create_group("b", Level::new(1)).unwrap();
+        s.create_group("c", Level::new(1)).unwrap();
+        s.set_parent("a", "b").unwrap();
+        s.set_parent("b", "c").unwrap();
+        // c -> a would close a -> b -> c -> a.
+        assert!(s.set_parent("c", "a").is_err());
+        // a -> c is fine (no cycle).
+        assert!(s.set_parent("a", "c").is_ok());
+        s.validate().unwrap();
+    }
+
+    #[test]
+    fn a_missing_parent_is_skipped_not_an_error() {
+        let text = r#"
+[groups.a]
+id = "a"
+level = 1
+builtin = false
+parents = ["ghost"]
+"#;
+        let s = Store::from_toml(text).unwrap();
+        assert!(s.group("a").is_some());
+    }
+
+    #[test]
+    fn meta_resolves_player_then_group_by_precedence() {
+        let mut s = fixture();
+        s.set_group_meta("moderator", "prefix", "[mod] ").unwrap();
+        s.set_group_meta("moderator", "weight", "5").unwrap();
+        assert_eq!(
+            s.meta_of("alice", None, "prefix").as_deref(),
+            Some("[mod] ")
+        );
+        assert_eq!(s.meta_of("alice", None, "weight").as_deref(), Some("5"));
+        assert_eq!(s.meta_of("bob", None, "prefix"), None);
+        // A player prefix outranks the group's.
+        s.set_player_meta("alice", "prefix", "[a] ").unwrap();
+        assert_eq!(s.meta_of("alice", None, "prefix").as_deref(), Some("[a] "));
+        // Weight still inherits from the group.
+        assert_eq!(s.meta_of("alice", None, "weight").as_deref(), Some("5"));
+        // A non-integer weight is refused.
+        assert!(s.set_player_meta("alice", "weight", "heavy").is_err());
+        assert!(s.set_player_meta("alice", "nonsense", "x").is_err());
+    }
+
+    #[test]
+    fn the_file_round_trips_groups_inheritance_context_and_meta() {
+        let mut s = Store::new();
+        s.create_group("staff", Level::new(3)).unwrap();
+        s.create_group("moderator", Level::new(2)).unwrap();
+        s.set_parent("moderator", "staff").unwrap();
+        s.set_priority("moderator", 7).unwrap();
+        s.set_group_node("moderator", "aether.command.kick", None, Some(true))
+            .unwrap();
+        s.set_group_node(
+            "staff",
+            "aether.command.ban",
+            Some("overworld"),
+            Some(false),
+        )
+        .unwrap();
+        s.set_group_meta("moderator", "prefix", "[mod] ").unwrap();
+        s.set_player_node("alice", "aether.command.kick", None, Some(false))
+            .unwrap();
+        s.set_player_meta("alice", "suffix", " the brave").unwrap();
+
+        let text = s.to_toml().unwrap();
+        let back = Store::from_toml(&text).unwrap();
+        assert_eq!(back.group("moderator").unwrap().priority, 7);
+        assert_eq!(
+            back.group("moderator").unwrap().parents(),
+            &["staff".to_string()]
+        );
+        assert_eq!(
+            back.group("moderator")
+                .unwrap()
+                .node("aether.command.kick", None),
+            Some(true)
+        );
+        assert_eq!(
+            back.group("staff")
+                .unwrap()
+                .node("aether.command.ban", Some("overworld")),
+            Some(false)
+        );
+        assert_eq!(
+            back.meta_of("alice", None, "suffix").as_deref(),
+            Some(" the brave")
+        );
+        assert_eq!(
+            back.player("alice")
+                .unwrap()
+                .node("aether.command.kick", None),
+            Some(false)
+        );
+        // The inherited node still resolves for the member.
+        s.add_member("moderator", "alice", None).unwrap();
+        let text = s.to_toml().unwrap();
+        let back = Store::from_toml(&text).unwrap();
+        assert_eq!(
+            back.explicit("alice", None, "aether.command.ban", Some("overworld")),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn a_reload_preserves_a_players_explicit_overrides() {
+        let path = temp_path("overrides");
+        let _ = std::fs::remove_file(&path);
+        let mut s = fixture();
+        s.set_group_node("moderator", "test.node", None, Some(true))
+            .unwrap();
+        s.set_player_node("alice", "test.node", None, Some(false))
+            .unwrap();
+        s.save(&path).unwrap();
+
+        let back = Store::load(&path).unwrap().expect("the file exists");
+        // The group still grants, but the player's stored deny still wins.
+        assert_eq!(
+            back.group("moderator").unwrap().node("test.node", None),
+            Some(true)
+        );
+        assert!(!back.resolve(
+            back.level_of("alice", None),
+            "alice",
+            None,
+            "test.node",
+            None,
+            0
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.tmp"));
+    }
+
+    #[test]
+    fn a_snapshot_swap_is_atomic() {
+        let _guard = test_lock();
+        let mut seeded = Store::new();
+        seeded
+            .set_player_node("p", "test.a", None, Some(true))
+            .unwrap();
+        seeded
+            .set_player_node("p", "test.b", None, Some(true))
+            .unwrap();
+        seeded.declare_node("test.a", NodeDefault::Allow).unwrap();
+        seeded.declare_node("test.b", NodeDefault::Allow).unwrap();
+        *snapshot().write().unwrap() = Arc::new(seeded);
+
+        let before = snapshot_store();
+        assert!(before.player("p").unwrap().node("test.a", None).unwrap());
+
+        // A write builds a whole new store and swaps the pointer.
+        update(|store| {
+            store
+                .set_player_node("p", "test.a", None, Some(false))
+                .unwrap();
+            store
+                .set_player_node("p", "test.b", None, Some(false))
+                .unwrap();
+        });
+        let after = snapshot_store();
+        assert!(
+            !Arc::ptr_eq(&before, &after),
+            "the snapshot must be swapped"
+        );
+        // The old snapshot is untouched — a reader holding it sees the old,
+        // consistent state, never a half-applied edit.
+        assert!(before.player("p").unwrap().node("test.a", None).unwrap());
+        assert!(before.player("p").unwrap().node("test.b", None).unwrap());
+        assert!(!after.player("p").unwrap().node("test.a", None).unwrap());
+        assert!(!after.player("p").unwrap().node("test.b", None).unwrap());
+    }
+
+    #[test]
+    fn a_concurrent_reader_never_sees_a_half_applied_edit() {
+        let _guard = test_lock();
+        *snapshot().write().unwrap() = Arc::new(Store::new());
+        update(|store| {
+            store.declare_node("test.a", NodeDefault::Allow).unwrap();
+            store.declare_node("test.b", NodeDefault::Allow).unwrap();
+            store
+                .set_player_node("p", "test.a", None, Some(true))
+                .unwrap();
+            store
+                .set_player_node("p", "test.b", None, Some(true))
+                .unwrap();
+        });
+
+        let writer = std::thread::spawn(|| {
+            for i in 0..20_000u32 {
+                let on = i % 2 == 0;
+                update(|store| {
+                    store
+                        .set_player_node("p", "test.a", None, Some(on))
+                        .unwrap();
+                    store
+                        .set_player_node("p", "test.b", None, Some(on))
+                        .unwrap();
+                });
+            }
+        });
+
+        for _ in 0..20_000 {
+            let snap = snapshot_store();
+            let player = snap
+                .player("p")
+                .expect("the player exists in every snapshot");
+            // Both nodes are written in one `update`, so every snapshot must
+            // agree on them: no reader can observe one flipped and not the
+            // other.
+            assert_eq!(
+                player.node("test.a", None),
+                player.node("test.b", None),
+                "a snapshot saw a half-applied edit"
+            );
+        }
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn the_process_wide_write_model_grants_and_revokes_a_player_node() {
+        let _guard = test_lock();
+        // Start from a clean-ish store and take unique names.
+        *snapshot().write().unwrap() = Arc::new(Store::new());
+        declare_node("perm_cmd02_test", NodeDefault::Deny).unwrap();
+        assert!(!check_for("perm_cmd02_subject", None, "perm_cmd02_test", 0));
+        set_node("perm_cmd02_subject", "perm_cmd02_test", None, true).unwrap();
+        assert!(check_for("perm_cmd02_subject", None, "perm_cmd02_test", 0));
+        unset_node("perm_cmd02_subject", "perm_cmd02_test", None).unwrap();
+        assert!(!check_for("perm_cmd02_subject", None, "perm_cmd02_test", 0));
     }
 }
