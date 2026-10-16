@@ -105,8 +105,8 @@ fn argument(kind: ArgKind, partial: &str, ctx: &SuggestCtx) -> Vec<String> {
         ArgKind::ItemStack => aether_world::registry::items::ITEM_NAMES.to_vec(),
         ArgKind::ResourceLocation => vec!["minecraft:"],
         ArgKind::ResourceOrTag => vec!["#minecraft:"],
-        ArgKind::BlockPos | ArgKind::Vec3 => vec!["~ ~ ~", "^ ^ ^"],
-        ArgKind::Vec2 => vec!["~ ~", "^ ^"],
+        ArgKind::BlockPos | ArgKind::Vec3(_) => vec!["~ ~ ~", "^ ^ ^"],
+        ArgKind::Vec2(_) => vec!["~ ~", "^ ^"],
         ArgKind::Rotation => vec!["~ ~"],
         ArgKind::Angle => vec!["~"],
         ArgKind::Entity | ArgKind::Entities | ArgKind::GameProfile | ArgKind::ScoreHolder => {

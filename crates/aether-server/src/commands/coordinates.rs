@@ -14,8 +14,16 @@
 //!   coordinates may not be mixed with absolute or relative ones.
 //! * an absolute component is a double for an exact position; a block position
 //!   floors after resolving relatives.
+//! * a `vec3`/`vec2` parsed with `centerIntegers` adds `0.5` to each absolute
+//!   component so a whole number names the *centre* of its block; `vec3` does
+//!   this for X and Z only, never Y (see [`WorldCoordinate::centered`]).
 //! * a source with no position (the console) cannot resolve `~`; a source with
 //!   no rotation cannot resolve `^`.
+//!
+//! Resolution never wraps an angle: vanilla's `DefaultPosArgument.getRotation`
+//! returns the raw yaw/pitch and a command folds or clamps it itself, so
+//! `/execute rotated 270 ~` resolves to `270`, not `-90`. [`wrap_degrees`] is
+//! provided for a command that chooses to fold.
 
 use aether_api::Vector3 as Vec3;
 
@@ -37,11 +45,16 @@ pub enum CoordError {
 }
 
 impl CoordError {
-    /// The chat line this error produces.
+    /// The chat line this error produces, using vanilla's translation keys.
     pub fn message(&self) -> String {
         match self {
-            CoordError::NotANumber(s) => format!("Invalid coordinate '{s}'"),
-            CoordError::NotAnInteger(s) => format!("Invalid integer '{s}'"),
+            // `argument.pos.missing.double`: a coordinate component that is not
+            // a number.
+            CoordError::NotANumber(_) => "Expected a double".into(),
+            // `argument.pos.missing.int`: a block component that is not an
+            // integer.
+            CoordError::NotAnInteger(_) => "Expected an integer".into(),
+            // `argument.pos.mixed`.
             CoordError::MixedLocal => {
                 "Cannot mix world & local coordinates (everything must either use ^ or not)".into()
             }
@@ -105,6 +118,19 @@ impl WorldCoordinate {
         }
     }
 
+    /// The `centerIntegers` transform: an *absolute* value gains `0.5` so a
+    /// whole number names a block centre; a `~`/`^` value is left alone.
+    ///
+    /// This is vanilla's `CoordinateArgument.parse(reader, centerIntegers)`,
+    /// applied per component — `Vec3ArgumentType` centres X and Z but passes
+    /// `false` for Y.
+    pub fn centered(self) -> WorldCoordinate {
+        match self {
+            WorldCoordinate::Absolute(v) => WorldCoordinate::Absolute(v + 0.5),
+            other => other,
+        }
+    }
+
     /// Resolve against a base value: absolute is itself, relative adds `base`.
     fn resolve_scalar(self, base: Option<f64>) -> Result<f64, CoordError> {
         match self {
@@ -141,18 +167,13 @@ impl Rotation {
     pub fn new(yaw: f32, pitch: f32) -> Rotation {
         Rotation { yaw, pitch }
     }
-
-    /// Both angles folded into `[-180, 180)`, as vanilla does when a rotation
-    /// is read back.
-    pub fn wrapped(self) -> Rotation {
-        Rotation {
-            yaw: wrap_degrees(self.yaw),
-            pitch: wrap_degrees(self.pitch),
-        }
-    }
 }
 
 /// Fold an angle in degrees into `[-180, 180)`.
+///
+/// Not applied during resolution — vanilla returns a rotation's raw angles and
+/// lets each command decide. This is the helper a command uses when it does
+/// want to fold a resolved yaw or pitch.
 pub fn wrap_degrees(v: f32) -> f32 {
     let mut d = v % 360.0;
     if d >= 180.0 {
@@ -190,14 +211,18 @@ impl BlockPos {
 ///
 /// A player has both a position and a rotation; the console has neither, which
 /// is why `~` and `^` from the console fail rather than silently meaning zero.
-pub trait CommandSource {
+///
+/// Named `CoordinateSource` rather than `CommandSource` to leave that name to
+/// [`super::source::CommandSource`], the command-issuer identity CMD-05/CMD-07
+/// use; a future task can implement this for it.
+pub trait CoordinateSource {
     /// The source's position, if it has one.
     fn position(&self) -> Option<Vec3>;
     /// The source's rotation, if it has one.
     fn rotation(&self) -> Option<Rotation>;
 }
 
-impl CommandSource for PlayerHandle {
+impl CoordinateSource for PlayerHandle {
     fn position(&self) -> Option<Vec3> {
         let p = self.pos();
         Some(Vec3::new(p.x, p.y, p.z))
@@ -237,7 +262,7 @@ impl Coordinates {
     }
 
     /// Resolve to an exact point.
-    pub fn resolve(&self, source: &dyn CommandSource) -> Result<Vec3, CoordError> {
+    pub fn resolve(&self, source: &dyn CoordinateSource) -> Result<Vec3, CoordError> {
         let locals = [self.x, self.y, self.z]
             .iter()
             .filter(|c| c.is_local())
@@ -263,7 +288,7 @@ impl Coordinates {
     }
 
     /// Resolve to a block cell, flooring every component after resolving.
-    pub fn resolve_block(&self, source: &dyn CommandSource) -> Result<BlockPos, CoordError> {
+    pub fn resolve_block(&self, source: &dyn CoordinateSource) -> Result<BlockPos, CoordError> {
         self.resolve(source).map(BlockPos::from_vec3)
     }
 }
@@ -284,7 +309,7 @@ impl Coordinates2 {
     }
 
     /// Resolve to a pair of exact values.
-    pub fn resolve(&self, source: &dyn CommandSource) -> Result<(f64, f64), CoordError> {
+    pub fn resolve(&self, source: &dyn CoordinateSource) -> Result<(f64, f64), CoordError> {
         let base = source.position();
         Ok((
             self.x.resolve_scalar(base.map(|p| p.x))?,
@@ -293,22 +318,29 @@ impl Coordinates2 {
     }
 
     /// Resolve to a yaw/pitch pair, relative to the source's own rotation.
-    pub fn resolve_rotation(&self, source: &dyn CommandSource) -> Result<Rotation, CoordError> {
+    ///
+    /// The angles are **not** wrapped or clamped: vanilla's
+    /// `DefaultPosArgument.getRotation` returns the raw resolved value and the
+    /// command folds it if it wants to, so `/execute rotated 270 ~` yields 270.
+    pub fn resolve_rotation(&self, source: &dyn CoordinateSource) -> Result<Rotation, CoordError> {
         let rot = source.rotation();
         let yaw = self.x.resolve_scalar(rot.map(|r| r.yaw as f64))? as f32;
         let pitch = self.y.resolve_scalar(rot.map(|r| r.pitch as f64))? as f32;
-        Ok(Rotation::new(yaw, pitch).wrapped())
+        Ok(Rotation::new(yaw, pitch))
     }
 }
 
 /// Resolve a single `angle` argument: absolute, or relative to source yaw.
+///
+/// Not wrapped, for the same reason as [`Coordinates2::resolve_rotation`] —
+/// vanilla's `AngleArgument.getAngle` adds the source yaw and returns.
 pub fn resolve_angle(
     coord: WorldCoordinate,
-    source: &dyn CommandSource,
+    source: &dyn CoordinateSource,
 ) -> Result<f32, CoordError> {
     let rot = source.rotation();
     let v = coord.resolve_scalar(rot.map(|r| r.yaw as f64))? as f32;
-    Ok(wrap_degrees(v))
+    Ok(v)
 }
 
 /// The local (left, up, forward) basis for a yaw/pitch, in world space.
@@ -346,17 +378,31 @@ pub enum Swizzle {
 }
 
 impl Swizzle {
-    /// Parse the exact spelling, case-insensitively as vanilla does.
+    /// Parse an exact, lowercase, duplicate-free sequence of `x`/`y`/`z`.
+    ///
+    /// Vanilla's `SwizzleArgumentType` accepts any order and any subset
+    /// (`yx`, `zx`, `zy`, …); a duplicated axis, an unknown letter or an
+    /// uppercase letter is refused. The result is canonical (`yx` → `xy`),
+    /// because only the set of axes matters.
     pub fn parse(s: &str) -> Option<Swizzle> {
-        match s.to_ascii_lowercase().as_str() {
-            "x" => Some(Swizzle::X),
-            "y" => Some(Swizzle::Y),
-            "z" => Some(Swizzle::Z),
-            "xy" => Some(Swizzle::XY),
-            "xz" => Some(Swizzle::XZ),
-            "yz" => Some(Swizzle::YZ),
-            "xyz" => Some(Swizzle::XYZ),
-            _ => None,
+        let (mut x, mut y, mut z) = (false, false, false);
+        for c in s.chars() {
+            match c {
+                'x' if !x => x = true,
+                'y' if !y => y = true,
+                'z' if !z => z = true,
+                _ => return None,
+            }
+        }
+        match (x, y, z) {
+            (true, false, false) => Some(Swizzle::X),
+            (false, true, false) => Some(Swizzle::Y),
+            (false, false, true) => Some(Swizzle::Z),
+            (true, true, false) => Some(Swizzle::XY),
+            (true, false, true) => Some(Swizzle::XZ),
+            (false, true, true) => Some(Swizzle::YZ),
+            (true, true, true) => Some(Swizzle::XYZ),
+            (false, false, false) => None,
         }
     }
 
@@ -383,7 +429,7 @@ mod tests {
         rot: Option<Rotation>,
     }
 
-    impl CommandSource for Source {
+    impl CoordinateSource for Source {
         fn position(&self) -> Option<Vec3> {
             self.pos
         }
@@ -548,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn rotations_resolve_against_the_source_and_wrap() {
+    fn rotations_resolve_against_the_source_without_wrapping() {
         let src = looking(0.0, 0.0, 0.0, 90.0, 0.0);
         let absolute = Coordinates2::new(c("45", false), c("10", false));
         assert_eq!(
@@ -556,14 +602,16 @@ mod tests {
             Rotation::new(45.0, 10.0)
         );
         let relative = Coordinates2::new(c("~90", false), c("~-10", false));
-        // 90 + 90 = 180, which vanilla folds to −180.
         assert_eq!(
             relative.resolve_rotation(&src).unwrap(),
-            Rotation::new(-180.0, -10.0)
+            Rotation::new(180.0, -10.0)
         );
-        // 270 wraps to −90.
-        let wrap = Coordinates2::new(c("270", false), c("0", false));
-        assert_eq!(wrap.resolve_rotation(&src).unwrap().yaw, -90.0);
+        // Vanilla does not wrap; `/execute rotated 270 ~` resolves to 270 and
+        // the command folds it if it wants to.
+        let raw = Coordinates2::new(c("270", false), c("0", false));
+        assert_eq!(raw.resolve_rotation(&src).unwrap().yaw, 270.0);
+        let raw = Coordinates2::new(c("~350", false), c("0", false));
+        assert_eq!(raw.resolve_rotation(&src).unwrap().yaw, 440.0);
     }
 
     #[test]
@@ -574,19 +622,51 @@ mod tests {
     }
 
     #[test]
-    fn swizzles_round_trip() {
-        for s in ["x", "y", "z", "xy", "xz", "yz", "xyz"] {
-            let sw = Swizzle::parse(s).unwrap();
-            assert_eq!(sw.as_str(), s);
-        }
-        // Case-insensitive, as vanilla reads swizzles.
-        assert_eq!(Swizzle::parse("XYZ").unwrap(), Swizzle::XYZ);
-        assert_eq!(Swizzle::parse("xy z"), None);
-        assert_eq!(Swizzle::parse(""), None);
+    fn centering_adds_a_half_to_absolute_values_only() {
+        assert_eq!(
+            WorldCoordinate::Absolute(10.0).centered(),
+            WorldCoordinate::Absolute(10.5)
+        );
+        // A `~`/`^` component is untouched.
+        assert_eq!(
+            WorldCoordinate::Relative(10.0).centered(),
+            WorldCoordinate::Relative(10.0)
+        );
+        assert_eq!(
+            WorldCoordinate::Local(10.0).centered(),
+            WorldCoordinate::Local(10.0)
+        );
     }
 
     #[test]
-    fn angles_resolve_and_wrap() {
+    fn swizzles_accept_any_order_or_subset_without_repeats() {
+        for (s, want) in [
+            ("x", Swizzle::X),
+            ("y", Swizzle::Y),
+            ("z", Swizzle::Z),
+            ("xy", Swizzle::XY),
+            ("yx", Swizzle::XY),
+            ("xz", Swizzle::XZ),
+            ("zx", Swizzle::XZ),
+            ("yz", Swizzle::YZ),
+            ("zy", Swizzle::YZ),
+            ("xyz", Swizzle::XYZ),
+            ("zyx", Swizzle::XYZ),
+        ] {
+            assert_eq!(Swizzle::parse(s), Some(want), "{s}");
+        }
+        // Duplicates, uppercase, unknown letters and the empty string error.
+        for bad in ["xx", "xyx", "XYZ", "X", "w", "", "xy z"] {
+            assert_eq!(Swizzle::parse(bad), None, "{bad}");
+        }
+        // Every variant round-trips.
+        for s in ["x", "y", "z", "xy", "xz", "yz", "xyz"] {
+            assert_eq!(Swizzle::parse(s).unwrap().as_str(), s);
+        }
+    }
+
+    #[test]
+    fn angles_resolve_without_wrapping() {
         let src = looking(0.0, 0.0, 0.0, 90.0, 0.0);
         assert_eq!(
             resolve_angle(WorldCoordinate::parse("45").unwrap(), &src).unwrap(),
@@ -596,9 +676,10 @@ mod tests {
             resolve_angle(WorldCoordinate::parse("~10").unwrap(), &src).unwrap(),
             100.0
         );
+        // No fold: 350 stays 350.
         assert_eq!(
             resolve_angle(WorldCoordinate::parse("350").unwrap(), &src).unwrap(),
-            -10.0
+            350.0
         );
     }
 }

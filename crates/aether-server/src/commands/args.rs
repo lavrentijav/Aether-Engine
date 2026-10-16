@@ -8,7 +8,7 @@
 //! Coordinates live in [`super::coordinates`] and SNBT in [`super::snbt`]; the
 //! rest are small, exact validators: a resource location, a gamemode word, a
 //! time with its suffix, a block state resolved through the world's block
-//! table, an item stack with its optional component compound and count.
+//! table, an item stack with its optional component patch.
 
 use aether_world::registry::blocks;
 use aether_world::registry::props;
@@ -19,15 +19,38 @@ use super::snbt;
 use super::tree::{ArgKind, ParseError, StringReader, Value};
 use crate::protocol::nbt::Nbt;
 
-/// An item stack argument: an item, its optional component compound and a count.
+/// A block-state argument: the state id and the optional block-entity NBT a
+/// `{…}` suffix carries (vanilla's `BlockArgumentParser.block(…, true)`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockState {
+    /// The resolved block state.
+    pub id: BlockStateId,
+    /// The block-entity compound, if a `{…}` suffix was given.
+    pub nbt: Option<Nbt>,
+}
+
+/// One entry of an item stack's `[…]` component patch.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ComponentPatch {
+    /// `!name`: remove the component.
+    Removed(String),
+    /// `name`: the component is present with its default value.
+    Present(String),
+    /// `name=<snbt>`: the component is present with an explicit value.
+    Value(String, Nbt),
+}
+
+/// An item stack argument: an item and its optional component patch.
+///
+/// Vanilla 1.21.11's `ItemStringReader`: an item id followed by an optional
+/// `[component=value,!component]` patch. There is no count here — a count is a
+/// separate argument (`/give … <targets> <item> [<count>]`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ItemStack {
     /// The item type.
     pub item: ItemTypeId,
-    /// How many; at least one.
-    pub count: i32,
-    /// The `{…}` component compound, if the argument carried one.
-    pub nbt: Option<Nbt>,
+    /// The component patch entries, in order; empty when no `[…]` was given.
+    pub components: Vec<ComponentPatch>,
 }
 
 /// Parse one argument of `kind` from `r`, returning its value and source text.
@@ -86,41 +109,47 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
         // Coordinates.
         ArgKind::BlockPos => {
             let start = r.cursor;
-            let c = coordinates(r, true)?;
+            let c = coordinates(r, true, false)?;
             Ok((Value::Coordinates(c), r.text_from(start)))
         }
-        ArgKind::Vec3 => {
+        // `vec3(true)` centers absolute X and Z (not Y); `vec3(false)` is the
+        // delta form `/particle` uses.
+        ArgKind::Vec3(center) => {
             let start = r.cursor;
-            let c = coordinates(r, false)?;
+            let c = coordinates(r, false, center)?;
             Ok((Value::Coordinates(c), r.text_from(start)))
         }
-        ArgKind::Vec2 => {
+        ArgKind::Vec2(center) => {
             let start = r.cursor;
-            let c = coordinates2(r)?;
+            let c = coordinates2(r, center)?;
             Ok((Value::Vec2(c), r.text_from(start)))
         }
         ArgKind::Rotation => {
             let start = r.cursor;
-            let c = coordinates2(r)?;
+            // A rotation is `vec2(false)`: never centered.
+            let c = coordinates2(r, false)?;
             Ok((Value::Rotation(c), r.text_from(start)))
         }
         ArgKind::Swizzle => {
             let t = read_required(r)?;
             match Swizzle::parse(&t) {
                 Some(s) => Ok((Value::Swizzle(s), t)),
-                None => Err(ParseError::IncorrectArg),
+                None => Err(ParseError::Argument(
+                    "Invalid swizzle, expected combination of 'x', 'y' and 'z'".into(),
+                )),
             }
         }
         ArgKind::Angle => {
             let t = read_required(r)?;
-            let c = WorldCoordinate::parse(&t).map_err(coord_error)?;
+            let c = WorldCoordinate::parse(&t)
+                .map_err(|_| ParseError::Argument("Invalid angle".into()))?;
             Ok((Value::Angle(c), t))
         }
         // The block, item, NBT and registry-backed kinds.
         ArgKind::BlockState => {
             let t = read_component(r)?;
-            let id = parse_block_state(&t)?;
-            Ok((Value::BlockState(id), t))
+            let bs = parse_block_state(&t)?;
+            Ok((Value::BlockState(bs), t))
         }
         ArgKind::ItemStack => parse_item_stack(r),
         ArgKind::NbtCompound => {
@@ -167,25 +196,21 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
         ArgKind::Time => parse_time(r),
         ArgKind::Gamemode => {
             let t = read_required(r)?;
-            let canonical = match t.to_ascii_lowercase().as_str() {
-                "survival" | "s" | "0" => "survival",
-                "creative" | "c" | "1" => "creative",
-                "adventure" | "a" | "2" => "adventure",
-                "spectator" | "sp" | "3" => "spectator",
-                _ => return Err(ParseError::Argument(format!("Unknown game mode '{t}'"))),
-            };
-            Ok((Value::Text(canonical.into()), t))
+            // `GameMode.CODEC`/`GameType.byName`: an exact, lowercase name only.
+            match t.as_str() {
+                "survival" | "creative" | "adventure" | "spectator" => {
+                    Ok((Value::Text(t.clone()), t))
+                }
+                _ => Err(ParseError::Argument(format!("Unknown game mode '{t}'"))),
+            }
         }
         ArgKind::Difficulty => {
             let t = read_required(r)?;
-            let canonical = match t.to_ascii_lowercase().as_str() {
-                "peaceful" | "p" => "peaceful",
-                "easy" | "e" => "easy",
-                "normal" | "n" => "normal",
-                "hard" | "h" => "hard",
-                _ => return Err(ParseError::Argument(format!("Unknown difficulty '{t}'"))),
-            };
-            Ok((Value::Text(canonical.into()), t))
+            // `/difficulty` takes its full literals; there are no initials.
+            match t.as_str() {
+                "peaceful" | "easy" | "normal" | "hard" => Ok((Value::Text(t.clone()), t)),
+                _ => Err(ParseError::Argument(format!("Unknown difficulty '{t}'"))),
+            }
         }
         ArgKind::Particle => {
             // A particle id, then whatever the type-specific parameters are;
@@ -236,17 +261,27 @@ fn read_component(r: &mut StringReader) -> Result<String, ParseError> {
     Ok(t)
 }
 
-fn coordinates(r: &mut StringReader, block: bool) -> Result<Coordinates, ParseError> {
+fn coordinates(r: &mut StringReader, block: bool, center: bool) -> Result<Coordinates, ParseError> {
     let x = coordinate(r, block, 3)?;
     let y = coordinate(r, block, 3)?;
     let z = coordinate(r, block, 3)?;
-    Ok(Coordinates::new(x, y, z))
+    // `Vec3ArgumentType` centers X and Z, never Y.
+    Ok(if center {
+        Coordinates::new(x.centered(), y, z.centered())
+    } else {
+        Coordinates::new(x, y, z)
+    })
 }
 
-fn coordinates2(r: &mut StringReader) -> Result<Coordinates2, ParseError> {
+fn coordinates2(r: &mut StringReader, center: bool) -> Result<Coordinates2, ParseError> {
     let x = coordinate(r, false, 2)?;
     let y = coordinate(r, false, 2)?;
-    Ok(Coordinates2::new(x, y))
+    // `Vec2ArgumentType` centers both components.
+    Ok(if center {
+        Coordinates2::new(x.centered(), y.centered())
+    } else {
+        Coordinates2::new(x, y)
+    })
 }
 
 fn coordinate(
@@ -272,16 +307,39 @@ fn coord_error(e: CoordError) -> ParseError {
 }
 
 /// Resolve a block state through the vanilla block table, naming what is wrong.
-fn parse_block_state(text: &str) -> Result<BlockStateId, ParseError> {
-    let (base, props_str) = match text.split_once('[') {
-        Some((base, rest)) => (base, Some(rest.strip_suffix(']').unwrap_or(rest))),
+///
+/// The shape is `id[prop=value,…]{blockEntityNbt}`; both the property list and
+/// the NBT are optional (vanilla's `BlockArgumentParser.block(…, true)`).
+fn parse_block_state(text: &str) -> Result<BlockState, ParseError> {
+    // Split off an optional `{…}` block-entity tag first: it comes last, and
+    // the base/property part never contains a `{`.
+    let (head, nbt) = match text.find('{') {
+        Some(i) => {
+            if !text.ends_with('}') {
+                return Err(ParseError::Argument(format!(
+                    "Invalid block state '{text}'"
+                )));
+            }
+            let nbt = snbt::parse_compound(&text[i..])
+                .map_err(|e| ParseError::Argument(format!("Invalid block state '{text}': {e}")))?;
+            (&text[..i], Some(nbt))
+        }
         None => (text, None),
+    };
+    let (base, props_str) = match head.split_once('[') {
+        Some((base, rest)) => {
+            let rest = rest
+                .strip_suffix(']')
+                .ok_or_else(|| ParseError::Argument(format!("Invalid block state '{text}'")))?;
+            (base, Some(rest))
+        }
+        None => (head, None),
     };
     let base = normalize_block(base);
     let block = blocks::block_id_of(&base)
         .ok_or_else(|| ParseError::Argument(format!("Unknown block type '{text}'")))?;
-    match props_str {
-        None => Ok(BlockStateId(blocks::DEFAULT_STATE[block as usize])),
+    let id = match props_str {
+        None => BlockStateId(blocks::DEFAULT_STATE[block as usize]),
         Some(list) => {
             if list.is_empty() {
                 return Err(ParseError::Argument(format!(
@@ -298,61 +356,123 @@ fn parse_block_state(text: &str) -> Result<BlockStateId, ParseError> {
             let state = props::state_with(block, &pairs).ok_or_else(|| {
                 ParseError::Argument(format!("Unknown property or value in block state '{text}'"))
             })?;
-            Ok(BlockStateId(state))
+            BlockStateId(state)
         }
-    }
+    };
+    Ok(BlockState { id, nbt })
 }
 
 fn parse_item_stack(r: &mut StringReader) -> Result<(Value, String), ParseError> {
     let start = r.cursor;
     let text = read_component(r)?;
-    let (name, nbt) = match text.find('{') {
-        Some(i) => (&text[..i], Some(&text[i..])),
-        None => (text.as_str(), None),
-    };
+    // `ItemStringReader`: `id` then an optional `[…]` component patch.
+    let id_end = text.find('[').unwrap_or(text.len());
+    let name = &text[..id_end];
     if name.is_empty() {
         return Err(ParseError::Argument(format!("Invalid item '{text}'")));
     }
     let norm = normalize_resource(name);
     let item = ItemTypeId::vanilla(&norm)
         .ok_or_else(|| ParseError::Argument(format!("Unknown item '{name}'")))?;
-    let nbt = match nbt {
-        Some(s) => Some(
-            snbt::parse_compound(s)
-                .map_err(|e| ParseError::Argument(format!("Invalid component: {e}")))?,
-        ),
-        None => None,
-    };
-    let mut count = 1;
-    let save = r.cursor;
-    r.skip_whitespace();
-    if r.can_read() {
-        let token = r.read_token();
-        match token.parse::<i32>() {
-            Ok(n) if n > 0 => count = n,
-            _ => r.cursor = save,
+    let mut components = Vec::new();
+    if id_end < text.len() {
+        // The token is brace/bracket-balanced, so a patch ends with `]`.
+        if !text.ends_with(']') || text.len() < id_end + 2 {
+            return Err(ParseError::Argument(format!("Invalid item '{text}'")));
         }
-    } else {
-        r.cursor = save;
+        let inner = &text[id_end + 1..text.len() - 1];
+        components = parse_component_patch(inner, &text)?;
     }
     Ok((
-        Value::ItemStack(ItemStack { item, count, nbt }),
+        Value::ItemStack(ItemStack { item, components }),
         r.text_from(start),
     ))
 }
 
+/// Parse the inside of an item's `[…]` patch: `name`, `name=value` or
+/// `!name`, comma-separated at the top level.
+fn parse_component_patch(inner: &str, whole: &str) -> Result<Vec<ComponentPatch>, ParseError> {
+    let invalid = || ParseError::Argument(format!("Invalid item components '{}'", whole));
+    if inner.trim().is_empty() {
+        return Err(invalid());
+    }
+    let mut out = Vec::new();
+    for entry in split_top_level(inner) {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return Err(invalid());
+        }
+        if let Some(rest) = entry.strip_prefix('!') {
+            let name = component_name(rest).ok_or_else(invalid)?;
+            out.push(ComponentPatch::Removed(name));
+        } else if let Some((name, value)) = entry.split_once('=') {
+            let name = component_name(name).ok_or_else(invalid)?;
+            let value = snbt::parse(value.trim()).map_err(|_| invalid())?;
+            out.push(ComponentPatch::Value(name, value));
+        } else {
+            let name = component_name(entry).ok_or_else(invalid)?;
+            out.push(ComponentPatch::Present(name));
+        }
+    }
+    Ok(out)
+}
+
+/// A component id, namespaced if the user left the namespace off.
+fn component_name(name: &str) -> Option<String> {
+    let norm = normalize_resource(name.trim());
+    valid_resource(&norm).then_some(norm)
+}
+
+/// Split on top-level commas: commas inside `{}`, `[]` or quotes are kept.
+fn split_top_level(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut start = 0usize;
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if let Some(q) = quote {
+            if c == '\\' {
+                chars.next();
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '{' | '[' => depth += 1,
+            '}' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
 fn parse_time(r: &mut StringReader) -> Result<(Value, String), ParseError> {
     let t = read_required(r)?;
+    // Strict, lowercase unit suffixes: `d`/`s`/`t` or none. `1D` is an error.
     let (body, per) = match t.chars().last() {
-        Some('d') | Some('D') => (&t[..t.len() - 1], 24_000.0),
-        Some('s') | Some('S') => (&t[..t.len() - 1], 20.0),
-        Some('t') | Some('T') => (&t[..t.len() - 1], 1.0),
+        Some('d') => (&t[..t.len() - 1], 24_000.0),
+        Some('s') => (&t[..t.len() - 1], 20.0),
+        Some('t') => (&t[..t.len() - 1], 1.0),
+        // `argument.time.invalid_unit`: any other trailing letter, or a letter
+        // anywhere the number should be.
+        Some(c) if c.is_ascii_alphabetic() => {
+            return Err(ParseError::Argument("Invalid unit".into()))
+        }
         _ => (t.as_str(), 1.0),
     };
     let value: f64 = body
         .parse()
         .map_err(|_| ParseError::Argument(format!("Invalid time '{t}'")))?;
-    Ok((Value::Int((value * per) as i32), t))
+    // `Math.round(amount * ticksPerUnit)`, not a truncation.
+    Ok((Value::Int((value * per).round() as i32), t))
 }
 
 /// Add the default `minecraft:` namespace when the user left it off.
@@ -389,7 +509,7 @@ fn valid_resource(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::commands::coordinates::Swizzle;
-    use crate::commands::coordinates::{CommandSource, Rotation};
+    use crate::commands::coordinates::{CoordinateSource, Rotation};
     use aether_api::Vector3 as Vec3;
 
     fn value(kind: ArgKind, text: &str) -> Result<Value, ParseError> {
@@ -430,19 +550,30 @@ mod tests {
 
     #[test]
     fn block_states_resolve_and_unknown_ones_error() {
-        let Value::BlockState(id) = value(ArgKind::BlockState, "minecraft:stone").unwrap() else {
+        let Value::BlockState(bs) = value(ArgKind::BlockState, "minecraft:stone").unwrap() else {
             panic!("not a block state")
         };
-        assert_eq!(id, aether_world::registry::ids::STONE);
+        assert_eq!(bs.id, aether_world::registry::ids::STONE);
+        assert!(bs.nbt.is_none());
 
-        let Value::BlockState(id) = value(ArgKind::BlockState, "oak_stairs[facing=east]").unwrap()
+        let Value::BlockState(bs) = value(ArgKind::BlockState, "oak_stairs[facing=east]").unwrap()
         else {
             panic!("not a block state")
         };
         // The property round-trips through the registry's own name.
         let reg = aether_world::registry::BlockRegistry::new();
-        let name = reg.name_of(id).unwrap();
+        let name = reg.name_of(bs.id).unwrap();
         assert!(name.contains("facing=east"), "{name}");
+
+        // Vanilla allows a `{…}` block-entity tag after the state.
+        let Value::BlockState(bs) = value(
+            ArgKind::BlockState,
+            "minecraft:chest{Items:[],CustomName:\"x\"}",
+        )
+        .unwrap() else {
+            panic!("not a block state")
+        };
+        assert!(matches!(bs.nbt, Some(Nbt::Compound(_))));
 
         // Unknown block, unknown property, bad value: all errors.
         for bad in [
@@ -450,6 +581,7 @@ mod tests {
             "minecraft:oak_stairs[colour=red]",
             "minecraft:oak_stairs[facing=upside]",
             "minecraft:oak_stairs[unterminated",
+            "minecraft:stone{unterminated",
         ] {
             assert!(
                 matches!(err(ArgKind::BlockState, bad), ParseError::Argument(_)),
@@ -459,76 +591,119 @@ mod tests {
     }
 
     #[test]
-    fn item_stacks_carry_components_and_a_count() {
+    fn item_stacks_use_the_bracket_component_patch() {
         let Value::ItemStack(stack) = value(ArgKind::ItemStack, "minecraft:stone").unwrap() else {
             panic!("not an item")
         };
         assert_eq!(stack.item, ItemTypeId::vanilla("minecraft:stone").unwrap());
-        assert_eq!(stack.count, 1);
-        assert!(stack.nbt.is_none());
+        assert!(stack.components.is_empty());
 
-        // Count with a space, per the brief's `minecraft:stone{…} 3`.
+        // 1.21.11 syntax: `id[component=value,!component]`.
         let Value::ItemStack(stack) = value(
             ArgKind::ItemStack,
-            "minecraft:stone{display:{Name:\"x\"}} 3",
+            "minecraft:stone[minecraft:damage=5,!minecraft:foo]",
         )
         .unwrap() else {
             panic!("not an item")
         };
-        assert_eq!(stack.count, 3);
-        assert!(matches!(stack.nbt, Some(Nbt::Compound(_))));
+        assert_eq!(stack.components.len(), 2);
+        assert_eq!(
+            stack.components[0],
+            ComponentPatch::Value("minecraft:damage".into(), Nbt::Int(5))
+        );
+        assert_eq!(
+            stack.components[1],
+            ComponentPatch::Removed("minecraft:foo".into())
+        );
+
+        // Namespacing is optional, and a bare name is a present component.
+        let Value::ItemStack(stack) = value(ArgKind::ItemStack, "stone[damage=5]").unwrap() else {
+            panic!("not an item")
+        };
+        assert_eq!(
+            stack.components[0],
+            ComponentPatch::Value("minecraft:damage".into(), Nbt::Int(5))
+        );
+        let Value::ItemStack(stack) = value(ArgKind::ItemStack, "stone[unbreakable]").unwrap()
+        else {
+            panic!("not an item")
+        };
+        assert_eq!(
+            stack.components[0],
+            ComponentPatch::Present("minecraft:unbreakable".into())
+        );
 
         assert!(matches!(
             err(ArgKind::ItemStack, "minecraft:not_an_item"),
             ParseError::Argument(_)
         ));
-        // An invalid component compound errors.
+        // The old `{…}`-NBT form is not vanilla 1.21.11, nor is a built-in count.
         assert!(matches!(
             err(ArgKind::ItemStack, "minecraft:stone{nope}"),
             ParseError::Argument(_)
         ));
-    }
-
-    #[test]
-    fn gamemodes_and_difficulties_accept_the_shorthands() {
-        for (text, want) in [
-            ("creative", "creative"),
-            ("c", "creative"),
-            ("1", "creative"),
+        // A malformed or empty patch errors.
+        for bad in [
+            "stone[]",
+            "stone[=5]",
+            "stone[!]",
+            "stone[damage=]",
+            "stone[a=1",
         ] {
-            assert_eq!(
-                value(ArgKind::Gamemode, text).unwrap(),
-                Value::Text(want.into())
+            assert!(
+                matches!(err(ArgKind::ItemStack, bad), ParseError::Argument(_)),
+                "{bad}"
             );
         }
-        assert_eq!(
-            value(ArgKind::Gamemode, "SP").unwrap(),
-            Value::Text("spectator".into())
-        );
-        assert!(matches!(
-            err(ArgKind::Gamemode, "sideways"),
-            ParseError::Argument(_)
-        ));
-        assert_eq!(
-            value(ArgKind::Difficulty, "p").unwrap(),
-            Value::Text("peaceful".into())
-        );
-        assert!(matches!(
-            err(ArgKind::Difficulty, "impossible"),
-            ParseError::Argument(_)
-        ));
     }
 
     #[test]
-    fn time_reads_day_second_and_tick_suffixes() {
+    fn gamemodes_and_difficulties_take_only_the_full_names() {
+        for name in ["survival", "creative", "adventure", "spectator"] {
+            assert_eq!(
+                value(ArgKind::Gamemode, name).unwrap(),
+                Value::Text(name.into())
+            );
+        }
+        // Initials, digits, mixed case and unknown words are all refused,
+        // exactly as `GameType.byName` does.
+        for bad in ["c", "s", "sp", "0", "1", "Creative", "sideways"] {
+            assert!(
+                matches!(err(ArgKind::Gamemode, bad), ParseError::Argument(_)),
+                "{bad}"
+            );
+        }
+        for name in ["peaceful", "easy", "normal", "hard"] {
+            assert_eq!(
+                value(ArgKind::Difficulty, name).unwrap(),
+                Value::Text(name.into())
+            );
+        }
+        for bad in ["p", "e", "n", "h", "Peaceful", "impossible"] {
+            assert!(
+                matches!(err(ArgKind::Difficulty, bad), ParseError::Argument(_)),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn time_rounds_and_takes_only_d_s_t() {
         assert_eq!(value(ArgKind::Time, "20").unwrap(), Value::Int(20));
         assert_eq!(value(ArgKind::Time, "1s").unwrap(), Value::Int(20));
         assert_eq!(value(ArgKind::Time, "1d").unwrap(), Value::Int(24_000));
         assert_eq!(value(ArgKind::Time, "0.5s").unwrap(), Value::Int(10));
-        assert!(matches!(
-            err(ArgKind::Time, "soon"),
-            ParseError::Argument(_)
-        ));
+        // `Math.round`, not truncation: 0.9 ticks rounds up to 1.
+        assert_eq!(value(ArgKind::Time, "0.9t").unwrap(), Value::Int(1));
+        assert_eq!(value(ArgKind::Time, "0.4t").unwrap(), Value::Int(0));
+        // `argument.time.invalid_unit`: `1D`/`1S`/`1T` and other letters error.
+        for bad in ["1D", "1S", "1T", "10x", "soon"] {
+            let e = err(ArgKind::Time, bad);
+            assert!(
+                matches!(&e, ParseError::Argument(m) if m == "Invalid unit"),
+                "{bad} => {e:?}"
+            );
+        }
     }
 
     #[test]
@@ -537,10 +712,25 @@ mod tests {
             value(ArgKind::Swizzle, "xz").unwrap(),
             Value::Swizzle(Swizzle::XZ)
         );
-        assert_eq!(err(ArgKind::Swizzle, "xx"), ParseError::IncorrectArg);
+        // Any order/subset is fine; a repeat or uppercase is not.
+        assert_eq!(
+            value(ArgKind::Swizzle, "zx").unwrap(),
+            Value::Swizzle(Swizzle::XZ)
+        );
+        let e = err(ArgKind::Swizzle, "xx");
+        assert!(
+            matches!(&e, ParseError::Argument(m) if m.contains("Invalid swizzle")),
+            "{e:?}"
+        );
         assert_eq!(
             value(ArgKind::Angle, "~90").unwrap(),
             Value::Angle(WorldCoordinate::Relative(90.0))
+        );
+        // An angle that is not a number errors with the vanilla key.
+        let e = err(ArgKind::Angle, "sideways");
+        assert!(
+            matches!(&e, ParseError::Argument(m) if m == "Invalid angle"),
+            "{e:?}"
         );
         for op in ["=", "+=", "-=", "*=", "/=", "%=", "<", ">", "><"] {
             assert_eq!(
@@ -577,15 +767,16 @@ mod tests {
             panic!("not coordinates")
         };
         assert!(c.is_relative());
-        let Value::Coordinates(c) = value(ArgKind::Vec3, "1.5 ~ ^2").unwrap() else {
+        let Value::Coordinates(c) = value(ArgKind::Vec3(true), "1.5 ~ ^2").unwrap() else {
             panic!("not coordinates")
         };
         // Local mixed with world is only rejected at resolve time, not here.
         assert!(!c.is_local());
-        let Value::Vec2(c) = value(ArgKind::Vec2, "1 2").unwrap() else {
+        // `vec2(true)` centers both components, so 1 becomes 1.5.
+        let Value::Vec2(c) = value(ArgKind::Vec2(true), "1 2").unwrap() else {
             panic!("not a vec2")
         };
-        assert_eq!(c.x, WorldCoordinate::Absolute(1.0));
+        assert_eq!(c.x, WorldCoordinate::Absolute(1.5));
         let Value::Rotation(c) = value(ArgKind::Rotation, "~90 ~").unwrap() else {
             panic!("not a rotation")
         };
@@ -597,9 +788,46 @@ mod tests {
             ParseError::IncompletePos { .. }
         ));
         assert!(matches!(
-            err(ArgKind::Vec2, "1"),
+            err(ArgKind::Vec2(true), "1"),
             ParseError::IncompletePos { .. }
         ));
+    }
+
+    #[test]
+    fn vec3_centers_absolute_x_and_z_but_not_y() {
+        // `vec3(true)`: `/tp 10 64 10` names block centres 10.5 / 64.0 / 10.5.
+        let Value::Coordinates(c) = value(ArgKind::Vec3(true), "10 64 10").unwrap() else {
+            panic!("not coordinates")
+        };
+        assert_eq!(c.x, WorldCoordinate::Absolute(10.5));
+        assert_eq!(c.y, WorldCoordinate::Absolute(64.0));
+        assert_eq!(c.z, WorldCoordinate::Absolute(10.5));
+
+        // `vec3(false)` is the raw delta form: no centering.
+        let Value::Coordinates(c) = value(ArgKind::Vec3(false), "10 64 10").unwrap() else {
+            panic!("not coordinates")
+        };
+        assert_eq!(c.x, WorldCoordinate::Absolute(10.0));
+        assert_eq!(c.z, WorldCoordinate::Absolute(10.0));
+
+        // Relative and local components are never centered.
+        let Value::Coordinates(c) = value(ArgKind::Vec3(true), "~10 ~64 ~10").unwrap() else {
+            panic!("not coordinates")
+        };
+        assert_eq!(c.x, WorldCoordinate::Relative(10.0));
+        assert_eq!(c.z, WorldCoordinate::Relative(10.0));
+
+        // `vec2(true)` centers both components.
+        let Value::Vec2(c) = value(ArgKind::Vec2(true), "3 4").unwrap() else {
+            panic!("not a vec2")
+        };
+        assert_eq!(c.x, WorldCoordinate::Absolute(3.5));
+        assert_eq!(c.y, WorldCoordinate::Absolute(4.5));
+        // A rotation is `vec2(false)`, so it is never centered.
+        let Value::Rotation(c) = value(ArgKind::Rotation, "90 0").unwrap() else {
+            panic!("not a rotation")
+        };
+        assert_eq!(c.x, WorldCoordinate::Absolute(90.0));
     }
 
     #[test]
@@ -635,7 +863,7 @@ mod tests {
 
     struct Source;
 
-    impl CommandSource for Source {
+    impl CoordinateSource for Source {
         fn position(&self) -> Option<Vec3> {
             Some(Vec3::new(0.5, 64.25, -0.5))
         }
@@ -671,7 +899,7 @@ mod tests {
                 random_coordinate_component(&mut rng, false),
                 random_coordinate_component(&mut rng, false)
             );
-            let Ok(Value::Coordinates(c)) = value(ArgKind::Vec3, &text) else {
+            let Ok(Value::Coordinates(c)) = value(ArgKind::Vec3(true), &text) else {
                 panic!("valid coordinates `{text}` did not parse")
             };
             // A per-component local/world mix is the only failure allowed.
@@ -705,8 +933,9 @@ mod tests {
             ArgKind::Double,
             ArgKind::Bool,
             ArgKind::BlockPos,
-            ArgKind::Vec3,
-            ArgKind::Vec2,
+            ArgKind::Vec3(true),
+            ArgKind::Vec3(false),
+            ArgKind::Vec2(true),
             ArgKind::Rotation,
             ArgKind::Swizzle,
             ArgKind::Angle,

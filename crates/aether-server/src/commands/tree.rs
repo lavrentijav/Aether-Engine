@@ -14,9 +14,7 @@
 
 use std::sync::OnceLock;
 
-use aether_world::BlockStateId;
-
-use super::args::ItemStack;
+use super::args::{BlockState, ItemStack};
 use super::coordinates::{Coordinates, Coordinates2, Swizzle, WorldCoordinate};
 use super::feedback::Feedback;
 use super::registry;
@@ -94,9 +92,10 @@ pub enum Value {
     Swizzle(Swizzle),
     /// A single `angle`, absolute or relative.
     Angle(WorldCoordinate),
-    /// A block state resolved through the block table.
-    BlockState(BlockStateId),
-    /// An item stack with its optional component compound and count.
+    /// A block state resolved through the block table, with any block-entity
+    /// NBT a `{…}` suffix carried.
+    BlockState(BlockState),
+    /// An item stack: an item and its optional component patch.
     ItemStack(ItemStack),
     /// A parsed SNBT value (`nbt_compound`, `component`).
     Nbt(Nbt),
@@ -135,10 +134,13 @@ pub enum ArgKind {
     Entities,
     /// `minecraft:block_pos`.
     BlockPos,
-    /// `minecraft:vec3`.
-    Vec3,
-    /// `minecraft:vec2`.
-    Vec2,
+    /// `minecraft:vec3`. The flag is vanilla's `centerIntegers`: `true` (the
+    /// default for `/tp`, `/summon`, `/execute positioned`, …) adds `0.5` to
+    /// absolute X and Z; `false` is the raw delta form `/particle` uses.
+    Vec3(bool),
+    /// `minecraft:vec2`. The flag is `centerIntegers` (`vec2()` defaults to
+    /// `true`, which centers both components).
+    Vec2(bool),
     /// `minecraft:block_state`.
     BlockState,
     /// `minecraft:item_stack`.
@@ -209,8 +211,8 @@ impl ArgKind {
             ArgKind::Bool => "brigadier:bool",
             ArgKind::Entity | ArgKind::Entities => "minecraft:entity",
             ArgKind::BlockPos => "minecraft:block_pos",
-            ArgKind::Vec3 => "minecraft:vec3",
-            ArgKind::Vec2 => "minecraft:vec2",
+            ArgKind::Vec3(_) => "minecraft:vec3",
+            ArgKind::Vec2(_) => "minecraft:vec2",
             ArgKind::BlockState => "minecraft:block_state",
             ArgKind::ItemStack => "minecraft:item_stack",
             // Renamed `minecraft:nbt` when parser ids arrived in 1.19; the
@@ -261,8 +263,8 @@ impl ArgKind {
             ArgKind::Message
             | ArgKind::Bool
             | ArgKind::BlockPos
-            | ArgKind::Vec3
-            | ArgKind::Vec2
+            | ArgKind::Vec3(_)
+            | ArgKind::Vec2(_)
             | ArgKind::BlockState
             | ArgKind::ItemStack
             | ArgKind::NbtCompound
@@ -836,7 +838,7 @@ impl ParseError {
             ParseError::InvalidBool(x) => format!("Invalid bool '{x}'"),
             ParseError::InvalidQuoted => "Invalid quoted string".into(),
             ParseError::IncompletePos { expected } => {
-                format!("Incomplete coordinate. Expected {expected} numbers")
+                format!("Incomplete (expected {expected} coordinates)")
             }
             ParseError::Argument(m) => m.clone(),
             ParseError::Denied(m) => m.clone(),

@@ -288,6 +288,10 @@ fn empty_array(kind: char, bytes: Vec<u8>, ints: Vec<i32>, longs: Vec<i64>) -> N
 }
 
 /// Turn a bare token into an NBT scalar, choosing the tag from the suffix.
+///
+/// A token that is not a number or `true`/`false` is an **unquoted string**
+/// (vanilla SNBT allows `{a:oops}`), provided every character is legal in one;
+/// this is why `oops` is a `String` and not an error.
 fn classify(token: &str) -> Option<Nbt> {
     match token {
         "true" => return Some(Nbt::Byte(1)),
@@ -300,7 +304,7 @@ fn classify(token: &str) -> Option<Nbt> {
         }
         _ => (token, None),
     };
-    match suffix {
+    let numeric = match suffix {
         Some('b' | 'B') => body.parse::<i8>().ok().map(Nbt::Byte),
         Some('s' | 'S') => body.parse::<i16>().ok().map(Nbt::Short),
         Some('l' | 'L') => body.parse::<i64>().ok().map(Nbt::Long),
@@ -315,7 +319,20 @@ fn classify(token: &str) -> Option<Nbt> {
                 body.parse::<f64>().ok().map(Nbt::Double)
             }
         }
+    };
+    match numeric {
+        Some(v) => Some(v),
+        None if is_unquoted_string(token) => Some(Nbt::Str(token.to_string())),
+        None => None,
     }
+}
+
+/// The characters vanilla allows in an unquoted SNBT string.
+fn is_unquoted_string(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+'))
 }
 
 #[cfg(test)]
@@ -403,6 +420,19 @@ mod tests {
     }
 
     #[test]
+    fn an_unquoted_value_is_a_string() {
+        // Vanilla SNBT: `{a:oops}` parses as a String, not an error.
+        assert_eq!(
+            parse("{a:oops}").unwrap(),
+            compound(&[("a", Nbt::Str("oops".into()))])
+        );
+        assert_eq!(parse("hello").unwrap(), Nbt::Str("hello".into()));
+        assert_eq!(parse("a-b.c+d_e").unwrap(), Nbt::Str("a-b.c+d_e".into()));
+        // A value with a character an unquoted string cannot hold is refused.
+        assert!(parse("{a:oops!}").is_err());
+    }
+
+    #[test]
     fn malformed_input_is_an_error_not_a_panic() {
         for bad in [
             "{",
@@ -416,7 +446,6 @@ mod tests {
             "\"unterminated",
             "[B;1,2]",
             "[1,\"two\"]",
-            "{a:oops}",
             "\u{1f600}",
         ] {
             assert!(parse(bad).is_err(), "`{bad}` should not parse");
