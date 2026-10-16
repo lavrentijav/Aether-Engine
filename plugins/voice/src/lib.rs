@@ -852,7 +852,10 @@ impl NativePlugin for VoicePlugin {
                         let (t, label) = parse_target(&self.shared, target);
                         {
                             let mut rec = self.shared.recorder.lock().unwrap();
-                            rec.target = t;
+                            rec.target = t.clone();
+                        }
+                        if self.shared.config.read().unwrap().notify_recorded {
+                            self.notify_recorded(ctx, target);
                         }
                         lines.push(format!("&aVoice recording started for {label}."));
                     }
@@ -890,6 +893,29 @@ impl VoicePlugin {
                 )
             })
             .unwrap_or(false)
+    }
+
+    /// Tell every player the given target captures that their voice is being
+    /// recorded. Kept on by default (`notify_recorded`): many jurisdictions
+    /// expect a recorded party to know.
+    fn notify_recorded(&self, ctx: &NativeContext, target_str: &str) {
+        let (target, _) = parse_target(&self.shared, target_str);
+        if target == record::Target::None {
+            return;
+        }
+        for p in ctx.backend.online_players(ctx.id) {
+            let Some(uuid) = ctx.backend.player_uuid(ctx.id, p.id) else {
+                continue;
+            };
+            let group = {
+                let players = self.shared.players.lock().unwrap();
+                players.get(&uuid).and_then(|v| v.group)
+            };
+            if target.captures(uuid, group) {
+                ctx.backend
+                    .send_message(ctx.id, p.id, "&eYour voice chat is now being recorded.");
+            }
+        }
     }
 }
 
