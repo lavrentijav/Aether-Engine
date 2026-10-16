@@ -683,7 +683,7 @@ pub fn anti_xray_summary(cfg: &config::Config) -> String {
             a.hidden_block_names().len()
         ),
         AntiXrayMode::Culling => format!(
-            "culling — margin {} blocks, fill {:?}, reveal budget {}/tick, {worlds}, {bypass}",
+            "culling (cells 4x4x2) — margin {} blocks, fill {:?}, reveal budget {}/tick, {worlds}, {bypass}",
             a.margin_blocks, a.hidden_fill, a.reveal_budget_per_tick
         ),
     }

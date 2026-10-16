@@ -387,17 +387,29 @@ fn login_and_play(
     let engine_hidden = (anti_xray && mode == crate::config::AntiXrayMode::Engine)
         .then(crate::visibility::hidden_states);
     let fill = crate::visibility::fill_for_mode(game_mode);
+    // The per-column hidden-cell masks of the first burst, kept so the handle
+    // can be seeded with exactly what this client now holds.
+    let mut first_sent: std::collections::HashMap<(i32, i32), crate::visibility::CellMask> =
+        std::collections::HashMap::new();
     for cz in spawn_cz - initial..=spawn_cz + initial {
         for cx in spawn_cx - initial..=spawn_cx + initial {
             let view = crate::protocol::ColumnView::new(world, cx, cz);
             let packets = if let Some(vis) = &vis {
-                let hidden = crate::visibility::desired_hidden(vis, cx, cz);
-                if hidden != 0 {
-                    let masked = crate::visibility::MaskedColumn::new(&view, cx, cz, hidden, fill);
-                    codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &masked)
-                } else {
+                let hidden = crate::visibility::column_hidden(world, vis, cx, cz);
+                let packets = if hidden.is_empty() {
                     codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view)
-                }
+                } else {
+                    let masked = crate::visibility::MaskedColumn::from_mask(
+                        &view,
+                        cx,
+                        cz,
+                        hidden.clone(),
+                        fill,
+                    );
+                    codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &masked)
+                };
+                first_sent.insert((cx, cz), hidden);
+                packets
             } else if let Some(hidden) = engine_hidden {
                 let masked = crate::visibility::EngineColumn::new(&view, hidden);
                 codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &masked)
@@ -447,24 +459,15 @@ fn login_and_play(
     // masked, so `/visibility off` re-sends the whole loaded area.
     let section = crate::visibility::section_of(pos);
     if let Some(visible) = vis {
-        let mut sent = std::collections::HashMap::new();
-        for cz in spawn_cz - initial..=spawn_cz + initial {
-            for cx in spawn_cx - initial..=spawn_cx + initial {
-                sent.insert(
-                    (cx, cz),
-                    crate::visibility::desired_hidden(&visible, cx, cz),
-                );
-            }
-        }
-        handle.visibility().seed(section, visible, sent);
+        handle.visibility().seed(section, visible, first_sent);
+        handle
+            .visibility()
+            .set_own_cell(crate::visibility::cell_of_pos(pos));
     } else if engine_hidden.is_some() {
-        let mut sent = std::collections::HashMap::new();
-        for cz in spawn_cz - initial..=spawn_cz + initial {
-            for cx in spawn_cx - initial..=spawn_cx + initial {
-                sent.insert((cx, cz), 1);
-            }
-        }
-        handle.visibility().seed(section, HashSet::new(), sent);
+        let columns: Vec<(i32, i32)> = (spawn_cz - initial..=spawn_cz + initial)
+            .flat_map(|cz| (spawn_cx - initial..=spawn_cx + initial).map(move |cx| (cx, cz)))
+            .collect();
+        handle.visibility().seed_engine(section, &columns);
     }
     // A returning player gets what they had; a new one gets the starter
     // hotbar. Seeding over a restored inventory would overwrite the first nine
