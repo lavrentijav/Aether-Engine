@@ -315,8 +315,8 @@ impl PlayerHandle {
                 match crate::visibility::mask_for_render(self, world, *cx, *cz) {
                     crate::visibility::ColumnMask::None => self.codec.encode(ev, &view),
                     crate::visibility::ColumnMask::Cells { hidden, fill } => {
-                        let masked = crate::visibility::MaskedColumn::from_cells(
-                            &view, *cx, *cz, hidden, fill,
+                        let masked = crate::visibility::MaskedColumn::from_mask(
+                            &view, *cx, *cz, *hidden, fill,
                         );
                         self.codec.encode(ev, &masked)
                     }

@@ -1,5 +1,4 @@
-//! AX3c: per-join, per-tick and encoded-size cost of `4×4×2` cell culling,
-//! against the old `16³` section culling.
+//! AX3c: per-join, per-tick and encoded-size cost of `4×4×2` cell culling.
 //!
 //! Reproduce (shared target dir, as in `docs/tasks/COMMON.md`):
 //!
@@ -8,42 +7,36 @@
 //! cargo-locked bench -p aether-server --bench ax3c_cells
 //! ```
 //!
-//! Read the numbers as a ratio, not an absolute: the host is shared. The
-//! join bench is the full cell breadth-first search over the view with the
-//! per-section cell-graph cache warm (a re-run after a cell-border crossing);
-//! the tick bench is the reveal planner's guard on an unchanged search id; the
-//! size bench encodes the same surface column once with a per-cell mask and
-//! once with the old per-section mask.
+//! `view8` below is a **view distance of 8 sections** (chunks), as the server
+//! passes it — the coarse search is over `16³` sections, not `4×4×2` cells, so
+//! the radius is 8 × 16 = 128 blocks. Cell granularity is applied afterwards,
+//! per visible section, by `column_hidden`, from each section's cached mask;
+//! there is no global cell search any more.
 //!
-//! Measured on fi2 (release, view 8, warm cache; the host is shared, so the
-//! join number moves with load):
+//! The benches to read, and what they are:
 //!
-//! | bench | time |
-//! |---|---|
-//! | `cell_join_reachable_view8` | ≈ 120–270 ms |
-//! | `cell_tick_reveal_step_budget32` | ≈ 1 ns |
-//! | `cell_column_encode_plain` | ≈ 7–14 ms |
+//! - `section_join_reachable_view8` — the search the tick thread runs when a
+//!   player crosses a section border or a nearby block changes (the non-fresh
+//!   path). Measured ~41 ms in the all-air worst case (every one of ~8 000
+//!   sections in the view is clear); a real underground view visits far
+//!   fewer. It must stay well below the 50 ms tick, not the seconds the old
+//!   per-cell BFS took at a correct radius (~3.5 s).
+//! - `cell_mask_all_columns_view8` — building every view column's per-cell
+//!   mask from the section set (the join burst and the reveal pass do this),
+//!   ~8 ms for ~290 columns.
+//! - `cell_tick_reveal_step_budget32` — the per-tick reveal planner on a
+//!   settled player: a ~3 ns guard, so an unchanged tick costs nothing.
+//! - `cell_column_encode_plain` — encoding one surface column with the cell
+//!   mask (~8 ms, the codec dominates).
 //!
 //! The printed `AX3c encoded column` line compares one partly-visible surface
-//! column masked per cell and per section: `53522 B` vs `53524 B` — essentially
-//! equal, because a hidden cell is a single-value palette either way. The cell
-//! mask's win is not bytes but *hiding the buried ore* the section mask sends.
-//!
-//! The ≈ 120–270 ms full cell search over an open sky is why the live server
-//! recomputes the reachable set only when the player crosses a `16³` section
-//! border (reusing the parent section's answer) rather than every `4×4×2`
-//! cell — see `section_origin_cell` in `visibility.rs`. The per-tick reveal
-//! pass is a no-op guard once the search id settles, so the tick never runs a
-//! wide BFS.
-
-use std::collections::HashSet;
+//! column masked per cell and per section: equal bytes (53 522 vs 53 524 — a
+//! hidden cell is a single-value palette either way). The cell mask's win is
+//! not bytes but *hiding the buried ore* the section mask would have sent.
 
 use aether_server::protocol::{codec_for, BlockSource, ServerEvent};
-use aether_server::visibility::{
-    desired_hidden, desired_hidden_cells, visible_from, MaskedColumn, State,
-};
+use aether_server::visibility::{column_hidden, visible_from, MaskedColumn, State};
 use aether_world::registry::blocks;
-use aether_world::visibility::BoxDims;
 use aether_world::BlockStateId;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
@@ -88,48 +81,66 @@ fn stone() -> BlockStateId {
     blocks::default_state("minecraft:stone").unwrap()
 }
 
+/// A view of `r` sections around the origin.
+fn view_columns(r: i32) -> Vec<(i32, i32)> {
+    (-r..=r)
+        .flat_map(|cz| (-r..=r).map(move |cx| (cx, cz)))
+        .collect()
+}
+
 fn bench_ax3c(c: &mut Criterion) {
     let world = SurfaceWorld::new();
-    // Warm the per-section cell-graph cache once, so the join bench measures
-    // the search, not the first computation.
+    // Warm the section cache once, so the search bench measures the search,
+    // not the first flood fill of the view.
     let _ = visible_from(&world, (0.5, 70.5, 0.5), 8);
 
-    c.bench_function("cell_join_reachable_view8", |b| {
+    c.bench_function("section_join_reachable_view8", |b| {
         b.iter(|| visible_from(black_box(&world), black_box((0.5, 70.5, 0.5)), 8))
+    });
+
+    let visible = visible_from(&world, (0.5, 70.5, 0.5), 8);
+    let columns = view_columns(8);
+    c.bench_function("cell_mask_all_columns_view8", |b| {
+        b.iter(|| {
+            let mut total = 0usize;
+            for &(cx, cz) in &columns {
+                total += column_hidden(black_box(&world), &visible, cx, cz).len();
+            }
+            black_box(total)
+        })
     });
 
     // A per-tick reveal pass on a settled player: the planner must return
     // immediately because the search id has not changed.
-    let visible = visible_from(&world, (0.5, 70.5, 0.5), 8);
     let mut state = State::default();
-    state.set_visible_if((0, 35, 0), visible.clone(), 0);
-    for cx in -8..=8 {
-        for cz in -8..=8 {
-            let hidden = state.hidden_for(cx, cz);
-            state.record_sent(cx, cz, &hidden);
-        }
+    state.set_visible_if((0, 4, 0), visible.clone(), 0);
+    for &(cx, cz) in &columns {
+        let hidden = state.hidden_for(&world, cx, cz);
+        state.record_sent(cx, cz, hidden);
     }
     c.bench_function("cell_tick_reveal_step_budget32", |b| {
-        b.iter(|| state.reveal_step(32))
+        b.iter(|| state.reveal_step(black_box(&world), 32))
     });
 
-    // Encoded size of one surface column: cell mask vs the old section mask
-    // (a section counts as visible when any of its cells is).
+    // Encoded size of one surface column: cell mask vs the section mask (a
+    // section hidden when it is not in the reachable set).
     let codec = codec_for(774).expect("1.21.11 codec");
     let vis = visible_from(&world, (0.5, 70.5, 0.5), 8);
-    let cell_hidden = desired_hidden_cells(&vis, BoxDims::CELL, 0, 0);
-    let masked_cells = MaskedColumn::from_cells(&world, 0, 0, cell_hidden, stone());
+    let cell_hidden = column_hidden(&world, &vis, 0, 0);
+    let masked_cells = MaskedColumn::from_mask(&world, 0, 0, cell_hidden, stone());
     let cell_bytes: usize = codec
         .encode(&ServerEvent::ChunkColumn { cx: 0, cz: 0 }, &masked_cells)
         .iter()
         .map(|p| p.frame(None).len())
         .sum();
 
-    let mut section_visible: HashSet<(i32, i32, i32)> = HashSet::new();
-    for (x, y, z) in &vis {
-        section_visible.insert((x >> 2, y >> 3, z >> 2));
+    let mut section_hidden = 0u32;
+    for i in 0..aether_server::visibility::SECTION_COUNT {
+        let cy = aether_server::visibility::SECTION_MIN_Y + i as i32;
+        if !vis.contains(&(0, cy, 0)) {
+            section_hidden |= 1 << i;
+        }
     }
-    let section_hidden = desired_hidden(&section_visible, 0, 0);
     let masked_sections = MaskedColumn::new(&world, 0, 0, section_hidden, stone());
     let section_bytes: usize = codec
         .encode(&ServerEvent::ChunkColumn { cx: 0, cz: 0 }, &masked_sections)
@@ -140,8 +151,8 @@ fn bench_ax3c(c: &mut Criterion) {
 
     c.bench_function("cell_column_encode_plain", |b| {
         b.iter(|| {
-            let hidden = desired_hidden_cells(&vis, BoxDims::CELL, 0, 0);
-            let masked = MaskedColumn::from_cells(&world, 0, 0, hidden, stone());
+            let hidden = column_hidden(&world, &vis, 0, 0);
+            let masked = MaskedColumn::from_mask(&world, 0, 0, hidden, stone());
             let packets = codec.encode(&ServerEvent::ChunkColumn { cx: 0, cz: 0 }, &masked);
             let bytes: usize = packets.iter().map(|p| p.frame(None).len()).sum();
             black_box(bytes)

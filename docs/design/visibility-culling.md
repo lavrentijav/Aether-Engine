@@ -1,7 +1,7 @@
 # Visibility culling — do not send what the player cannot see (planned, optional module)
 
-Status: ✅ implemented, default **off** (2026-10-14; cell granularity 2026-10-16). The `4×4×2`
-AVX-cell face graph and the reachable-set BFS live in `aether_world::visibility`; the cache, the
+Status: ✅ implemented, default **off** (2026-10-14; cell granularity 2026-10-16). The `16³`
+section face graph and the reachable-set BFS live in `aether_world::visibility`; the cache, the
 per-player state, the per-cell stone masking and the per-tick reveal budget live in
 `crates/aether-server/src/visibility.rs`, wired through `players.rs::render` and the game tick. This
 is the `culling` mode of the optional anti-xray module (AX1); the default `engine` mode lives in the
@@ -16,10 +16,29 @@ The atomic unit is the **cell** (`4×4×2` = 32 blocks, one cache line), not the
 column is sent with **every cell** either real, if the player can see it, or wholly `hidden_fill`
 (stone by default). This closes the leak of the old section culling: a partly-visible section (the
 surface, a wall the player stands next to) is no longer sent whole, so the ores in its hidden cells
-never reach the client. The graph is computed per cell, cached by `16³` section (128 cell graphs
-from one block snapshot, guarded by the same global `EDIT_EPOCH` as before), and the reachable set
-is a set of cells recomputed only when the player crosses a cell border or an in-view cell graph
-changes.
+never reach the client.
+
+To keep this cheap, visibility is **two-level**. The coarse search is the same cheap **section**
+BFS it always was (`view_distance` is a view distance in sections/chunks, so the radius is
+`view_distance × 16` blocks). Then cell granularity is applied **locally, per visible section**: a
+section's own face openings decide which of its 128 cells are visible (a flood from the section's
+non-opaque boundary cells through its air, plus the opaque cells touching that), computed once and
+cached with the section under the same global `EDIT_EPOCH`. There is **no global cell search** — a
+full per-cell BFS at a correct radius was measured at ~3.5 s, which is exactly the stall this
+rework removes. The reachable set is a set of sections, re-searched only when the player crosses a
+**section** border or an in-view section graph changes; the per-cell mask of a column is rebuilt on
+demand from the cached section masks.
+
+## Staleness
+
+Because the search is re-run on a **section** border, not a cell border, the reachable section set
+(and therefore a column's cell mask) can lag the player by up to the width of a section — at most
+~15 blocks of movement — until the next border crossing or a nearby block change. The lag is
+conservative (a cell may stay masked for that window, so it under-reveals, never over-reveals): a
+cell that becomes visible is revealed on the next re-search, and the `margin_blocks` seed keeps a
+whole sphere around the player visible ahead of the exact position so nothing within it can pop in
+late. Any block write within the view radius also marks every player whose view covers it stale for
+the next tick.
 
 
 ## Two modes (`[anti_xray] mode`)
@@ -54,41 +73,47 @@ Switchable: `[anti_xray] enabled = false` by default until it is proven; per wor
 
 ## Design (recommended)
 
-1. **Cell visibility graph (cheap, precomputed).** For every `4×4×2` cell, compute which of its 6
+1. **Section visibility graph (cheap, precomputed).** For every `16³` section, compute which of its 6
    faces are connected to each other through non-opaque blocks (a 6×6 bitset, 15 useful bits) —
-   the same idea as the vanilla client's own `VisGraph`. The 128 cells of a `16³` section are
-   computed together from one block snapshot and cached as a unit. Recompute only when a block in
-   the section changes from/to opaque (journal events already tell us). Cost: one flood fill over
-   the section's blocks; zero per tick.
-2. **Per player: reachable set.** Breadth-first search over cells starting at the player's cell,
-   entering a neighbour only through connected faces (direction-aware, so a cave behind a wall is
-   not entered). Bounded by view distance. Re-run when the player crosses a cell border or a cell's
-   graph changes in range — not every tick, and never per column.
-3. **Margin ("can see if he turns or moves a bit").** Seed the BFS not only from the player's cell
-   but from every cell within `margin_blocks` (default 4–6) of the player, and ignore view
-   direction entirely (direction culling is what makes turning the head show holes). So the whole
-   sphere around the player that is reachable by sight is sent.
+   the same idea as the vanilla client's own `VisGraph`. Recompute only when a block in the section
+   changes from/to opaque (journal events already tell us). Cost: one flood fill over the section's
+   blocks; zero per tick. From the same snapshot, derive the section-local visible-cell mask (the
+   cell graph) so cell granularity costs nothing extra at search time.
+2. **Per player: reachable set.** Breadth-first search over **sections** starting at the player's
+   section, entering a neighbour only through connected faces (direction-aware, so a cave behind a
+   wall is not entered). Bounded by view distance (in sections). Re-run when the player crosses a
+   **section** border or a section's graph changes in range — not every tick, and never per column.
+   Cell granularity is *not* a global search: each visible section's cached cell mask says which of
+   its cells are visible, applied per column on demand.
+3. **Margin ("can see if he turns or moves a bit").** Seed the BFS not only from the player's
+   section but from every section within `margin_blocks` (default 4–6, in blocks) of the player, and
+   ignore view direction entirely (direction culling is what makes turning the head show holes). So
+   the whole sphere around the player that is reachable by sight is sent.
 
 ### Reachability rules (AX2 — closed leaks; cells since AX3)
 
-The reachable set must not mistake "the player can see this cell's face" for "the player can see
-this cell". The rules the BFS follows:
+The reachable set must not mistake "the player can see this section's face" for "the player can see
+this section". The rules the search follows:
 
-- **A fully opaque cell is never visible**, even when its face touches open space. Marking it
-  visible sends the whole cell real, leaking any ore in it. The player sees only the opaque surface,
-  and a stone fill looks the same. This includes the **margin**: a sealed cell within `margin_blocks`
-  is *not* seeded visible — only the cell the player physically stands in is sent even when sealed.
-  The margin only keeps cells that actually hold air visible, so it cannot reveal the solid shell
-  around the player or a neighbouring cave.
+- **A fully opaque section is never visible**, even when its face touches open space. Marking it
+  visible sends the whole section real, leaking any ore in it. The player sees only the opaque
+  surface, and a stone fill looks the same. This includes the **margin**: the margin seeds every
+  section within `margin_blocks` as a *candidate*, but a sealed section stays hidden — only the
+  section the player physically stands in is sent even when sealed. The margin only keeps sections
+  that actually hold air visible, so it cannot reveal the solid shell around the player or a
+  neighbouring cave.
 - **Only air lets the search continue.** A face with a non-opaque cell (stone, water, glass) is
-  *visible*, but the search enters the cell only through an air face. A pool the player looks at
+  *visible*, but the search enters the section only through an air face. A pool the player looks at
   therefore cannot reveal the flooded caves it drains into; a window is visible but opaque to the
   search.
-- **Visibility (not reachability) passes through fully-clear cells** — an all-air or
-  fully-flooded cell. So an ocean stays water cell after cell, while its stone floor and the stone
-  walls of a flooded cave stop the wave.
-- **A sub-cell move does not change the answer**: the search is seeded by cell, so two positions in
-  the same cell give the same set and the reveal planner has nothing to re-send.
+- **Visibility (not reachability) passes through fully-clear sections** — an all-air or
+  fully-flooded section. So an ocean stays water section after section, while its stone floor and the
+  stone walls of a flooded cave stop the wave.
+- **A sub-section move does not change the answer**: the search is seeded by section, so two
+  positions in the same section give the same set and the reveal planner has nothing to re-send.
+- **Within a visible section, only the cells its openings reach are real.** The section's own cell
+  mask floods from its non-opaque boundary cells through its air and marks those cells (and the
+  opaque cells touching them); a cell buried in the section's rock stays hidden.
 
 **Whole-cell invariant.** The send layer never replaces individual blocks inside a hidden cell. For
 every column, a cell is either sent **entirely** as its real blocks (it is in the reachable set) or

@@ -389,24 +389,17 @@ fn login_and_play(
     let fill = crate::visibility::fill_for_mode(game_mode);
     // The per-column hidden-cell masks of the first burst, kept so the handle
     // can be seeded with exactly what this client now holds.
-    let mut first_sent: std::collections::HashMap<
-        (i32, i32),
-        std::collections::HashSet<(i32, i32, i32)>,
-    > = std::collections::HashMap::new();
+    let mut first_sent: std::collections::HashMap<(i32, i32), crate::visibility::CellMask> =
+        std::collections::HashMap::new();
     for cz in spawn_cz - initial..=spawn_cz + initial {
         for cx in spawn_cx - initial..=spawn_cx + initial {
             let view = crate::protocol::ColumnView::new(world, cx, cz);
             let packets = if let Some(vis) = &vis {
-                let hidden = crate::visibility::desired_hidden_cells(
-                    vis,
-                    aether_world::visibility::BoxDims::CELL,
-                    cx,
-                    cz,
-                );
+                let hidden = crate::visibility::column_hidden(world, vis, cx, cz);
                 let packets = if hidden.is_empty() {
                     codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view)
                 } else {
-                    let masked = crate::visibility::MaskedColumn::from_cells(
+                    let masked = crate::visibility::MaskedColumn::from_mask(
                         &view,
                         cx,
                         cz,
@@ -464,14 +457,17 @@ fn login_and_play(
     // the reveal planner never re-sends a column it already sent and never
     // forgets one it has not. Engine mode marks every column as possibly
     // masked, so `/visibility off` re-sends the whole loaded area.
-    let cell = crate::visibility::section_origin_cell(pos);
+    let section = crate::visibility::section_of(pos);
     if let Some(visible) = vis {
-        handle.visibility().seed(cell, visible, first_sent);
+        handle.visibility().seed(section, visible, first_sent);
+        handle
+            .visibility()
+            .set_own_cell(crate::visibility::cell_of_pos(pos));
     } else if engine_hidden.is_some() {
         let columns: Vec<(i32, i32)> = (spawn_cz - initial..=spawn_cz + initial)
             .flat_map(|cz| (spawn_cx - initial..=spawn_cx + initial).map(move |cx| (cx, cz)))
             .collect();
-        handle.visibility().seed_engine(cell, &columns);
+        handle.visibility().seed_engine(section, &columns);
     }
     // A returning player gets what they had; a new one gets the starter
     // hotbar. Seeding over a restored inventory would overwrite the first nine
