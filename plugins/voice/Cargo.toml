@@ -3,6 +3,7 @@ name = "aether-voice-plugin"
 description = "The Aether voice chat plugin (native plugin): a native server side for Simple Voice Chat and Plasmo Voice, with one internal frame and a cross-protocol bridge."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
