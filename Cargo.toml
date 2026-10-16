@@ -22,6 +22,10 @@ members = [
     # The sidebar, as a native plugin: it composes a per-player scoreboard from
     # config and placeholders and asks the core to draw it.
     "plugins/sidebar",
+    # The voice chat plugin, as a native plugin (VC1): a native server side for
+    # Simple Voice Chat and Plasmo Voice, with a UDP server per protocol and a
+    # bridge that lets the two kinds of client hear each other.
+    "plugins/voice",
 ]
 
 # The example plugins are separate WebAssembly components: they target

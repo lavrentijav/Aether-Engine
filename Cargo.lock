@@ -127,6 +127,7 @@ dependencies = [
  "aether-plugin",
  "aether-sdk-plugin",
  "aether-sidebar-plugin",
+ "aether-voice-plugin",
  "aether-world",
  "aether-worldgen",
  "cfb8",
@@ -155,6 +156,16 @@ dependencies = [
 [[package]]
 name = "aether-telemetry"
 version = "0.1.0"
+
+[[package]]
+name = "aether-voice-plugin"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "aether-plugin",
+ "cipher",
+ "rand 0.8.8",
+]
 
 [[package]]
 name = "aether-world"
