@@ -177,6 +177,23 @@ pub fn run() -> std::process::ExitCode {
             )),
         }
     }
+    // Which replaceable list and support tags placements use: the data pack's
+    // `#minecraft:replaceable` and block tags when one is configured, else the
+    // compiled-in generated table. The log says which, so an operator can tell
+    // a pack change from a build with stale data.
+    {
+        let (source, err) = placement::rules::install(&cfg.server.worldgen_data);
+        match err {
+            Some(e) => log::warn(&format!(
+                "placement  : cannot read the pack tags from `{}`: {e}; using the compiled-in table",
+                cfg.server.worldgen_data
+            )),
+            None => log::info(&format!(
+                "placement  : replaceable list and support tags from {}",
+                source.label()
+            )),
+        }
+    }
     let described = generator.describe(cfg.server.seed);
     let revision = generator.revision();
     // The generator is deterministic, so its output is a cache and never a

@@ -116,9 +116,12 @@ max_len = 256
 rate_per_min = 120
 
 [plugins]
-# WebAssembly plugins (a build with the `plugins` feature, the default). Each
+# Plugins (a build with the `plugins` feature, the default). Each WebAssembly
 # plugin is a directory under `dir` holding plugin.toml and its .wasm
-# component. Empty disables plugins. See docs/design/plugins.md.
+# component. Compiled-in native plugins (tier N) are linked into the server and
+# have no `.wasm`, but are still enabled here by `[plugins.<id>] enabled` and
+# still require `dir` to be set: it is the master switch for the subsystem.
+# Empty disables all plugins. See docs/design/plugins.md and docs/plugins/README.md.
 dir = ""             # e.g. "plugins"
 budget_ms = 5        # per-call time budget before a running plugin is interrupted
 tick_budget_ms = 25  # shared budget for all plugins across one tick
