@@ -2,8 +2,8 @@
 //!
 //! Every core command in the catalogue (`docs/design/commands.md` §1–3) that is not implemented
 //! yet is listed here with the permission node, op level and task that will implement it. It is
-//! the data behind the "not implemented yet (CMD-nn)" reply and `/help`; the real Brigadier tree
-//! (CMD-03) and Declare Commands packet (CMD-04) will be built from it.
+//! the data behind the "not implemented yet (CMD-nn)" reply and the stub nodes on the Brigadier
+//! tree (CMD-03); CMD-05 renders `/help` from that tree, marking the entries listed here.
 //!
 //! Commands that already exist (the history commands, the economy, the gameplay commands in
 //! `game/commands.rs`) are deliberately **not** listed — a command name is answered by exactly one
@@ -622,33 +622,6 @@ pub fn plugin_command_names() -> Vec<String> {
     plugin_commands().lock().unwrap().keys().cloned().collect()
 }
 
-/// The `/help` listing: one line per group, compact enough to fit in chat.
-pub fn help_lines() -> Vec<String> {
-    let mut groups: Vec<&'static str> = Vec::new();
-    for e in CORE {
-        if !groups.contains(&e.group) {
-            groups.push(e.group);
-        }
-    }
-    let mut lines =
-        vec!["Commands not implemented yet — /help <command> for the node and task:".to_string()];
-    for g in groups {
-        let names: Vec<&str> = CORE
-            .iter()
-            .filter(|e| e.group == g)
-            .map(|e| e.name)
-            .collect();
-        lines.push(format!("  {g}: {}", names.join(" ")));
-    }
-    lines.push("Implemented: /help /inspect /lookup /rollback /page /stash /audit /cache".into());
-    lines.push(
-        "  /gamemode /give /summon /tp /time /heal /food /kill /killall /spawn /inventory".into(),
-    );
-    lines.push("  /balance /pay /sell /market /buy /listings /unlist /econ".into());
-    lines.push("  /stop /save-all".into());
-    lines
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,18 +716,6 @@ mod tests {
         assert_eq!(find("teammsg").map(|e| e.task), Some("CMD-16"));
         assert_eq!(find("pl").map(|e| e.task), Some("CMD-23"));
         assert!(find("definitely-not-a-command").is_none());
-    }
-
-    #[test]
-    fn help_lists_every_group() {
-        let lines = help_lines();
-        for e in CORE {
-            assert!(
-                lines.iter().any(|l| l.contains(e.group)),
-                "group {} is missing from /help",
-                e.group
-            );
-        }
     }
 
     #[test]

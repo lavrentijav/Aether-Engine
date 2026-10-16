@@ -992,13 +992,19 @@ fn play_loop(
                 if text.trim_start().starts_with('/') {
                     crate::chatlog::log_command(handle, &text, world);
                 }
-                if let Some(reply) = crate::commands::dispatch(&text, handle, registry, world) {
+                if let Some(feedback) = crate::commands::dispatch(&text, handle, registry, world) {
                     // Command output goes only to whoever typed it: a
                     // rollback report names players and sequence numbers
-                    // and is nobody else's business.
-                    for line in reply.0 {
-                        handle.emit(&ServerEvent::Chat(line), world);
-                    }
+                    // and is nobody else's business. The one feedback path
+                    // ([`crate::commands::feedback`]) decides per source and
+                    // per success/error whether the source sees it (for a
+                    // player, `sendCommandFeedback` gates success but never
+                    // error) and colours errors red.
+                    let source = crate::commands::source::CommandSource::Player(handle);
+                    let rules = crate::commands::feedback::GameRules::load(world);
+                    crate::commands::feedback::send(&source, &feedback, rules, |line| {
+                        handle.emit(&ServerEvent::Chat(line.to_string()), world)
+                    });
                     continue;
                 }
                 if let Some(reason) = crate::plugins::before_chat(handle, &text) {

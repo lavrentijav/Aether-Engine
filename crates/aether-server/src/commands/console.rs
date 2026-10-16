@@ -104,12 +104,13 @@ mod tests {
         let registry = registry();
         // `/help` is public and works from any source; the console's op level
         // is not needed to reach it. The point is that no leading slash is
-        // required and the line still went through the tree.
+        // required and the line still went through the tree. CMD-05 renders
+        // `/help` from the tree, so the list names real commands.
         let out = run_line("help", &registry, &world);
         assert!(!out.is_empty(), "help produced output");
         assert!(
-            out.iter().any(|l| l.contains("commands pending")),
-            "the help footer is present: {out:?}"
+            out.iter().any(|l| l.starts_with("/gamemode")),
+            "the help list is present: {out:?}"
         );
 
         // A leading slash is accepted too.
@@ -165,7 +166,7 @@ mod tests {
             "{lines:?}"
         );
         assert!(
-            lines.iter().any(|l| l.contains("commands pending")),
+            lines.iter().any(|l| l.starts_with("/gamemode")),
             "{lines:?}"
         );
         // Exactly one error line: the blank lines were not turned into

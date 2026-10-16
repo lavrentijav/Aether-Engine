@@ -35,19 +35,40 @@ use crate::session::DemoWorld;
 /// before.
 pub fn nodes() -> Vec<Node> {
     vec![
-        tree::greedy(
-            "balance",
-            &["bal", "money"],
-            Requirement::None,
-            exec_balance,
+        tree::with_usage(
+            tree::greedy(
+                "balance",
+                &["bal", "money"],
+                Requirement::None,
+                exec_balance,
+            ),
+            "[player]",
         ),
-        tree::greedy("pay", &[], Requirement::None, exec_pay),
-        tree::greedy("sell", &[], Requirement::None, exec_sell),
-        tree::greedy("market", &[], Requirement::None, exec_market),
-        tree::greedy("buy", &[], Requirement::None, exec_buy),
+        tree::with_usage(
+            tree::greedy("pay", &[], Requirement::None, exec_pay),
+            "<player> <amount>",
+        ),
+        tree::with_usage(
+            tree::greedy("sell", &[], Requirement::None, exec_sell),
+            "<count> <price each> [duration]",
+        ),
+        tree::with_usage(
+            tree::greedy("market", &[], Requirement::None, exec_market),
+            "[filters]",
+        ),
+        tree::with_usage(
+            tree::greedy("buy", &[], Requirement::None, exec_buy),
+            "<id> [count]",
+        ),
         tree::simple("listings", &[], Requirement::None, exec_listings),
-        tree::greedy("unlist", &[], Requirement::None, exec_unlist),
-        tree::greedy("econ", &[], Requirement::Fn(require_econ_op), exec_econ),
+        tree::with_usage(
+            tree::greedy("unlist", &[], Requirement::None, exec_unlist),
+            "<id>",
+        ),
+        tree::with_usage(
+            tree::greedy("econ", &[], Requirement::Fn(require_econ_op), exec_econ),
+            "give <player> <amount> [reason]",
+        ),
     ]
 }
 

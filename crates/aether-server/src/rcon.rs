@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(first.id, 10);
         assert_eq!(first.kind, TYPE_RESPONSE);
         assert!(
-            first.body.contains("commands pending"),
+            first.body.contains("/gamemode"),
             "help output: {:?}",
             first.body
         );
