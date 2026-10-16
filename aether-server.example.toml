@@ -99,6 +99,13 @@ log_commands = true  # commands players type
 # Command names whose arguments are masked as **** in the log and the journal,
 # so a password can never leak through it. Case-insensitive, without the slash.
 redact = ["login", "register", "l", "reg"]
+# Player text is sanitized of control characters and § before it is logged or
+# journalled, so it cannot forge a log line or inject a terminal escape, and is
+# cut to this many characters (0 = no limit; a cut line ends with …).
+max_len = 256
+# The most lines one player may have logged/journalled per minute; 0 disables
+# the limit. Bounds how fast a client can grow the journal on the game thread.
+rate_per_min = 120
 
 [plugins]
 # WebAssembly plugins (a build with the `plugins` feature, the default). Each

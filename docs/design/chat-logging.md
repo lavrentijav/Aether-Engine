@@ -26,6 +26,8 @@ logged before it runs, so the audit trail records the attempt even when the comm
 log = true           # public chat and private messages
 log_commands = true  # commands players type
 redact = ["login", "register", "l", "reg"]
+max_len = 256        # characters of player text kept in the log/journal (0 = no limit)
+rate_per_min = 120   # logged lines per player per minute (0 = no limit)
 ```
 
 Both switches default to `true`. `redact` is a case-insensitive list of command names (without the
@@ -37,6 +39,24 @@ Redaction is per *command name*, not a content scan: a secret typed as an argume
 command (`/msg Bob my password is …`) is still logged, as it is in every server's console. The
 default list covers the common authentication plugins; an operator running a different one adds its
 names.
+
+## Sanitization and limits
+
+Player text is hostile input: without care a client could embed a newline and forge a second
+`[chat]`/`[pm]`/`[cmd]` line — complete with a fake timestamp — or inject an ANSI escape sequence
+that clears or recolours the operator's terminal. Before any text reaches the log or the journal it
+is therefore **sanitized**: every control character (Unicode `Cc`, which covers `\n`, `\r`, `\t`
+and the escape introducer `ESC`), the Minecraft formatting sign `§` (U+00A7) and the Unicode
+line/paragraph separators (U+2028/U+2029) are replaced with a space. The cleaned text is what both
+the log line and the journal event carry, so neither can be forged.
+
+Two limits bound a spammer. `max_len` truncates the logged/journalled text to that many characters
+(counted as characters, so a multi-byte character is never split) and appends `…` when it was cut.
+`rate_per_min` is a per-player sliding window: over it, further lines are dropped from both the log
+and the journal for the rest of the window. Each logged line is a synchronous journal append
+(payload plus two index writes) on the game thread, so an unbounded client could otherwise grow the
+journal without limit. The limits apply to the *logged copy* only; a long message is still delivered
+to chat as typed.
 
 ## The journal event
 
@@ -74,6 +94,10 @@ follows the existing columns.
 - Chat shares the world journal, so `/lookup` and `/inspect` can return chat events alongside block
   changes. They render as `who said: …` / `who -> who: …` / `who ran: …`.
 - Console and RCON commands are not logged here yet; CH1 is scoped to lines typed by players.
+- A private message is journalled twice by design: once as `[cmd] sender: /msg target text` (the
+  command that was typed, from the generic command path) and once as `[pm] sender -> target: text`
+  (the message itself, with the recipient as `peer`). The `[cmd]` copy is what lets the audit trail
+  show the attempt even when the recipient is offline; `/lookup` shows both.
 - The default `redact` list is the brief's (`login`, `register`, `l`, `reg`), but `l` is also the
   core `/lookup` alias on this server, so a `/l player:…` query is logged with its filters masked.
   An operator who uses `/l` for history should drop `l` from the list (passwords are still covered
