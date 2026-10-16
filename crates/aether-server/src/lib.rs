@@ -33,6 +33,7 @@ pub mod proto;
 pub mod protocol;
 pub mod rewards;
 pub mod session;
+pub mod staff;
 pub mod stash;
 pub mod stored;
 pub mod visibility;
@@ -568,6 +569,16 @@ pub fn anti_xray_enabled() -> bool {
 /// [`ANTIXRAY_BYPASS_PERMISSION`] node (operators, until CMD-01), or a name in
 /// `[anti_xray] bypass_players`.
 pub fn anti_xray_bypass(handle: &players::PlayerHandle) -> bool {
+    // A `/spectate xray` override wins over everything else: `off` shows
+    // everything, and `engine`/`culling`/`<level>` turn anti-xray *on* for a
+    // spectator who would otherwise bypass it as an operator.
+    match handle.staff().xray() {
+        staff::AntiXrayLevel::Off => return true,
+        staff::AntiXrayLevel::Engine
+        | staff::AntiXrayLevel::Culling
+        | staff::AntiXrayLevel::Margin(_) => return false,
+        staff::AntiXrayLevel::Default => {}
+    }
     if handle.visibility().bypass {
         return true;
     }

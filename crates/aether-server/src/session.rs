@@ -502,19 +502,29 @@ fn login_and_play(
     // though they always shared one world.
     handle.emit(&ServerEvent::TabListAdd(&handle), world);
     for other in registry.snapshot() {
-        if other.entity_id != eid {
+        // A vanished staff member is not spawned for a viewer who may not see
+        // them; vanished staff still see each other.
+        if other.entity_id != eid && crate::staff::visible_to(&handle, &other) {
             handle.emit(&ServerEvent::TabListAdd(&other), world);
             handle.emit(&ServerEvent::SpawnPlayer(&other), world);
             handle.emit(&crate::game::tick::equipment_event(&other), world);
         }
     }
-    registry.broadcast_except(eid, &ServerEvent::TabListAdd(&handle), world);
-    registry.broadcast_except(eid, &ServerEvent::SpawnPlayer(&handle), world);
-    registry.broadcast_except(
-        eid,
-        &ServerEvent::Chat(format!("{} joined the game", player.name)),
-        world,
-    );
+    for viewer in registry.snapshot() {
+        if viewer.entity_id == eid || !crate::staff::visible_to(&viewer, &handle) {
+            continue;
+        }
+        viewer.emit(&ServerEvent::TabListAdd(&handle), world);
+        viewer.emit(&ServerEvent::SpawnPlayer(&handle), world);
+        viewer.emit(&crate::game::tick::equipment_event(&handle), world);
+    }
+    if !handle.staff().vanished() {
+        registry.broadcast_except(
+            eid,
+            &ServerEvent::Chat(format!("{} joined the game", player.name)),
+            world,
+        );
+    }
     crate::plugins::after_player_join(&handle);
 
     // Now fill out the rest of the view radius. The player is placed and
@@ -538,13 +548,22 @@ fn login_and_play(
     // persisted, and holding it for a player who has gone would leak. What was
     // rolled back is in the journal either way.
     crate::stash::forget(player.uuid);
-    registry.broadcast_except(eid, &ServerEvent::DespawnEntity(eid), world);
-    registry.broadcast_except(eid, &ServerEvent::TabListRemove(player.uuid), world);
-    registry.broadcast_except(
-        eid,
-        &ServerEvent::Chat(format!("{} left the game", player.name)),
-        world,
-    );
+    // Only viewers who could see this player need to drop them; `handle` is
+    // still alive, so its vanish state is still readable.
+    for viewer in registry.snapshot() {
+        if !crate::staff::visible_to(&viewer, &handle) {
+            continue;
+        }
+        viewer.emit(&ServerEvent::DespawnEntity(eid), world);
+        viewer.emit(&ServerEvent::TabListRemove(player.uuid), world);
+    }
+    if !handle.staff().vanished() {
+        registry.broadcast_except(
+            eid,
+            &ServerEvent::Chat(format!("{} left the game", player.name)),
+            world,
+        );
+    }
     crate::plugins::after_player_leave(&handle);
     result
 }
@@ -1226,7 +1245,10 @@ fn place_block(
 
 /// Everything a client needs after being placed in the world — at join and
 /// after a respawn: health, inventory, time, experience.
-fn after_spawn(
+///
+/// Also used by `/spectate off` to push the restored snapshot back to the
+/// client in one place.
+pub(crate) fn after_spawn(
     handle: &crate::players::PlayerHandle,
     registry: &SharedRegistry,
     world: &DemoWorld,

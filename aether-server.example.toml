@@ -108,6 +108,13 @@ init_fuel = 100000000  # fuel for a plugin's instantiation and init
 #                                                # nothing, even if asked for
 # config = { greeting = "hi" }
 
+# The native staff plugin (vanish + admin spectate, docs/design/staff.md) is
+# compiled in; it needs no capabilities. `persist = false` drops a vanish on
+# logout instead of restoring it on the next join.
+# [plugins.staff]
+# enabled = true
+# config = { persist = "true" }
+
 [cache]
 # Unmodified generated columns are cached on disk so the generator does not
 # recompute the same terrain on every restart. Pure speed: every entry is

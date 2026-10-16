@@ -343,6 +343,7 @@ fn abilities(v: &Version, mode: GameMode) -> PacketOut {
     let mut p = PacketOut::new(v.packets.cb_player_abilities);
     let flags = match mode {
         GameMode::Creative => 0x01 | 0x04 | 0x08,
+        GameMode::Spectator => 0x01 | 0x04,
         GameMode::Survival => 0,
     };
     p.u8(flags).f32(0.05).f32(0.10);
