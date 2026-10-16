@@ -25,7 +25,7 @@ pub mod registry;
 pub mod tree;
 
 use aether_api::{JournalActor, Ledger};
-use aether_world::journal::{now_ms, Event, EventBody};
+use aether_world::journal::{now_ms, ChatKind, Event, EventBody};
 use aether_world::BlockStateId;
 
 use crate::players::{PlayerHandle, SharedRegistry};
@@ -75,6 +75,10 @@ pub const RESERVED_COMMANDS: &[&str] = &[
     "food",
     "heal",
     "visibility",
+    // messaging
+    "msg",
+    "tell",
+    "w",
     // history
     "inspect",
     "i",
@@ -469,6 +473,22 @@ fn describe_body(
             bytes.len(),
             e.seq
         )),
+        EventBody::ChatMessage {
+            kind, peer, text, ..
+        } => {
+            let what = match kind {
+                ChatKind::Public => format!("{} said: {text}", actor_name(e.actor.0)),
+                ChatKind::Private => {
+                    format!(
+                        "{} -> {}: {text}",
+                        actor_name(e.actor.0),
+                        actor_name(peer.0)
+                    )
+                }
+                ChatKind::Command => format!("{} ran: {text}", actor_name(e.actor.0)),
+            };
+            Some(format!("  {ago} {what}  #{}", e.seq))
+        }
     }
 }
 

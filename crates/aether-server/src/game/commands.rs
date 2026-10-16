@@ -39,6 +39,7 @@ pub fn nodes() -> Vec<Node> {
         tree::simple("killall", &[], Requirement::Fn(require_op), exec_killall),
         tree::simple("kill", &[], Requirement::None, exec_kill),
         tree::simple("spawn", &[], Requirement::None, exec_spawn),
+        tree::greedy("msg", &["tell", "w"], Requirement::None, exec_msg),
         tree::greedy("tp", &[], Requirement::Fn(require_op), exec_tp),
         tree::greedy("block", &[], Requirement::None, exec_block),
         tree::greedy("food", &[], Requirement::Fn(require_op), exec_food),
@@ -82,6 +83,11 @@ fn exec_kill(ctx: &mut Ctx) -> Reply {
 
 fn exec_spawn(ctx: &mut Ctx) -> Reply {
     Reply(spawn(ctx.handle, ctx.registry, ctx.world))
+}
+
+fn exec_msg(ctx: &mut Ctx) -> Reply {
+    let args = ctx.refs();
+    Reply(msg(&args, ctx.handle, ctx.registry, ctx.world))
 }
 
 fn exec_tp(ctx: &mut Ctx) -> Reply {
@@ -243,6 +249,42 @@ pub fn spawn(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld
     let s = handle.game().spawn;
     teleport(handle, registry, world, s.0, s.1, s.2);
     vec!["Teleported to spawn".into()]
+}
+
+/// `/msg <player> <message>` and its `/tell` `/w` aliases: a private message
+/// to exactly one player.
+///
+/// The sender and the recipient each see their own side of it, and the line is
+/// logged and journalled (CH1). A target that is not a player is refused, as
+/// in vanilla; targeting yourself is allowed.
+pub fn msg(
+    args: &[&str],
+    handle: &PlayerHandle,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+) -> Vec<String> {
+    let Some(name) = args.first().copied() else {
+        return vec!["/msg <player> <message>".into()];
+    };
+    let message = args[1..].join(" ");
+    if message.is_empty() {
+        return vec!["/msg <player> <message>".into()];
+    }
+    match registry
+        .snapshot()
+        .into_iter()
+        .find(|p| p.name.eq_ignore_ascii_case(name))
+    {
+        Some(target) => {
+            crate::chatlog::log_private(handle, &target, &message, world);
+            target.emit(
+                &ServerEvent::Chat(format!("{} whispers to you: {message}", handle.name)),
+                world,
+            );
+            vec![format!("You whisper to {}: {message}", target.name)]
+        }
+        None => vec![format!("{name} is not online")],
+    }
 }
 
 /// `/tp <x> <y> <z>` or `/tp <player>`.
