@@ -80,6 +80,10 @@ pub const AUTH_LOCK: &[u8] = b"AUTH";
 /// Per-player web-admin profile: first/last seen and playtime, keyed by the
 /// player's 16-byte uuid (see `aether_server::web`).
 pub const WEB_PROFILE: &[u8] = b"WB";
+/// The world's game rules, e.g. `sendCommandFeedback`. One blob, owned by the
+/// server's command layer (CMD-05 introduced the store; CMD-13 owns
+/// `/gamerule`).
+pub const GAME_RULES: &[u8] = b"GR";
 
 /// Every top-level key prefix in a world's KV store, and its owner.
 ///
@@ -162,6 +166,10 @@ pub const KEY_PREFIXES: &[KeyClaim] = &[
     KeyClaim {
         owner: "web-admin player profile",
         prefix: WEB_PROFILE,
+    },
+    KeyClaim {
+        owner: "game rules",
+        prefix: GAME_RULES,
     },
 ];
 

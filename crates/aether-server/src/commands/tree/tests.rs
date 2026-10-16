@@ -124,6 +124,21 @@ fn one(env: &Env, who: &PlayerHandle, text: &str) -> String {
     lines.into_iter().next().unwrap()
 }
 
+/// Every `/help` line the caller can see, walking the whole pager.
+fn all_help(env: &Env, who: &PlayerHandle) -> Vec<String> {
+    let mut lines = run(env, who, "/help");
+    let pages: usize = lines[0]
+        .split("page 1 of ")
+        .nth(1)
+        .and_then(|s| s.split(' ').next())
+        .and_then(|s| s.parse().ok())
+        .expect("a /help header names its page count");
+    for _ in 1..pages {
+        lines.extend(run(env, who, "/page next"));
+    }
+    lines
+}
+
 /// The parse error for `text`, or a panic if it parsed.
 fn parse_err(tree: &CommandTree, text: &str, handle: &PlayerHandle) -> ParseError {
     match tree.parse(text, handle) {
@@ -357,6 +372,8 @@ fn sample_tree() -> CommandTree {
         requirement: none,
         executor: None,
         children: vec![num.build(), mode.build(), say.build(), flag.build()],
+        usage: None,
+        task: None,
     };
     CommandTree { root }
 }
@@ -404,6 +421,8 @@ fn unknown_literal_and_trailing_input_use_the_vanilla_errors() {
             executable: false,
             requirement: Requirement::None,
             executor: None,
+            usage: None,
+            task: None,
             children: vec![Builder::literal("toggle")
                 .executable(|_| Reply(Vec::new()))
                 .build()],
@@ -444,6 +463,8 @@ fn requirement_tree(req: Requirement) -> CommandTree {
             executable: false,
             requirement: Requirement::None,
             executor: None,
+            usage: None,
+            task: None,
             children: vec![Builder::literal("secret")
                 .requires(req)
                 .executable(|_| Reply(vec!["ok".into()]))
@@ -502,6 +523,8 @@ fn suggestion_tree() -> CommandTree {
             executable: false,
             requirement: Requirement::None,
             executor: None,
+            usage: None,
+            task: None,
             children: vec![
                 Builder::literal("time").executable(noop).build(),
                 Builder::literal("tp").executable(noop).build(),
@@ -601,6 +624,8 @@ fn a_two_hundred_node_tree_parses() {
             executable: false,
             requirement: Requirement::None,
             executor: None,
+            usage: None,
+            task: None,
             children,
         },
     };
@@ -694,22 +719,28 @@ fn game_commands_gate_on_operator_through_the_tree() {
         "You are not an operator."
     );
 
-    // An op runs them.
+    // An op runs them. The replies are vanilla's en_us strings (CMD-05).
     assert_eq!(
         one(&env, &env.tester, "/gamemode creative"),
-        "tester is now in Creative mode"
+        "Set own game mode to Creative Mode"
     );
     assert_eq!(
         one(&env, &env.tester, "/gm s"),
-        "tester is now in Survival mode"
+        "Set own game mode to Survival Mode"
     );
-    assert_eq!(one(&env, &env.tester, "/time set day"), "Time set to 1000");
+    assert_eq!(
+        one(&env, &env.tester, "/time set day"),
+        "Set the time to 1000"
+    );
     assert!(one(&env, &env.tester, "/time").starts_with("It is "));
     assert_eq!(
         one(&env, &env.tester, "/give stone 3"),
-        "Gave 3 minecraft:stone"
+        "Gave 3 minecraft:stone to tester"
     );
-    assert!(one(&env, &env.tester, "/summon pig").contains("pig"));
+    assert_eq!(
+        one(&env, &env.tester, "/summon pig"),
+        "Summoned new minecraft:pig"
+    );
     assert!(one(&env, &env.tester, "/killall").starts_with("Removed "));
 }
 
@@ -719,8 +750,8 @@ fn self_and_world_commands_route_through_the_tree() {
     let who = &env.tester;
     assert!(run(&env, who, "/kill").is_empty());
     assert_eq!(one(&env, who, "/spawn"), "Teleported to spawn");
-    assert_eq!(one(&env, who, "/tp 1 2 3"), "Teleported to 1 2 3");
-    assert_eq!(one(&env, who, "/tp bob"), "Teleported to bob");
+    assert_eq!(one(&env, who, "/tp 1 2 3"), "Teleported tester to 1, 2, 3");
+    assert_eq!(one(&env, who, "/tp bob"), "Teleported tester to bob");
     assert!(one(&env, who, "/block 0 64 0").contains(':'));
     assert_eq!(one(&env, who, "/food"), "Food set to 20");
     assert_eq!(one(&env, who, "/heal"), "Healed");
@@ -787,25 +818,153 @@ fn non_commands_and_unknown_commands_are_handled_by_the_tree() {
 }
 
 #[test]
-fn help_still_explains_a_single_command() {
+fn help_renders_from_the_tree_with_usages_and_stub_marks() {
     let env = env();
-    // `/help <command>` works again: the node is greedy, so an argument is
-    // accepted rather than rejected as "incorrect argument".
+    // A real command shows its tree usage, with its aliases.
+    assert_eq!(
+        one(&env, &env.tester, "/help gamemode"),
+        "/gamemode (gm) <gamemode> [<targets>]"
+    );
+    // An alias resolves to the canonical usage.
+    assert_eq!(
+        one(&env, &env.tester, "/help gm"),
+        "/gamemode (gm) <gamemode> [<targets>]"
+    );
+    // A specified-but-unimplemented command is listed and marked.
     assert_eq!(
         one(&env, &env.tester, "/help stop"),
-        "/stop — minecraft.command.stop (op level 4), planned in CMD-09"
-    );
-    assert!(
-        run(&env, &env.tester, "/help")
-            .iter()
-            .any(|l| l.contains("not implemented yet")),
-        "/help with no argument lists the stubs"
+        "/stop — not implemented yet (CMD-09)"
     );
     // The `?` alias routes to the same node.
     assert_eq!(
-        one(&env, &env.tester, "/? stop"),
-        "/stop — minecraft.command.stop (op level 4), planned in CMD-09"
+        one(&env, &env.tester, "/? gm"),
+        "/gamemode (gm) <gamemode> [<targets>]"
     );
+    // Unknown command -> exactly one line.
+    assert_eq!(
+        run(&env, &env.tester, "/help definitely-not-a-command"),
+        vec!["Unknown command. Try /help".to_string()]
+    );
+}
+
+#[test]
+fn help_with_no_argument_lists_the_visible_tree_paged() {
+    let env = env();
+    let first = run(&env, &env.tester, "/help");
+    // The pager header, one entry per line, and a nav footer when there is
+    // more than one page.
+    assert!(first[0].starts_with("Commands — page 1 of "), "{first:?}");
+    // The whole catalogue is reachable by paging; `/gamemode` and the stub
+    // mark sit past the first page, so a single page would miss them.
+    let all = all_help(&env, &env.tester);
+    assert!(
+        all.iter()
+            .any(|l| l.contains("/gamemode (gm) <gamemode> [<targets>]")),
+        "{all:?}"
+    );
+    assert!(
+        all.iter()
+            .any(|l| l.contains("/stop (not implemented yet)")),
+        "{all:?}"
+    );
+    // `all_help` left the pager on the last page; run `/help` again so the
+    // navigation below starts from page 1.
+    let _ = run(&env, &env.tester, "/help");
+    // Paging forward reaches a later page, and going back reaches page 1.
+    let next = run(&env, &env.tester, "/page next");
+    assert!(next[0].contains("page 2 of "), "{next:?}");
+    let back = run(&env, &env.tester, "/page prev");
+    assert!(back[0].contains("page 1 of "), "{back:?}");
+    // `goto` out of range clamps to the last page rather than wrapping or
+    // panicking.
+    let last = run(&env, &env.tester, "/page 99999");
+    let pages = first[0]
+        .split("page 1 of ")
+        .nth(1)
+        .and_then(|s| s.split(' ').next())
+        .unwrap()
+        .to_string();
+    assert!(
+        last[0].contains(&format!("page {pages} of {pages}")),
+        "{last:?}"
+    );
+}
+
+#[test]
+fn help_does_not_leak_op_only_commands_to_a_non_op() {
+    let env = env();
+    // An alias of an op-only command is also hidden.
+    assert_eq!(
+        run(&env, &env.bob, "/help gamemode"),
+        vec!["Unknown command. Try /help".to_string()]
+    );
+    assert_eq!(
+        run(&env, &env.bob, "/help gm"),
+        vec!["Unknown command. Try /help".to_string()]
+    );
+    // And the whole paged catalogue must not name them either.
+    let bob_help = all_help(&env, &env.bob);
+    assert!(
+        !bob_help.iter().any(|l| l.contains("/gamemode")),
+        "{bob_help:?}"
+    );
+    assert!(
+        !bob_help.iter().any(|l| l.contains("/stop")),
+        "{bob_help:?}"
+    );
+    // A public command is still there.
+    assert!(
+        bob_help.iter().any(|l| l.starts_with("/kill ")) || bob_help.iter().any(|l| l == "/kill")
+    );
+    // The operator sees it, so the filter is the caller, not the tree.
+    assert!(all_help(&env, &env.tester)
+        .iter()
+        .any(|l| l.starts_with("/stop ")));
+}
+
+#[test]
+fn an_alias_can_never_collide_with_a_literal() {
+    // The tree's one dispatch invariant, checked over the whole real tree.
+    assert_eq!(tree().find_duplicate_name(), None);
+}
+
+#[test]
+fn send_command_feedback_defaults_on_and_survives_the_world() {
+    let env = env();
+    use crate::commands::feedback;
+    assert!(
+        feedback::send_command_feedback(&env.world),
+        "vanilla default"
+    );
+    feedback::set_send_command_feedback(&env.world, false);
+    assert!(!feedback::send_command_feedback(&env.world));
+    feedback::set_send_command_feedback(&env.world, true);
+    assert!(feedback::send_command_feedback(&env.world));
+}
+
+#[test]
+fn a_silenced_function_gets_no_feedback_but_a_player_always_does() {
+    let env = env();
+    use crate::commands::feedback::{self, Feedback};
+    use crate::commands::source::CommandSource;
+    let err = Feedback::error(vec!["nope".into()]);
+    let player = CommandSource::Player(&env.tester);
+    let function = CommandSource::Function { name: "tick" };
+
+    // Rule off: a player still sees their own feedback, a function does not.
+    let mut seen = Vec::new();
+    feedback::send(&player, &err, false, |l| seen.push(l.to_string()));
+    assert_eq!(seen, vec!["§cnope".to_string()]);
+    seen.clear();
+    feedback::send(&function, &err, false, |l| seen.push(l.to_string()));
+    assert!(
+        seen.is_empty(),
+        "a silenced function must not be shown output"
+    );
+    // Rule on: the function sees it too.
+    seen.clear();
+    feedback::send(&function, &err, true, |l| seen.push(l.to_string()));
+    assert_eq!(seen, vec!["§cnope".to_string()]);
 }
 
 #[test]

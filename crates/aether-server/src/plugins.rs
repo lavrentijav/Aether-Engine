@@ -703,12 +703,14 @@ mod imp {
             } else {
                 format!("/{command}")
             };
-            if let Some(reply) =
+            if let Some(feedback) =
                 crate::commands::dispatch(&text, &handle, &backend.registry, &backend.world)
             {
-                for line in reply.0 {
-                    handle.emit(&ServerEvent::Chat(line), &*backend.world);
-                }
+                let source = crate::commands::source::CommandSource::Player(&handle);
+                let rule = crate::commands::feedback::send_command_feedback(&backend.world);
+                crate::commands::feedback::send(&source, &feedback, rule, |line| {
+                    handle.emit(&ServerEvent::Chat(line.to_string()), &*backend.world)
+                });
             }
         }
     }
