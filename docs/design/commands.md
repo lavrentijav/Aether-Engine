@@ -64,12 +64,16 @@ disagree.
 `fill` `fillbiome` `forceload` `function` `gamemode` `gamerule` `give` `help` `item` `jfr` `kick` `kill`
 `list` `locate` `loot` `me` `msg`/`tell`/`w` `op` `pardon` `pardon-ip` `particle` `perf` `place`
 `playsound` `publish` `random` `recipe` `reload` `return` `ride` `rotate` `save-all` `save-off` `save-on`
-`say` `schedule` `scoreboard` `seed` `setblock` `setidletimeout` `setworldspawn` `spawnpoint` `spectate`
+`say` `schedule` `scoreboard` `seed` `setblock` `setidletimeout` `setworldspawn` `spawnpoint`
 `spreadplayers` `stop` `stopsound` `summon` `tag` `team` `teammsg`/`tm` `teleport`/`tp` `tellraw` `test`
 `tick` `time` `title` `transfer` `trigger` `version` `waypoint` `weather` `whitelist` `worldborder`.
 
+`/spectate` is vanilla, but it is **not** a pending core command: it ships as the native `staff`
+plugin (SP1) with node `aether.staff.spectate`, so it is absent from `docs/COMMANDS.md` (which lists
+core commands). See `docs/design/plugins.md`.
+
 Groups for tasks: **V-admin** (op/deop/ban/kick/whitelist/stop/save/list/seed/version/setidletimeout/transfer),
-**V-player** (gamemode/give/clear/effect/enchant/xp/kill/tp/spawnpoint/spectate/ride/attribute/damage/item),
+**V-player** (gamemode/give/clear/effect/enchant/xp/kill/tp/spawnpoint/ride/attribute/damage/item),
 **V-world** (setblock/fill/clone/fillbiome/place/forceload/locate/setworldspawn/worldborder/weather/time/gamerule/difficulty/tick),
 **V-data** (data/scoreboard/tag/team/trigger/bossbar/title/tellraw/say/me/msg/teammsg/particle/playsound/stopsound/loot/recipe/advancement/random/schedule/function/datapack/reload/return/execute).
 `execute`/`function`/`datapack` are large (datapack functions): last.

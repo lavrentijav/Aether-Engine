@@ -86,7 +86,7 @@ Player verbs: inventory, movement, effects and items.
 | `/spawnpoint` | – | 🚧 pending CMD-11 | `node` | `minecraft.command.spawnpoint` | 2 | `/spawnpoint [target] [pos]` |
 | `/ride` | – | 🚧 pending CMD-11 | `node` | `minecraft.command.ride` | 2 | `/ride <target> <vehicle>` |
 | `/item` | – | 🚧 pending CMD-11 | `node` | `minecraft.command.item` | 2 | `/item <target> <slot> <replace,modify> [...]` |
-| `/rotate` | – | 🚧 pending CMD-11 | `node` | `aether.command.rotate` | 2 | `/rotate <target> <yaw> <pitch>` |
+| `/rotate` | – | 🚧 pending CMD-11 | `node` | `minecraft.command.rotate` | 2 | `/rotate <target> <yaw> <pitch>` |
 
 ## world
 

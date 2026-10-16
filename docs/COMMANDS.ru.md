@@ -86,7 +86,7 @@
 | `/spawnpoint` | – | 🚧 ожидает CMD-11 | `node` | `minecraft.command.spawnpoint` | 2 | `/spawnpoint [target] [pos]` |
 | `/ride` | – | 🚧 ожидает CMD-11 | `node` | `minecraft.command.ride` | 2 | `/ride <target> <vehicle>` |
 | `/item` | – | 🚧 ожидает CMD-11 | `node` | `minecraft.command.item` | 2 | `/item <target> <slot> <replace,modify> [...]` |
-| `/rotate` | – | 🚧 ожидает CMD-11 | `node` | `aether.command.rotate` | 2 | `/rotate <target> <yaw> <pitch>` |
+| `/rotate` | – | 🚧 ожидает CMD-11 | `node` | `minecraft.command.rotate` | 2 | `/rotate <target> <yaw> <pitch>` |
 
 ## world
 

@@ -611,7 +611,7 @@ pub const CATALOGUE: &[Command] = &[
     pend(
         "rotate",
         &[],
-        "aether.command.rotate",
+        "minecraft.command.rotate",
         2,
         "CMD-11",
         Category::Player,
