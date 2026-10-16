@@ -3,6 +3,7 @@ name = "aether-physics"
 description = "Aether Engine basic physics: voxel AABB collision, swept movement and a gravity/friction step."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -3,6 +3,7 @@ name = "aether-plugin"
 description = "WebAssembly plugin host for Aether Engine: Wasmtime component-model loader, sandbox limits and the event bus."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true

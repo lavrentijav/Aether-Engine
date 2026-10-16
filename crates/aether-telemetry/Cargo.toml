@@ -3,6 +3,7 @@ name = "aether-telemetry"
 description = "Aether Engine telemetry: sub-tick timers, counters and a Prometheus text exporter."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
