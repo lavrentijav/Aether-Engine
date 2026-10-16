@@ -1760,7 +1760,11 @@ pub static ENTITY_TYPES: &[(&str, u16)] = &[
     ("minecraft:zombie_villager", 153),
     ("minecraft:zombified_piglin", 154),
 ];
+pub const MENU_GENERIC_9X1: i32 = 0;
+pub const MENU_GENERIC_9X2: i32 = 1;
 pub const MENU_GENERIC_9X3: i32 = 2;
+pub const MENU_GENERIC_9X4: i32 = 3;
+pub const MENU_GENERIC_9X5: i32 = 4;
 pub const MENU_GENERIC_9X6: i32 = 5;
 pub const MENU_GENERIC_3X3: i32 = 6;
 pub const MENU_CRAFTING: i32 = 12;
@@ -1771,6 +1775,8 @@ pub const COMPONENT_DAMAGE: i32 = 3;
 pub const COMPONENT_CUSTOM_NAME: i32 = 6;
 pub const COMPONENT_LORE: i32 = 11;
 pub const COMPONENT_POTION_CONTENTS: i32 = 49;
+pub const COMPONENT_ENCHANTMENT_GLINT_OVERRIDE: i32 = 21;
+pub const COMPONENT_CUSTOM_MODEL_DATA: i32 = 17;
 pub const PARTICLE_EXPLOSION: i32 = 23;
 pub const PARTICLE_EXPLOSION_EMITTER: i32 = 22;
 

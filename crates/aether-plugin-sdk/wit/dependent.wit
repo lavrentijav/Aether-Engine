@@ -32,4 +32,8 @@ world dependent {
     /// player's panel. Its provider is the `plugins/sidebar` plugin, which may
     /// be disabled — the call then returns the neutral answer.
     import aether:sidebar/sidebar@0.1.0;
+
+    /// The shared menus service (native `plugins/menus`). Opening a menu is
+    /// one call; the core keeps every click out of the player's inventory.
+    import aether:menus/menus@0.1.0;
 }

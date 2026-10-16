@@ -11,6 +11,7 @@ members = [
     "crates/aether-worldgen",
     "crates/aether-baseproxy",
     "crates/aether-api",
+    "crates/aether-ops",
     "crates/aether-plugin",
     "crates/aether-plugin-sdk",
     "crates/aether-demo",
@@ -19,6 +20,13 @@ members = [
     # plugins call. Native plugins are compiled into the server, so this one is
     # a workspace member unlike the WASM examples.
     "plugins/sdk",
+    # The menus native plugin (tier N): the shared chest-menu host, exported as
+    # a `menus` service for every other plugin.
+    "plugins/menus",
+    # The admin web interface (WEB1 + WEB2), as a native plugin (tier N): a
+    # read-only live-ops dashboard, region heat, player/inventory views, a
+    # top-down map and a journal time machine, over one embedded HTTP server.
+    "plugins/webadmin",
     # The sidebar, as a native plugin: it composes a per-player scoreboard from
     # config and placeholders and asks the core to draw it.
     "plugins/sidebar",
@@ -26,6 +34,9 @@ members = [
     # Simple Voice Chat and Plasmo Voice, with a UDP server per protocol and a
     # bridge that lets the two kinds of client hear each other.
     "plugins/voice",
+    # The staff, as a native plugin: vanish, admin spectate and per-admin
+    # anti-xray control, with a journal audit trail.
+    "plugins/staff",
 ]
 
 # The example plugins are separate WebAssembly components: they target
@@ -61,6 +72,7 @@ aether-physics = { path = "crates/aether-physics", version = "0.1.0" }
 aether-worldgen = { path = "crates/aether-worldgen", version = "0.1.0" }
 aether-baseproxy = { path = "crates/aether-baseproxy", version = "0.1.0" }
 aether-api = { path = "crates/aether-api", version = "0.1.0", default-features = false }
+aether-ops = { path = "crates/aether-ops", version = "0.1.0" }
 aether-plugin = { path = "crates/aether-plugin", version = "0.1.0" }
 # Third-party
 # The Wasmtime component model runtime. Kept to the features the plugin host
@@ -80,6 +92,7 @@ miniz_oxide = "0.8"
 criterion = "0.5"
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # The whole engine is a hot path; optimise dependencies even in dev builds so
 # benchmarks and stress fixtures behave close to release.

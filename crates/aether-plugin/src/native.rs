@@ -135,6 +135,29 @@ pub trait NativePlugin: Send {
         Decision::Allow
     }
 
+    /// A click on a virtual menu window this plugin (or a dependent it
+    /// fronts) opened. Unlike `before-container-click` this carries the full
+    /// click, because a menu needs to tell a left-click from a shift-click,
+    /// a number-key swap from a drop. There is no decision: a menu click is
+    /// always consumed, and the core has already made it so.
+    ///
+    /// Native-only: the frozen WASM `@0.1.0` world has no matching export, so
+    /// a WASM dependent reaches menus through the `menus` service instead.
+    fn on_menu_click(
+        &mut self,
+        _ctx: &mut NativeContext,
+        _p: &Player,
+        _menu: u64,
+        _slot: i32,
+        _button: i8,
+        _mode: i32,
+    ) {
+    }
+
+    /// A player closed a menu window this plugin owns, by the Escape key, a
+    /// disconnect, or a server-side close.
+    fn on_menu_close(&mut self, _ctx: &mut NativeContext, _p: &Player, _menu: u64) {}
+
     // --- after-*: observe-only ---------------------------------------------
 
     fn after_player_join(&mut self, _ctx: &mut NativeContext, _p: &Player) {}

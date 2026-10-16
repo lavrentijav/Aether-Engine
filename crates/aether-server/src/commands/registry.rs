@@ -232,14 +232,8 @@ pub const CORE: &[Entry] = &[
         "CMD-11",
         "player",
     ),
-    e(
-        "spectate",
-        &[],
-        "minecraft.command.spectate",
-        2,
-        "CMD-11",
-        "player",
-    ),
+    // `/spectate` is implemented by the native `staff` plugin (SP1), with
+    // `aether.staff.spectate`; it is not a pending core command.
     e("ride", &[], "minecraft.command.ride", 2, "CMD-11", "player"),
     e("item", &[], "minecraft.command.item", 2, "CMD-11", "player"),
     // `/rotate` is in the catalogue but is not a vanilla 1.21.11 command; listed so the queue does

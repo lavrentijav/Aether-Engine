@@ -736,7 +736,7 @@ pub fn tick(
                             actions.push(Action::Tracked(
                                 id,
                                 crate::protocol::ServerEvent::Sound {
-                                    name: "minecraft:entity.creeper.primed",
+                                    name: "minecraft:entity.creeper.primed".into(),
                                     category: 5,
                                     x: pos.x,
                                     y: pos.y,
@@ -981,7 +981,9 @@ pub fn spawn_round(
         return out;
     }
     for p in players {
-        if !p.alive {
+        // A vanished (staff-hidden) player is not a spawn anchor, exactly as a
+        // spectator is not: mobs would otherwise appear around them.
+        if !p.alive || p.vanished {
             continue;
         }
         let (n, hostile) = super::entities::mobs_near(p.pos, 64.0);

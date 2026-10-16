@@ -20,6 +20,10 @@ aether-api = { workspace = true, default-features = false, features = ["fjall", 
 aether-worldgen = { workspace = true }
 toml = { workspace = true }
 serde = { workspace = true }
+# The live-ops shape shared with the web admin plugin: the server implements
+# the trait, the plugin reads it. Neither names the other.
+aether-ops = { workspace = true }
+serde_json = { workspace = true }
 # Protocol frame compression (zlib), pure Rust so the server keeps building
 # without a C toolchain.
 miniz_oxide = { workspace = true }
@@ -39,11 +43,18 @@ aether-plugin = { workspace = true, optional = true }
 # it registers its services at load, and dependents that require them refuse to
 # load when it is disabled. Core code never names it.
 aether-sdk-plugin = { path = "../../plugins/sdk", optional = true }
+# The menus native plugin (tier N): the shared chest-menu host every other
+# plugin opens menus through, and the provider of the `menus` service.
+aether-menus-plugin = { path = "../../plugins/menus", optional = true }
+aether-webadmin-plugin = { path = "../../plugins/webadmin", optional = true }
 # The sidebar native plugin. Loaded after the SDK, so its optional permission
 # checks resolve the SDK's service.
 aether-sidebar-plugin = { path = "../../plugins/sidebar", optional = true }
 # The voice chat native plugin. Loaded last; it owns its UDP server threads.
 aether-voice-plugin = { path = "../../plugins/voice", optional = true }
+# The staff native plugin: vanish, admin spectate and per-admin anti-xray
+# control, driven through the core's `staff_*` host hooks.
+aether-staff-plugin = { path = "../../plugins/staff", optional = true }
 postgres = { version = "0.19.10", optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -87,5 +98,5 @@ workspace = true
 # build that does not need Wasmtime (tests, a minimal deployment) can drop it
 # with `--no-default-features`.
 default = ["plugins"]
-plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-sidebar-plugin", "dep:aether-voice-plugin"]
+plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-menus-plugin", "dep:aether-webadmin-plugin", "dep:aether-sidebar-plugin", "dep:aether-voice-plugin", "dep:aether-staff-plugin"]
 postgres = ["dep:postgres"]

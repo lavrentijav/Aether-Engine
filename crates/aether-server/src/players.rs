@@ -92,6 +92,9 @@ pub struct PlayerHandle {
     /// The last measured keep-alive round trip, in milliseconds. Read by the
     /// `%ping%` placeholder; `0` until the first reply arrives.
     ping_ms: std::sync::atomic::AtomicU32,
+    /// Staff accountability state: vanish, spectate and the anti-xray
+    /// override. See [`crate::staff`].
+    staff: crate::staff::StaffState,
     /// Per-player rate limit on chat/command logging. See [`crate::chatlog`].
     chat_log: Mutex<crate::chatlog::LogLimiter>,
 }
@@ -148,6 +151,11 @@ impl PlayerHandle {
     /// Borrow this client's visibility-culling state.
     pub fn visibility(&self) -> std::sync::MutexGuard<'_, crate::visibility::State> {
         self.visibility.lock().unwrap()
+    }
+
+    /// This player's staff state (vanish, spectate, anti-xray override).
+    pub fn staff(&self) -> &crate::staff::StaffState {
+        &self.staff
     }
 
     /// Whether this client runs the full, server-authoritative gameplay.
@@ -290,6 +298,7 @@ impl PlayerHandle {
             // Every codec reads a column block by block; give it a view that
             // copies each section once instead of locking per block.
             ServerEvent::ChunkColumn { cx, cz } => {
+                crate::web::note_chunk_send(*cx, *cz);
                 let carrier_view;
                 let base: &dyn BlockSource = match table {
                     Some(t) => {
@@ -448,6 +457,56 @@ pub struct Registry {
     players: RwLock<HashMap<i32, Arc<PlayerHandle>>>,
 }
 
+#[cfg(test)]
+impl PlayerHandle {
+    /// A handle with an empty inventory and a real (loopback) outbox, for
+    /// tests that drive the click path or the plugin host without a socket
+    /// handshake. Uses the 1.21.11 codec.
+    pub(crate) fn for_test(entity_id: i32, name: &str) -> Arc<PlayerHandle> {
+        use std::net::{TcpListener, TcpStream};
+        static CODEC: crate::protocol::modern::Codec =
+            crate::protocol::modern::Codec(&crate::protocol::modern::version::V1_21_11);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let client = TcpStream::connect(listener.local_addr().unwrap()).expect("loopback peer");
+        // Nobody reads the other end; the outbox drains into the kernel buffer
+        // and the tests never push enough to fill it.
+        std::mem::forget(client);
+        let (server, _) = listener.accept().expect("loopback accept");
+        let outbox = Outbox::start(Conn::new(server), name).expect("outbox");
+        Arc::new(PlayerHandle {
+            entity_id,
+            uuid: entity_id as u128,
+            name: name.to_string(),
+            ip: None,
+            properties: Vec::new(),
+            codec: &CODEC,
+            outbox,
+            pos: Mutex::new(PosLook {
+                x: 0.0,
+                y: 64.0,
+                z: 0.0,
+                yaw: 0.0,
+                pitch: 0.0,
+                on_ground: true,
+            }),
+            inventory: Mutex::new(crate::inventory::Inventory::new()),
+            session: Mutex::new(crate::commands::Session::default()),
+            game: Mutex::new(crate::game::player::PlayerState::new(
+                crate::protocol::GameMode::Survival,
+            )),
+            tracked: Mutex::new(std::collections::HashSet::new()),
+            visibility: Mutex::new(crate::visibility::State::default()),
+            pack: AtomicU8::new(PACK_UNKNOWN),
+            compat_pack: AtomicBool::new(false),
+            sidebar: Mutex::new(None),
+            tab: Mutex::new(None),
+            ping_ms: std::sync::atomic::AtomicU32::new(0),
+            staff: crate::staff::StaffState::default(),
+            chat_log: Mutex::new(crate::chatlog::LogLimiter::new()),
+        })
+    }
+}
+
 pub type SharedRegistry = Arc<Registry>;
 
 impl Registry {
@@ -489,6 +548,7 @@ impl Registry {
             sidebar: Mutex::new(None),
             tab: Mutex::new(None),
             ping_ms: std::sync::atomic::AtomicU32::new(0),
+            staff: crate::staff::StaffState::default(),
             chat_log: Mutex::new(crate::chatlog::LogLimiter::new()),
         });
         self.players
@@ -507,6 +567,16 @@ impl Registry {
     /// joiner without holding the registry lock while writing to sockets).
     pub fn snapshot(&self) -> Vec<Arc<PlayerHandle>> {
         self.players.read().unwrap().values().cloned().collect()
+    }
+
+    /// Insert an already-built handle, for tests that need a player in the
+    /// registry without a live socket handshake.
+    #[cfg(test)]
+    pub(crate) fn insert_for_test(&self, handle: Arc<PlayerHandle>) {
+        self.players
+            .write()
+            .unwrap()
+            .insert(handle.entity_id, handle);
     }
 
     /// Send an event to everyone except `exclude`, encoded per recipient.

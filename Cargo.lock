@@ -76,8 +76,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-menus-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-plugin",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "aether-net"
 version = "0.1.0"
+
+[[package]]
+name = "aether-ops"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "aether-physics"
@@ -124,10 +140,14 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "aether-api",
+ "aether-menus-plugin",
+ "aether-ops",
  "aether-plugin",
  "aether-sdk-plugin",
  "aether-sidebar-plugin",
+ "aether-staff-plugin",
  "aether-voice-plugin",
+ "aether-webadmin-plugin",
  "aether-world",
  "aether-worldgen",
  "cfb8",
@@ -140,6 +160,7 @@ dependencies = [
  "reqwest",
  "rsa",
  "serde",
+ "serde_json",
  "sha1",
  "toml",
 ]
@@ -154,6 +175,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-staff-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-plugin",
+]
+
+[[package]]
 name = "aether-telemetry"
 version = "0.1.0"
 
@@ -165,6 +193,18 @@ dependencies = [
  "aether-plugin",
  "cipher",
  "rand 0.8.8",
+]
+
+[[package]]
+name = "aether-webadmin-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-api",
+ "aether-ops",
+ "aether-plugin",
+ "aether-world",
+ "aether-worldgen",
+ "serde_json",
 ]
 
 [[package]]

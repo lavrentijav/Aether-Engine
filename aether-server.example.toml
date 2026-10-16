@@ -14,6 +14,14 @@ operators = []
 # Names allowed to join; empty lets anyone in. AETHER_WHITELIST overrides it.
 whitelist = []
 
+[permissions]
+# Explicit per-player node grants, "name:node" (name may be "name@address").
+# Being an operator does NOT imply a node: grant one here to give a privilege
+# an operator would not otherwise have (e.g. "root:aether.antixray.bypass"),
+# or omit it so an operator stays under a protection and can watch it work.
+# This is the stand-in for the CMD-01 permission store.
+grants = []
+
 [server]
 # Loopback by default: this is an offline, unauthenticated preview server.
 # Set host = "0.0.0.0" only if you understand it will accept LAN/internet peers.
@@ -125,6 +133,25 @@ init_fuel = 100000000  # fuel for a plugin's instantiation and init
 #                                                # nothing, even if asked for
 # config = { greeting = "hi" }
 
+# The native staff plugin (vanish + admin spectate, docs/design/staff.md) is
+# compiled in; it needs no capabilities. `persist = false` drops a vanish on
+# logout instead of restoring it on the next join.
+# [plugins.staff]
+# enabled = true
+# config = { persist = "true" }
+
+# The web admin is a compiled-in native plugin (no .wasm), read-only, and only
+# loads when `dir` above is set. See docs/webadmin.md.
+# [plugins.webadmin]
+# enabled = true
+# bind = "127.0.0.1:8090"   # loopback only; the token is the gate
+# token = "change-me"       # optional; omit to use `/webadmin token` in game
+# max_conns = 32            # most simultaneous connections served
+# max_per_ip = 8            # most simultaneous connections from one address
+# request_deadline_ms = 10000   # absolute per-request deadline (slowloris guard)
+# rate_per_sec = 50         # expensive-endpoint (tile/history) rate; 0 disables
+# rate_burst = 200          # burst allowance for the rate limit
+
 [cache]
 # Unmodified generated columns are cached on disk so the generator does not
 # recompute the same terrain on every restart. Pure speed: every entry is
@@ -144,7 +171,10 @@ enabled = false
 mode = "engine"          # "engine" (buried ores) or "culling" (sections)
 hidden_blocks = []       # empty = every ore, ancient debris and monster spawner
 worlds = []              # world-dir names this applies to; empty = all
-bypass_players = []      # names always allowed to see everything
+# Names always allowed to see everything. Operators are NOT bypassed by
+# default: grant the "aether.antixray.bypass" node under [permissions], list a
+# name here, or use /visibility off (and /spectate xray off while spectating).
+bypass_players = []
 
 # culling mode only:
 margin_blocks = 5        # "could see it if he turned or stepped" sphere, in blocks

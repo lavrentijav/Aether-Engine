@@ -1,0 +1,89 @@
+/// The Aether **menus** service, package `aether:menus@0.1.0`.
+///
+/// The native `plugins/menus` host exports this so any dependent — native or
+/// WASM — opens an inventory menu with one call. The core renders the window;
+/// it guarantees a click on a menu never moves an item, and routes every click
+/// back to the menus host. The package is versioned independently of the frozen
+/// `aether:plugin@0.1.0` world.
+package aether:menus@0.1.0;
+
+interface menus {
+    /// The window shape. Every generic chest size (1–6 nine-wide rows) has a
+    /// protocol menu id, as do the dispenser (3×3) and hopper (5) grids.
+    enum layout {
+        chest1,
+        chest2,
+        chest3,
+        chest4,
+        chest5,
+        chest6,
+        dispenser,
+        hopper,
+    }
+
+    /// What a click does, in order. The set is deliberately small and closed:
+    /// a menu can only do what an operator can audit, and every action runs
+    /// through a host mechanism rather than touching the world directly.
+    variant action {
+        /// Run a command as the clicking player (permission-checked).
+        command(string),
+        /// Run a command on the console.
+        console(string),
+        /// Send a message to the clicking player.
+        message(string),
+        /// Open another menu by name.
+        open(string),
+        /// Close the menu.
+        close,
+        /// Play a sound by name.
+        sound(string),
+        /// Take an amount from the player's balance.
+        economy-take(s64),
+        /// Give an item: `(item, count)`.
+        give(tuple<string, u32>),
+        /// Return to the previous menu.
+        back,
+    }
+
+    /// One clickable slot.
+    record item {
+        slot: u32,
+        item: string,
+        count: u32,
+        name: option<string>,
+        lore: list<string>,
+        glint: bool,
+        model: option<s32>,
+        actions: list<action>,
+    }
+
+    /// A whole menu.
+    record definition {
+        name: string,
+        title: string,
+        layout: layout,
+        items: list<item>,
+        open-commands: list<string>,
+        permission: option<string>,
+    }
+
+    /// Open `menu` for the player named by `player-id`/`player-name`,
+    /// replacing any window they have open.
+    ///
+    /// The player is passed as an id and a name rather than the shared
+    /// `aether:plugin/types` `player` record on purpose: importing that
+    /// interface here would define it a second time in the host linker
+    /// (the SDK's `services` world already provides it). The host names and
+    /// identifies the player regardless.
+    open: func(player-id: u64, player-name: string, menu: definition) -> result<_, string>;
+    /// Replace one slot of the named menu the caller has open for the player.
+    update: func(player-id: u64, player-name: string, menu: string, slot: u32, item: option<item>) -> result<_, string>;
+    /// Close the named menu the caller opened for the player.
+    close: func(player-id: u64, player-name: string, menu: string) -> result<_, string>;
+}
+
+/// A world importing the menus interface, so the host can add one linker entry
+/// for it.
+world services {
+    import menus;
+}
