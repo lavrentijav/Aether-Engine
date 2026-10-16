@@ -7,7 +7,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-
 use super::effects::{self, Effect, TickEvent};
 use super::entities::{self, Action, PlayerView};
 use super::{combat, containers, mobs, tables, window};

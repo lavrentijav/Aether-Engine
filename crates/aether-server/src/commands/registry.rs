@@ -600,6 +600,14 @@ pub fn register_plugin(name: &str, plugin: &str, node: &str, op: u8) -> Result<(
             existing.plugin
         ));
     }
+    // Declare the node so a permission check resolves it explicitly rather
+    // than falling to the fail-closed default. A public command allows
+    // everyone; a gated one stays operator-only, with the op level enforced
+    // separately by the check. The declaration is non-destructive, so an
+    // operator's own setting (CMD-02) is kept; and a malformed node is a
+    // registration error, not a command that registers and then silently
+    // denies every check, so the reason reaches the operator's log.
+    crate::permissions::declare_command_node(node, op)?;
     table.insert(
         name.to_string(),
         PluginEntry {

@@ -88,6 +88,131 @@ pub trait HostBackend: Send + Sync {
         Vec::new()
     }
 
+    /// `permissions`: whether the online player with session id `id` holds
+    /// `node` for a command needing `op`.
+    ///
+    /// Used by the SDK `permissions` service. The default is **deny** — a host
+    /// (or a test) with no permission core fails closed, which is the safe
+    /// answer, and the server overrides it to front [`crate::permissions`].
+    fn permission_check(&self, _plugin: &str, _id: u64, _node: &str, _op: u8) -> bool {
+        false
+    }
+
+    /// `permissions`: the online player's effective level. The default is 0.
+    fn permission_level(&self, _plugin: &str, _id: u64) -> u8 {
+        0
+    }
+
+    /// `permissions`: the groups the online player belongs to. The default is
+    /// empty.
+    fn permission_groups(&self, _plugin: &str, _id: u64) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// `permissions`: a meta value (prefix/suffix/weight) for the online
+    /// player. The default is `None`; meta is CMD-02.
+    fn permission_meta(&self, _plugin: &str, _id: u64, _key: &str) -> Option<String> {
+        None
+    }
+
+    /// `permissions`: grant or deny `node` to `subject`. The default refuses:
+    /// the per-player write model is CMD-02, and a host without it must not
+    /// pretend the write happened.
+    fn permission_grant(
+        &self,
+        _plugin: &str,
+        _subject: &str,
+        _node: &str,
+        _value: bool,
+    ) -> std::result::Result<(), String> {
+        Err("the permission write model (CMD-02) is not available yet".to_string())
+    }
+
+    /// `permissions`: remove an explicit `node` from `subject`. The default
+    /// refuses, as [`Self::permission_grant`].
+    fn permission_revoke(
+        &self,
+        _plugin: &str,
+        _subject: &str,
+        _node: &str,
+    ) -> std::result::Result<(), String> {
+        Err("the permission write model (CMD-02) is not available yet".to_string())
+    }
+
+    // --- History API (PA2) -------------------------------------------------
+    //
+    // Read-only journal queries behind the SDK `history` service. The defaults
+    // are the neutral answer — an empty page, "not original", an empty chain —
+    // so a host without a journal (a test, a stripped build) still satisfies
+    // the trait and a dependent sees an empty history rather than a trap. The
+    // server overrides every one of these over its world journal.
+
+    /// The full timeline of the block at `(x, y, z)`, newest first.
+    fn history_block(
+        &self,
+        _plugin: &str,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _before: Option<u64>,
+        _limit: u32,
+    ) -> crate::sdk::HistoryPage {
+        crate::sdk::empty_history_page()
+    }
+
+    /// Whether nobody has ever changed the block at `(x, y, z)`.
+    fn history_worldgen_original(&self, _plugin: &str, _x: i32, _y: i32, _z: i32) -> bool {
+        false
+    }
+
+    /// Events matching `window`, newest first.
+    fn history_events(
+        &self,
+        _plugin: &str,
+        _window: crate::sdk::HistoryWindow,
+        _before: Option<u64>,
+        _limit: u32,
+    ) -> crate::sdk::HistoryPage {
+        crate::sdk::empty_history_page()
+    }
+
+    /// The provenance chain of item `uid`, newest first, paged.
+    fn history_item_chain(
+        &self,
+        _plugin: &str,
+        _uid: u64,
+        _depth: u32,
+        _before: Option<u64>,
+        _limit: u32,
+    ) -> crate::sdk::HistoryPage {
+        crate::sdk::empty_history_page()
+    }
+
+    /// Who accessed the container at `(x, y, z)`, newest first.
+    fn history_container_log(
+        &self,
+        _plugin: &str,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _before: Option<u64>,
+        _limit: u32,
+    ) -> crate::sdk::HistoryPage {
+        crate::sdk::empty_history_page()
+    }
+
+    /// One player's event stream, newest first.
+    fn history_player_events(
+        &self,
+        _plugin: &str,
+        _actor_low: u64,
+        _actor_high: u64,
+        _before: Option<u64>,
+        _limit: u32,
+    ) -> crate::sdk::HistoryPage {
+        crate::sdk::empty_history_page()
+    }
+
     /// Replace a player's sidebar. The core diffs the board against what the
     /// player already shows and writes only the packets that changed, so a
     /// caller may hand over the whole board every update. The default does

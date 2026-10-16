@@ -176,6 +176,11 @@ interface confirm {
     request: func(p: player, prompt: string, command: string) -> bool;
 }
 
+interface history {                     // read-only journal queries (PA2)
+    // block-history / worldgen-original / events / item-chain /
+    // container-log / player-events, all paged; see `history-api.md`
+}
+
 interface placeholders {                // shared %name% registry (sidebar, menus, chat)
     register: func(name: string) -> bool;               // declare a token this caller will fill
     set: func(name: string, p: player, value: string);  // push a value for one player
@@ -261,6 +266,7 @@ own invariants (e.g. `grant` needs `permissions.admin`).
 | `scheduler` | timer wheel, run-later/every/cancel, async (native) | own `on-tick` |
 | `cooldowns` | per-dependent, per-key last-tick maps | clock |
 | `confirm` | pending confirmations + expiry | `scheduler` |
+| `history` | read-only facade + the `history.read` capability gate | core journal queries (PA2) |
 | `placeholders` | the shared `%name%` registry + a resolved-token cache | host per-player view (built-ins) |
 | `services` | optional-service lookup facade | host registry |
 

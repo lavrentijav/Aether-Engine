@@ -15,9 +15,11 @@ mod imp {
     use std::path::Path;
     use std::sync::{Arc, Mutex, OnceLock};
 
+    use aether_plugin::sdk::{HistoryEvent, HistoryPage, HistoryPos, HistoryWindow};
     use aether_plugin::{
         discover, Decision, HostBackend, HostConfig, LogLevel, ManifestFile, Player, PluginHost,
     };
+    use aether_world::journal::{self, ActorId, Event, EventBody, Place};
     use aether_world::KvBackend;
 
     use crate::config::Config;
@@ -33,6 +35,7 @@ mod imp {
         "storage.kv.v1",
         "log.v1",
         "config.v1",
+        "history.v1",
     ];
 
     /// KV keys live under this prefix, which no other part of the world store
@@ -77,6 +80,13 @@ mod imp {
                 name: handle.name.clone(),
                 operator: crate::is_operator(handle),
             }
+        }
+    }
+
+    impl ServerBackend {
+        /// The online player with `id`, for the SDK `permissions` service.
+        fn by_session(&self, id: u64) -> Option<Arc<PlayerHandle>> {
+            self.registry.by_entity(id as i32)
         }
     }
 
@@ -187,6 +197,153 @@ mod imp {
                 .get(plugin)
                 .cloned()
                 .unwrap_or_default()
+        }
+
+        /// The permission core, fronted for the SDK's `permissions` service.
+        /// The player is looked up by session id, so address-bound operators
+        /// are judged from the address they are really connected from; a
+        /// player the registry does not know fails closed.
+        fn permission_check(&self, _plugin: &str, id: u64, node: &str, op: u8) -> bool {
+            match self.by_session(id) {
+                Some(h) => {
+                    crate::permissions::check(crate::permissions::level(&h.name, h.ip), node, op)
+                }
+                None => false,
+            }
+        }
+
+        fn permission_level(&self, _plugin: &str, id: u64) -> u8 {
+            self.by_session(id)
+                .map(|h| crate::permissions::level(&h.name, h.ip).get())
+                .unwrap_or(0)
+        }
+
+        fn permission_groups(&self, _plugin: &str, id: u64) -> Vec<String> {
+            self.by_session(id)
+                .map(|h| crate::permissions::groups_of(&h.name, h.ip))
+                .unwrap_or_default()
+        }
+
+        fn permission_grant(
+            &self,
+            _plugin: &str,
+            _subject: &str,
+            _node: &str,
+            _value: bool,
+        ) -> Result<(), String> {
+            Err("the permission write model (CMD-02) is not available yet".to_string())
+        }
+
+        fn permission_revoke(
+            &self,
+            _plugin: &str,
+            _subject: &str,
+            _node: &str,
+        ) -> Result<(), String> {
+            Err("the permission write model (CMD-02) is not available yet".to_string())
+        }
+
+        // --- History API (PA2) ------------------------------------------
+        //
+        // The SDK `history` service's provider forwards here; the journal
+        // queries live in `aether-world` and this is only the mapping from
+        // their compact ids to the plugin-facing records.
+
+        fn history_block(
+            &self,
+            _plugin: &str,
+            x: i32,
+            y: i32,
+            z: i32,
+            before: Option<u64>,
+            limit: u32,
+        ) -> HistoryPage {
+            page_of(
+                &self.world,
+                self.world
+                    .journal()
+                    .block_history(x, y, z, before, limit as usize),
+            )
+        }
+
+        fn history_worldgen_original(&self, _plugin: &str, x: i32, y: i32, z: i32) -> bool {
+            self.world
+                .journal()
+                .is_worldgen_original(x, y, z)
+                .unwrap_or(false)
+        }
+
+        fn history_events(
+            &self,
+            _plugin: &str,
+            window: HistoryWindow,
+            before: Option<u64>,
+            limit: u32,
+        ) -> HistoryPage {
+            let Some(window) = to_window(&window) else {
+                // A kind name this build does not know selects nothing rather
+                // than silently widening the query.
+                return empty_page();
+            };
+            page_of(
+                &self.world,
+                self.world
+                    .journal()
+                    .history_page(&window, before, limit as usize),
+            )
+        }
+
+        fn history_item_chain(
+            &self,
+            _plugin: &str,
+            uid: u64,
+            depth: u32,
+            before: Option<u64>,
+            limit: u32,
+        ) -> HistoryPage {
+            page_of(
+                &self.world,
+                self.world.journal().item_chain(
+                    journal::ItemUid(uid),
+                    depth as usize,
+                    before,
+                    limit as usize,
+                ),
+            )
+        }
+
+        fn history_container_log(
+            &self,
+            _plugin: &str,
+            x: i32,
+            y: i32,
+            z: i32,
+            before: Option<u64>,
+            limit: u32,
+        ) -> HistoryPage {
+            page_of(
+                &self.world,
+                self.world
+                    .journal()
+                    .container_log(x, y, z, before, limit as usize),
+            )
+        }
+
+        fn history_player_events(
+            &self,
+            _plugin: &str,
+            actor_low: u64,
+            actor_high: u64,
+            before: Option<u64>,
+            limit: u32,
+        ) -> HistoryPage {
+            let actor = join_uuid(actor_low, actor_high);
+            page_of(
+                &self.world,
+                self.world
+                    .journal()
+                    .player_events(actor, before, limit as usize),
+            )
         }
 
         fn set_sidebar(
@@ -372,6 +529,149 @@ mod imp {
 
     /// The custom journal tag the staff plugin's audit events use.
     pub const STAFF_JOURNAL_TAG: u8 = aether_world::journal::event::TAG_CUSTOM_MIN;
+
+    /// An empty plugin-facing page.
+    fn empty_page() -> HistoryPage {
+        HistoryPage {
+            events: Vec::new(),
+            next: None,
+        }
+    }
+
+    /// Map a journal page to the plugin-facing one.
+    fn page_of(
+        world: &DemoWorld,
+        page: Result<journal::Page, aether_world::StorageError>,
+    ) -> HistoryPage {
+        match page {
+            Ok(p) => HistoryPage {
+                events: p.events.iter().map(|e| to_event(world, e)).collect(),
+                next: p.next,
+            },
+            Err(e) => {
+                crate::log::warn(&format!("history query failed: {e}"));
+                empty_page()
+            }
+        }
+    }
+
+    /// A UUID from the two halves the component model carries.
+    fn join_uuid(low: u64, high: u64) -> ActorId {
+        ActorId(((high as u128) << 64) | (low as u128))
+    }
+
+    /// A journal window from the plugin-facing one, or `None` when it names an
+    /// unknown event kind.
+    fn to_window(w: &HistoryWindow) -> Option<journal::Window> {
+        let mut window = journal::Window::new();
+        if w.has_actor {
+            window = window.actor(join_uuid(w.actor_low, w.actor_high));
+        }
+        if w.has_area {
+            window = window.area(journal::Area::between(
+                (w.x1, w.y1, w.z1),
+                (w.x2, w.y2, w.z2),
+            ));
+        }
+        window = window.since(w.since_ms).until(w.until_ms);
+        if !w.kinds.is_empty() {
+            let mut tags = Vec::with_capacity(w.kinds.len());
+            for name in &w.kinds {
+                let (tag, _) = journal::EVENT_KINDS
+                    .iter()
+                    .find(|(_, n)| *n == name.as_str())?;
+                tags.push(*tag);
+            }
+            window = window.kinds(&tags);
+        }
+        Some(window)
+    }
+
+    /// Render a place the way a plugin sees it.
+    fn place_name(p: &Place) -> String {
+        match p {
+            Place::Inventory { slot, .. } => format!("inventory:{slot}"),
+            Place::Ground { x, y, z } => format!("ground:{x},{y},{z}"),
+            Place::Container { x, y, z, slot } => format!("container:{x},{y},{z}:{slot}"),
+            Place::Nowhere => "nowhere".to_string(),
+        }
+    }
+
+    /// One journal event as the plugin-facing record.
+    fn to_event(world: &DemoWorld, e: &Event) -> HistoryEvent {
+        let uuid = e.actor.0;
+        let mut out = HistoryEvent {
+            seq: e.seq,
+            at_ms: e.at_ms,
+            actor_low: uuid as u64,
+            actor_high: (uuid >> 64) as u64,
+            kind: e.body.kind_name().to_string(),
+            pos: e.position().map(|(x, y, z)| HistoryPos { x, y, z }),
+            from_block: None,
+            to_block: None,
+            uid: None,
+            item: None,
+            count: None,
+            from_place: None,
+            to_place: None,
+            reason: None,
+            cause: e.cause,
+            sources: Vec::new(),
+        };
+        match &e.body {
+            EventBody::BlockSet { from, to, .. } => {
+                out.from_block = world.block_name_of(*from);
+                out.to_block = world.block_name_of(*to);
+            }
+            EventBody::ItemMint {
+                uid,
+                item,
+                count,
+                to,
+            } => {
+                out.uid = Some(uid.0);
+                out.item = world.item_name(*item);
+                out.count = Some(*count);
+                out.to_place = Some(place_name(to));
+            }
+            EventBody::ItemMove {
+                uid,
+                from,
+                to,
+                count,
+            } => {
+                out.uid = Some(uid.0);
+                out.count = Some(*count);
+                out.from_place = Some(place_name(from));
+                out.to_place = Some(place_name(to));
+            }
+            EventBody::ItemDestroy { uid, from, reason } => {
+                out.uid = Some(uid.0);
+                out.from_place = Some(place_name(from));
+                out.reason = Some(reason.name().to_string());
+            }
+            EventBody::ItemMerge { into, from, count } => {
+                out.uid = Some(into.0);
+                out.count = Some(*count);
+                out.sources = vec![from.0];
+            }
+            EventBody::ItemDerive {
+                uid,
+                item,
+                count,
+                to,
+                from,
+            } => {
+                out.uid = Some(uid.0);
+                out.item = world.item_name(*item);
+                out.count = Some(*count);
+                out.to_place = Some(place_name(to));
+                out.sources = from.iter().map(|u| u.0).collect();
+            }
+            EventBody::Custom { .. } => {}
+        }
+        out
+    }
 
     static HOST: OnceLock<Mutex<PluginHost>> = OnceLock::new();
 
@@ -693,6 +993,7 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::effective_capabilities;
+        use aether_world::journal;
 
         #[test]
         fn capabilities_are_deny_by_default() {
@@ -758,6 +1059,62 @@ mod imp {
                 .expect("registered");
             assert_eq!(entry.plugin, "registers_test_plugin");
             assert_eq!(entry.op, 3);
+        }
+
+        #[test]
+        fn a_uuid_survives_the_split_into_two_halves() {
+            let uuid = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210u128;
+            let actor = super::join_uuid(uuid as u64, (uuid >> 64) as u64);
+            assert_eq!(actor.0, uuid);
+        }
+
+        #[test]
+        fn a_history_window_maps_actor_area_time_and_kind() {
+            let w = aether_plugin::sdk::HistoryWindow {
+                has_actor: true,
+                actor_low: 1,
+                actor_high: 0,
+                has_area: true,
+                x1: -10,
+                y1: 60,
+                z1: -10,
+                x2: 10,
+                y2: 70,
+                z2: 10,
+                since_ms: 100,
+                until_ms: 200,
+                kinds: vec!["block_set".to_string()],
+            };
+            let mapped = super::to_window(&w).expect("known kind");
+            assert_eq!(mapped.actor, Some(journal::ActorId(1)));
+            assert!(mapped.area.is_some());
+            assert_eq!(mapped.since_ms, 100);
+            assert_eq!(mapped.until_ms, 200);
+            assert_eq!(mapped.kinds, vec![1]);
+
+            // An unknown kind selects nothing rather than widening.
+            let w = aether_plugin::sdk::HistoryWindow {
+                kinds: vec!["not_a_kind".to_string()],
+                ..w
+            };
+            assert!(super::to_window(&w).is_none());
+        }
+
+        #[test]
+        fn an_event_renders_its_places() {
+            use aether_world::journal::Place;
+            assert_eq!(super::place_name(&Place::Nowhere), "nowhere");
+            assert_eq!(
+                super::place_name(&Place::Ground { x: 1, y: 2, z: 3 }),
+                "ground:1,2,3"
+            );
+            assert_eq!(
+                super::place_name(&Place::Inventory {
+                    owner: journal::ActorId(0),
+                    slot: 5
+                }),
+                "inventory:5"
+            );
         }
     }
 }

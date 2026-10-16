@@ -209,6 +209,102 @@ interface confirm {
     check: func(p: player, token: string) -> bool;
 }
 
+/// Read-only queries over the world's history (PA2).
+///
+/// The journal is the single source of truth for what changed; these functions
+/// are the reading side, paged and object-centric (`this block`, `this item`,
+/// `this player`, `this container`). Nothing here writes, and every call is
+/// gated on the caller's `history.read` capability by the provider.
+///
+/// A query names at most one of the three cheap indexes — the per-column
+/// index for a block or a container, the actor index for a player, the item
+/// index for a provenance chain — so a single-block question never scans the
+/// journal.
+interface history {
+    /// A world position.
+    record pos {
+        x: s32,
+        y: s32,
+        z: s32,
+    }
+
+    /// One journalled change, as a plugin sees it.
+    record event {
+        /// Position in the global order.
+        seq: u64,
+        /// Wall-clock time, milliseconds since the Unix epoch.
+        at-ms: u64,
+        /// The actor's UUID, split into two halves for the component model.
+        actor-low: u64,
+        actor-high: u64,
+        /// Stable kind name: `block_set`, `item_mint`, `item_move`,
+        /// `item_destroy`, `item_derive`, `item_merge`, or `unknown`.
+        kind: string,
+        /// The block coordinates the event concerns, when it concerns any.
+        pos: option<pos>,
+        /// For a `block_set`: the old and new block names.
+        from-block: option<string>,
+        to-block: option<string>,
+        /// For an item event: the instance uid, the item name and the count.
+        uid: option<u64>,
+        item: option<string>,
+        count: option<u8>,
+        /// The two sides of an item move, rendered (`inventory`, `ground`,
+        /// `container`, `nowhere`).
+        from-place: option<string>,
+        to-place: option<string>,
+        /// For an `item_destroy`: why it left the world.
+        reason: option<string>,
+        /// The event this one happened because of, if any.
+        cause: option<u64>,
+        /// For an `item_derive`: the instances it was made from.
+        sources: list<u64>,
+    }
+
+    /// One page of events, **newest first**.
+    record page {
+        events: list<event>,
+        /// Pass as `before` to fetch the next, older page; absent when done.
+        next: option<u64>,
+    }
+
+    /// A time/area/kind restriction for a sweep. Unset fields do not restrict.
+    record window {
+        has-actor: bool,
+        actor-low: u64,
+        actor-high: u64,
+        has-area: bool,
+        x1: s32,
+        y1: s32,
+        z1: s32,
+        x2: s32,
+        y2: s32,
+        z2: s32,
+        /// At or after this Unix time in milliseconds (`0` = no bound).
+        since-ms: u64,
+        /// Strictly before this Unix time in milliseconds (`0` = no bound).
+        until-ms: u64,
+        /// Event kind names; empty selects every kind.
+        kinds: list<string>,
+    }
+
+    /// The whole timeline of the block at `(x,y,z)` — only block changes,
+    /// newest first, paged.
+    block-history: func(x: s32, y: s32, z: s32, before: option<u64>, limit: u32) -> page;
+    /// Whether nobody has ever **changed the block** at `(x,y,z)`. Item events
+    /// at the coordinates (a drop, a chest opened) do not count.
+    worldgen-original: func(x: s32, y: s32, z: s32) -> bool;
+    /// Events matching `window`, newest first, paged.
+    events: func(window: window, before: option<u64>, limit: u32) -> page;
+    /// The provenance chain of item `uid`, newest first, paged; `depth` is
+    /// clamped by the provider.
+    item-chain: func(uid: u64, depth: u32, before: option<u64>, limit: u32) -> page;
+    /// Who accessed the container at `(x,y,z)`, newest first, paged.
+    container-log: func(x: s32, y: s32, z: s32, before: option<u64>, limit: u32) -> page;
+    /// One player's event stream, newest first, paged.
+    player-events: func(actor-low: u64, actor-high: u64, before: option<u64>, limit: u32) -> page;
+}
+
 /// The shared `%name%` placeholder registry, used by the sidebar, menus and
 /// chat. A native provider registers a closure; a component cannot, so it
 /// declares a name and pushes a per-player value.
@@ -248,6 +344,7 @@ world services {
     import scheduler;
     import cooldowns;
     import confirm;
+    import history;
     import placeholders;
     /// The sidebar service (a separate package, versioned on its own).
     import aether:sidebar/sidebar@0.1.0;
