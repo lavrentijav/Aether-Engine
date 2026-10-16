@@ -238,7 +238,7 @@ fn login_and_play(
     // would refuse someone whose own seat it is. Operators get in regardless,
     // so an admin can still reach a server nobody else can.
     let online = registry.snapshot().len();
-    if online >= cfg.server.max_players as usize && !cfg.is_operator(&name, ip) {
+    if online >= cfg.server.max_players as usize && !crate::permissions::is_operator(&name, ip) {
         crate::log::info(&format!(
             "[x] {name} refused: server full ({online}/{}) ({})",
             cfg.server.max_players,
@@ -1287,12 +1287,14 @@ fn after_spawn(
     handle.emit(&crate::game::time_event(), world);
     // Permission level, as an entity event on the player's own entity: 24
     // is level 0, 28 level 4. Without it the client treats an operator as
-    // anyone else — the F3+F4 switcher and F3+N refuse to open.
-    let level = if crate::is_operator(handle) { 4 } else { 0 };
+    // anyone else — the F3+F4 switcher and F3+N refuse to open. The level is
+    // the store's, not "4 if an operator", so a future group (CMD-02) at 2 or
+    // 3 is told to the client correctly.
+    let level = crate::permissions::level(&handle.name, handle.ip).get();
     handle.emit(
         &ServerEvent::EntityStatus {
             entity_id: handle.entity_id,
-            status: 24 + level,
+            status: 24 + level as i8,
         },
         world,
     );

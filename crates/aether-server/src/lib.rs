@@ -26,6 +26,7 @@ pub mod inventory;
 pub mod log;
 pub mod ops;
 pub mod outbox;
+pub mod permissions;
 pub mod placement;
 pub mod players;
 pub mod plugins;
@@ -223,6 +224,9 @@ pub fn run() -> std::process::ExitCode {
         Err(e) => return fail(&format!("cannot open the item uid allocator: {e}")),
     }
     economy::install(open_economy(&cfg.database));
+    // The permission store is the source of truth for every level and node
+    // check; seed it from `config.operators` before anyone can connect.
+    permissions::install(&cfg);
     let _ = GAME_MODE.set(cfg.server.game_mode);
     let cfg = Arc::new(cfg);
     let _ = CONFIG.set(Arc::clone(&cfg));
@@ -469,14 +473,15 @@ fn open_economy(cfg: &config::DatabaseConfig) -> Option<Box<dyn economy::Economy
 /// The configuration, installed at startup.
 static CONFIG: std::sync::OnceLock<Arc<Config>> = std::sync::OnceLock::new();
 
-/// Whether this player may run administrative commands: their name is an
-/// operator entry, and if the entry names an address, they connected from it.
-/// False for everyone when the list is empty — the safe default for an
+/// Whether this player may run administrative commands: their effective
+/// permission level is at least 1.
+///
+/// The level comes from the permission store ([`permissions`]), seeded at
+/// startup from `config.operators` — a member of the built-in `op` group is
+/// level 4. False for everyone the store does not know, the safe default for an
 /// offline-mode server, where a username is a claim rather than an identity.
 pub fn is_operator(handle: &players::PlayerHandle) -> bool {
-    CONFIG
-        .get()
-        .is_some_and(|c| c.is_operator(&handle.name, handle.ip))
+    permissions::is_operator(&handle.name, handle.ip)
 }
 
 /// The operator's `worldgen_data` path, for the parts of the game that read
