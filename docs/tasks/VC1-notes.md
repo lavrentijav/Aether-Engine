@@ -33,6 +33,24 @@ in-tree round-trip tests (bytes in/out) rather than captured pcap files.
   the `custom_payload` packet id per release, `NativePlugin::on_plugin_message`,
   and `HostBackend` send/uuid/position/disconnect hooks.
 
+## Review round 1 fixes (oc/VC1, merge with main included)
+
+- **PV control packets**: the server sends `PlayerInfoRequest` on join with the
+  mod's retry schedule, answers `Connection` with `ip = "0.0.0.0"`, sends the
+  periodic UDP `Ping`, and answers `SourceInfoRequest` with a `SourceInfoPacket`.
+- **SVC keepalive**: a periodic `KeepAlive` after the connection check, so the
+  client's 10 s timeout no longer drops it.
+- **Admin**: `/voice join` bypasses a group password; `/voice spy
+  <player|group|all|off>` copies matching frames to the admin's own client;
+  `/voice record <player>` resolves the real online uuid.
+- **Safety**: per-sender token buckets; a capped inbound queue that drops the
+  oldest frame; the PV secret index is O(1). Recording and retention moved off
+  the tick onto their own threads (a bounded writer channel).
+- **Opt-in listeners**: `svc_enabled`/`pv_enabled` default to `false`; the
+  misleading `pv_aes_key` key was removed.
+- New process tests drive the plugin with a mock host backend and pin the
+  control packets, the rate limit and the queue cap.
+
 ## Deliberately not done (see KNOWN_ISSUES §21)
 
 - Custom-payload transport is wired for protocols 764–775. **26.2/26.3 are
@@ -47,7 +65,8 @@ in-tree round-trip tests (bytes in/out) rather than captured pcap files.
 
 ## Checks
 
-`cargo fmt --all -- --check`, `cargo clippy -p aether-voice-plugin -p
-aether-plugin -p aether-server --all-targets -- -D warnings`, and
-`cargo-locked test` for `aether-voice-plugin` (40), `aether-plugin`, and
-`aether-server --lib` (1087). All green at the branch tip.
+`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -j4 --
+-D warnings`, and `cargo-locked test` for `aether-voice-plugin` (51 unit + 4
+bridge), `aether-plugin`, and `aether-server --lib` (1151). All green at the
+branch tip.
+

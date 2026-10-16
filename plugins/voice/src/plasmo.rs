@@ -103,6 +103,56 @@ impl CodecInfo {
     }
 }
 
+/// A player audio source as the server describes it in a `SourceInfoPacket`.
+///
+/// The client learns a source id from an incoming `SourceAudioPacket`, then
+/// asks for its details with `SourceInfoRequestPacket`; without this reply it
+/// keeps the audio buffered and drops it after five seconds. The `id` is the
+/// server's own handle for the source (PV picks a random UUID); the plugin uses
+/// a stable [`crate::source_id_for`] so the same speaker always maps to the
+/// same source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerSource {
+    pub addon_id: String,
+    pub id: u128,
+    pub line_id: u128,
+    pub name: Option<String>,
+    /// The activation state byte; the client re-requests when it changes.
+    pub state: u8,
+    pub stereo: bool,
+    pub icon_visible: bool,
+    pub angle: i32,
+    pub player: PlayerInfo,
+}
+
+impl PlayerSource {
+    fn write(&self, w: &mut Writer) {
+        w.utf("PLAYER");
+        w.utf(&self.addon_id);
+        w.uuid(self.id);
+        w.bool(self.name.is_some());
+        if let Some(n) = &self.name {
+            w.utf(n);
+        }
+        w.u8(self.state);
+        // decoderInfo: opus, so the client opens a matching decoder.
+        w.bool(true);
+        CodecInfo {
+            name: "opus".to_string(),
+            params: vec![
+                ("mode".to_string(), "voip".to_string()),
+                ("bitrate".to_string(), "32000".to_string()),
+            ],
+        }
+        .write(w);
+        w.bool(self.stereo);
+        w.uuid(self.line_id);
+        w.bool(self.icon_visible);
+        w.i32(self.angle);
+        self.player.write(w);
+    }
+}
+
 /// The server config packet the client needs to start sending audio.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -219,6 +269,8 @@ pub enum Tcp {
     ActivationDistances { distances: Vec<(u128, i32)> },
     /// `SourceInfoRequestPacket` (client): ask for a source's details.
     SourceInfoRequest { source_id: u128 },
+    /// `SourceInfoPacket` (server): the details of one player source.
+    SourceInfo(Box<PlayerSource>),
     /// `LanguageRequestPacket` (client).
     LanguageRequest { language: String },
     /// `PlayerListPacket` (server).
@@ -241,6 +293,7 @@ impl Tcp {
             Tcp::PlayerAudioEnd { .. } => tcp::PLAYER_AUDIO_END,
             Tcp::ActivationDistances { .. } => tcp::PLAYER_ACTIVATION_DISTANCES,
             Tcp::SourceInfoRequest { .. } => tcp::SOURCE_INFO_REQUEST,
+            Tcp::SourceInfo(_) => tcp::SOURCE_INFO,
             Tcp::LanguageRequest { .. } => tcp::LANGUAGE_REQUEST,
             Tcp::PlayerList { .. } => tcp::PLAYER_LIST,
             Tcp::PlayerInfoUpdate { .. } => tcp::PLAYER_INFO_UPDATE,
@@ -294,6 +347,7 @@ impl Tcp {
             Tcp::SourceInfoRequest { source_id } => {
                 w.uuid(*source_id);
             }
+            Tcp::SourceInfo(source) => source.write(&mut w),
             Tcp::LanguageRequest { language } => {
                 w.utf(language);
             }

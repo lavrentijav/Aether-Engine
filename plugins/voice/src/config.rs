@@ -1,9 +1,10 @@
 //! Operator configuration for the voice plugin.
 //!
 //! Read from `[plugins.voice]` in the server config (a flat string map, like
-//! every native plugin's). Every value has a default so a fresh install works:
-//! the Simple Voice Chat and Plasmo Voice servers start on their conventional
-//! ports, proximity is 48 blocks (SVC's own default), and recording is **off**.
+//! every native plugin's). Every value has a default so a fresh install works.
+//! The two UDP listeners are **opt-in** — `svc_enabled`/`pv_enabled` default to
+//! `false`, so installing the plugin opens no port until the operator asks —
+//! proximity is 48 blocks (SVC's own default), and recording is off.
 
 use std::collections::BTreeMap;
 
@@ -35,16 +36,16 @@ pub struct VoiceConfig {
     pub retention_days: u32,
     /// Soft cap on the recording directory in mebibytes (`0` is no cap).
     pub max_disk_mb: u64,
-    /// The AES-128 key Plasmo Voice protects audio with, if encryption is on.
-    pub pv_aes_key: Option<[u8; 16]>,
 }
 
 impl Default for VoiceConfig {
     fn default() -> VoiceConfig {
         VoiceConfig {
-            svc_enabled: true,
+            // The UDP listeners are opt-in: a fresh install opens no ports
+            // until the operator enables them.
+            svc_enabled: false,
             svc_port: 24_454,
-            pv_enabled: true,
+            pv_enabled: false,
             pv_port: 60_606,
             distance: 48.0,
             whisper: 24.0,
@@ -54,7 +55,6 @@ impl Default for VoiceConfig {
             notify_recorded: true,
             retention_days: 0,
             max_disk_mb: 0,
-            pv_aes_key: None,
         }
     }
 }
@@ -102,24 +102,8 @@ impl VoiceConfig {
         if let Some(v) = u("max_disk_mb") {
             c.max_disk_mb = v;
         }
-        if let Some(v) = map.get("pv_aes_key").and_then(|s| parse_hex16(s)) {
-            c.pv_aes_key = Some(v);
-        }
         c
     }
-}
-
-/// Parse a 32-character hex string into 16 bytes.
-fn parse_hex16(s: &str) -> Option<[u8; 16]> {
-    let s = s.trim();
-    if s.len() != 32 {
-        return None;
-    }
-    let mut out = [0u8; 16];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
 }
 
 #[cfg(test)]
@@ -133,6 +117,17 @@ mod tests {
         assert_eq!(c.pv_port, 60_606);
         assert_eq!(c.distance, 48.0);
         assert!(!c.record_dir.is_empty());
+        // The listeners are opt-in.
+        assert!(!c.svc_enabled && !c.pv_enabled);
+    }
+
+    #[test]
+    fn listeners_can_be_enabled() {
+        let mut m = BTreeMap::new();
+        m.insert("svc_enabled".to_string(), "true".to_string());
+        m.insert("pv_enabled".to_string(), "true".to_string());
+        let c = VoiceConfig::from_map(&m);
+        assert!(c.svc_enabled && c.pv_enabled);
     }
 
     #[test]
@@ -141,17 +136,9 @@ mod tests {
         m.insert("svc_port".to_string(), "25000".to_string());
         m.insert("pv_enabled".to_string(), "false".to_string());
         m.insert("distance".to_string(), "64".to_string());
-        m.insert(
-            "pv_aes_key".to_string(),
-            "000102030405060708090a0b0c0d0e0f".to_string(),
-        );
         let c = VoiceConfig::from_map(&m);
         assert_eq!(c.svc_port, 25000);
         assert!(!c.pv_enabled);
         assert_eq!(c.distance, 64.0);
-        assert_eq!(
-            c.pv_aes_key,
-            Some([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
-        );
     }
 }
