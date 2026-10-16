@@ -14,11 +14,14 @@
 
 use std::sync::OnceLock;
 
+use super::args::{BlockState, ItemStack};
 use super::catalogue::{self, Status};
+use super::coordinates::{Coordinates, Coordinates2, Swizzle, WorldCoordinate};
 use super::feedback::Feedback;
 use super::Reply;
 use crate::economy::Economy;
 use crate::players::{PlayerHandle, PosLook, SharedRegistry};
+use crate::protocol::nbt::Nbt;
 use crate::session::DemoWorld;
 
 pub mod suggest;
@@ -191,6 +194,25 @@ pub enum Value {
     Double(f64),
     /// A parsed `bool`.
     Bool(bool),
+    /// An unresolved coordinate triple (`block_pos`, `vec3`).
+    Coordinates(Coordinates),
+    /// An unresolved coordinate pair (`vec2`).
+    Vec2(Coordinates2),
+    /// An unresolved yaw/pitch pair (`rotation`).
+    Rotation(Coordinates2),
+    /// A `swizzle` axis mask.
+    Swizzle(Swizzle),
+    /// A single `angle`, absolute or relative.
+    Angle(WorldCoordinate),
+    /// A block state resolved through the block table, with any block-entity
+    /// NBT a `{…}` suffix carried.
+    BlockState(BlockState),
+    /// An item stack: an item and its optional component patch.
+    ItemStack(ItemStack),
+    /// A parsed SNBT value (`nbt_compound`, `component`).
+    Nbt(Nbt),
+    /// A namespaced resource location, or `#tag`.
+    ResourceLocation(String),
 }
 
 /// Every argument kind the tree understands. The set is the one the brief
@@ -224,10 +246,13 @@ pub enum ArgKind {
     Entities,
     /// `minecraft:block_pos`.
     BlockPos,
-    /// `minecraft:vec3`.
-    Vec3,
-    /// `minecraft:vec2`.
-    Vec2,
+    /// `minecraft:vec3`. The flag is vanilla's `centerIntegers`: `true` (the
+    /// default for `/tp`, `/summon`, `/execute positioned`, …) adds `0.5` to
+    /// absolute X and Z; `false` is the raw delta form `/particle` uses.
+    Vec3(bool),
+    /// `minecraft:vec2`. The flag is `centerIntegers` (`vec2()` defaults to
+    /// `true`, which centers both components).
+    Vec2(bool),
     /// `minecraft:block_state`.
     BlockState,
     /// `minecraft:item_stack`.
@@ -298,8 +323,8 @@ impl ArgKind {
             ArgKind::Bool => "brigadier:bool",
             ArgKind::Entity | ArgKind::Entities => "minecraft:entity",
             ArgKind::BlockPos => "minecraft:block_pos",
-            ArgKind::Vec3 => "minecraft:vec3",
-            ArgKind::Vec2 => "minecraft:vec2",
+            ArgKind::Vec3(_) => "minecraft:vec3",
+            ArgKind::Vec2(_) => "minecraft:vec2",
             ArgKind::BlockState => "minecraft:block_state",
             ArgKind::ItemStack => "minecraft:item_stack",
             // Renamed `minecraft:nbt` when parser ids arrived in 1.19; the
@@ -350,8 +375,8 @@ impl ArgKind {
             ArgKind::Message
             | ArgKind::Bool
             | ArgKind::BlockPos
-            | ArgKind::Vec3
-            | ArgKind::Vec2
+            | ArgKind::Vec3(_)
+            | ArgKind::Vec2(_)
             | ArgKind::BlockState
             | ArgKind::ItemStack
             | ArgKind::NbtCompound
@@ -382,63 +407,11 @@ impl ArgKind {
     }
 
     /// Parse one argument from `r`, returning its typed value and source text.
-    fn parse(self, r: &mut StringReader) -> Result<(Value, String), ParseError> {
-        match self {
-            ArgKind::GreedyString | ArgKind::Message => {
-                let t = r.read_remainder()?;
-                Ok((Value::Text(t.clone()), t))
-            }
-            ArgKind::String | ArgKind::Quotable => {
-                // A string argument is quoted-aware: an unterminated quote is
-                // `InvalidQuoted`, never a silently empty word.
-                let t = r.read_string_arg()?;
-                Ok((Value::Text(t.clone()), t))
-            }
-            ArgKind::Integer => {
-                let t = r.read_token();
-                t.parse::<i32>()
-                    .map(|n| (Value::Int(n), t.clone()))
-                    .map_err(|_| ParseError::InvalidInteger(t))
-            }
-            ArgKind::Long => {
-                let t = r.read_token();
-                t.parse::<i64>()
-                    .map(|n| (Value::Long(n), t.clone()))
-                    .map_err(|_| ParseError::InvalidLong(t))
-            }
-            ArgKind::Float => {
-                let t = r.read_token();
-                t.parse::<f32>()
-                    .map(|n| (Value::Float(n), t.clone()))
-                    .map_err(|_| ParseError::InvalidFloat(t))
-            }
-            ArgKind::Double => {
-                let t = r.read_token();
-                t.parse::<f64>()
-                    .map(|n| (Value::Double(n), t.clone()))
-                    .map_err(|_| ParseError::InvalidDouble(t))
-            }
-            ArgKind::Bool => {
-                let t = r.read_token();
-                match t.as_str() {
-                    "true" => Ok((Value::Bool(true), t)),
-                    "false" => Ok((Value::Bool(false), t)),
-                    _ => Err(ParseError::InvalidBool(t)),
-                }
-            }
-            ArgKind::Enum(words) => {
-                let t = r.read_token();
-                if words.contains(&t.as_str()) {
-                    Ok((Value::Text(t.clone()), t))
-                } else {
-                    Err(ParseError::IncorrectArg)
-                }
-            }
-            _ => {
-                let t = r.read_token();
-                Ok((Value::Text(t.clone()), t))
-            }
-        }
+    ///
+    /// The bodies live in [`super::args`]; this is the seam the tree calls
+    /// once it has decided which node matched.
+    pub(crate) fn parse(self, r: &mut StringReader) -> Result<(Value, String), ParseError> {
+        super::args::parse(self, r)
     }
 }
 
@@ -970,6 +943,15 @@ pub enum ParseError {
     InvalidBool(String),
     /// A quoted string never closed.
     InvalidQuoted,
+    /// A coordinate argument ended before all its components arrived.
+    IncompletePos {
+        /// How many components the argument expected.
+        expected: u8,
+    },
+    /// A fully-rendered argument error: an unknown block or item, a bad
+    /// resource location, malformed NBT, a mixed coordinate. The message is
+    /// already the chat line to send.
+    Argument(String),
     /// A requirement refused: the denial reply.
     Denied(String),
 }
@@ -986,6 +968,10 @@ impl ParseError {
             ParseError::InvalidDouble(x) => format!("Invalid double '{x}'"),
             ParseError::InvalidBool(x) => format!("Invalid bool '{x}'"),
             ParseError::InvalidQuoted => "Invalid quoted string".into(),
+            ParseError::IncompletePos { expected } => {
+                format!("Incomplete (expected {expected} coordinates)")
+            }
+            ParseError::Argument(m) => m.clone(),
             ParseError::Denied(m) => m.clone(),
         }
     }
@@ -1196,11 +1182,11 @@ impl<'a> StringReader<'a> {
         StringReader { text, cursor: 0 }
     }
 
-    fn can_read(&self) -> bool {
+    pub(crate) fn can_read(&self) -> bool {
         self.cursor < self.text.len()
     }
 
-    fn peek(&self) -> Option<char> {
+    pub(crate) fn peek(&self) -> Option<char> {
         self.text[self.cursor..].chars().next()
     }
 
@@ -1210,7 +1196,7 @@ impl<'a> StringReader<'a> {
         Some(c)
     }
 
-    fn skip_whitespace(&mut self) {
+    pub(crate) fn skip_whitespace(&mut self) {
         while let Some(c) = self.peek() {
             if !c.is_whitespace() {
                 break;
@@ -1219,10 +1205,16 @@ impl<'a> StringReader<'a> {
         }
     }
 
+    /// The text consumed since byte offset `from`, as a string. Used to give a
+    /// multi-token argument its exact source text for `ctx.refs()`.
+    pub(crate) fn text_from(&self, from: usize) -> String {
+        self.text[from..self.cursor].to_string()
+    }
+
     /// One unquoted token: up to the next whitespace, quote characters taken
     /// literally. This is what literal matching and the plain `string`
     /// arguments read, and `split_whitespace` is its word-splitting peer.
-    fn read_token(&mut self) -> String {
+    pub(crate) fn read_token(&mut self) -> String {
         let start = self.cursor;
         while let Some(c) = self.peek() {
             if c.is_whitespace() {
@@ -1233,9 +1225,48 @@ impl<'a> StringReader<'a> {
         self.text[start..self.cursor].to_string()
     }
 
+    /// A brace- and quote-aware token: whitespace inside `{}`, `[]` or a quoted
+    /// span does not end it. This is what a block state (`…[a=b, c=d]`), an NBT
+    /// compound (`{a: 1}`) or an item stack (`id{…}`) needs.
+    pub(crate) fn read_component_token(&mut self) -> String {
+        let start = self.cursor;
+        let mut depth = 0i32;
+        let mut quote: Option<char> = None;
+        while let Some(c) = self.peek() {
+            if let Some(q) = quote {
+                self.read();
+                if c == '\\' {
+                    self.read();
+                } else if c == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match c {
+                '"' | '\'' => {
+                    quote = Some(c);
+                    self.read();
+                }
+                '{' | '[' => {
+                    depth += 1;
+                    self.read();
+                }
+                '}' | ']' => {
+                    depth -= 1;
+                    self.read();
+                }
+                c if c.is_whitespace() && depth <= 0 => break,
+                _ => {
+                    self.read();
+                }
+            }
+        }
+        self.text[start..self.cursor].to_string()
+    }
+
     /// A `string` argument: a quoted string if it opens with `"`, else a
     /// token. An unterminated quote is an error.
-    fn read_string_arg(&mut self) -> Result<String, ParseError> {
+    pub(crate) fn read_string_arg(&mut self) -> Result<String, ParseError> {
         if self.peek() == Some('"') {
             self.read_quoted()
         } else {
@@ -1246,7 +1277,7 @@ impl<'a> StringReader<'a> {
     /// The rest of the line. A leading quote is read as a quoted string, the
     /// remainder is appended verbatim (so a trailing slash survives). An
     /// unterminated quote is an error, not an empty argument.
-    fn read_remainder(&mut self) -> Result<String, ParseError> {
+    pub(crate) fn read_remainder(&mut self) -> Result<String, ParseError> {
         if self.peek() == Some('"') {
             let quoted = self.read_quoted()?;
             let rest = &self.text[self.cursor..];
@@ -1259,7 +1290,7 @@ impl<'a> StringReader<'a> {
         }
     }
 
-    fn read_quoted(&mut self) -> Result<String, ParseError> {
+    pub(crate) fn read_quoted(&mut self) -> Result<String, ParseError> {
         self.read(); // opening quote
         let mut out = String::new();
         loop {
