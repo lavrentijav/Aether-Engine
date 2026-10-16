@@ -996,13 +996,13 @@ fn play_loop(
                     // Command output goes only to whoever typed it: a
                     // rollback report names players and sequence numbers
                     // and is nobody else's business. The one feedback path
-                    // ([`crate::commands::feedback`]) decides whether the
-                    // source sees it at all (the `sendCommandFeedback` rule
-                    // silences command blocks and functions, never a player)
-                    // and colours errors red.
+                    // ([`crate::commands::feedback`]) decides per source and
+                    // per success/error whether the source sees it (for a
+                    // player, `sendCommandFeedback` gates success but never
+                    // error) and colours errors red.
                     let source = crate::commands::source::CommandSource::Player(handle);
-                    let rule = crate::commands::feedback::send_command_feedback(world);
-                    crate::commands::feedback::send(&source, &feedback, rule, |line| {
+                    let rules = crate::commands::feedback::GameRules::load(world);
+                    crate::commands::feedback::send(&source, &feedback, rules, |line| {
                         handle.emit(&ServerEvent::Chat(line.to_string()), world)
                     });
                     continue;

@@ -10,8 +10,8 @@
 //! * an error is coloured the way vanilla colours it (red) and success is
 //!   plain,
 //! * the `sendCommandFeedback` game rule is honoured — and honoured *as
-//!   vanilla does it*: it silences command blocks and functions only, never a
-//!   player's own feedback.
+//!   vanilla does it*, which is **per source and per success/error**, not as
+//!   one switch. See [`accepts`] and its table.
 //!
 //! Success and error strings that vanilla has a translation for are copied
 //! verbatim into [`lang`]; the ones this server invents carry a `TODO verify`
@@ -70,13 +70,45 @@ impl Feedback {
     }
 }
 
-/// Whether `source` should be shown its command feedback.
+/// Whether `source` should be shown a reply of `kind`, as vanilla decides it.
 ///
-/// This is vanilla's rule exactly. Players, the console and RCON always see
-/// feedback; command blocks and functions see it only when
-/// `sendCommandFeedback` is on.
-pub fn emits(source: super::source::SourceKind, send_command_feedback: bool) -> bool {
-    source.always_receives_feedback() || send_command_feedback
+/// The rule is **not** one switch: it depends on the source *and* on whether
+/// the reply is a success or an error. Vanilla 1.21.x
+/// (`ServerPlayer`/`MinecraftServer`/`BaseCommandBlock`/`FunctionCommand`):
+///
+/// | source        | success                              | error             |
+/// |---------------|--------------------------------------|-------------------|
+/// | player        | `sendCommandFeedback`                | always            |
+/// | console / RCON| always                               | always            |
+/// | command block | `sendCommandFeedback && trackOutput` | `trackOutput`     |
+/// | function      | always suppressed                    | always suppressed |
+///
+/// The two consequences worth stating: a player's *errors* are never silenced
+/// by the rule (only their successes are), and a datapack function is always
+/// suppressed (`withSuppressedOutput`), rule or no rule. `track_output` is the
+/// command block's own setting; it is ignored for every other source.
+pub fn accepts(
+    source: super::source::SourceKind,
+    kind: FeedbackKind,
+    rules: GameRules,
+    track_output: bool,
+) -> bool {
+    use super::source::SourceKind;
+    let rule = rules.send_command_feedback;
+    match (source, kind) {
+        // A player sees their own failures always; the rule gates only
+        // success (`ServerPlayer.acceptsSuccess()` / `acceptsFailure()`).
+        (SourceKind::Player, FeedbackKind::Error) => true,
+        (SourceKind::Player, FeedbackKind::Success) => rule,
+        // The console and RCON are the server itself: always.
+        (SourceKind::Console | SourceKind::Rcon, _) => true,
+        // A command block with output tracking off is silent; with it on, the
+        // rule gates success but never failure.
+        (SourceKind::CommandBlock, FeedbackKind::Error) => track_output,
+        (SourceKind::CommandBlock, FeedbackKind::Success) => rule && track_output,
+        // A function always runs with output suppressed.
+        (SourceKind::Function, _) => false,
+    }
 }
 
 /// Render one line for chat at `kind`'s colour.
@@ -87,17 +119,18 @@ pub fn render(kind: FeedbackKind, line: &str) -> String {
     }
 }
 
-/// Deliver `feedback` to `source`, through `emit`, honouring the game rule.
+/// Deliver `feedback` to `source`, through `emit`, honouring the game rules.
 ///
 /// The one place feedback leaves the command layer. `emit` receives already
-/// styled lines, so the caller only has to know how to send a chat line.
+/// styled lines, so the caller only has to know how to send a chat line. The
+/// source's own `trackOutput` is read here, so a caller never has to pass it.
 pub fn send(
     source: &super::source::CommandSource<'_>,
     feedback: &Feedback,
-    send_command_feedback: bool,
+    rules: GameRules,
     mut emit: impl FnMut(&str),
 ) {
-    if !emits(source.kind(), send_command_feedback) {
+    if !accepts(source.kind(), feedback.kind, rules, source.track_output()) {
         return;
     }
     for line in &feedback.lines {
@@ -123,8 +156,10 @@ pub struct GameRules {
 
 impl Default for GameRules {
     fn default() -> GameRules {
-        // Vanilla's default. A player is never silenced by this rule; only
-        // command blocks and functions are.
+        // Vanilla's default. When off, the rule suppresses only *success*
+        // feedback (a player's errors still show, a command block's errors
+        // still follow `trackOutput`); a function is always suppressed either
+        // way. See [`accepts`].
         GameRules {
             send_command_feedback: true,
         }
@@ -162,7 +197,7 @@ impl GameRules {
     }
 }
 
-/// Whether command blocks and functions are currently shown feedback.
+/// Whether the `sendCommandFeedback` rule is currently on.
 pub fn send_command_feedback(world: &DemoWorld) -> bool {
     GameRules::load(world).send_command_feedback
 }
@@ -289,17 +324,58 @@ mod tests {
     use super::*;
     use crate::commands::source::SourceKind;
 
-    #[test]
-    fn players_and_consoles_ignore_the_gamerule_and_blocks_obey_it() {
-        for on in [true, false] {
-            assert!(emits(SourceKind::Player, on), "a player always sees it");
-            assert!(emits(SourceKind::Console, on), "a console always sees it");
-            assert!(emits(SourceKind::Rcon, on), "an RCON always sees it");
+    fn rules(on: bool) -> GameRules {
+        GameRules {
+            send_command_feedback: on,
         }
-        assert!(emits(SourceKind::CommandBlock, true));
-        assert!(!emits(SourceKind::CommandBlock, false));
-        assert!(emits(SourceKind::Function, true));
-        assert!(!emits(SourceKind::Function, false));
+    }
+
+    #[test]
+    fn the_feedback_policy_matches_vanilla_per_source_and_kind() {
+        use FeedbackKind::{Error, Success};
+        use SourceKind::{CommandBlock, Console, Function, Player, Rcon};
+
+        // A player: the rule gates success, never error.
+        assert!(accepts(Player, Success, rules(true), false));
+        assert!(!accepts(Player, Success, rules(false), false));
+        assert!(accepts(Player, Error, rules(true), false));
+        assert!(
+            accepts(Player, Error, rules(false), false),
+            "errors always show"
+        );
+
+        // Console and RCON: always, either kind, rule irrelevant.
+        for on in [true, false] {
+            for kind in [Success, Error] {
+                assert!(accepts(Console, kind, rules(on), false));
+                assert!(accepts(Rcon, kind, rules(on), false));
+            }
+        }
+
+        // A command block: `trackOutput` gates both; the rule gates only
+        // success.
+        assert!(accepts(CommandBlock, Success, rules(true), true));
+        assert!(!accepts(CommandBlock, Success, rules(false), true), "rule");
+        assert!(
+            !accepts(CommandBlock, Success, rules(true), false),
+            "trackOutput"
+        );
+        assert!(accepts(CommandBlock, Error, rules(true), true));
+        assert!(
+            accepts(CommandBlock, Error, rules(false), true),
+            "error ignores the rule"
+        );
+        assert!(
+            !accepts(CommandBlock, Error, rules(true), false),
+            "trackOutput"
+        );
+
+        // A function: always suppressed, either kind, rule irrelevant.
+        for on in [true, false] {
+            for kind in [Success, Error] {
+                assert!(!accepts(Function, kind, rules(on), false));
+            }
+        }
     }
 
     #[test]
@@ -330,24 +406,42 @@ mod tests {
     fn an_empty_feedback_emits_nothing() {
         let src = crate::commands::source::CommandSource::Console;
         let mut seen = Vec::new();
-        send(&src, &Feedback::success(Vec::new()), true, |l| {
+        send(&src, &Feedback::success(Vec::new()), rules(true), |l| {
             seen.push(l.to_string())
         });
         assert!(seen.is_empty(), "a silent success must stay silent");
     }
 
     #[test]
-    fn send_honours_the_gamerule_and_styles_the_lines() {
-        let src = crate::commands::source::CommandSource::Function { name: "tick" };
-        let feedback = Feedback::error(vec!["nope".into()]);
+    fn send_styles_the_lines_and_honours_the_policy() {
+        use crate::commands::source::CommandSource;
+
+        // A command block with output on: success follows the rule, error
+        // does not.
+        let block = CommandSource::CommandBlock {
+            x: 0,
+            y: 0,
+            z: 0,
+            track_output: true,
+        };
+        let success = Feedback::success(vec!["ok".into()]);
+        let error = Feedback::error(vec!["nope".into()]);
+
         let mut seen = Vec::new();
-        send(&src, &feedback, false, |l| seen.push(l.to_string()));
-        assert!(
-            seen.is_empty(),
-            "a function is silenced when the rule is off"
-        );
-        send(&src, &feedback, true, |l| seen.push(l.to_string()));
-        assert_eq!(seen, vec!["§cnope".to_string()]);
+        send(&block, &success, rules(false), |l| seen.push(l.to_string()));
+        assert!(seen.is_empty(), "the rule silences a block's success");
+        send(&block, &success, rules(true), |l| seen.push(l.to_string()));
+        assert_eq!(seen, vec!["ok".to_string()]);
+
+        seen.clear();
+        send(&block, &error, rules(false), |l| seen.push(l.to_string()));
+        assert_eq!(seen, vec!["§cnope".to_string()], "error ignores the rule");
+
+        // A function is always suppressed, rule or no rule.
+        let function = CommandSource::Function { name: "tick" };
+        seen.clear();
+        send(&function, &error, rules(true), |l| seen.push(l.to_string()));
+        assert!(seen.is_empty(), "a function is always suppressed");
     }
 
     #[test]

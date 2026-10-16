@@ -707,8 +707,8 @@ mod imp {
                 crate::commands::dispatch(&text, &handle, &backend.registry, &backend.world)
             {
                 let source = crate::commands::source::CommandSource::Player(&handle);
-                let rule = crate::commands::feedback::send_command_feedback(&backend.world);
-                crate::commands::feedback::send(&source, &feedback, rule, |line| {
+                let rules = crate::commands::feedback::GameRules::load(&backend.world);
+                crate::commands::feedback::send(&source, &feedback, rules, |line| {
                     handle.emit(&ServerEvent::Chat(line.to_string()), &*backend.world)
                 });
             }

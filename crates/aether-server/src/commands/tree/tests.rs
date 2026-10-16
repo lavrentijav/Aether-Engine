@@ -732,7 +732,7 @@ fn game_commands_gate_on_operator_through_the_tree() {
         one(&env, &env.tester, "/time set day"),
         "Set the time to 1000"
     );
-    assert!(one(&env, &env.tester, "/time").starts_with("It is "));
+    assert!(one(&env, &env.tester, "/time").starts_with("The time is "));
     assert_eq!(
         one(&env, &env.tester, "/give stone 3"),
         "Gave 3 minecraft:stone to tester"
@@ -943,28 +943,39 @@ fn send_command_feedback_defaults_on_and_survives_the_world() {
 }
 
 #[test]
-fn a_silenced_function_gets_no_feedback_but_a_player_always_does() {
+fn a_function_is_silenced_while_a_player_keeps_their_errors() {
     let env = env();
-    use crate::commands::feedback::{self, Feedback};
+    use crate::commands::feedback::{self, Feedback, GameRules};
     use crate::commands::source::CommandSource;
-    let err = Feedback::error(vec!["nope".into()]);
+    let off = GameRules {
+        send_command_feedback: false,
+    };
+    let on = GameRules {
+        send_command_feedback: true,
+    };
     let player = CommandSource::Player(&env.tester);
     let function = CommandSource::Function { name: "tick" };
+    let success = Feedback::success(vec!["done".into()]);
+    let error = Feedback::error(vec!["nope".into()]);
 
-    // Rule off: a player still sees their own feedback, a function does not.
+    // A player: the rule suppresses success but never an error.
     let mut seen = Vec::new();
-    feedback::send(&player, &err, false, |l| seen.push(l.to_string()));
-    assert_eq!(seen, vec!["§cnope".to_string()]);
+    feedback::send(&player, &success, off, |l| seen.push(l.to_string()));
+    assert!(seen.is_empty(), "the rule silences a player's success");
+    feedback::send(&player, &success, on, |l| seen.push(l.to_string()));
+    assert_eq!(seen, vec!["done".to_string()]);
     seen.clear();
-    feedback::send(&function, &err, false, |l| seen.push(l.to_string()));
-    assert!(
-        seen.is_empty(),
-        "a silenced function must not be shown output"
-    );
-    // Rule on: the function sees it too.
-    seen.clear();
-    feedback::send(&function, &err, true, |l| seen.push(l.to_string()));
-    assert_eq!(seen, vec!["§cnope".to_string()]);
+    feedback::send(&player, &error, off, |l| seen.push(l.to_string()));
+    assert_eq!(seen, vec!["§cnope".to_string()], "errors always show");
+
+    // A function: always suppressed, rule or no rule, success or error.
+    for rules in [off, on] {
+        for feedback in [&success, &error] {
+            seen.clear();
+            feedback::send(&function, feedback, rules, |l| seen.push(l.to_string()));
+            assert!(seen.is_empty(), "a function is always suppressed");
+        }
+    }
 }
 
 #[test]

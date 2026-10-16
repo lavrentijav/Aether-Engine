@@ -205,11 +205,14 @@ pub fn time(args: &[&str], registry: &SharedRegistry, world: &DemoWorld) -> Vec<
             },
         },
         _ => {
-            return vec![format!(
-                "It is {} (day {})",
-                super::time_of_day(),
-                super::now() / 24000
-            )]
+            // The bare `/time` is a query, the closest vanilla analogue being
+            // `/time query daytime`; use its string (`commands.time.query`)
+            // rather than an invented one. CMD-13a ports the full
+            // `add/set/query` grammar onto the tree.
+            return vec![lang::format(
+                lang::TIME_QUERY,
+                &[&super::time_of_day().to_string()],
+            )];
         }
     };
     super::set_time_of_day(t);

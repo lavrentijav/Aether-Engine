@@ -342,6 +342,10 @@ pub fn permitted_level(level: u8, node: &str, op: u8) -> bool {
 /// A command the caller may not run reads exactly like a name no command
 /// owns — this is the permission-filtering guarantee: `/help` must not let a
 /// non-op enumerate the op-only catalogue.
+///
+/// `/help <category>` is deliberately not handled here: categories are the
+/// CMD-48 command catalogue's to define, and it builds its `/help` listing on
+/// this one.
 fn help(args: &[&str], handle: &PlayerHandle) -> Reply {
     let cmd_tree = tree::tree();
     let Some(word) = args.first() else {
