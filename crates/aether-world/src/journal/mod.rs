@@ -51,6 +51,7 @@
 //! a deletion, and it is why a rollback can itself be rolled back.
 
 pub mod event;
+pub mod history;
 pub mod ledger;
 pub mod sink;
 
@@ -61,6 +62,7 @@ pub use event::{
     ActorId, ChatKind, DecodeError, DestroyReason, Event, EventBody, ItemUid, Place,
     DESTROY_REASONS, EVENT_KINDS, EVENT_KIND_UNKNOWN,
 };
+pub use history::{Area, Page, Window};
 pub use ledger::{install_allocator, Anomaly, Balance, Ledger, UidAllocator};
 pub use sink::{BatchConfig, BatchingSink, EventSink, SinkStats};
 
@@ -72,6 +74,11 @@ use std::sync::Mutex;
 const K_EVENT: u8 = b'E';
 const K_COLUMN: u8 = b'X';
 const K_ACTOR: u8 = b'P';
+/// Item index: `uid(8) seq(8)` -> empty; "this item instance was involved at
+/// seq". Like the column and actor indexes it holds no payload, so the whole
+/// history of one item is a prefix scan of its own entries rather than a walk
+/// of the journal.
+const K_ITEM: u8 = b'I';
 /// Key written by earlier versions: the last sequence number used. Read only,
 /// to resume a journal that predates [`K_RESERVED`].
 const K_HEAD: &[u8] = b"H";
@@ -122,6 +129,20 @@ fn actor_key(actor: ActorId, seq: u64) -> [u8; 25] {
     let mut k = [0u8; 25];
     k[..17].copy_from_slice(&actor_prefix(actor));
     k[17..].copy_from_slice(&seq.to_be_bytes());
+    k
+}
+
+fn item_prefix(uid: ItemUid) -> [u8; 9] {
+    let mut k = [0u8; 9];
+    k[0] = K_ITEM;
+    k[1..].copy_from_slice(&uid.0.to_be_bytes());
+    k
+}
+
+fn item_key(uid: ItemUid, seq: u64) -> [u8; 17] {
+    let mut k = [0u8; 17];
+    k[..9].copy_from_slice(&item_prefix(uid));
+    k[9..].copy_from_slice(&seq.to_be_bytes());
     k
 }
 
@@ -409,10 +430,20 @@ impl<B: KvBackend> Journal<B> {
         // never an index entry pointing at nothing (which would read as
         // corruption).
         self.backend.put(&event_key(seq), &e.encode())?;
-        if let Some((x, _, z)) = e.position() {
+        // One column entry per block position the event touches. A block
+        // change touches its own block; an item event touches both ends of its
+        // movement, so a container's column sees a transfer that leaves it for
+        // another chunk, not only one that lands on it.
+        for (x, _, z) in e.body.indexed_positions() {
             self.backend.put(&column_key(x >> 4, z >> 4, seq), &[])?;
         }
         self.backend.put(&actor_key(actor, seq), &[])?;
+        // One entry per item instance the event names, so an item's whole
+        // history is a prefix read of its own entries. A block event names
+        // none and writes none.
+        for uid in e.body.item_uids() {
+            self.backend.put(&item_key(uid, seq), &[])?;
+        }
         // After the durable write, never before: the mirror must not be able
         // to show an event the journal does not have.
         if let Some(sink) = &self.sink {
@@ -461,26 +492,64 @@ impl<B: KvBackend> Journal<B> {
         Ok(out)
     }
 
-    /// The most recent change to the block at `(x, y, z)`, if anyone has ever
-    /// touched it.
+    /// The most recent event touching the block at `(x, y, z)`, if anyone has
+    /// ever touched it.
     ///
-    /// `None` means the block is exactly as the generator made it — which is
-    /// the question a survival server has to answer before paying for it, or
-    /// a player places a diamond block, breaks it, and is paid for the
-    /// privilege.
+    /// "Touching" is broad: a block change at the position, but also an item
+    /// event whose place is that block (a drop landing there, a container
+    /// access at its coordinates). A caller that means strictly "was this
+    /// block changed" wants [`Self::last_block_change_at`].
     pub fn last_change_at(&self, x: i32, y: i32, z: i32) -> Result<Option<Event>, StorageError> {
-        // Walks the column index backwards and stops at the first hit, so the
-        // cost is the number of edits *after* the last one at this position
-        // rather than the column's whole history.
-        let keys = self.backend.scan_prefix(&column_prefix(x >> 4, z >> 4))?;
-        for (k, _) in keys.iter().rev() {
-            let seq = u64::from_be_bytes(k[9..17].try_into().unwrap());
-            let Some(e) = self.get(seq)? else { continue };
-            if e.position() == Some((x, y, z)) {
-                return Ok(Some(e));
-            }
-        }
-        Ok(None)
+        self.first_column_hit(x, z, &|e| e.position() == Some((x, y, z)))
+    }
+
+    /// The most recent **block change** at `(x, y, z)`, if the block there was
+    /// ever placed or broken.
+    ///
+    /// Item events that merely happen to sit at the coordinates — a dropped
+    /// item, a chest opening — are ignored, so this is the "was the block
+    /// itself edited" question the worldgen-original check needs: a player who
+    /// mined a natural diamond and dropped items on the spot has not made the
+    /// block original or non-original by the drop.
+    pub fn last_block_change_at(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Result<Option<Event>, StorageError> {
+        self.first_column_hit(x, z, &|e| {
+            matches!(e.body, EventBody::BlockSet { .. }) && e.position() == Some((x, y, z))
+        })
+    }
+
+    /// The newest event in `(x, z)`'s column for which `accept` holds, walking
+    /// the column index backwards and stopping at the first hit.
+    ///
+    /// Lazy and reverse: it reads the index from the newest key down and only
+    /// decodes an event when the key is a candidate, so the cost is the number
+    /// of column entries after the match rather than a materialised scan.
+    fn first_column_hit(
+        &self,
+        x: i32,
+        z: i32,
+        accept: &dyn Fn(&Event) -> bool,
+    ) -> Result<Option<Event>, StorageError> {
+        let mut found = None;
+        self.backend
+            .scan_prefix_each_rev(&column_prefix(x >> 4, z >> 4), &mut |k, _| {
+                if k.len() < 17 {
+                    return Ok(true);
+                }
+                let seq = u64::from_be_bytes(k[9..17].try_into().unwrap());
+                if let Some(e) = self.get(seq)? {
+                    if accept(&e) {
+                        found = Some(e);
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })?;
+        Ok(found)
     }
 
     /// Every event by `actor`, oldest first.
