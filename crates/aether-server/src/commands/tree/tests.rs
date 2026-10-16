@@ -795,11 +795,19 @@ fn help_still_explains_a_single_command() {
         one(&env, &env.tester, "/help stop"),
         "/stop — minecraft.command.stop (op level 4), planned in CMD-09"
     );
+    let listing = run(&env, &env.tester, "/help");
     assert!(
-        run(&env, &env.tester, "/help")
-            .iter()
-            .any(|l| l.contains("not implemented yet")),
-        "/help with no argument lists the stubs"
+        listing.iter().any(|l| l.contains("🚧")),
+        "/help marks the pending commands: {listing:?}"
+    );
+    assert!(
+        listing.iter().any(|l| l.contains("admin:")),
+        "/help groups the commands by category: {listing:?}"
+    );
+    // An implemented command explains itself with its usage, from the catalogue.
+    assert_eq!(
+        one(&env, &env.tester, "/help gamemode"),
+        "/gamemode — minecraft.command.gamemode (op level 2): /gamemode <mode> [player]"
     );
     // The `?` alias routes to the same node.
     assert_eq!(

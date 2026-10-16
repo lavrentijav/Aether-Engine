@@ -8,7 +8,7 @@ GriefPrevention, chat/moderation, shops), split by the rule in `CONTRIBUTING.md`
 core owns the mechanism it needs (marked "core API + plugin").
 
 Already in Aether (commands/mod.rs, game/commands.rs, economy/commands.rs): `/gamemode` (`gm`), `/time`
-(`day/night/noon/midnight`), `/give`, `/summon`, `/tp`, `/heal`, `/food`, `/kill`, `/killall`,
+(`day/night/noon/midnight`), `/give`, `/summon`, `/teleport` (`tp`), `/heal`, `/food`, `/kill`, `/killall`,
 `/spawn`, `/inv` (`inventory`), `/stash`, `/audit`, `/inspect`, `/rollback` (`rb`), `/cache`, `/msg`
 (`tell`, `w`), economy `/balance` (`bal`, `money`) `/pay /buy /sell /market /listings /unlist /econ`,
 `/visibility`.
@@ -17,23 +17,35 @@ Already in Aether (commands/mod.rs, game/commands.rs, economy/commands.rs): `/ga
 
 The single source of truth for **which commands exist** is
 `crates/aether-server/src/commands/catalogue.rs` (`CATALOGUE`): one entry per command with
-`name`, `aliases`, `node`, `op`, `task` (`CMD-nn` or `-`), `category` and `status`
-(`Implemented` | `Pending`). `docs/COMMANDS.md` and `docs/COMMANDS.ru.md` are generated from that
-list (`cargo-locked run -p aether-server --example gen_commands_md`) and byte-compared by a test, so
-the docs cannot drift. This section holds the *design decisions*; `COMMANDS.md` is the *current
-state* list — the two must not contradict each other.
+`name`, `aliases`, `node`, `op`, `task` (`CMD-nn` or `-`), `category`, `status`
+(`Implemented` | `Pending`) and `gate`. The command tree's pending half is built from it
+(`commands/tree.rs`), the Declare Commands packet and `/help` read it, and `docs/COMMANDS.md` +
+`docs/COMMANDS.ru.md` are generated from it (`cargo-locked run -p aether-server --example
+gen_commands_md`) and byte-compared by a test, so the docs cannot drift. This section holds the
+*design decisions*; `COMMANDS.md` is the *current state* list — the two must not contradict each
+other. There is no second list: `commands/registry.rs` holds only the plugin-command side.
 
 Categories are the fixed set `admin, server, player, world, data, ops, history, economy` (the
 values the catalogue's `Category` uses, reused as the `/help` grouping). A pending command is still
 declared in the tree (so it autocompletes and is permission-gated by its `node`/`op`) and answers
-`/<name> is not implemented yet (CMD-nn)`; `/help` marks it as not implemented.
+`/<name> is not implemented yet (CMD-nn)`; `/help` marks it as not implemented and only lists
+commands the caller may run.
+
+The `gate` field records what the tree enforces **today**: `node` (the declared node/op are
+enforced — every pending command), `operator` (the legacy operator-only check; `node`/`op` are the
+intended target, not yet enforced — e.g. `/gamemode`, `/give`, `/aether`), or `everyone` (no
+requirement; `node`/`op` are the intended target — e.g. `/inspect`, `/kill`, `/spawn`, the economy
+verbs). This is deliberate: the brief forbids changing access rights silently, so the catalogue is
+brought in line with the real gate instead of claiming a node the tree does not check. A guard
+(`an_implemented_entry_gate_matches_the_tree`) fails the build if `gate` and the tree disagree.
 
 **To add a command:** one entry in `CATALOGUE`. If it is not written yet, set `status = Pending` and
 its `CMD-nn` task; if it is, set `status = Implemented`, `task = "-"`, and wire the executor in the
-owning module's `nodes()` (`game/commands.rs`, `economy/commands.rs` or `commands/core_nodes()`).
-**To flip planned → working:** change the entry's `status` (and `task`) and add the executor — no
-second list, no hardcoded `"Implemented:"` string. The tests in `catalogue.rs` fail the build when
-the catalogue and the tree (or `registry.rs::CORE`) disagree.
+owning module's `nodes()` (`game/commands.rs`, `economy/commands.rs` or `commands/core_nodes()`),
+choosing `imp` (everyone), `imp_op` (operator) or a node gate. **To flip planned → working:** change
+the entry's `status` (and `task`) and add the executor — no second list, no hardcoded
+`"Implemented:"` string. The tests in `catalogue.rs` fail the build when the catalogue and the tree
+disagree.
 
 ## 0. Command infrastructure (core, first)
 

@@ -40,7 +40,7 @@ pub fn nodes() -> Vec<Node> {
         tree::simple("kill", &[], Requirement::None, exec_kill),
         tree::simple("spawn", &[], Requirement::None, exec_spawn),
         tree::greedy("msg", &["tell", "w"], Requirement::None, exec_msg),
-        tree::greedy("tp", &[], Requirement::Fn(require_op), exec_tp),
+        tree::greedy("teleport", &["tp"], Requirement::Fn(require_op), exec_tp),
         tree::greedy("block", &[], Requirement::None, exec_block),
         tree::greedy("food", &[], Requirement::Fn(require_op), exec_food),
         tree::simple("heal", &[], Requirement::Fn(require_op), exec_heal),

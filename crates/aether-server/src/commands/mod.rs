@@ -55,58 +55,6 @@ impl Reply {
     }
 }
 
-/// Every built-in command name, across the game, economy and history layers.
-///
-/// Passed to the plugin host as its reserved set, so a plugin can never be
-/// handed one of these names. The tree is the single dispatcher now; this list
-/// is the readable form of the names it owns, kept for the host.
-#[allow(dead_code)]
-pub const RESERVED_COMMANDS: &[&str] = &[
-    // game
-    "gamemode",
-    "gm",
-    "time",
-    "give",
-    "summon",
-    "killall",
-    "kill",
-    "spawn",
-    "tp",
-    "block",
-    "food",
-    "heal",
-    "visibility",
-    // messaging
-    "msg",
-    "tell",
-    "w",
-    // history
-    "inspect",
-    "i",
-    "lookup",
-    "l",
-    "rollback",
-    "rb",
-    "page",
-    "pg",
-    "inv",
-    "inventory",
-    "stash",
-    "audit",
-    "cache",
-    // economy
-    "balance",
-    "bal",
-    "money",
-    "pay",
-    "sell",
-    "market",
-    "buy",
-    "listings",
-    "unlist",
-    "econ",
-];
-
 /// Handle `text` if it is a command. `None` means it was ordinary chat.
 ///
 /// The tree is the one dispatcher: this runs `text` against
@@ -307,32 +255,48 @@ pub fn permitted_level(level: u8, node: &str, op: u8) -> bool {
     crate::permissions::check(crate::permissions::Level::new(level), node, op)
 }
 
-/// `/help [command]` — list the commands that are specified but not implemented yet, or explain one.
+/// `/help [command]` — list the commands by category, or explain one.
 ///
-/// This is a stop-gap until the real tree-driven `/help` (CMD-05): it makes the catalogue
-/// discoverable while each command is stubbed with its own `not implemented yet (CMD-nn)`.
+/// This is a stop-gap until the full tree-driven `/help` (CMD-05), but it is
+/// **generated from the catalogue** ([`catalogue::CATALOGUE`]) — there is no
+/// hand-written command list anywhere. It marks the not-yet-implemented ones
+/// and only shows commands the caller may actually run, as vanilla does.
 fn help(args: &[&str], handle: &PlayerHandle) -> Reply {
     if let Some(name) = args.first() {
-        return match registry::find(name) {
-            Some(e) => Reply::one(format!(
-                "/{} — {} (op level {}), planned in {}",
-                e.name, e.node, e.op, e.task
-            )),
-            None => Reply::one(format!(
-                "no entry for `{name}`; /help lists the commands still to come"
-            )),
+        return match catalogue::find(name) {
+            Some(c) => Reply::one(match c.status {
+                catalogue::Status::Pending => format!(
+                    "/{} — {} (op level {}), planned in {}",
+                    c.name, c.node, c.op, c.task
+                ),
+                catalogue::Status::Implemented => {
+                    format!("/{} — {} (op level {}): {}", c.name, c.node, c.op, c.usage)
+                }
+            }),
+            None => Reply::one(format!("no entry for `{name}`")),
         };
     }
-    let mut lines = registry::help_lines();
-    lines.push(format!(
-        "({} commands pending, {} runnable now)",
-        registry::CORE.len(),
-        if crate::is_operator(handle) {
-            "all"
-        } else {
-            "level-0"
+    let tree = tree::tree();
+    let mut lines = vec!["Commands — ✅ working, 🚧 pending (task):".to_string()];
+    for cat in catalogue::Category::ALL {
+        let mut names: Vec<String> = Vec::new();
+        for c in catalogue::CATALOGUE.iter().filter(|c| c.category == *cat) {
+            let node = tree.commands().iter().find(|n| n.name == c.name);
+            // A command the caller cannot run is not listed at all, as in
+            // vanilla (no leak of op-only names to a non-op).
+            let Some(node) = node else { continue };
+            if tree::check(&node.requirement, handle).is_err() {
+                continue;
+            }
+            names.push(match c.status {
+                catalogue::Status::Implemented => format!("/{}", c.name),
+                catalogue::Status::Pending => format!("/{} 🚧{}", c.name, c.task),
+            });
         }
-    ));
+        if !names.is_empty() {
+            lines.push(format!("  {}: {}", cat.key(), names.join(" ")));
+        }
+    }
     Reply(lines)
 }
 
@@ -804,15 +768,16 @@ mod tests {
     }
 
     #[test]
-    fn the_reserved_set_covers_the_operator_verbs() {
+    fn the_catalogue_owns_the_operator_verbs() {
         // The host refuses these before any plugin sees them; if one were
-        // dropped from the list a plugin could shadow it again.
+        // dropped from the catalogue a plugin could shadow it again.
         for verb in [
-            "give", "tp", "gamemode", "summon", "killall", "time", "heal", "food", "pay", "econ",
+            "give", "teleport", "tp", "gamemode", "summon", "killall", "time", "heal", "food",
+            "pay", "econ",
         ] {
             assert!(
-                super::RESERVED_COMMANDS.contains(&verb),
-                "`{verb}` must be reserved"
+                super::catalogue::owns(verb),
+                "`{verb}` must be owned by the catalogue"
             );
         }
     }
@@ -866,8 +831,8 @@ mod tests {
     #[test]
     fn the_registry_owns_both_implemented_and_specified_core_names() {
         // `core_owns` is the ownership check a plugin registration faces: it
-        // must reject an implemented name even if the reserved list drifted,
-        // and a specified-but-unimplemented one.
+        // must reject both an implemented name and a specified-but-unimplemented
+        // one, straight from the catalogue.
         assert!(super::registry::core_owns("give"), "implemented");
         assert!(super::registry::core_owns("stop"), "specified stub");
         assert!(!super::registry::core_owns("definitely_a_plugin_name"));

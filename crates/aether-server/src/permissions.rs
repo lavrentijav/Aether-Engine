@@ -494,8 +494,14 @@ pub fn install(cfg: &Config) {
         }
     };
     let added = store.seed_operators(&cfg.operators);
-    for entry in crate::commands::registry::CORE {
-        let _ = declare_command_node_in(&mut store, entry.node, entry.op);
+    // The pending core commands are node/op stubs, so their nodes are declared
+    // here (the implemented ones gate through the legacy operator check until
+    // CMD-05/CMD-01 wire their nodes).
+    for c in crate::commands::catalogue::CATALOGUE
+        .iter()
+        .filter(|c| c.status == crate::commands::catalogue::Status::Pending)
+    {
+        let _ = declare_command_node_in(&mut store, c.node, c.op);
     }
     *write() = store;
     if added > 0 {

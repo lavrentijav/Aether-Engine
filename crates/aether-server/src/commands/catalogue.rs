@@ -2,13 +2,11 @@
 //!
 //! Every command Aether knows about — the ones that run today **and** the ones
 //! that are only specified — is listed here exactly once, with its category,
-//! permission node, op level and status. This is the single source of truth
-//! the generated docs (`docs/COMMANDS.md`, `docs/COMMANDS.ru.md`) are rendered
-//! from. The command tree, the Declare Commands packet and `/help` are meant
-//! to be built from this same list; that wiring is a separate step while
-//! CMD-05 rewrites `/help`, so for now the tests at the bottom of this file
-//! pin the list to [`super::registry::CORE`] (the pending half) and to the
-//! command tree (the implemented half).
+//! permission node, op level and status. This is the single source of truth:
+//! the command tree's pending half ([`crate::commands::tree`]) is built from
+//! it, the Declare Commands packet and `/help` read it, and the generated docs
+//! (`docs/COMMANDS.md`, `docs/COMMANDS.ru.md`) are rendered from it. There is
+//! no second list — [`super::registry`] holds only the plugin side.
 //!
 //! ## One edit, one place
 //!
@@ -24,6 +22,14 @@
 //!
 //! A command must never appear twice: a name that is both implemented and
 //! listed pending fails [`tests::no_name_is_both_implemented_and_pending`].
+//!
+//! ## The `gate` field
+//!
+//! The `node`/`op` are the intended vanilla permission. [`Gate`] records what
+//! the tree enforces *today*, so an implemented command gated by the legacy
+//! operator check (or not gated at all) is described honestly rather than
+//! claiming a node it does not use;
+//! [`tests::an_implemented_entry_gate_matches_the_tree`] keeps the two in step.
 
 use std::fmt::Write as _;
 
@@ -72,8 +78,7 @@ impl Category {
         Category::Economy,
     ];
 
-    /// The short key (`admin`) — also the value [`super::registry::Entry::group`]
-    /// uses, so the two lists agree.
+    /// The short key (`admin`) — the `/help` grouping and the docs anchor.
     pub const fn key(self) -> &'static str {
         match self {
             Category::Admin => "admin",
@@ -116,13 +121,47 @@ impl Category {
     }
 }
 
+/// How a command's permission is enforced in the tree **today**.
+///
+/// The `node`/`op` on a [`Command`] are the intended vanilla permission. For a
+/// pending command the stub enforces exactly them (`Gate::Node`); for an
+/// implemented command the tree may still use an older check, in which case
+/// `node`/`op` are the target and this field says what actually happens. The
+/// `an_implemented_entry_gate_matches_the_tree` test keeps the two in step, so
+/// the catalogue never claims an enforcement the tree does not perform.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Gate {
+    /// No requirement: anyone may run it. The declared `node`/`op` are the
+    /// intended target, not enforced.
+    Everyone,
+    /// Operators only, through the legacy operator check (`Requirement::Fn`,
+    /// `is_operator`); the declared `node`/`op` are the intended target, not
+    /// yet enforced as a permission node.
+    Operator,
+    /// Enforced by the permission node at the op level
+    /// (`Requirement::Level { op, node }`).
+    Node,
+}
+
+impl Gate {
+    /// The short key shown in the generated docs.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Gate::Everyone => "everyone",
+            Gate::Operator => "operator",
+            Gate::Node => "node",
+        }
+    }
+}
+
 /// One command in the catalogue, working or not.
 pub struct Command {
     /// Canonical command name, without the leading slash.
     pub name: &'static str,
     /// Alternative names the command answers to.
     pub aliases: &'static [&'static str],
-    /// Permission node checked before the command runs.
+    /// Permission node (see [`Gate`]: enforced when `gate` is
+    /// [`Gate::Node`], else the intended target).
     pub node: &'static str,
     /// Vanilla op level required (0 everyone … 4 owner).
     pub op: u8,
@@ -132,10 +171,13 @@ pub struct Command {
     pub category: Category,
     /// Implemented or pending.
     pub status: Status,
+    /// How the permission is enforced in the tree today.
+    pub gate: Gate,
     /// A one-line usage/description, without a leading slash.
     pub usage: &'static str,
 }
 
+/// An implemented command anyone may run (the tree has no requirement for it).
 const fn imp(
     name: &'static str,
     aliases: &'static [&'static str],
@@ -152,6 +194,30 @@ const fn imp(
         task: "-",
         category,
         status: Status::Implemented,
+        gate: Gate::Everyone,
+        usage,
+    }
+}
+
+/// An implemented command held by the legacy operator check
+/// ([`Gate::Operator`]) until its node/op is wired (CMD-05/CMD-01).
+const fn imp_op(
+    name: &'static str,
+    aliases: &'static [&'static str],
+    node: &'static str,
+    op: u8,
+    category: Category,
+    usage: &'static str,
+) -> Command {
+    Command {
+        name,
+        aliases,
+        node,
+        op,
+        task: "-",
+        category,
+        status: Status::Implemented,
+        gate: Gate::Operator,
         usage,
     }
 }
@@ -173,6 +239,8 @@ const fn pend(
         task,
         category,
         status: Status::Pending,
+        // A pending command is a stub gated by its node/op.
+        gate: Gate::Node,
         usage,
     }
 }
@@ -362,7 +430,7 @@ pub const CATALOGUE: &[Command] = &[
         "/publish [allow-commands] [gamemode] [port]",
     ),
     // -- player ------------------------------------------------------------
-    imp(
+    imp_op(
         "gamemode",
         &["gm"],
         "minecraft.command.gamemode",
@@ -370,7 +438,7 @@ pub const CATALOGUE: &[Command] = &[
         Category::Player,
         "/gamemode <mode> [player]",
     ),
-    imp(
+    imp_op(
         "give",
         &[],
         "minecraft.command.give",
@@ -378,7 +446,7 @@ pub const CATALOGUE: &[Command] = &[
         Category::Player,
         "/give <item> [count]",
     ),
-    imp(
+    imp_op(
         "summon",
         &[],
         "minecraft.command.summon",
@@ -386,7 +454,7 @@ pub const CATALOGUE: &[Command] = &[
         Category::Player,
         "/summon <entity> [pos]",
     ),
-    imp(
+    imp_op(
         "killall",
         &[],
         "aether.command.killall",
@@ -410,13 +478,13 @@ pub const CATALOGUE: &[Command] = &[
         Category::Player,
         "/spawn",
     ),
-    imp(
-        "tp",
-        &[],
-        "minecraft.command.tp",
+    imp_op(
+        "teleport",
+        &["tp"],
+        "minecraft.command.teleport",
         2,
         Category::Player,
-        "/tp <target>",
+        "/teleport <target>",
     ),
     imp(
         "block",
@@ -426,7 +494,7 @@ pub const CATALOGUE: &[Command] = &[
         Category::Player,
         "/block <x> <y> <z>",
     ),
-    imp(
+    imp_op(
         "food",
         &[],
         "aether.command.food",
@@ -434,7 +502,7 @@ pub const CATALOGUE: &[Command] = &[
         Category::Player,
         "/food [level]",
     ),
-    imp(
+    imp_op(
         "heal",
         &[],
         "aether.command.heal",
@@ -505,15 +573,6 @@ pub const CATALOGUE: &[Command] = &[
         "/damage <target> <amount> [type]",
     ),
     pend(
-        "teleport",
-        &[],
-        "minecraft.command.teleport",
-        2,
-        "CMD-11",
-        Category::Player,
-        "/teleport <target>",
-    ),
-    pend(
         "spreadplayers",
         &[],
         "minecraft.command.spreadplayers",
@@ -559,7 +618,7 @@ pub const CATALOGUE: &[Command] = &[
         "/rotate <target> <yaw> <pitch>",
     ),
     // -- world -------------------------------------------------------------
-    imp(
+    imp_op(
         "time",
         &[],
         "minecraft.command.time",
@@ -954,7 +1013,7 @@ pub const CATALOGUE: &[Command] = &[
         Category::Ops,
         "/cache",
     ),
-    imp(
+    imp_op(
         "aether",
         &[],
         "aether.command.aether",
@@ -962,7 +1021,7 @@ pub const CATALOGUE: &[Command] = &[
         Category::Ops,
         "/aether <subcommand>",
     ),
-    imp(
+    imp_op(
         "visibility",
         &[],
         "aether.command.visibility",
@@ -1175,7 +1234,7 @@ pub const CATALOGUE: &[Command] = &[
         Category::Economy,
         "/unlist <id>",
     ),
-    imp(
+    imp_op(
         "econ",
         &[],
         "aether.command.econ",
@@ -1280,11 +1339,17 @@ pub fn render_markdown(lang: Lang) -> String {
         "{}",
         t(
             "**Legend:** ✅ working · 🚧 pending (`CMD-nn` is the task that will implement it). \
-             **Node** is the permission node checked before the command runs; **Op** is the \
-             vanilla operator level required (0 everyone … 4 owner).",
+             **Node** is the permission node and **Op** the vanilla operator level (0 everyone … \
+             4 owner); for a pending command the stub enforces exactly them. **Gate** is what the \
+             server checks *today*: `node` (enforced node/op), `operator` (the legacy \
+             operator-only check — Node/Op are the intended target, not yet enforced), or \
+             `everyone` (no requirement; Node/Op are the intended target).",
             "**Легенда:** ✅ работает · 🚧 ожидает (`CMD-nn` — задача, которая её реализует). \
-             **Узел** — правомочие, проверяемое перед запуском команды; **Op** — требуемый \
-             ванильный уровень оператора (0 — всем … 4 — владельцу).",
+             **Узел** — правомочие, а **Op** — ванильный уровень оператора (0 — всем … 4 — \
+             владельцу); для ожидающей команды заглушка требует ровно их. **Gate** — что сервер \
+             проверяет *сегодня*: `node` (узел/op применяются), `operator` (прежняя проверка \
+             «только оператор» — узел/op это цель, пока не применяются) или `everyone` \
+             (требований нет; узел/op — цель).",
         )
     )
     .unwrap();
@@ -1320,16 +1385,17 @@ pub fn render_markdown(lang: Lang) -> String {
         writeln!(s).unwrap();
         writeln!(
             s,
-            "| {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} |",
             t("Command", "Команда"),
             t("Aliases", "Синонимы"),
             t("Status", "Статус"),
+            t("Gate", "Gate"),
             t("Node", "Узел"),
             t("Op", "Op"),
             t("Usage", "Использование"),
         )
         .unwrap();
-        writeln!(s, "| --- | --- | --- | --- | --- | --- |").unwrap();
+        writeln!(s, "| --- | --- | --- | --- | --- | --- | --- |").unwrap();
         for c in CATALOGUE.iter().filter(|c| c.category == *cat) {
             let aliases = if c.aliases.is_empty() {
                 "–".to_string()
@@ -1348,8 +1414,9 @@ pub fn render_markdown(lang: Lang) -> String {
             };
             writeln!(
                 s,
-                "| `/{name}` | {aliases} | {status} | `{node}` | {op} | `{usage}` |",
+                "| `/{name}` | {aliases} | {status} | `{gate}` | `{node}` | {op} | `{usage}` |",
                 name = c.name,
+                gate = c.gate.key(),
                 node = c.node,
                 op = c.op,
                 usage = c.usage,
@@ -1375,7 +1442,7 @@ impl Category {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::{registry, tree};
+    use crate::commands::tree::{self, Requirement};
 
     /// Every name and alias in the catalogue, in order.
     fn catalogue_names() -> Vec<&'static str> {
@@ -1449,32 +1516,62 @@ mod tests {
         }
     }
 
+    /// The tree node for `name`, or a panic naming the missing command.
+    fn command_node(name: &str) -> &'static tree::Node {
+        tree::tree()
+            .commands()
+            .iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("`{name}` has no tree node"))
+    }
+
     #[test]
-    fn the_pending_half_matches_the_registry() {
-        // The drift guard: `registry::CORE` is the pending list the tree and
-        // the stub reply read, so a catalogue entry that disagrees with it (or
-        // is missing from it) fails here rather than shipping a stale doc.
-        for c in CATALOGUE.iter().filter(|c| c.status == Status::Pending) {
-            let e = registry::find(c.name)
-                .unwrap_or_else(|| panic!("pending `{}` is missing from registry::CORE", c.name));
-            assert_eq!(e.name, c.name);
-            assert_eq!(e.aliases, c.aliases, "{}: aliases", c.name);
-            assert_eq!(e.node, c.node, "{}: node", c.name);
-            assert_eq!(e.op, c.op, "{}: op", c.name);
-            assert_eq!(e.task, c.task, "{}: task", c.name);
-            assert_eq!(e.group, c.category.key(), "{}: category", c.name);
+    fn an_implemented_entry_gate_matches_the_tree() {
+        // The drift guard: the catalogue's `gate` must describe what the tree
+        // actually does, so an implemented command never claims a node/op it
+        // does not enforce. A gate that changes without the catalogue (or the
+        // reverse) fails here.
+        for c in CATALOGUE.iter().filter(|c| c.status == Status::Implemented) {
+            let req = &command_node(c.name).requirement;
+            match (c.gate, req) {
+                (Gate::Everyone, Requirement::None) => {}
+                (Gate::Operator, Requirement::Fn(_)) => {}
+                (Gate::Node, Requirement::Level { op, node }) => {
+                    assert_eq!(op, &c.op, "{}: op level", c.name);
+                    assert_eq!(node, &c.node, "{}: permission node", c.name);
+                }
+                _ => panic!(
+                    "`{}` claims gate {:?} but the tree enforces {:?}",
+                    c.name,
+                    c.gate,
+                    requirement_kind(req)
+                ),
+            }
         }
-        for e in registry::CORE {
-            let c = CATALOGUE
-                .iter()
-                .find(|c| c.name == e.name)
-                .unwrap_or_else(|| panic!("registry::CORE entry `{}` is missing", e.name));
-            assert_eq!(
-                c.status,
-                Status::Pending,
-                "`{}` is in registry::CORE but the catalogue calls it implemented",
-                e.name
-            );
+    }
+
+    #[test]
+    fn a_pending_entry_gate_matches_the_tree() {
+        // A pending command is a stub: the tree enforces exactly its node/op,
+        // and answers `not implemented yet (CMD-nn)`.
+        for c in CATALOGUE.iter().filter(|c| c.status == Status::Pending) {
+            let req = &command_node(c.name).requirement;
+            match req {
+                Requirement::Level { op, node } => {
+                    assert_eq!(op, &c.op, "{}: op level", c.name);
+                    assert_eq!(node, &c.node, "{}: permission node", c.name);
+                }
+                _ => panic!("pending `{}` is not a node/op stub", c.name),
+            }
+        }
+    }
+
+    /// A readable label for a requirement, for the panic above.
+    fn requirement_kind(req: &Requirement) -> &'static str {
+        match req {
+            Requirement::None => "no requirement",
+            Requirement::Fn(_) => "an operator check",
+            Requirement::Level { .. } => "a node/op level",
         }
     }
 
