@@ -278,9 +278,10 @@ impl Default for PluginsConfig {
 ///   section the player cannot see, even after turning or moving a little, is
 ///   sent as solid stone instead of its real blocks.
 ///
-/// The permission node [`crate::ANTIXRAY_BYPASS_PERMISSION`] (currently held
-/// by operators) lets a player see everything; so does
-/// [`Self::bypass_players`] and `/visibility off`.
+/// **Operators are not bypassed automatically.** Bypass is only ever explicit:
+/// the [`crate::ANTIXRAY_BYPASS_PERMISSION`] node granted through
+/// [`PermissionsConfig::grants`], a name in [`Self::bypass_players`], or the
+/// `/visibility off` / `/spectate xray off` per-player toggles.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct AntiXrayConfig {
@@ -609,9 +610,49 @@ pub struct Config {
     pub operators: Vec<String>,
     /// Names allowed to join at all. Empty lets anyone in.
     pub whitelist: Vec<String>,
+    /// Explicit per-player permission grants (the CMD-01 store's stand-in).
+    pub permissions: PermissionsConfig,
     /// The generated-column cache. See [`crate::gencache`].
     #[serde(default)]
     pub cache: CacheSection,
+}
+
+/// Explicit per-player permission grants, for the nodes the operator wants to
+/// hand out by name before the real permission store (CMD-01) lands.
+///
+/// **Being an operator does not imply a node here.** A grant is a deliberate
+/// `"name:node"` entry, so an operator can be left *without* a privilege
+/// (notably `aether.antixray.bypass`, so they see exactly what a normal player
+/// sees) and a non-operator can be given one. The name may be `name@address`
+/// to require the connection address, exactly like [`Config::operators`].
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct PermissionsConfig {
+    /// `"name:node"` entries; the last `:` separates the name from the node.
+    pub grants: Vec<String>,
+}
+
+impl PermissionsConfig {
+    /// Whether `name`, connecting from `ip`, is explicitly granted `node`.
+    /// Names compare case-insensitively; an entry with an address also needs
+    /// that address, matching [`Config::is_operator`].
+    pub fn granted(&self, name: &str, ip: Option<std::net::IpAddr>, node: &str) -> bool {
+        self.grants.iter().any(|entry| {
+            let Some((who, granted)) = entry.rsplit_once(':') else {
+                return false;
+            };
+            if !granted.eq_ignore_ascii_case(node) {
+                return false;
+            }
+            match who.split_once('@') {
+                Some((n, addr)) => {
+                    n.eq_ignore_ascii_case(name)
+                        && ip.is_some_and(|ip| addr.trim().parse::<std::net::IpAddr>() == Ok(ip))
+                }
+                None => who.eq_ignore_ascii_case(name),
+            }
+        })
+    }
 }
 
 impl Config {
@@ -915,6 +956,14 @@ operators = []
 # Names allowed to join; empty lets anyone in. AETHER_WHITELIST overrides it.
 whitelist = []
 
+[permissions]
+# Explicit per-player node grants, "name:node" (name may be "name@address").
+# Being an operator does NOT imply a node: grant one here to give a privilege
+# an operator would not otherwise have (e.g. "root:aether.antixray.bypass"),
+# or omit it so an operator stays under a protection and can watch it work.
+# This is the stand-in for the CMD-01 permission store.
+grants = []
+
 [server]
 # Loopback by default: this is an offline, unauthenticated preview server.
 # Set host = "0.0.0.0" only if you understand it will accept LAN/internet peers.
@@ -1043,7 +1092,10 @@ mode = "engine"          # "engine" (buried ores) or "culling" (sections)
 # minecraft: namespace.
 hidden_blocks = []
 worlds = []              # world-dir names this applies to; empty = all
-bypass_players = []      # names always allowed to see everything
+# Names always allowed to see everything. Operators are NOT bypassed by
+# default: grant the "aether.antixray.bypass" node under [permissions], list a
+# name here, or use /visibility off (and /spectate xray off while spectating).
+bypass_players = []
 
 # culling-mode only:
 margin_blocks = 5        # "could see it if he turned or stepped" sphere, in blocks
@@ -1162,6 +1214,38 @@ mod tests {
         assert_eq!(cfg.auth.mode, AuthMode::Hybrid);
         assert_eq!(cfg.auth.lookup_timeout_ms, 250);
         assert_eq!(cfg.auth.on_lookup_failure, LookupFailure::Deny);
+    }
+
+    #[test]
+    fn a_permission_grant_is_explicit_and_address_bound() {
+        use std::net::IpAddr;
+        let ip: Option<IpAddr> = Some("10.0.0.7".parse().unwrap());
+        let cfg: Config = toml::from_str(
+            "[permissions]\ngrants = [\"root:aether.antixray.bypass\", \"Bob@10.0.0.7:aether.antixray.bypass\"]\n",
+        )
+        .unwrap();
+        // Granted only when the node matches, case-insensitively.
+        assert!(cfg
+            .permissions
+            .granted("ROOT", None, "aether.antixray.bypass"));
+        assert!(!cfg.permissions.granted("root", None, "some.other.node"));
+        assert!(!cfg
+            .permissions
+            .granted("alice", None, "aether.antixray.bypass"));
+        // An address-bound grant needs the address.
+        assert!(cfg.permissions.granted("bob", ip, "aether.antixray.bypass"));
+        assert!(!cfg.permissions.granted(
+            "bob",
+            Some("10.0.0.8".parse().unwrap()),
+            "aether.antixray.bypass"
+        ));
+        // A malformed entry (no colon) grants nothing.
+        let cfg: Config = toml::from_str("[permissions]\ngrants = [\"root\"]\n").unwrap();
+        assert!(!cfg
+            .permissions
+            .granted("root", None, "aether.antixray.bypass"));
+        // Default: no grants at all.
+        assert!(Config::default().permissions.grants.is_empty());
     }
 
     #[test]

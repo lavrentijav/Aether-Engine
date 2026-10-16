@@ -160,6 +160,9 @@ impl ServerEvent<'_> {
                 y: *y,
                 z: *z,
             }),
+            // Codecs before 1.19 have no action-bar overlay, so the status line
+            // is shown as an ordinary chat line rather than vanishing.
+            ServerEvent::ActionBar(text) => Some(ServerEvent::Chat(text.clone())),
             _ => None,
         }
     }
@@ -262,6 +265,12 @@ pub enum ServerEvent<'a> {
     },
     /// A chat line, already formatted as plain text.
     Chat(String),
+    /// A status line above the hotbar, already formatted as plain text.
+    ///
+    /// From 1.19 this is System Chat with the action-bar overlay flag set; on
+    /// older codecs [`ServerEvent::legacy`] rewrites it to a chat line, so the
+    /// vanished staff indicator shows in every protocol.
+    ActionBar(String),
     /// Release the client's block prediction for `seq`.
     ///
     /// From 1.19 on the client applies a placement or break locally before
@@ -758,6 +767,10 @@ pub enum GameMode {
     /// The client fills its own inventory and blocks break instantly.
     #[default]
     Creative,
+    /// No collision and no interaction with the world; the admin flies freely
+    /// and mobs ignore them. Entered by `/spectate`, which saves the previous
+    /// mode and restores it on `/spectate off`.
+    Spectator,
 }
 
 impl GameMode {
@@ -766,6 +779,7 @@ impl GameMode {
         match self {
             GameMode::Survival => 0,
             GameMode::Creative => 1,
+            GameMode::Spectator => 3,
         }
     }
 
@@ -778,6 +792,12 @@ impl GameMode {
     pub fn server_grants_drops(self) -> bool {
         matches!(self, GameMode::Survival)
     }
+
+    /// Whether the mode is flight-capable and non-colliding — spectator and
+    /// creative, the two modes that may float through the world.
+    pub fn flies(self) -> bool {
+        matches!(self, GameMode::Creative | GameMode::Spectator)
+    }
 }
 
 impl std::str::FromStr for GameMode {
@@ -786,8 +806,9 @@ impl std::str::FromStr for GameMode {
         match s.trim().to_ascii_lowercase().as_str() {
             "survival" | "0" => Ok(GameMode::Survival),
             "creative" | "1" => Ok(GameMode::Creative),
+            "spectator" | "3" => Ok(GameMode::Spectator),
             other => Err(format!(
-                "`{other}` is not a game mode — use survival or creative"
+                "`{other}` is not a game mode — use survival, creative or spectator"
             )),
         }
     }

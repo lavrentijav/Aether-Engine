@@ -535,7 +535,115 @@ mod imp {
             // the slot. When it lands, this reads that model.
             false
         }
+
+        // --- Staff accountability (the native `staff` plugin) --------------
+
+        fn staff_set_vanished(&self, _plugin: &str, player: u64, vanished: bool) {
+            if let Some(handle) = self.registry.by_entity(player as i32) {
+                crate::staff::set_vanished(&handle, vanished, &self.registry, &*self.world);
+            }
+        }
+
+        fn staff_is_vanished(&self, _plugin: &str, player: u64) -> bool {
+            self.registry
+                .by_entity(player as i32)
+                .is_some_and(|h| h.staff().vanished())
+        }
+
+        fn staff_set_sees_vanished(&self, _plugin: &str, player: u64, see: bool) {
+            if let Some(handle) = self.registry.by_entity(player as i32) {
+                crate::staff::set_sees_vanished(&handle, see, &self.registry, &*self.world);
+            }
+        }
+
+        fn staff_is_spectating(&self, _plugin: &str, player: u64) -> bool {
+            self.registry
+                .by_entity(player as i32)
+                .is_some_and(|h| h.staff().spectating())
+        }
+
+        fn staff_enter_spectate(
+            &self,
+            _plugin: &str,
+            player: u64,
+            target: Option<u64>,
+        ) -> Result<(), String> {
+            let handle = self
+                .registry
+                .by_entity(player as i32)
+                .ok_or("that player is not online")?;
+            let target = match target {
+                Some(t) => Some(
+                    self.registry
+                        .by_entity(t as i32)
+                        .ok_or("that target is not online")?,
+                ),
+                None => None,
+            };
+            crate::staff::enter_spectate(&handle, &self.registry, &self.world, target.as_deref())
+        }
+
+        fn staff_leave_spectate(&self, _plugin: &str, player: u64) -> Result<(), String> {
+            let handle = self
+                .registry
+                .by_entity(player as i32)
+                .ok_or("that player is not online")?;
+            crate::staff::leave_spectate(&handle, &self.registry, &self.world)
+        }
+
+        fn staff_set_xray_level(
+            &self,
+            _plugin: &str,
+            player: u64,
+            level: &str,
+        ) -> Result<(), String> {
+            let handle = self
+                .registry
+                .by_entity(player as i32)
+                .ok_or("that player is not online")?;
+            let parsed = crate::staff::AntiXrayLevel::parse(level).ok_or_else(|| {
+                format!("`{level}` is not a level — use off, engine, culling or a number")
+            })?;
+            crate::staff::set_xray_level(&handle, parsed, &*self.world);
+            Ok(())
+        }
+
+        fn staff_actionbar(&self, _plugin: &str, player: u64, text: &str) {
+            if let Some(handle) = self.registry.by_entity(player as i32) {
+                handle.emit(
+                    &crate::protocol::ServerEvent::ActionBar(text.to_string()),
+                    &*self.world,
+                );
+            }
+        }
+
+        fn staff_journal(&self, _plugin: &str, actor: u64, action: &str, detail: &str) {
+            // `actor` is the acting player's entity id; the journal keys by
+            // UUID, so resolve it here. An unknown player (gone already) is the
+            // server actor, which is honest rather than inventing an identity.
+            let uuid = self
+                .registry
+                .by_entity(actor as i32)
+                .map(|h| h.uuid)
+                .unwrap_or(0);
+            // A plugin-defined journal event under the staff tag; the payload
+            // is `action\x1fdetail`, opaque to the core.
+            let mut bytes = Vec::with_capacity(action.len() + detail.len() + 1);
+            bytes.extend_from_slice(action.as_bytes());
+            bytes.push(0x1f);
+            bytes.extend_from_slice(detail.as_bytes());
+            let _ = self.world.journal().append(
+                aether_api::JournalActor(uuid),
+                aether_world::journal::EventBody::Custom {
+                    tag: STAFF_JOURNAL_TAG,
+                    bytes,
+                },
+            );
+        }
     }
+
+    /// The custom journal tag the staff plugin's audit events use.
+    pub const STAFF_JOURNAL_TAG: u8 = aether_world::journal::event::TAG_CUSTOM_MIN;
 
     /// Dispatch every command a host callback deferred, once no host lock is
     /// held. Player commands go through the core dispatcher (the same gate as
@@ -913,6 +1021,15 @@ mod imp {
             grant_sink,
             aether_menus_plugin::registration(),
             "native menus",
+        );
+        // The staff plugin is independent of the SDK; it self-registers its
+        // commands and drives the core's `staff_*` hooks.
+        install_native_one(
+            host,
+            cfg,
+            grant_sink,
+            aether_staff_plugin::registration(),
+            "native staff",
         );
 
         // The admin web interface is the one native plugin that needs the live

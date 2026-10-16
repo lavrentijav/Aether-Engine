@@ -35,6 +35,7 @@ pub mod proto;
 pub mod protocol;
 pub mod rewards;
 pub mod session;
+pub mod staff;
 pub mod stash;
 pub mod stored;
 pub mod visibility;
@@ -529,9 +530,10 @@ fn warn_if_exposed(cfg: &Config) {
 
 /// The permission node that lets a player bypass anti-xray.
 ///
-/// Until the permission store (CMD-01) lands, a player's only levels are 4 (an
-/// operator) and 0 (everyone else), so this node is effectively
-/// [`is_operator`]; it is named now so the store can resolve it later.
+/// **Not implied by being an operator.** Until the permission store (CMD-01)
+/// lands, it is granted explicitly through `[permissions] grants` (see
+/// [`config::PermissionsConfig`]); the node is named here so the store can
+/// resolve it without a rename later.
 pub const ANTIXRAY_BYPASS_PERMISSION: &str = "aether.antixray.bypass";
 
 /// The `[anti_xray]` settings, or the defaults (off) before startup installs
@@ -585,6 +587,9 @@ pub fn anti_xray_enabled() -> bool {
 /// A one-line description of the active anti-xray configuration, for the
 /// startup log — so an operator can see at a glance which mode is live and for
 /// which worlds, rather than inferring it from a silent config.
+///
+/// It reports the explicit bypass list, never "operators bypass": operators are
+/// not bypassed automatically (see [`anti_xray_bypass`], SP1).
 pub fn anti_xray_summary(cfg: &config::Config) -> String {
     use config::AntiXrayMode;
     let a = &cfg.anti_xray;
@@ -604,9 +609,9 @@ pub fn anti_xray_summary(cfg: &config::Config) -> String {
         );
     }
     let bypass = if a.bypass_players.is_empty() {
-        "operators bypass".to_string()
+        "no automatic bypass".to_string()
     } else {
-        format!("operators + {} bypass", a.bypass_players.join(", "))
+        format!("bypass: {}", a.bypass_players.join(", "))
     };
     match a.mode {
         AntiXrayMode::Engine => format!(
@@ -620,24 +625,48 @@ pub fn anti_xray_summary(cfg: &config::Config) -> String {
     }
 }
 
-/// Whether `handle` may see everything: an explicit `/visibility off`, the
-/// [`ANTIXRAY_BYPASS_PERMISSION`] node (operators, until CMD-01), or a name in
-/// `[anti_xray] bypass_players`.
+/// Whether `handle` may see everything.
+///
+/// **Being an operator is not enough.** Bypass is always explicit: the
+/// `/spectate xray` override, the per-player `/visibility off` toggle, the
+/// [`ANTIXRAY_BYPASS_PERMISSION`] node granted through `[permissions]`, or a
+/// name in `[anti_xray] bypass_players`. An operator who wants to watch the
+/// protection work is therefore left under it by default — and can turn it off
+/// with `/visibility off` when they need to.
 pub fn anti_xray_bypass(handle: &players::PlayerHandle) -> bool {
-    if handle.visibility().bypass {
-        return true;
-    }
-    let cfg = match CONFIG.get() {
-        Some(c) => c,
-        None => return false,
+    let (node, listed) = match CONFIG.get() {
+        Some(c) => (
+            c.permissions
+                .granted(&handle.name, handle.ip, ANTIXRAY_BYPASS_PERMISSION),
+            c.anti_xray
+                .bypass_players
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(&handle.name)),
+        ),
+        None => (false, false),
     };
-    if cfg.is_operator(&handle.name, handle.ip) {
-        return true;
+    bypass_decision(
+        handle.staff().xray(),
+        handle.visibility().bypass,
+        node || listed,
+    )
+}
+
+/// The bypass decision itself, without a handle, so it can be tested and
+/// reused: the `/spectate xray` override wins over everything, then the
+/// explicit per-player toggle or grant.
+///
+/// `Off` shows everything; `engine`/`culling`/`<margin>` *force anti-xray on*
+/// even for someone who would otherwise bypass it; `Default` falls back to the
+/// explicit toggle/grant.
+pub fn bypass_decision(level: staff::AntiXrayLevel, toggle: bool, explicit_grant: bool) -> bool {
+    match level {
+        staff::AntiXrayLevel::Off => true,
+        staff::AntiXrayLevel::Engine
+        | staff::AntiXrayLevel::Culling
+        | staff::AntiXrayLevel::Margin(_) => false,
+        staff::AntiXrayLevel::Default => toggle || explicit_grant,
     }
-    cfg.anti_xray
-        .bypass_players
-        .iter()
-        .any(|n| n.eq_ignore_ascii_case(&handle.name))
 }
 
 /// The chunk radius kept loaded around a player, from the config.
@@ -682,5 +711,37 @@ mod tests {
         cfg.server.world_dir = "beta".to_string();
         let s = anti_xray_summary(&cfg);
         assert!(s.contains("off for this world"), "{s}");
+
+        // No "operators bypass": SP1 made bypass explicit only.
+        let mut cfg = config::Config::default();
+        cfg.anti_xray.enabled = true;
+        let s = anti_xray_summary(&cfg);
+        assert!(s.contains("no automatic bypass"), "{s}");
+        assert!(!s.contains("operators bypass"), "{s}");
+    }
+
+    /// An operator with neither the toggle nor a grant is **not** bypassed, and
+    /// each explicit path works; a forced spectate level beats a grant.
+    #[test]
+    fn bypass_is_only_explicit() {
+        use super::staff::AntiXrayLevel;
+        // The regression this covers: previously `is_operator` bypassed an
+        // operator, so they could not watch the anti-xray protection work.
+        assert!(!bypass_decision(AntiXrayLevel::Default, false, false));
+        // `/visibility off` (the per-player toggle).
+        assert!(bypass_decision(AntiXrayLevel::Default, true, false));
+        // The `aether.antixray.bypass` node or `[anti_xray] bypass_players`.
+        assert!(bypass_decision(AntiXrayLevel::Default, false, true));
+        // `/spectate xray off`.
+        assert!(bypass_decision(AntiXrayLevel::Off, false, false));
+        // The override wins: an explicitly-granted admin still sees masking at
+        // a forced level, which is the point of per-admin control.
+        for level in [
+            AntiXrayLevel::Engine,
+            AntiXrayLevel::Culling,
+            AntiXrayLevel::Margin(8),
+        ] {
+            assert!(!bypass_decision(level, true, true), "{level:?}");
+        }
     }
 }

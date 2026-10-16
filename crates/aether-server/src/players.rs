@@ -92,6 +92,9 @@ pub struct PlayerHandle {
     /// The last measured keep-alive round trip, in milliseconds. Read by the
     /// `%ping%` placeholder; `0` until the first reply arrives.
     ping_ms: std::sync::atomic::AtomicU32,
+    /// Staff accountability state: vanish, spectate and the anti-xray
+    /// override. See [`crate::staff`].
+    staff: crate::staff::StaffState,
     /// Per-player rate limit on chat/command logging. See [`crate::chatlog`].
     chat_log: Mutex<crate::chatlog::LogLimiter>,
 }
@@ -148,6 +151,11 @@ impl PlayerHandle {
     /// Borrow this client's visibility-culling state.
     pub fn visibility(&self) -> std::sync::MutexGuard<'_, crate::visibility::State> {
         self.visibility.lock().unwrap()
+    }
+
+    /// This player's staff state (vanish, spectate, anti-xray override).
+    pub fn staff(&self) -> &crate::staff::StaffState {
+        &self.staff
     }
 
     /// Whether this client runs the full, server-authoritative gameplay.
@@ -493,6 +501,7 @@ impl PlayerHandle {
             sidebar: Mutex::new(None),
             tab: Mutex::new(None),
             ping_ms: std::sync::atomic::AtomicU32::new(0),
+            staff: crate::staff::StaffState::default(),
             chat_log: Mutex::new(crate::chatlog::LogLimiter::new()),
         })
     }
@@ -539,6 +548,7 @@ impl Registry {
             sidebar: Mutex::new(None),
             tab: Mutex::new(None),
             ping_ms: std::sync::atomic::AtomicU32::new(0),
+            staff: crate::staff::StaffState::default(),
             chat_log: Mutex::new(crate::chatlog::LogLimiter::new()),
         });
         self.players

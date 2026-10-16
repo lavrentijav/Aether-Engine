@@ -352,7 +352,12 @@ pub fn heal(handle: &PlayerHandle) -> Vec<String> {
 /// `/visibility [on|off]`.
 pub fn visibility(args: &[&str], handle: &PlayerHandle, world: &DemoWorld) -> Vec<String> {
     let action = args.first().copied();
-    let (bypass, reply) = {
+    // `/visibility off` is the explicit per-player bypass toggle (an alias kept
+    // alongside `/spectate xray off`); `/visibility status` reports the
+    // effective state for this player. Operators are **not** bypassed
+    // implicitly — see `crate::anti_xray_bypass`. `reveal` is set only by an
+    // explicit turn-off, so `/visibility status` never re-sends anything.
+    let (reveal, status) = {
         let mut st = handle.visibility();
         match action {
             Some("on") => {
@@ -360,31 +365,43 @@ pub fn visibility(args: &[&str], handle: &PlayerHandle, world: &DemoWorld) -> Ve
                 // A bypassed player is skipped on the tick, so force the next
                 // search when culling comes back.
                 st.mark_dirty();
-                (false, "Visibility culling on".to_string())
+                (false, false)
             }
             Some("off") => {
                 st.bypass = true;
-                (
-                    true,
-                    "Visibility culling off: you are sent every section".to_string(),
-                )
+                (true, false)
             }
-            _ => (
-                st.bypass,
-                format!(
-                    "Visibility culling is {}",
-                    if st.bypass { "off" } else { "on" }
-                ),
-            ),
+            // The new subcommand: the live, effective state for this player.
+            Some("status") => (false, true),
+            // The bare readback keeps its old wording.
+            None => (false, false),
+            Some(other) => return vec![format!("/visibility on|off|status (not `{other}`)")],
         }
     };
     // Turning culling off must reveal the columns already sent as stone, not
     // wait for them to re-stream. Done with the visibility lock released:
     // re-encoding a column takes it again.
-    if bypass {
+    if reveal {
         crate::visibility::reveal_all(handle, world);
     }
-    vec![reply]
+    if status {
+        return vec![crate::visibility::player_status(handle)];
+    }
+    // The plain toggle replies stay as they were: `on`/`off` change the
+    // per-player bypass flag, which the server-level enable sits apart from.
+    vec![match action {
+        Some("on") => "Visibility culling on".to_string(),
+        Some("off") => "Visibility culling off: you are sent every section".to_string(),
+        // Bare `/visibility`.
+        _ => format!(
+            "Visibility culling is {}",
+            if handle.visibility().bypass {
+                "off"
+            } else {
+                "on"
+            }
+        ),
+    }]
 }
 
 fn parse_mode(s: &str) -> Option<GameMode> {
