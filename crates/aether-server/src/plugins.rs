@@ -414,8 +414,7 @@ mod imp {
             return;
         }
         let registration = aether_webadmin::registration();
-        let caps =
-            effective_capabilities(&registration.manifest.capabilities, &entry.capabilities);
+        let caps = effective_capabilities(&registration.manifest.capabilities, &entry.capabilities);
         let file = ManifestFile {
             dir: std::path::PathBuf::new(),
             manifest: registration.manifest,
@@ -452,8 +451,7 @@ mod imp {
         }
         // Native plugins ask the operator for no host capabilities of their
         // own; a service method still checks its *caller's* capabilities.
-        let caps =
-            effective_capabilities(&registration.manifest.capabilities, &entry.capabilities);
+        let caps = effective_capabilities(&registration.manifest.capabilities, &entry.capabilities);
         let file = ManifestFile {
             // Native plugins are compiled in; there is no directory.
             dir: std::path::PathBuf::new(),
