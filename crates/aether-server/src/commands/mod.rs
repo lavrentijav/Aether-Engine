@@ -21,10 +21,12 @@
 
 pub mod args;
 pub mod coordinates;
+pub mod feedback;
 pub mod pager;
 pub mod query;
 pub mod registry;
 mod snbt;
+pub mod source;
 pub mod tree;
 
 use aether_api::{JournalActor, Ledger};
@@ -96,6 +98,8 @@ pub const RESERVED_COMMANDS: &[&str] = &[
     "stash",
     "audit",
     "cache",
+    "help",
+    "?",
     // economy
     "balance",
     "bal",
@@ -119,8 +123,8 @@ pub fn dispatch(
     handle: &PlayerHandle,
     registry: &SharedRegistry,
     world: &DemoWorld,
-) -> Option<Reply> {
-    tree::execute(text, handle, registry, world)
+) -> Option<feedback::Feedback> {
+    tree::execute_feedback(text, handle, registry, world)
 }
 
 /// The history, `/help` and `/aether` commands — the ones that live in this
@@ -128,17 +132,33 @@ pub fn dispatch(
 pub(crate) fn core_nodes() -> Vec<Node> {
     vec![
         tree::simple("inspect", &["i"], Requirement::None, exec_inspect),
-        tree::greedy("lookup", &["l"], Requirement::None, exec_lookup),
-        tree::greedy("rollback", &["rb"], Requirement::None, exec_rollback),
-        tree::greedy("page", &["pg"], Requirement::None, exec_page),
+        tree::with_usage(
+            tree::greedy("lookup", &["l"], Requirement::None, exec_lookup),
+            "[filters]",
+        ),
+        tree::with_usage(
+            tree::greedy("rollback", &["rb"], Requirement::None, exec_rollback),
+            "[filters]",
+        ),
+        tree::with_usage(
+            tree::greedy("page", &["pg"], Requirement::None, exec_page),
+            "next | prev | <number>",
+        ),
         tree::simple("inv", &["inventory"], Requirement::None, exec_inventory),
         tree::simple("stash", &[], Requirement::None, exec_stash),
         tree::simple("audit", &[], Requirement::None, exec_audit),
         tree::simple("cache", &[], Requirement::None, exec_cache),
-        // `/help [command]` takes an optional argument, so it is greedy until
-        // the tree-driven `/help` (CMD-05) replaces it.
-        tree::greedy("help", &["?"], Requirement::None, exec_help),
-        tree::greedy("aether", &[], Requirement::Fn(require_admin), exec_aether),
+        // `/help [command]` takes an optional command word; the argument is
+        // greedy so a name with no arguments still parses, then resolves it
+        // against the tree (CMD-05).
+        tree::with_usage(
+            tree::greedy("help", &["?"], Requirement::None, exec_help),
+            "[command]",
+        ),
+        tree::with_usage(
+            tree::greedy("aether", &[], Requirement::Fn(require_admin), exec_aether),
+            "auth migrate <name>",
+        ),
     ]
 }
 
@@ -309,33 +329,79 @@ pub fn permitted_level(level: u8, node: &str, op: u8) -> bool {
     crate::permissions::check(crate::permissions::Level::new(level), node, op)
 }
 
-/// `/help [command]` — list the commands that are specified but not implemented yet, or explain one.
+/// `/help [command]` — every command the caller may run, or one command's
+/// usage.
 ///
-/// This is a stop-gap until the real tree-driven `/help` (CMD-05): it makes the catalogue
-/// discoverable while each command is stubbed with its own `not implemented yet (CMD-nn)`.
+/// This is generated from the command tree, not a hand-kept list: the same
+/// nodes the parser dispatches on decide what is listed, so a newly registered
+/// command appears here (and a mis-declared one cannot be missing from the
+/// grammar yet present in the help).
+///
+/// * no argument: every command the caller's permission level allows, paged
+///   through [`pager::Pager`] so `/page next` works as for any other answer.
+/// * a command or alias: its usage, built from the tree (or the node's
+///   explicit usage), with its aliases spelled out.
+///
+/// A command the caller may not run reads exactly like a name no command
+/// owns — this is the permission-filtering guarantee: `/help` must not let a
+/// non-op enumerate the op-only catalogue.
+///
+/// `/help <category>` is deliberately not handled here: categories are the
+/// CMD-48 command catalogue's to define, and it builds its `/help` listing on
+/// this one.
 fn help(args: &[&str], handle: &PlayerHandle) -> Reply {
-    if let Some(name) = args.first() {
-        return match registry::find(name) {
-            Some(e) => Reply::one(format!(
-                "/{} — {} (op level {}), planned in {}",
-                e.name, e.node, e.op, e.task
-            )),
-            None => Reply::one(format!(
-                "no entry for `{name}`; /help lists the commands still to come"
-            )),
-        };
+    let cmd_tree = tree::tree();
+    let Some(word) = args.first() else {
+        return help_list(cmd_tree, handle);
+    };
+    // Either no such command, or one this caller cannot see: the same answer
+    // keeps the second case indistinguishable from the first.
+    if let Some(node) = cmd_tree
+        .find_command(word)
+        .filter(|node| tree::check(&node.requirement, handle).is_ok())
+    {
+        return Reply::one(help_line(node, true));
     }
-    let mut lines = registry::help_lines();
-    lines.push(format!(
-        "({} commands pending, {} runnable now)",
-        registry::CORE.len(),
-        if crate::is_operator(handle) {
-            "all"
+    Reply::one(feedback::lang::UNKNOWN_COMMAND)
+}
+
+/// The paged list of every command `handle` may run.
+fn help_list(cmd_tree: &tree::CommandTree, handle: &PlayerHandle) -> Reply {
+    let lines: Vec<String> = cmd_tree
+        .commands()
+        .iter()
+        .filter(|node| tree::check(&node.requirement, handle).is_ok())
+        .map(|node| help_line(node, false))
+        .collect();
+    let mut s = handle.session();
+    s.pager.set("Commands", lines);
+    Reply(s.pager.render())
+}
+
+/// One `/help` line: `/name (aliases) usage`, marked if it is a stub.
+///
+/// `one` selects the longer "not implemented yet (CMD-nn)" note used when the
+/// line is the whole answer; the list uses a short mark to stay scannable.
+fn help_line(node: &tree::Node, one: bool) -> String {
+    let mut line = format!("/{}", node.name);
+    if !node.aliases.is_empty() {
+        line.push_str(" (");
+        line.push_str(&node.aliases.join(", "));
+        line.push(')');
+    }
+    let usage = tree::usage_of(node);
+    if !usage.is_empty() {
+        line.push(' ');
+        line.push_str(&usage);
+    }
+    if let Some(task) = node.task {
+        if one {
+            line.push_str(&format!(" — not implemented yet ({task})"));
         } else {
-            "level-0"
+            line.push_str(" (not implemented yet)");
         }
-    ));
-    Reply(lines)
+    }
+    line
 }
 
 /// `/cache` — how the generated-column cache is doing.

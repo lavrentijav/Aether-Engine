@@ -23,3 +23,8 @@ gen 1.21.11 "" "1.21.11"
 gen 26.1 "$SY26_1" "26.1,26.1.1,26.1.2"
 gen 26.2 "$SY26_2" "26.2"
 gen 26.3 "$SY26_3" "26.3"
+
+# Block placement data — the replaceable list and the support tags — from the
+# same 1.21.11 pack. `placement.js` finds `data/minecraft` under the path.
+node tools/gen/placement.js "$ROOT/1.21.11/data/data/minecraft" \
+  > crates/aether-server/src/placement/data.rs

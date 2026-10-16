@@ -37,6 +37,11 @@ members = [
     # The staff, as a native plugin: vanish, admin spectate and per-admin
     # anti-xray control, with a journal audit trail.
     "plugins/staff",
+    # The reference native plugin (CMD-00N): the smallest complete tier-N
+    # plugin, and the template the native-plugin guide walks through. A native
+    # plugin is a normal Rust crate linked in-process, so unlike the WASM
+    # examples it is a workspace member and builds with `cargo test`.
+    "plugins/examples/hello-native",
 ]
 
 # The example plugins are separate WebAssembly components: they target

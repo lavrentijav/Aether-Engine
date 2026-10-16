@@ -700,3 +700,239 @@ fn the_service_registry_is_shared_with_the_host() {
         .unwrap();
     assert_eq!(*reg.get::<String>("shared", "0.1").unwrap(), "value");
 }
+
+/// A native plugin that logs each call to the shared backend in the same
+/// `{id}:{event}` form the WASM recorder uses, so a mixed-tier test can read
+/// one combined order out of the backend. It optionally cancels.
+struct LoggingNative {
+    cancel: bool,
+}
+
+impl NativePlugin for LoggingNative {
+    fn init(&mut self, ctx: &mut NativeContext) -> Result<(), String> {
+        ctx.log(LogLevel::Info, &format!("{}:init", ctx.id));
+        Ok(())
+    }
+
+    fn before_block_break(
+        &mut self,
+        ctx: &mut NativeContext,
+        _p: &Player,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _block: &str,
+    ) -> Decision {
+        ctx.log(LogLevel::Info, &format!("{}:before-block-break", ctx.id));
+        if self.cancel {
+            Decision::Cancel(format!("before-block-break cancelled by {}", ctx.id))
+        } else {
+            Decision::Allow
+        }
+    }
+
+    fn after_player_join(&mut self, ctx: &mut NativeContext, _p: &Player) {
+        ctx.log(LogLevel::Info, &format!("{}:after-player-join", ctx.id));
+    }
+}
+
+fn logging_native(cancel: bool) -> Box<dyn NativePlugin> {
+    Box::new(LoggingNative { cancel })
+}
+
+/// A native plugin whose `init` refuses, to prove one bad native plugin never
+/// takes the host down.
+struct FailingNative;
+
+impl NativePlugin for FailingNative {
+    fn init(&mut self, _ctx: &mut NativeContext) -> Result<(), String> {
+        Err("no thanks".to_string())
+    }
+}
+
+#[test]
+fn native_and_wasm_plugins_interleave_in_one_priority_order() {
+    let (mut h, backend) = host();
+    // Same priority (5) across tiers → ordered by id (`alpha` before `beta`);
+    // a higher-priority native plugin (`zulu`, 50) runs before both. The order
+    // is a single total order over priority then id, not per-tier.
+    let (wasm_alpha, caps, cfg) = recorder("alpha", 5, &["before-block-break"], &[], &[]);
+    h.add(&wasm_alpha, &caps, &cfg).unwrap();
+    let native_beta = native_manifest("beta", 5, &["before-block-break"], &[]);
+    h.add_native(
+        &native_beta,
+        &[],
+        &Default::default(),
+        logging_native(false),
+    )
+    .unwrap();
+    let native_zulu = native_manifest("zulu", 50, &["before-block-break"], &[]);
+    h.add_native(
+        &native_zulu,
+        &[],
+        &Default::default(),
+        logging_native(false),
+    )
+    .unwrap();
+
+    assert_eq!(
+        h.ids(),
+        vec!["zulu".to_string(), "alpha".to_string(), "beta".to_string()]
+    );
+    h.before_block_break(&player(), 0, 64, 0, "minecraft:stone");
+    assert_eq!(
+        backend.ending_with(":before-block-break"),
+        vec!["zulu", "alpha", "beta"]
+    );
+}
+
+#[test]
+fn a_native_cancel_is_seen_by_the_next_wasm_plugin() {
+    let (mut h, backend) = host();
+    // The native plugin (priority 20) cancels before the WASM one (priority 0)
+    // would run; the cancel stops the walk, exactly as a WASM cancel does.
+    let native_aaa = native_manifest("aaa", 20, &["before-block-break"], &[]);
+    h.add_native(&native_aaa, &[], &Default::default(), logging_native(true))
+        .unwrap();
+    let (wasm_bbb, caps, cfg) = recorder("bbb", 0, &["before-block-break"], &[], &[]);
+    h.add(&wasm_bbb, &caps, &cfg).unwrap();
+
+    match h.before_block_break(&player(), 0, 64, 0, "minecraft:stone") {
+        Decision::Cancel(reason) => assert!(reason.contains("aaa"), "{reason}"),
+        Decision::Allow => panic!("the native plugin should have cancelled"),
+    }
+    // `bbb` is never called: the native cancel was final for the chain.
+    assert_eq!(backend.ending_with(":before-block-break"), vec!["aaa"]);
+}
+
+#[test]
+fn a_native_init_failure_refuses_only_that_plugin() {
+    let (mut h, backend) = host();
+    let bad = native_manifest("bad", 0, &[], &[]);
+    let err = h
+        .add_native(&bad, &[], &Default::default(), Box::new(FailingNative))
+        .unwrap_err();
+    assert!(err.to_string().contains("bad"), "{err}");
+    assert!(err.to_string().contains("no thanks"), "{err}");
+    assert!(h.ids().is_empty(), "the refused plugin must not be loaded");
+
+    // The host is unharmed: a good plugin still loads and runs after it.
+    let (good, caps, cfg) = recorder("good", 0, &["after-player-join"], &[], &[]);
+    h.add(&good, &caps, &cfg).unwrap();
+    h.after_player_join(&player());
+    assert_eq!(backend.ending_with(":after-player-join"), vec!["good"]);
+}
+
+#[test]
+fn a_disabled_native_service_is_unresolved_and_returns_on_restart() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+
+    // Enabled: the provider publishes `provider.svc`, so the dependent loads.
+    let (mut h, _b) = host();
+    h.add_native(
+        &native_manifest("provider", 10, &[], &[]),
+        &[],
+        &Default::default(),
+        native(Arc::clone(&calls)),
+    )
+    .unwrap();
+    assert!(h.services().get::<u32>("provider.svc", "0.1").is_some());
+    let dependent = native_manifest("dependent", 0, &[], &["provider.svc@0.1"]);
+    h.add_native(
+        &dependent,
+        &[],
+        &Default::default(),
+        native(Arc::clone(&calls)),
+    )
+    .unwrap();
+    assert_eq!(
+        h.ids(),
+        vec!["provider".to_string(), "dependent".to_string()]
+    );
+
+    // Disabled at restart: the provider is not loaded, so its service does not
+    // resolve and the dependent is refused with a clear error.
+    let (mut h2, _b2) = host();
+    assert!(h2.services().get::<u32>("provider.svc", "0.1").is_none());
+    let err = h2
+        .add_native(
+            &dependent,
+            &[],
+            &Default::default(),
+            native(Arc::new(Mutex::new(Vec::new()))),
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("provider.svc@0.1"), "{err}");
+    assert!(h2.ids().is_empty());
+
+    // Re-enabled at restart: both load again.
+    let (mut h3, _b3) = host();
+    h3.add_native(
+        &native_manifest("provider", 10, &[], &[]),
+        &[],
+        &Default::default(),
+        native(Arc::clone(&calls)),
+    )
+    .unwrap();
+    h3.add_native(
+        &dependent,
+        &[],
+        &Default::default(),
+        native(Arc::new(Mutex::new(Vec::new()))),
+    )
+    .unwrap();
+    assert_eq!(
+        h3.ids(),
+        vec!["provider".to_string(), "dependent".to_string()]
+    );
+}
+
+#[test]
+fn a_native_command_for_a_reserved_core_name_is_refused() {
+    let backend = Arc::new(TestBackend::default());
+    let config = HostConfig {
+        reserved_commands: vec!["give".to_string()],
+        ..HostConfig::default()
+    };
+    let mut h = PluginHost::new(config, backend.clone()).unwrap();
+
+    // A native plugin that (wrongly) declares a core-owned name.
+    let mut file = native_manifest("greedy", 0, &["on-command"], &[]);
+    file.manifest.commands = vec![CommandDecl::Plain("give".to_string())];
+    h.add_native(&file, &[], &Default::default(), logging_native(false))
+        .unwrap();
+
+    // The host refuses to route it to the plugin, exactly as for a WASM one.
+    assert!(h.on_command(&player(), "give", &[]).is_none());
+    assert!(
+        backend
+            .messages()
+            .iter()
+            .any(|(id, m)| id == "host" && m.contains("refused to route built-in command `give`")),
+        "{:?}",
+        backend.messages()
+    );
+}
+
+#[test]
+fn a_native_and_a_wasm_plugin_reach_the_same_host_imports() {
+    let (mut h, backend) = host();
+    // Both tiers subscribe to after-player-join: the native plugin calls the
+    // backend directly through `NativeContext`, the WASM recorder through the
+    // generated `host::log` import. They land in the same backend, in order.
+    h.add_native(
+        &native_manifest("nat", 10, &["after-player-join"], &[]),
+        &[],
+        &Default::default(),
+        logging_native(false),
+    )
+    .unwrap();
+    let (wasm, caps, cfg) = recorder("wasm", 0, &["after-player-join"], &[], &[]);
+    h.add(&wasm, &caps, &cfg).unwrap();
+
+    h.after_player_join(&player());
+    assert_eq!(
+        backend.ending_with(":after-player-join"),
+        vec!["nat", "wasm"]
+    );
+}
