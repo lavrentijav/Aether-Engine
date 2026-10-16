@@ -14,16 +14,18 @@
 //!   coordinates may not be mixed with absolute or relative ones.
 //! * an absolute component is a double for an exact position; a block position
 //!   floors after resolving relatives.
-//! * a `vec3`/`vec2` parsed with `centerIntegers` adds `0.5` to each absolute
-//!   component so a whole number names the *centre* of its block; `vec3` does
-//!   this for X and Z only, never Y (see [`WorldCoordinate::centered`]).
+//! * a `vec3`/`vec2` parsed with `centerIntegers` adds `0.5` to an absolute
+//!   component written **without a decimal point** (so `10` names a block
+//!   centre while `10.0`/`10.` do not); `vec3` does this for X and Z only,
+//!   never Y (see [`WorldCoordinate::parse_centered`]).
 //! * a source with no position (the console) cannot resolve `~`; a source with
 //!   no rotation cannot resolve `^`.
 //!
-//! Resolution never wraps an angle: vanilla's `DefaultPosArgument.getRotation`
-//! returns the raw yaw/pitch and a command folds or clamps it itself, so
-//! `/execute rotated 270 ~` resolves to `270`, not `-90`. [`wrap_degrees`] is
-//! provided for a command that chooses to fold.
+//! A `rotation` is not wrapped: vanilla's `DefaultPosArgument.getRotation`
+//! returns the raw yaw/pitch and the command folds or clamps it itself, so
+//! `/execute rotated 270 ~` resolves to `270`, not `-90`. An `angle` **is**
+//! wrapped, because vanilla's `AngleArgument.getAngle` runs `wrapDegrees` on
+//! the result (see [`resolve_angle`]).
 
 use aether_api::Vector3 as Vec3;
 
@@ -78,15 +80,25 @@ pub enum WorldCoordinate {
 impl WorldCoordinate {
     /// Parse one component, allowing fractional absolute values.
     pub fn parse(s: &str) -> Result<Self, CoordError> {
-        Self::parse_inner(s, false)
+        Self::parse_inner(s, false, false)
     }
 
     /// Parse one block-position component: absolute values must be integers.
     pub fn parse_block(s: &str) -> Result<Self, CoordError> {
-        Self::parse_inner(s, true)
+        Self::parse_inner(s, true, false)
     }
 
-    fn parse_inner(s: &str, integer_absolute: bool) -> Result<Self, CoordError> {
+    /// Parse one `vec3`/`vec2` component with vanilla's `centerIntegers`.
+    ///
+    /// Vanilla's `CoordinateArgument.parse(reader, centerIntegers)` adds `0.5`
+    /// only when the component is absolute **and its text contains no `.`**
+    /// (so `10` becomes `10.5` but `10.0`, `10.` and `10.5` stay as written),
+    /// and never to a `~`/`^` component.
+    pub fn parse_centered(s: &str) -> Result<Self, CoordError> {
+        Self::parse_inner(s, false, true)
+    }
+
+    fn parse_inner(s: &str, integer_absolute: bool, center: bool) -> Result<Self, CoordError> {
         if let Some(rest) = s.strip_prefix('~') {
             return Ok(WorldCoordinate::Relative(parse_f64(rest, s)?));
         }
@@ -97,6 +109,12 @@ impl WorldCoordinate {
         if integer_absolute && v.fract() != 0.0 {
             return Err(CoordError::NotAnInteger(s.to_string()));
         }
+        // `centerIntegers`: a whole-number literal (no `.`) names a centre.
+        let v = if center && !s.contains('.') {
+            v + 0.5
+        } else {
+            v
+        };
         Ok(WorldCoordinate::Absolute(v))
     }
 
@@ -115,19 +133,6 @@ impl WorldCoordinate {
         match self {
             WorldCoordinate::Local(v) => Some(v),
             _ => None,
-        }
-    }
-
-    /// The `centerIntegers` transform: an *absolute* value gains `0.5` so a
-    /// whole number names a block centre; a `~`/`^` value is left alone.
-    ///
-    /// This is vanilla's `CoordinateArgument.parse(reader, centerIntegers)`,
-    /// applied per component — `Vec3ArgumentType` centres X and Z but passes
-    /// `false` for Y.
-    pub fn centered(self) -> WorldCoordinate {
-        match self {
-            WorldCoordinate::Absolute(v) => WorldCoordinate::Absolute(v + 0.5),
-            other => other,
         }
     }
 
@@ -332,15 +337,16 @@ impl Coordinates2 {
 
 /// Resolve a single `angle` argument: absolute, or relative to source yaw.
 ///
-/// Not wrapped, for the same reason as [`Coordinates2::resolve_rotation`] —
-/// vanilla's `AngleArgument.getAngle` adds the source yaw and returns.
+/// Unlike a `rotation`, the result **is** wrapped — vanilla's
+/// `AngleArgument.getAngle` is `MathHelper.wrapDegrees(relative ? angle +
+/// source.y : angle)`, so `350` resolves to `-10`.
 pub fn resolve_angle(
     coord: WorldCoordinate,
     source: &dyn CoordinateSource,
 ) -> Result<f32, CoordError> {
     let rot = source.rotation();
     let v = coord.resolve_scalar(rot.map(|r| r.yaw as f64))? as f32;
-    Ok(v)
+    Ok(wrap_degrees(v))
 }
 
 /// The local (left, up, forward) basis for a yaw/pitch, in world space.
@@ -361,6 +367,8 @@ pub fn local_basis(rot: Rotation) -> (Vec3, Vec3, Vec3) {
 /// The axes a `swizzle` argument names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Swizzle {
+    /// The empty set: no axis.
+    Empty,
     /// `x`.
     X,
     /// `y`.
@@ -378,12 +386,13 @@ pub enum Swizzle {
 }
 
 impl Swizzle {
-    /// Parse an exact, lowercase, duplicate-free sequence of `x`/`y`/`z`.
+    /// Parse a lowercase, duplicate-free sequence of `x`/`y`/`z`.
     ///
     /// Vanilla's `SwizzleArgumentType` accepts any order and any subset
-    /// (`yx`, `zx`, `zy`, …); a duplicated axis, an unknown letter or an
-    /// uppercase letter is refused. The result is canonical (`yx` → `xy`),
-    /// because only the set of axes matters.
+    /// (`yx`, `zx`, `zy`, …), including the **empty** string (an empty axis
+    /// set); a duplicated axis, an unknown letter or an uppercase letter is
+    /// refused. The result is canonical (`yx` → `xy`), because only the set
+    /// of axes matters.
     pub fn parse(s: &str) -> Option<Swizzle> {
         let (mut x, mut y, mut z) = (false, false, false);
         for c in s.chars() {
@@ -395,6 +404,7 @@ impl Swizzle {
             }
         }
         match (x, y, z) {
+            (false, false, false) => Some(Swizzle::Empty),
             (true, false, false) => Some(Swizzle::X),
             (false, true, false) => Some(Swizzle::Y),
             (false, false, true) => Some(Swizzle::Z),
@@ -402,13 +412,13 @@ impl Swizzle {
             (true, false, true) => Some(Swizzle::XZ),
             (false, true, true) => Some(Swizzle::YZ),
             (true, true, true) => Some(Swizzle::XYZ),
-            (false, false, false) => None,
         }
     }
 
-    /// The canonical lowercase spelling.
+    /// The canonical lowercase spelling (the empty string for [`Swizzle::Empty`]).
     pub fn as_str(self) -> &'static str {
         match self {
+            Swizzle::Empty => "",
             Swizzle::X => "x",
             Swizzle::Y => "y",
             Swizzle::Z => "z",
@@ -622,25 +632,44 @@ mod tests {
     }
 
     #[test]
-    fn centering_adds_a_half_to_absolute_values_only() {
+    fn centering_adds_a_half_only_to_a_dotless_absolute() {
+        // `10` (no `.`) becomes a block centre; a written point disables it.
         assert_eq!(
-            WorldCoordinate::Absolute(10.0).centered(),
+            WorldCoordinate::parse_centered("10").unwrap(),
             WorldCoordinate::Absolute(10.5)
         );
-        // A `~`/`^` component is untouched.
         assert_eq!(
-            WorldCoordinate::Relative(10.0).centered(),
+            WorldCoordinate::parse_centered("10.0").unwrap(),
+            WorldCoordinate::Absolute(10.0)
+        );
+        assert_eq!(
+            WorldCoordinate::parse_centered("10.").unwrap(),
+            WorldCoordinate::Absolute(10.0)
+        );
+        assert_eq!(
+            WorldCoordinate::parse_centered("10.5").unwrap(),
+            WorldCoordinate::Absolute(10.5)
+        );
+        // A `~`/`^` component is never centered.
+        assert_eq!(
+            WorldCoordinate::parse_centered("~10").unwrap(),
             WorldCoordinate::Relative(10.0)
         );
         assert_eq!(
-            WorldCoordinate::Local(10.0).centered(),
+            WorldCoordinate::parse_centered("^10").unwrap(),
             WorldCoordinate::Local(10.0)
+        );
+        // `parse` (no centering) leaves an integer as written.
+        assert_eq!(
+            WorldCoordinate::parse("10").unwrap(),
+            WorldCoordinate::Absolute(10.0)
         );
     }
 
     #[test]
     fn swizzles_accept_any_order_or_subset_without_repeats() {
         for (s, want) in [
+            ("", Swizzle::Empty),
             ("x", Swizzle::X),
             ("y", Swizzle::Y),
             ("z", Swizzle::Z),
@@ -655,18 +684,18 @@ mod tests {
         ] {
             assert_eq!(Swizzle::parse(s), Some(want), "{s}");
         }
-        // Duplicates, uppercase, unknown letters and the empty string error.
-        for bad in ["xx", "xyx", "XYZ", "X", "w", "", "xy z"] {
+        // Duplicates, uppercase, unknown letters and embedded spaces error.
+        for bad in ["xx", "xyx", "XYZ", "X", "w", "xy z"] {
             assert_eq!(Swizzle::parse(bad), None, "{bad}");
         }
         // Every variant round-trips.
-        for s in ["x", "y", "z", "xy", "xz", "yz", "xyz"] {
+        for s in ["", "x", "y", "z", "xy", "xz", "yz", "xyz"] {
             assert_eq!(Swizzle::parse(s).unwrap().as_str(), s);
         }
     }
 
     #[test]
-    fn angles_resolve_without_wrapping() {
+    fn angles_resolve_wrapped() {
         let src = looking(0.0, 0.0, 0.0, 90.0, 0.0);
         assert_eq!(
             resolve_angle(WorldCoordinate::parse("45").unwrap(), &src).unwrap(),
@@ -676,10 +705,14 @@ mod tests {
             resolve_angle(WorldCoordinate::parse("~10").unwrap(), &src).unwrap(),
             100.0
         );
-        // No fold: 350 stays 350.
+        // Vanilla wraps: 350 → −10, and 90 + 350 = 440 → 80.
         assert_eq!(
             resolve_angle(WorldCoordinate::parse("350").unwrap(), &src).unwrap(),
-            350.0
+            -10.0
+        );
+        assert_eq!(
+            resolve_angle(WorldCoordinate::parse("~350").unwrap(), &src).unwrap(),
+            80.0
         );
     }
 }

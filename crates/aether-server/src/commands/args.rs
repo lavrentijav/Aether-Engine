@@ -34,9 +34,7 @@ pub struct BlockState {
 pub enum ComponentPatch {
     /// `!name`: remove the component.
     Removed(String),
-    /// `name`: the component is present with its default value.
-    Present(String),
-    /// `name=<snbt>`: the component is present with an explicit value.
+    /// `name=<snbt>`: add the component with an explicit value.
     Value(String, Nbt),
 }
 
@@ -45,6 +43,11 @@ pub enum ComponentPatch {
 /// Vanilla 1.21.11's `ItemStringReader`: an item id followed by an optional
 /// `[component=value,!component]` patch. There is no count here — a count is a
 /// separate argument (`/give … <targets> <item> [<count>]`).
+///
+/// A component's *syntax* is checked (a resource location, `=` required,
+/// no repeats); its *existence* is not, because the data-component registry
+/// that would answer that is not part of CMD-06a. A component id is carried
+/// through verbatim for the executor that owns it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ItemStack {
     /// The item type.
@@ -262,44 +265,39 @@ fn read_component(r: &mut StringReader) -> Result<String, ParseError> {
 }
 
 fn coordinates(r: &mut StringReader, block: bool, center: bool) -> Result<Coordinates, ParseError> {
-    let x = coordinate(r, block, 3)?;
-    let y = coordinate(r, block, 3)?;
-    let z = coordinate(r, block, 3)?;
-    // `Vec3ArgumentType` centers X and Z, never Y.
-    Ok(if center {
-        Coordinates::new(x.centered(), y, z.centered())
-    } else {
-        Coordinates::new(x, y, z)
-    })
+    // `Vec3ArgumentType` centers X and Z (when `centerIntegers`), never Y.
+    let x = coordinate(r, block, 3, center)?;
+    let y = coordinate(r, block, 3, false)?;
+    let z = coordinate(r, block, 3, center)?;
+    Ok(Coordinates::new(x, y, z))
 }
 
 fn coordinates2(r: &mut StringReader, center: bool) -> Result<Coordinates2, ParseError> {
-    let x = coordinate(r, false, 2)?;
-    let y = coordinate(r, false, 2)?;
     // `Vec2ArgumentType` centers both components.
-    Ok(if center {
-        Coordinates2::new(x.centered(), y.centered())
-    } else {
-        Coordinates2::new(x, y)
-    })
+    let x = coordinate(r, false, 2, center)?;
+    let y = coordinate(r, false, 2, center)?;
+    Ok(Coordinates2::new(x, y))
 }
 
 fn coordinate(
     r: &mut StringReader,
     block: bool,
     expected: u8,
+    center: bool,
 ) -> Result<WorldCoordinate, ParseError> {
     r.skip_whitespace();
     if !r.can_read() {
         return Err(ParseError::IncompletePos { expected });
     }
     let t = r.read_token();
-    if block {
+    let parsed = if block {
         WorldCoordinate::parse_block(&t)
+    } else if center {
+        WorldCoordinate::parse_centered(&t)
     } else {
         WorldCoordinate::parse(&t)
-    }
-    .map_err(coord_error)
+    };
+    parsed.map_err(coord_error)
 }
 
 fn coord_error(e: CoordError) -> ParseError {
@@ -339,21 +337,33 @@ fn parse_block_state(text: &str) -> Result<BlockState, ParseError> {
     let block = blocks::block_id_of(&base)
         .ok_or_else(|| ParseError::Argument(format!("Unknown block type '{text}'")))?;
     let id = match props_str {
+        // `stone` and `stone[]` both mean the block's default state; an empty
+        // property list is accepted, as vanilla's parser never enters the loop.
         None => BlockStateId(blocks::DEFAULT_STATE[block as usize]),
+        Some(list) if list.trim().is_empty() => BlockStateId(blocks::DEFAULT_STATE[block as usize]),
         Some(list) => {
-            if list.is_empty() {
-                return Err(ParseError::Argument(format!(
-                    "Invalid block state '{text}'"
-                )));
-            }
-            let mut pairs = Vec::new();
+            let mut pairs: Vec<(&str, &str)> = Vec::new();
+            let mut seen: Vec<&str> = Vec::new();
             for kv in list.split(',') {
-                let (k, v) = kv
-                    .split_once('=')
-                    .ok_or_else(|| ParseError::Argument(format!("Invalid block state '{text}'")))?;
-                pairs.push((k.trim(), v.trim()));
+                let Some((k, v)) = kv.split_once('=') else {
+                    // `argument.block.property.novalue`.
+                    return Err(ParseError::Argument(format!(
+                        "Expected value for property in block state '{text}'"
+                    )));
+                };
+                let (k, v) = (k.trim(), v.trim());
+                if seen.contains(&k) {
+                    // `argument.block.property.duplicate`.
+                    return Err(ParseError::Argument(format!(
+                        "Property '{k}' is already defined for block '{base}'"
+                    )));
+                }
+                seen.push(k);
+                pairs.push((k, v));
             }
             let state = props::state_with(block, &pairs).ok_or_else(|| {
+                // `argument.block.property.unknown` / `.invalid` share a body
+                // here: `props::state_with` cannot tell them apart.
                 ParseError::Argument(format!("Unknown property or value in block state '{text}'"))
             })?;
             BlockStateId(state)
@@ -389,30 +399,47 @@ fn parse_item_stack(r: &mut StringReader) -> Result<(Value, String), ParseError>
     ))
 }
 
-/// Parse the inside of an item's `[…]` patch: `name`, `name=value` or
-/// `!name`, comma-separated at the top level.
+/// Parse the inside of an item's `[…]` patch.
+///
+/// Vanilla `ItemStringReader`: every entry is either `!name` (remove) or
+/// `name=<snbt>` (add) — a bare `name` with no `=` is an error
+/// (`arguments.item.component.expected`). A component named twice is
+/// `arguments.item.component.repeated`.
 fn parse_component_patch(inner: &str, whole: &str) -> Result<Vec<ComponentPatch>, ParseError> {
     let invalid = || ParseError::Argument(format!("Invalid item components '{}'", whole));
     if inner.trim().is_empty() {
         return Err(invalid());
     }
-    let mut out = Vec::new();
+    let mut out: Vec<ComponentPatch> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     for entry in split_top_level(inner) {
         let entry = entry.trim();
         if entry.is_empty() {
             return Err(invalid());
         }
-        if let Some(rest) = entry.strip_prefix('!') {
+        let patch = if let Some(rest) = entry.strip_prefix('!') {
             let name = component_name(rest).ok_or_else(invalid)?;
-            out.push(ComponentPatch::Removed(name));
+            ComponentPatch::Removed(name)
         } else if let Some((name, value)) = entry.split_once('=') {
             let name = component_name(name).ok_or_else(invalid)?;
             let value = snbt::parse(value.trim()).map_err(|_| invalid())?;
-            out.push(ComponentPatch::Value(name, value));
+            ComponentPatch::Value(name, value)
         } else {
-            let name = component_name(entry).ok_or_else(invalid)?;
-            out.push(ComponentPatch::Present(name));
+            // No `=` and no `!`: vanilla's `reader.expect('=')` fails here.
+            return Err(ParseError::Argument(
+                "Expected a component value after '='".into(),
+            ));
+        };
+        let name = match &patch {
+            ComponentPatch::Removed(n) | ComponentPatch::Value(n, _) => n.clone(),
+        };
+        if seen.contains(&name) {
+            return Err(ParseError::Argument(format!(
+                "Component '{name}' is already defined"
+            )));
         }
+        seen.push(name);
+        out.push(patch);
     }
     Ok(out)
 }
@@ -472,7 +499,14 @@ fn parse_time(r: &mut StringReader) -> Result<(Value, String), ParseError> {
         .parse()
         .map_err(|_| ParseError::Argument(format!("Invalid time '{t}'")))?;
     // `Math.round(amount * ticksPerUnit)`, not a truncation.
-    Ok((Value::Int((value * per).round() as i32), t))
+    let ticks = (value * per).round() as i64;
+    // `TimeArgumentType.time()` has a minimum of 0.
+    if ticks < 0 {
+        return Err(ParseError::Argument(
+            "Time must not be less than 0 ticks".into(),
+        ));
+    }
+    Ok((Value::Int(ticks as i32), t))
 }
 
 /// Add the default `minecraft:` namespace when the user left it off.
@@ -575,11 +609,20 @@ mod tests {
         };
         assert!(matches!(bs.nbt, Some(Nbt::Compound(_))));
 
-        // Unknown block, unknown property, bad value: all errors.
+        // An empty property list is accepted and means the default state.
+        let Value::BlockState(bs) = value(ArgKind::BlockState, "minecraft:stone[]").unwrap() else {
+            panic!("not a block state")
+        };
+        assert_eq!(bs.id, aether_world::registry::ids::STONE);
+
+        // Unknown block, unknown property, bad value, duplicate property: all
+        // errors.
         for bad in [
             "minecraft:not_a_block",
             "minecraft:oak_stairs[colour=red]",
             "minecraft:oak_stairs[facing=upside]",
+            "minecraft:oak_stairs[facing=east,facing=west]",
+            "minecraft:oak_stairs[facing]",
             "minecraft:oak_stairs[unterminated",
             "minecraft:stone{unterminated",
         ] {
@@ -616,21 +659,13 @@ mod tests {
             ComponentPatch::Removed("minecraft:foo".into())
         );
 
-        // Namespacing is optional, and a bare name is a present component.
+        // Namespacing is optional.
         let Value::ItemStack(stack) = value(ArgKind::ItemStack, "stone[damage=5]").unwrap() else {
             panic!("not an item")
         };
         assert_eq!(
             stack.components[0],
             ComponentPatch::Value("minecraft:damage".into(), Nbt::Int(5))
-        );
-        let Value::ItemStack(stack) = value(ArgKind::ItemStack, "stone[unbreakable]").unwrap()
-        else {
-            panic!("not an item")
-        };
-        assert_eq!(
-            stack.components[0],
-            ComponentPatch::Present("minecraft:unbreakable".into())
         );
 
         assert!(matches!(
@@ -642,12 +677,15 @@ mod tests {
             err(ArgKind::ItemStack, "minecraft:stone{nope}"),
             ParseError::Argument(_)
         ));
-        // A malformed or empty patch errors.
+        // A bare component name needs `=`, and a repeat is refused.
         for bad in [
             "stone[]",
             "stone[=5]",
             "stone[!]",
             "stone[damage=]",
+            "stone[unbreakable]",
+            "stone[damage=5,damage=6]",
+            "stone[!foo,foo=1]",
             "stone[a=1",
         ] {
             assert!(
@@ -704,6 +742,16 @@ mod tests {
                 "{bad} => {e:?}"
             );
         }
+        // `TimeArgumentType.time()` has a minimum of 0.
+        for bad in ["-1", "-1t", "-0.6t"] {
+            let e = err(ArgKind::Time, bad);
+            assert!(
+                matches!(&e, ParseError::Argument(m) if m.contains("less than 0")),
+                "{bad} => {e:?}"
+            );
+        }
+        // Exactly zero is fine.
+        assert_eq!(value(ArgKind::Time, "0t").unwrap(), Value::Int(0));
     }
 
     #[test]
@@ -809,6 +857,20 @@ mod tests {
         };
         assert_eq!(c.x, WorldCoordinate::Absolute(10.0));
         assert_eq!(c.z, WorldCoordinate::Absolute(10.0));
+
+        // A component written with a decimal point is NOT centered (vanilla
+        // checks the text for `.`), even under `centerIntegers`.
+        let Value::Coordinates(c) = value(ArgKind::Vec3(true), "10.0 64 10.").unwrap() else {
+            panic!("not coordinates")
+        };
+        assert_eq!(c.x, WorldCoordinate::Absolute(10.0));
+        assert_eq!(c.z, WorldCoordinate::Absolute(10.0));
+        // A dotted fractional value is left as written (and Y never centers).
+        let Value::Coordinates(c) = value(ArgKind::Vec3(true), "10.5 64.5 10.5").unwrap() else {
+            panic!("not coordinates")
+        };
+        assert_eq!(c.x, WorldCoordinate::Absolute(10.5));
+        assert_eq!(c.y, WorldCoordinate::Absolute(64.5));
 
         // Relative and local components are never centered.
         let Value::Coordinates(c) = value(ArgKind::Vec3(true), "~10 ~64 ~10").unwrap() else {
