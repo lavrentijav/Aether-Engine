@@ -9,6 +9,7 @@
 use aether_api::Vector3;
 
 use super::{entities, interact, mobs};
+use crate::commands::feedback::lang;
 use crate::commands::tree::{self, Ctx, Deny, Node, Requirement};
 use crate::commands::Reply;
 use crate::players::{PlayerHandle, SharedRegistry};
@@ -27,28 +28,55 @@ pub fn require_op(handle: &PlayerHandle) -> Result<(), Deny> {
 /// Register every gameplay command on the tree.
 pub fn nodes() -> Vec<Node> {
     vec![
-        tree::greedy(
-            "gamemode",
-            &["gm"],
-            Requirement::Fn(require_op),
-            exec_gamemode,
+        tree::with_usage(
+            tree::greedy(
+                "gamemode",
+                &["gm"],
+                Requirement::Fn(require_op),
+                exec_gamemode,
+            ),
+            "<gamemode> [<targets>]",
         ),
-        tree::greedy("time", &[], Requirement::Fn(require_op), exec_time),
-        tree::greedy("give", &[], Requirement::Fn(require_op), exec_give),
-        tree::greedy("summon", &[], Requirement::Fn(require_op), exec_summon),
+        tree::with_usage(
+            tree::greedy("time", &[], Requirement::Fn(require_op), exec_time),
+            "set <day|noon|night|midnight|ticks>",
+        ),
+        tree::with_usage(
+            tree::greedy("give", &[], Requirement::Fn(require_op), exec_give),
+            "<item> [<count>]",
+        ),
+        tree::with_usage(
+            tree::greedy("summon", &[], Requirement::Fn(require_op), exec_summon),
+            "<mob> [x y z]",
+        ),
         tree::simple("killall", &[], Requirement::Fn(require_op), exec_killall),
         tree::simple("kill", &[], Requirement::None, exec_kill),
         tree::simple("spawn", &[], Requirement::None, exec_spawn),
-        tree::greedy("msg", &["tell", "w"], Requirement::None, exec_msg),
-        tree::greedy("teleport", &["tp"], Requirement::Fn(require_op), exec_tp),
-        tree::greedy("block", &[], Requirement::None, exec_block),
-        tree::greedy("food", &[], Requirement::Fn(require_op), exec_food),
+        tree::with_usage(
+            tree::greedy("msg", &["tell", "w"], Requirement::None, exec_msg),
+            "<player> <message>",
+        ),
+        tree::with_usage(
+            tree::greedy("teleport", &["tp"], Requirement::Fn(require_op), exec_tp),
+            "<x> <y> <z> | <player>",
+        ),
+        tree::with_usage(
+            tree::greedy("block", &[], Requirement::None, exec_block),
+            "<x> <y> <z>",
+        ),
+        tree::with_usage(
+            tree::greedy("food", &[], Requirement::Fn(require_op), exec_food),
+            "[level]",
+        ),
         tree::simple("heal", &[], Requirement::Fn(require_op), exec_heal),
-        tree::greedy(
-            "visibility",
-            &[],
-            Requirement::Fn(require_op),
-            exec_visibility,
+        tree::with_usage(
+            tree::greedy(
+                "visibility",
+                &[],
+                Requirement::Fn(require_op),
+                exec_visibility,
+            ),
+            "[on|off|status]",
         ),
     ]
 }
@@ -139,7 +167,28 @@ pub fn gamemode(
         },
     };
     interact::set_mode(&target, world, mode);
-    vec![format!("{} is now in {:?} mode", target.name, mode)]
+    // Vanilla words it differently for the caller than for someone else; the
+    // old reply did not, and this is the one place to fix that.
+    if target.entity_id == handle.entity_id {
+        vec![lang::format(
+            lang::GAMEMODE_SUCCESS_SELF,
+            &[game_mode_name(mode)],
+        )]
+    } else {
+        vec![lang::format(
+            lang::GAMEMODE_SUCCESS_OTHER,
+            &[&target.name, game_mode_name(mode)],
+        )]
+    }
+}
+
+/// The vanilla `gameMode.*` display name.
+fn game_mode_name(mode: GameMode) -> &'static str {
+    match mode {
+        GameMode::Survival => lang::GAMEMODE_SURVIVAL,
+        GameMode::Creative => lang::GAMEMODE_CREATIVE,
+        GameMode::Spectator => lang::GAMEMODE_SPECTATOR,
+    }
 }
 
 /// `/time [set] <day|noon|night|midnight|ticks>` or a query.
@@ -156,16 +205,19 @@ pub fn time(args: &[&str], registry: &SharedRegistry, world: &DemoWorld) -> Vec<
             },
         },
         _ => {
-            return vec![format!(
-                "It is {} (day {})",
-                super::time_of_day(),
-                super::now() / 24000
-            )]
+            // The bare `/time` is a query, the closest vanilla analogue being
+            // `/time query daytime`; use its string (`commands.time.query`)
+            // rather than an invented one. CMD-13a ports the full
+            // `add/set/query` grammar onto the tree.
+            return vec![lang::format(
+                lang::TIME_QUERY,
+                &[&super::time_of_day().to_string()],
+            )];
         }
     };
     super::set_time_of_day(t);
     registry.broadcast(&super::time_event(), world);
-    vec![format!("Time set to {t}")]
+    vec![lang::format(lang::TIME_SET, &[&t.to_string()])]
 }
 
 /// `/give <item> [count]`.
@@ -192,7 +244,10 @@ pub fn give(
         .unwrap_or(1)
         .min(64 * 36);
     crate::ground::give_or_drop(handle, registry, world, item_id, count);
-    vec![format!("Gave {count} {item}")]
+    vec![lang::format(
+        lang::GIVE_SUCCESS_SINGLE,
+        &[&count.to_string(), &item, &handle.name],
+    )]
 }
 
 /// `/summon <mob> [x y z]`.
@@ -214,7 +269,7 @@ pub fn summon(args: &[&str], handle: &PlayerHandle) -> Vec<String> {
         }
     };
     entities::spawn_mob(def, at, p.yaw + 180.0);
-    vec![format!("Summoned {}", def.kind)]
+    vec![lang::format(lang::SUMMON_SUCCESS, &[def.kind])]
 }
 
 /// `/killall`.
@@ -278,10 +333,16 @@ pub fn msg(
         Some(target) => {
             crate::chatlog::log_private(handle, &target, &message, world);
             target.emit(
-                &ServerEvent::Chat(format!("{} whispers to you: {message}", handle.name)),
+                &ServerEvent::Chat(lang::format(
+                    lang::MESSAGE_INCOMING,
+                    &[&handle.name, &message],
+                )),
                 world,
             );
-            vec![format!("You whisper to {}: {message}", target.name)]
+            vec![lang::format(
+                lang::MESSAGE_OUTGOING,
+                &[&target.name, &message],
+            )]
         }
         None => vec![format!("{name} is not online")],
     }
@@ -298,7 +359,10 @@ pub fn tp(
         [x, y, z] => match (x.parse::<f64>(), y.parse::<f64>(), z.parse::<f64>()) {
             (Ok(x), Ok(y), Ok(z)) => {
                 teleport(handle, registry, world, x, y, z);
-                vec![format!("Teleported to {x} {y} {z}")]
+                vec![lang::format(
+                    lang::TELEPORT_SUCCESS_LOCATION_SINGLE,
+                    &[&handle.name, &x.to_string(), &y.to_string(), &z.to_string()],
+                )]
             }
             _ => vec!["/tp <x> <y> <z> | /tp <player>".into()],
         },
@@ -310,7 +374,10 @@ pub fn tp(
             Some(p) => {
                 let to = p.pos();
                 teleport(handle, registry, world, to.x, to.y, to.z);
-                vec![format!("Teleported to {}", p.name)]
+                vec![lang::format(
+                    lang::TELEPORT_SUCCESS_ENTITY_SINGLE,
+                    &[&handle.name, &p.name],
+                )]
             }
             None => vec![format!("{name} is not online")],
         },

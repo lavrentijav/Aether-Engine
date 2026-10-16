@@ -1045,6 +1045,8 @@ mod tests {
                 executable: false,
                 requirement: Requirement::None,
                 executor: None,
+                usage: None,
+                task: None,
                 children,
             },
         };

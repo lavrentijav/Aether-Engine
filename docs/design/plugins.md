@@ -44,9 +44,13 @@ optional, i.e. whenever a vanilla-like server would run without it.
 - Enabled/disabled in operator config like any plugin; **never required by the core**. A native
   plugin that needs a core hook that does not exist extends the API (event/registry/import), it does
   not patch the engine.
-- The **native plugin loader** is a task of its own (`CMD-00N`, on the P1 API): it discovers
-  native plugins, runs their `init`/`shutdown`, dispatches the same events with priority ordering,
-  and exposes the same services. See `docs/tasks/CMD-00N-native-loader.md`.
+- The **native plugin loader** (`CMD-00N`, on the P1 API) lives in
+  `crates/aether-plugin/src/native.rs` beside the wasmtime one: `NativePlugin` is the trait a
+  native crate implements, `NativeRegistration` is the build-time record the server collects, and
+  `PluginHost::add_native` runs its `init`/`shutdown` and dispatches the same events with the same
+  priority ordering and service registry. A native plugin is linked by calling `registration()`
+  from the server's `install_native`; the reference is `plugins/examples/hello-native` and the
+  guide is `docs/plugins/README.md`.
 - Because they are in-process, native plugins can degrade the whole server; they are trusted code
   the operator chooses to build (or install from the same source), not arbitrary third-party code.
 
@@ -121,6 +125,9 @@ manifest requests and the operator grants them. A trap or overrun disables that 
 **Manifest** `plugin.toml`: id, version, api version (`0.1`), entry `.wasm`, requested capabilities,
 event subscriptions, priority (ordering among plugins for the same event), provided services.
 Operator config `[plugins] dir`, `[plugins.<id>] enabled`, granted capabilities, per-plugin config.
+Native selection is **build-time** (the crates linked behind the server's `plugins` feature) plus the
+same `[plugins.<id>] enabled` flag; there is no `[plugins.native] dir`. `[plugins] dir` is the master
+switch and the WASM scan path.
 
 ## Services: economy as the first one
 
@@ -168,9 +175,13 @@ Operator config `[plugins] dir`, `[plugins.<id>] enabled`, granted capabilities,
   under a context that grants nothing (so a Rust `wasm32-wasip2` component's std imports resolve),
   and `after-enchant` has no hook point until the enchanting work (E1/E2). Plugin commands are
   resolved through the command registry (see below), not a side path.
-- **P1-N (CMD-00N)**: the **native** plugin loader — the same API/events/bus as P1 but for Rust
-  crates linked in-process (no wasmtime, no boundary), enabled/disabled by config. This unblocks the
-  native tier (permissions, regions/claims, WorldEdit, history, profiler, moderation, essentials).
+- **P1-N (CMD-00N)** ✅: the **native** plugin loader — the same API/events/bus as P1 but for Rust
+  crates linked in-process (no wasmtime, no boundary), enabled/disabled by config. `NativePlugin` /
+  `NativeRegistration` in `crates/aether-plugin/src/native.rs`, `PluginHost::add_native`, the
+  reference `plugins/examples/hello-native`, and cross-tier tests in
+  `crates/aether-plugin/tests/plugin_host.rs`. Documented in this file and the plugin dev guide
+  `docs/plugins/README.md`. This unblocks the native tier (permissions, regions/claims, WorldEdit,
+  history, profiler, moderation, essentials).
 - **P2**: economy service: WIT economy interface, `storage.ledger`, `WasmEconomy` adapter,
   conformance suite, `plugins/economy` port; switch by config.
 - **P3**: registries for plugins: custom enchantments and custom items (shown via compat stand-ins),

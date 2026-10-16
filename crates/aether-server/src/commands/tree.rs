@@ -15,6 +15,7 @@
 use std::sync::OnceLock;
 
 use super::catalogue::{self, Status};
+use super::feedback::Feedback;
 use super::Reply;
 use crate::economy::Economy;
 use crate::players::{PlayerHandle, SharedRegistry};
@@ -413,6 +414,16 @@ pub struct Node {
     pub executor: Option<Box<ExecFn>>,
     /// Following nodes.
     pub children: Vec<Node>,
+    /// Vanilla-style usage text without the leading slash (`<gamemode>
+    /// [<targets>]`), when the tree's own grammar cannot express it because the
+    /// ported body still parses a single greedy remainder. `None` means "derive
+    /// it from the children", which is what every real argument node gets.
+    pub usage: Option<&'static str>,
+    /// For a specified-but-unimplemented command, the CMD task that will
+    /// implement it. `/help` marks these; `None` is a working command. This is
+    /// authoritative where the registry is not: `/aether` has a registry entry
+    /// (CMD-24) but a real body today.
+    pub task: Option<&'static str>,
 }
 
 /// The node's category.
@@ -452,6 +463,33 @@ impl CommandTree {
     /// The command literals, one node per command (aliases live on the node).
     pub fn commands(&self) -> &[Node] {
         &self.root.children
+    }
+
+    /// The command node addressed by `word` — its canonical name or any alias.
+    ///
+    /// This is how `/help <word>` resolves an alias to the one node it shares
+    /// with the canonical name.
+    pub fn find_command(&self, word: &str) -> Option<&Node> {
+        self.root.children.iter().find(|c| c.matches_literal(word))
+    }
+
+    /// The first name or alias declared by two different commands, if any.
+    ///
+    /// The tree's one invariant is that every literal word (canonical or
+    /// alias) names exactly one node: an alias that collided with a literal
+    /// would make dispatch depend on declaration order. Tests assert this is
+    /// `None`; [`build`] debug-asserts it too.
+    pub fn find_duplicate_name(&self) -> Option<&'static str> {
+        let mut seen: Vec<&'static str> = Vec::new();
+        for command in self.commands() {
+            for name in std::iter::once(command.name).chain(command.aliases.iter().copied()) {
+                if seen.contains(&name) {
+                    return Some(name);
+                }
+                seen.push(name);
+            }
+        }
+        None
     }
 
     /// Parse `text` and return the matched executable node plus its arguments.
@@ -591,7 +629,16 @@ fn build() -> CommandTree {
     let mut root = Builder::literal("");
     root.node.kind = Kind::Root;
     root.node.children = children;
-    CommandTree { root: root.node }
+    let tree = CommandTree { root: root.node };
+    // An alias that collided with another command's literal (or an implemented
+    // name that shadowed a stub's alias) would make dispatch depend on
+    // declaration order; refuse it in every build, including tests.
+    debug_assert!(
+        tree.find_duplicate_name().is_none(),
+        "a command name or alias is declared twice: {:?}",
+        tree.find_duplicate_name()
+    );
+    tree
 }
 
 /// A stub node for a specified-but-unimplemented command. Its executor names
@@ -610,6 +657,7 @@ fn stub(entry: &'static catalogue::Command) -> Node {
             entry.name, entry.task
         )])
     })
+    .task(entry.task)
     .build()
 }
 
@@ -630,6 +678,8 @@ impl Builder {
                 requirement: Requirement::None,
                 executor: None,
                 children: Vec::new(),
+                usage: None,
+                task: None,
             },
         }
     }
@@ -645,6 +695,8 @@ impl Builder {
                 requirement: Requirement::None,
                 executor: None,
                 children: Vec::new(),
+                usage: None,
+                task: None,
             },
         }
     }
@@ -652,6 +704,18 @@ impl Builder {
     /// Add an alias word.
     pub fn alias(mut self, alias: &'static str) -> Builder {
         self.node.aliases.push(alias);
+        self
+    }
+
+    /// Set the node's usage text, for a grammar the tree does not carry.
+    pub fn usage(mut self, usage: &'static str) -> Builder {
+        self.node.usage = Some(usage);
+        self
+    }
+
+    /// Mark the node as a stub for a not-yet-implemented command.
+    pub fn task(mut self, task: &'static str) -> Builder {
+        self.node.task = Some(task);
         self
     }
 
@@ -681,6 +745,52 @@ impl Builder {
     pub fn build(self) -> Node {
         self.node
     }
+}
+
+/// Attach a usage string to an already-built node.
+///
+/// The ported bodies parse one greedy remainder, so their grammar is not in
+/// the tree; this gives `/help` the vanilla usage without a second table keyed
+/// by name.
+pub fn with_usage(mut node: Node, usage: &'static str) -> Node {
+    node.usage = Some(usage);
+    node
+}
+
+/// The usage text for `node`, after its name: what `/help <command>` prints.
+///
+/// A node with an explicit [`Node::usage`] returns it. Otherwise the grammar
+/// is read off the children: a literal is its word (recursing for a
+/// subcommand), a required argument is `<name>`, a greedy remainder is
+/// `[name]`, and an executable optional argument is `[<name>]`.
+pub fn usage_of(node: &Node) -> String {
+    if let Some(usage) = node.usage {
+        return usage.to_string();
+    }
+    let parts: Vec<String> = node
+        .children
+        .iter()
+        .filter_map(|child| {
+            let text = match &child.kind {
+                Kind::Root => return None,
+                Kind::Literal => {
+                    let sub = usage_of(child);
+                    if child.children.is_empty() {
+                        child.name.to_string()
+                    } else {
+                        format!("{} {}", child.name, sub)
+                    }
+                }
+                Kind::Argument(ArgKind::GreedyString | ArgKind::Message) => {
+                    format!("[{}]", child.name)
+                }
+                Kind::Argument(_) if child.executable => format!("[<{}>]", child.name),
+                Kind::Argument(_) => format!("<{}>", child.name),
+            };
+            Some(text)
+        })
+        .collect();
+    parts.join(" ")
 }
 
 /// A command that takes no arguments.
@@ -833,12 +943,31 @@ fn consume(
 }
 
 /// Run `text` against the tree. `None` means ordinary chat (no leading `/`).
+///
+/// The lines-only view of [`execute_feedback`], for tests and callers that do
+/// not care about the success/error distinction. The server's connection path
+/// uses [`execute_feedback`] so the feedback it delivers can be styled and
+/// gated.
 pub fn execute(
     text: &str,
     handle: &PlayerHandle,
     registry: &SharedRegistry,
     world: &DemoWorld,
 ) -> Option<Reply> {
+    execute_feedback(text, handle, registry, world).map(|f| Reply(f.lines))
+}
+
+/// Run `text` against the tree, keeping whether it succeeded or failed.
+///
+/// `None` means ordinary chat (no leading `/`). A parse error or a permission
+/// denial is an [`Feedback::error`]; a body's output is a success even when it
+/// is empty (self-`/kill` is not an error).
+pub fn execute_feedback(
+    text: &str,
+    handle: &PlayerHandle,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+) -> Option<Feedback> {
     let trimmed = text.trim();
     let body = trimmed.strip_prefix('/')?;
     match tree().parse(body, handle) {
@@ -850,17 +979,18 @@ pub fn execute(
                 econ: crate::economy::get(),
                 args: m.args,
             };
-            Some(m.node.run(&mut ctx).unwrap_or_else(|| Reply(Vec::new())))
+            let reply = m.node.run(&mut ctx).unwrap_or_else(|| Reply(Vec::new()));
+            Some(Feedback::success(reply.0))
         }
-        Err(ParseError::Denied(m)) => Some(Reply(vec![m])),
+        Err(ParseError::Denied(m)) => Some(Feedback::error(vec![m])),
         Err(e) => {
             // A name the tree does not own might belong to a plugin; the
             // plugin path is the only other place a verb can be answered, and
             // it refuses every core name, so the core gate is never bypassed.
             if let Some(reply) = super::plugin_command(body, handle) {
-                return Some(reply);
+                return Some(Feedback::success(reply.0));
             }
-            Some(Reply(vec![e.message()]))
+            Some(Feedback::error(vec![e.message()]))
         }
     }
 }

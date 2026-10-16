@@ -20,9 +20,11 @@
 //! from the packet.
 
 pub mod catalogue;
+pub mod feedback;
 pub mod pager;
 pub mod query;
 pub mod registry;
+pub mod source;
 pub mod tree;
 
 use aether_api::{JournalActor, Ledger};
@@ -65,8 +67,8 @@ pub fn dispatch(
     handle: &PlayerHandle,
     registry: &SharedRegistry,
     world: &DemoWorld,
-) -> Option<Reply> {
-    tree::execute(text, handle, registry, world)
+) -> Option<feedback::Feedback> {
+    tree::execute_feedback(text, handle, registry, world)
 }
 
 /// The history, `/help` and `/aether` commands — the ones that live in this
@@ -74,17 +76,33 @@ pub fn dispatch(
 pub(crate) fn core_nodes() -> Vec<Node> {
     vec![
         tree::simple("inspect", &["i"], Requirement::None, exec_inspect),
-        tree::greedy("lookup", &["l"], Requirement::None, exec_lookup),
-        tree::greedy("rollback", &["rb"], Requirement::None, exec_rollback),
-        tree::greedy("page", &["pg"], Requirement::None, exec_page),
+        tree::with_usage(
+            tree::greedy("lookup", &["l"], Requirement::None, exec_lookup),
+            "[filters]",
+        ),
+        tree::with_usage(
+            tree::greedy("rollback", &["rb"], Requirement::None, exec_rollback),
+            "[filters]",
+        ),
+        tree::with_usage(
+            tree::greedy("page", &["pg"], Requirement::None, exec_page),
+            "next | prev | <number>",
+        ),
         tree::simple("inv", &["inventory"], Requirement::None, exec_inventory),
         tree::simple("stash", &[], Requirement::None, exec_stash),
         tree::simple("audit", &[], Requirement::None, exec_audit),
         tree::simple("cache", &[], Requirement::None, exec_cache),
-        // `/help [command]` takes an optional argument, so it is greedy until
-        // the tree-driven `/help` (CMD-05) replaces it.
-        tree::greedy("help", &["?"], Requirement::None, exec_help),
-        tree::greedy("aether", &[], Requirement::Fn(require_admin), exec_aether),
+        // `/help [command]` takes an optional command word; the argument is
+        // greedy so a name with no arguments still parses, then resolves it
+        // against the tree (CMD-05).
+        tree::with_usage(
+            tree::greedy("help", &["?"], Requirement::None, exec_help),
+            "[command]",
+        ),
+        tree::with_usage(
+            tree::greedy("aether", &[], Requirement::Fn(require_admin), exec_aether),
+            "auth migrate <name>",
+        ),
     ]
 }
 
@@ -255,49 +273,107 @@ pub fn permitted_level(level: u8, node: &str, op: u8) -> bool {
     crate::permissions::check(crate::permissions::Level::new(level), node, op)
 }
 
-/// `/help [command]` — list the commands by category, or explain one.
+/// `/help [command|category]` — every command the caller may run, grouped by
+/// category; one command's usage; or one category.
 ///
-/// This is a stop-gap until the full tree-driven `/help` (CMD-05), but it is
-/// **generated from the catalogue** ([`catalogue::CATALOGUE`]) — there is no
-/// hand-written command list anywhere. It marks the not-yet-implemented ones
-/// and only shows commands the caller may actually run, as vanilla does.
+/// The listing is generated from the command catalogue (CMD-48), so pending
+/// commands are marked and the category grouping is the catalogue's; each
+/// line's usage and stub note come from its tree node (CMD-05). Nothing here
+/// is a hand-kept list.
+///
+/// * no argument: every command the caller's permission level allows, grouped
+///   by category, paged through [`pager::Pager`] so `/page next` works as for
+///   any other answer.
+/// * a category (`/help admin`): just that category.
+/// * a command or alias: its usage, built from the tree (or the node's
+///   explicit usage), with its aliases spelled out.
+///
+/// A command the caller may not run reads exactly like a name no command
+/// owns — the permission-filtering guarantee: `/help` must not let a non-op
+/// enumerate the op-only catalogue.
 fn help(args: &[&str], handle: &PlayerHandle) -> Reply {
-    if let Some(name) = args.first() {
-        return match catalogue::find(name) {
-            Some(c) => Reply::one(match c.status {
-                catalogue::Status::Pending => format!(
-                    "/{} — {} (op level {}), planned in {}",
-                    c.name, c.node, c.op, c.task
-                ),
-                catalogue::Status::Implemented => {
-                    format!("/{} — {} (op level {}): {}", c.name, c.node, c.op, c.usage)
-                }
-            }),
-            None => Reply::one(format!("no entry for `{name}`")),
-        };
+    let cmd_tree = tree::tree();
+    let Some(word) = args.first() else {
+        return help_list(cmd_tree, handle, None);
+    };
+    // A category word lists that category from the catalogue (CMD-48).
+    if let Some(cat) = catalogue::Category::ALL.iter().find(|c| c.key() == *word) {
+        return help_list(cmd_tree, handle, Some(*cat));
     }
-    let tree = tree::tree();
-    let mut lines = vec!["Commands — ✅ working, 🚧 pending (task):".to_string()];
+    // Either no such command, or one this caller cannot see: the same answer
+    // keeps the second case indistinguishable from the first.
+    if let Some(node) = cmd_tree
+        .find_command(word)
+        .filter(|node| tree::check(&node.requirement, handle).is_ok())
+    {
+        return Reply::one(help_line(node, true));
+    }
+    Reply::one(feedback::lang::UNKNOWN_COMMAND)
+}
+
+/// The paged list of every command `handle` may run, grouped by category — or
+/// restricted to one category when `only` is set.
+fn help_list(
+    cmd_tree: &tree::CommandTree,
+    handle: &PlayerHandle,
+    only: Option<catalogue::Category>,
+) -> Reply {
+    let all = only.is_none();
+    let mut lines: Vec<String> = if all {
+        vec!["Commands — ✅ working, 🚧 pending (task):".to_string()]
+    } else {
+        Vec::new()
+    };
     for cat in catalogue::Category::ALL {
-        let mut names: Vec<String> = Vec::new();
-        for c in catalogue::CATALOGUE.iter().filter(|c| c.category == *cat) {
-            let node = tree.commands().iter().find(|n| n.name == c.name);
-            // A command the caller cannot run is not listed at all, as in
-            // vanilla (no leak of op-only names to a non-op).
-            let Some(node) = node else { continue };
-            if tree::check(&node.requirement, handle).is_err() {
-                continue;
-            }
-            names.push(match c.status {
-                catalogue::Status::Implemented => format!("/{}", c.name),
-                catalogue::Status::Pending => format!("/{} 🚧{}", c.name, c.task),
-            });
+        if only.is_some_and(|o| o != *cat) {
+            continue;
         }
-        if !names.is_empty() {
-            lines.push(format!("  {}: {}", cat.key(), names.join(" ")));
+        // Only commands this caller may run are listed, as in vanilla (no leak
+        // of op-only names to a non-op).
+        let in_cat: Vec<String> = catalogue::CATALOGUE
+            .iter()
+            .filter(|c| c.category == *cat)
+            .filter_map(|c| cmd_tree.find_command(c.name))
+            .filter(|node| tree::check(&node.requirement, handle).is_ok())
+            .map(|node| help_line(node, false))
+            .collect();
+        if in_cat.is_empty() {
+            continue;
+        }
+        if all {
+            lines.push(format!("  {}:", cat.key()));
+        }
+        lines.extend(in_cat);
+    }
+    let mut s = handle.session();
+    s.pager.set("Commands", lines);
+    Reply(s.pager.render())
+}
+
+/// One `/help` line: `/name (aliases) usage`, marked if it is a stub.
+///
+/// `one` selects the longer "not implemented yet (CMD-nn)" note used when the
+/// line is the whole answer; the list uses a short mark to stay scannable.
+fn help_line(node: &tree::Node, one: bool) -> String {
+    let mut line = format!("/{}", node.name);
+    if !node.aliases.is_empty() {
+        line.push_str(" (");
+        line.push_str(&node.aliases.join(", "));
+        line.push(')');
+    }
+    let usage = tree::usage_of(node);
+    if !usage.is_empty() {
+        line.push(' ');
+        line.push_str(&usage);
+    }
+    if let Some(task) = node.task {
+        if one {
+            line.push_str(&format!(" — not implemented yet ({task})"));
+        } else {
+            line.push_str(" (not implemented yet)");
         }
     }
-    Reply(lines)
+    line
 }
 
 /// `/cache` — how the generated-column cache is doing.
