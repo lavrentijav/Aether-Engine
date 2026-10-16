@@ -3,7 +3,7 @@ wait 22
 send /list
 wait 4
 expect Server was successfully joined
-expect PlayerList: .*_alpha_01
+expect PlayerList: .*_aether_bot1
 reject kicked
 reject Disconnected
 reject Connection lost

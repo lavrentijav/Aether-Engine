@@ -1,0 +1,23 @@
+[package]
+name = "aether-sidebar-plugin"
+description = "The Aether sidebar plugin, provided as a native plugin: composes the per-player scoreboard sidebar from config and placeholders."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "aether_sidebar_plugin"
+
+[dependencies]
+# The host trait a native plugin implements, the shared `Player`/`CommandResult`
+# types, the `sidebar` service surface and the SDK's `permissions` facade.
+aether-plugin = { workspace = true }
+# `config.toml` parsing.
+toml = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

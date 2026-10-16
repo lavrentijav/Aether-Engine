@@ -520,20 +520,72 @@ fn warn_if_exposed(cfg: &Config) {
     }
 }
 
-/// The `[visibility]` settings, or the defaults (off) before startup installs
+/// The permission node that lets a player bypass anti-xray.
+///
+/// Until the permission store (CMD-01) lands, a player's only levels are 4 (an
+/// operator) and 0 (everyone else), so this node is effectively
+/// [`is_operator`]; it is named now so the store can resolve it later.
+pub const ANTIXRAY_BYPASS_PERMISSION: &str = "aether.antixray.bypass";
+
+/// The `[anti_xray]` settings, or the defaults (off) before startup installs
 /// the config.
-pub fn visibility_config() -> config::VisibilityConfig {
+pub fn anti_xray_config() -> config::AntiXrayConfig {
     CONFIG
         .get()
-        .map(|c| c.visibility.clone())
+        .map(|c| c.anti_xray.clone())
         .unwrap_or_default()
 }
 
-/// Whether visibility culling is on. A single load and branch, for the block
-/// write path, which must cost nothing on the default (off) configuration.
+/// Whether anti-xray is active for the running world, resolved once.
+///
+/// The block-write path calls this for every write, so the per-world test
+/// (`worlds`) is computed once after the config is installed rather than
+/// re-parsing the world directory each time. `0` means "not asked yet": a call
+/// before the config exists returns `false` without caching, so the answer
+/// becomes correct once startup installs it.
+static ANTI_XRAY_ACTIVE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Whether anti-xray is on for the running world. A single load and branch,
+/// for the block write path, which must cost nothing on the default (off)
+/// configuration.
 #[inline]
-pub fn visibility_enabled() -> bool {
-    CONFIG.get().is_some_and(|c| c.visibility.enabled)
+pub fn anti_xray_enabled() -> bool {
+    const ON: u8 = 1;
+    const OFF: u8 = 2;
+    use std::sync::atomic::Ordering;
+    match ANTI_XRAY_ACTIVE.load(Ordering::Relaxed) {
+        ON => true,
+        OFF => false,
+        _ => {
+            let on = CONFIG.get().is_some_and(|c| {
+                c.anti_xray.enabled && c.anti_xray.applies_to_world(&c.server.world_dir)
+            });
+            if CONFIG.get().is_some() {
+                ANTI_XRAY_ACTIVE.store(if on { ON } else { OFF }, Ordering::Relaxed);
+            }
+            on
+        }
+    }
+}
+
+/// Whether `handle` may see everything: an explicit `/visibility off`, the
+/// [`ANTIXRAY_BYPASS_PERMISSION`] node (operators, until CMD-01), or a name in
+/// `[anti_xray] bypass_players`.
+pub fn anti_xray_bypass(handle: &players::PlayerHandle) -> bool {
+    if handle.visibility().bypass {
+        return true;
+    }
+    let cfg = match CONFIG.get() {
+        Some(c) => c,
+        None => return false,
+    };
+    if cfg.is_operator(&handle.name, handle.ip) {
+        return true;
+    }
+    cfg.anti_xray
+        .bypass_players
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(&handle.name))
 }
 
 /// The chunk radius kept loaded around a player, from the config.
