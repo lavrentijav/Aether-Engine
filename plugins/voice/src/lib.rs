@@ -12,4 +12,5 @@
 pub mod bytes;
 pub mod config;
 pub mod crypto;
+pub mod plasmo;
 pub mod svc;
