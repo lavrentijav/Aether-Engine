@@ -51,7 +51,7 @@ in-tree round-trip tests (bytes in/out) rather than captured pcap files.
 - New process tests drive the plugin with a mock host backend and pin the
   control packets, the rate limit and the queue cap.
 
-## Deliberately not done (see KNOWN_ISSUES §21)
+## Deliberately not done (see KNOWN_ISSUES §25)
 
 - Custom-payload transport is wired for protocols 764–775. **26.2/26.3 are
   `-1`**: `minecraft-data` 3.117.0 has 26.1 (775) but not 26.2/26.3, and the

@@ -61,7 +61,7 @@ per-sender rate limit and the inbound-queue cap.
 
 ## Limits
 
-See [KNOWN_ISSUES.md §21](../../docs/KNOWN_ISSUES.md). In short: SVC groups are
+See [KNOWN_ISSUES.md §25](../../docs/KNOWN_ISSUES.md). In short: SVC groups are
 in memory and non-persistent; PV RSA key exchange and end-to-end PV audio
 encryption are not implemented (PV audio is forwarded as sent); custom-payload
 transport is wired for protocols 764–775 (26.2/26.3 not yet); Opus is a
