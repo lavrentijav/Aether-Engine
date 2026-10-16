@@ -35,6 +35,9 @@
 //! is left alone — rather than a list that has to be kept in step with the
 //! game.
 
+pub mod data;
+pub mod rules;
+
 use aether_world::registry::{blocks, props};
 use aether_world::BlockStateId;
 

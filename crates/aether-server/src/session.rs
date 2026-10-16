@@ -890,7 +890,7 @@ fn play_loop(
                             // A replaceable block that was clicked is built
                             // into, not against.
                             let clicked = world.get_block(tx, ty, tz);
-                            let (px, py, pz) = if is_replaceable(world, clicked) {
+                            let (px, py, pz) = if crate::placement::rules::is_replaceable(clicked) {
                                 (tx, ty, tz)
                             } else {
                                 (x, y, z)
@@ -1140,35 +1140,6 @@ fn play_loop(
 /// The window id the recovery stash opens under.
 const STASH_WINDOW: u8 = 1;
 
-/// Whether placing into a cell holding `b` replaces it.
-fn is_replaceable(world: &DemoWorld, b: BlockStateId) -> bool {
-    if b == block_ids::AIR || b == block_ids::WATER {
-        return true;
-    }
-    let name = crate::game::block_name(world, b).unwrap_or_default();
-    matches!(
-        name.trim_start_matches("minecraft:"),
-        "short_grass"
-            | "tall_grass"
-            | "fern"
-            | "large_fern"
-            | "dead_bush"
-            | "vine"
-            | "snow"
-            | "seagrass"
-            | "tall_seagrass"
-            | "lava"
-            | "water"
-            | "air"
-            | "cave_air"
-            | "void_air"
-            | "fire"
-            | "short_dry_grass"
-            | "tall_dry_grass"
-            | "bush"
-    )
-}
-
 /// Break the block at `(x, y, z)` on a player's behalf.
 fn break_block(
     handle: &crate::players::PlayerHandle,
@@ -1227,7 +1198,7 @@ fn place_block(
         return false;
     }
     let here = world.get_block(x, y, z);
-    if handle.full() && !is_replaceable(world, here) {
+    if handle.full() && !crate::placement::rules::is_replaceable(here) {
         return false;
     }
     // The block is chosen by the item; the *state* is chosen here, where
@@ -1246,6 +1217,21 @@ fn place_block(
     // them at placement too.
     let state =
         crate::placement::reshape(state, x, y, z, &|nx, ny, nz| world.get_block(nx, ny, nz));
+    // The block's own placement rule: a plant needs its soil, a torch a
+    // support, a wall block a wall. Refused before anything is written, so a
+    // bad placement costs nothing but the ack (see `placement::rules`).
+    if handle.full() {
+        let place_name = crate::game::block_name(world, state).unwrap_or_default();
+        if !crate::placement::rules::allowed_facing(
+            &place_name,
+            state,
+            (x, y, z),
+            &|nx, ny, nz| world.get_block(nx, ny, nz),
+            face,
+        ) {
+            return false;
+        }
+    }
     // A door is two blocks; if either would land in somebody, the whole
     // placement is refused, the way vanilla refuses it.
     let upper = crate::placement::upper_half_of(state);
@@ -1255,7 +1241,9 @@ fn place_block(
         return false;
     }
     if let Some(u) = upper {
-        if y + 1 >= WORLD_TOP || !is_replaceable(world, world.get_block(x, y + 1, z)) {
+        if y + 1 >= WORLD_TOP
+            || !crate::placement::rules::is_replaceable(world.get_block(x, y + 1, z))
+        {
             return false;
         }
         let _ = u;
@@ -1927,17 +1915,22 @@ fn inspect(
     }
 }
 
+/// The ack a placement (or dig) packet gets back. `seq == 0` means the version
+/// predicts nothing (before 1.19); every other value is acked **whether or not
+/// the placement was refused**, or the client would hold its prediction until
+/// it desyncs.
+fn ack_event(seq: i32) -> Option<ServerEvent<'static>> {
+    (seq != 0).then_some(ServerEvent::AckBlockChange(seq))
+}
+
 /// Release the client's block prediction for `seq`.
 ///
 /// Ordered after the block update on purpose: the client holds updates for a
 /// predicted position until the ack arrives, then applies them, so an ack sent
 /// first would release nothing and the update behind it would be discarded.
-///
-/// `seq == 0` means the version predicts nothing (before 1.19); those codecs
-/// encode the event as no packets at all, so this stays a plain call.
 fn ack(handle: &crate::players::PlayerHandle, world: &DemoWorld, seq: i32) {
-    if seq != 0 {
-        handle.emit(&ServerEvent::AckBlockChange(seq), world);
+    if let Some(ev) = ack_event(seq) {
+        handle.emit(&ev, world);
     }
 }
 
@@ -2125,5 +2118,196 @@ mod placement_tests {
         // A malformed body is unknown, not a panic.
         assert_eq!(parse_pack_status(&[]), PackStatus::Unknown);
         assert_eq!(parse_pack_status(&[0x80, 0x80]), PackStatus::Unknown);
+    }
+
+    /// A throwaway world on a temp store, for the placement-rule tests.
+    fn test_world(seed: u64) -> DemoWorld {
+        use aether_api::{FjallStore, World};
+        let dir = std::env::temp_dir().join(format!("aether-blk-{}-{seed}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FjallStore::open(&dir).expect("temp store");
+        let generator = crate::worldgen::Generator::load("", "", seed).expect("noise generator");
+        let revision = generator.revision();
+        let cfg = crate::gencache::CacheConfig {
+            root: String::new(),
+            ..Default::default()
+        };
+        let generator = crate::gencache::Cached::with_revision(generator, seed, revision, &cfg);
+        World::new(store, generator)
+    }
+
+    /// The placement rules are enforced inside `place_block`, before anything
+    /// is written: a plant on the wrong soil leaves the world untouched.
+    #[test]
+    fn a_plant_refused_by_the_rule_writes_nothing() {
+        let world = test_world(7);
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(1, "Steve");
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+
+        world.set_block(0, 100, 0, "minecraft:stone");
+        let poppy = aether_world::registry::blocks::default_state("minecraft:poppy").unwrap();
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            0,
+            101,
+            0,
+            poppy,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(!placed, "a poppy on stone must be refused");
+        assert_eq!(
+            world.get_block(0, 101, 0),
+            block_ids::AIR,
+            "a refused placement must write nothing"
+        );
+
+        // On dirt the same poppy places.
+        world.set_block(2, 100, 0, "minecraft:dirt");
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            2,
+            101,
+            0,
+            poppy,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(placed, "a poppy on dirt must place");
+        assert_ne!(world.get_block(2, 101, 0), block_ids::AIR);
+    }
+
+    /// The owner's exact bug, end to end through `place_block`: grass on sand
+    /// is refused, on dirt it places. On a pre-change tree (no rule check)
+    /// this test fails on the sand half.
+    #[test]
+    fn place_block_refuses_grass_on_sand() {
+        let world = test_world(8);
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(1, "Steve");
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+
+        let grass = aether_world::registry::blocks::default_state("minecraft:short_grass").unwrap();
+        world.set_block(0, 100, 0, "minecraft:sand");
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            0,
+            101,
+            0,
+            grass,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(!placed, "grass on sand must be refused");
+        assert_eq!(world.get_block(0, 101, 0), block_ids::AIR);
+
+        world.set_block(2, 100, 0, "minecraft:dirt");
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            2,
+            101,
+            0,
+            grass,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(placed, "grass on dirt must place");
+        assert_ne!(world.get_block(2, 101, 0), block_ids::AIR);
+    }
+
+    /// `leaf_litter`'s first trigger through `place_block`: on the floor it
+    /// places; with nothing below (a wall) it is refused. On a pre-change tree
+    /// the refusal half fails.
+    #[test]
+    fn place_block_refuses_leaf_litter_on_a_wall() {
+        let world = test_world(9);
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(1, "Steve");
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+
+        let litter =
+            aether_world::registry::blocks::default_state("minecraft:leaf_litter").unwrap();
+        // A wall: nothing below the target cell.
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            0,
+            120,
+            0,
+            litter,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(!placed, "leaf litter on a wall must be refused");
+        assert_eq!(world.get_block(0, 120, 0), block_ids::AIR);
+
+        // The floor: a full block below.
+        world.set_block(2, 100, 0, "minecraft:stone");
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            2,
+            101,
+            0,
+            litter,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(placed, "leaf litter on the floor must place");
+        assert_ne!(world.get_block(2, 101, 0), block_ids::AIR);
+    }
+
+    /// `leaf_litter`'s second, independent trigger: on the floor but under
+    /// water it is refused. On a pre-change tree this fails.
+    #[test]
+    fn place_block_refuses_leaf_litter_under_water() {
+        let world = test_world(10);
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(1, "Steve");
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+
+        let litter =
+            aether_world::registry::blocks::default_state("minecraft:leaf_litter").unwrap();
+        world.set_block(0, 100, 0, "minecraft:stone");
+        world.set_block(0, 101, 0, "minecraft:water");
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            0,
+            101,
+            0,
+            litter,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(
+            !placed,
+            "leaf litter on the floor under water must be refused"
+        );
+        assert_eq!(
+            world.get_block(0, 101, 0),
+            block_ids::WATER,
+            "the water must be left untouched"
+        );
+    }
+
+    /// The ack is not a function of the placement outcome: a refused place
+    /// packet is acked too, or the client holds its prediction forever.
+    #[test]
+    fn a_refused_placement_is_still_acked() {
+        assert!(matches!(ack_event(7), Some(ServerEvent::AckBlockChange(7))));
+        assert!(ack_event(0).is_none(), "pre-1.19 predicts nothing");
     }
 }
