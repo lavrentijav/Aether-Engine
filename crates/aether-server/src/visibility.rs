@@ -205,7 +205,7 @@ impl CellMask {
 pub struct State {
     /// Set by `/visibility off`: this player sees everything.
     pub bypass: bool,
-    /// The `4×4×2` cell the last search was rooted at.
+    /// The `16³` section the last search was rooted at.
     center: Option<(i32, i32, i32)>,
     /// A graph inside this player's view changed since the last search. Set
     /// from a writer thread, cleared by the next search.
@@ -668,11 +668,14 @@ pub fn invalidate_block(x: i32, y: i32, z: i32) {
     if !crate::anti_xray_enabled() {
         return;
     }
-    match crate::anti_xray_config().mode {
-        AntiXrayMode::Culling => record_invalidation((x >> 4, y >> 4, z >> 4)),
-        AntiXrayMode::Engine => {
-            dirty_blocks().lock().unwrap().insert((x, y, z));
-        }
+    // Always evict the section's cached cell graphs and record the section for
+    // the coarse culling pass, regardless of the global mode: a player may hold
+    // a per-player `/spectate xray <margin>` override (effective mode culling)
+    // while the server runs `engine`, so their cell set must be invalidated by
+    // a block write too. The write path is not hot when anti-xray is on.
+    record_invalidation((x >> 4, y >> 4, z >> 4));
+    if crate::anti_xray_config().mode == AntiXrayMode::Engine {
+        dirty_blocks().lock().unwrap().insert((x, y, z));
     }
 }
 
@@ -793,7 +796,13 @@ pub fn visible_from_margin(
 /// an in-view graph changed since the last search.
 fn ensure_visible(handle: &PlayerHandle, world: &dyn BlockSource) {
     let pos = handle.pos();
+    let cell = cell_of_pos(pos);
     let section = section_of(pos);
+    // Track the player's exact cell every call, before the early return: a
+    // move within the same section keeps the section set fresh, but the own
+    // cell changes, and it must never be masked (or the client would show the
+    // player encased in stone for a frame).
+    handle.visibility().set_own_cell(cell);
     if handle.visibility().is_fresh(section) {
         return;
     }
@@ -805,7 +814,6 @@ fn ensure_visible(handle: &PlayerHandle, world: &dyn BlockSource) {
         effective_margin(handle),
     );
     handle.visibility().set_visible_if(section, visible, epoch);
-    handle.visibility().set_own_cell(cell_of_pos(pos));
 }
 
 /// The anti-xray mode in force for this player: their `/spectate xray`
@@ -2623,9 +2631,16 @@ mod tests {
     fn a_far_buried_ore_behind_solid_stone_is_hidden() {
         // The player is on the surface; a far column is solid stone with an
         // ore under the surface (the "shell" beside open air) and another
-        // deeper. Both cells must stay hidden: a solid cell may not be marked
-        // visible just because its face touches the air — a whole cell sent
-        // real leaks any ore in it.
+        // deeper. Both stay hidden because their section is fully opaque, so
+        // the coarse search never marks it visible and `column_hidden` leaves
+        // every cell of it as `fill` — the ore cannot be sent real.
+        //
+        // Note this is a *section-level* guarantee, not the `adj` cell rule:
+        // `compute_cell_visible` deliberately marks an opaque cell visible when
+        // it borders a visible one (so the surface dirt/water the player looks
+        // at is real). A sealed section has no visible cell in it to seed that,
+        // so the ore is hidden. The cell-level rule is exercised by
+        // `a_partly_visible_surface_section_is_masked_per_cell`.
         let _guard = global_test_lock();
         invalidate_all();
         let world = DeepGround {
@@ -2634,6 +2649,10 @@ mod tests {
         };
         let vis = visible_from_margin(&world, (0.5, 5.5, 0.5), 2, 2);
         // x=40 is column 2, within the view.
+        assert!(
+            !vis.contains(&(2, -1, 0)),
+            "the fully opaque ore section is not reachable"
+        );
         let hidden = column_hidden(&world, &vis, 2, 0);
         assert!(
             hidden.contains(10, -3, 0),
