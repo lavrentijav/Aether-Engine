@@ -319,8 +319,9 @@ pub enum ServerEvent<'a> {
     ///
     /// Sent once, at join. Without it the client's command tree is empty:
     /// every slash command shows red, nothing completes, and the server's
-    /// commands are undiscoverable. 1.8 has no such packet and ignores the
-    /// event.
+    /// commands are undiscoverable. The packet arrived in 1.13; 1.8 predates
+    /// it and has no server-supplied tree, so that codec encodes the event as
+    /// no packets.
     CommandTree,
     /// Move the centre of the client's loaded-column window.
     ///

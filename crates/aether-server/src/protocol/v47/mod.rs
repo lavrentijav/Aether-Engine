@@ -616,4 +616,22 @@ mod tests {
             _ => panic!("expected a keep-alive"),
         }
     }
+
+    #[test]
+    fn the_command_tree_packet_does_not_exist_before_1_13() {
+        // 1.13 added the Declare Commands packet. 1.8 has no packet for it and
+        // no server-supplied command tree at all — the client knows the
+        // vanilla command list itself — so the event must encode to nothing
+        // rather than to a packet the client would reject.
+        struct Empty;
+        impl BlockSource for Empty {
+            fn block_at(&self, _x: i32, _y: i32, _z: i32) -> BlockStateId {
+                BlockStateId::AIR
+            }
+        }
+        assert!(
+            Codec.encode(&ServerEvent::CommandTree, &Empty).is_empty(),
+            "1.8 predates the command tree and must send no packet for it"
+        );
+    }
 }

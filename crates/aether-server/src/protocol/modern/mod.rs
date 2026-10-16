@@ -465,7 +465,10 @@ impl ProtocolCodec for Codec {
             ServerEvent::CommandTree => {
                 let mut p = PacketOut::new(self.0.packets.cb_commands);
                 // From 1.19 on a parser is an index into the registry.
-                super::commands::write_tree(&mut p, super::commands::Parsers::ById);
+                super::commands::write_tree(
+                    &mut p,
+                    super::commands::Parsers::ById(&super::commands::PARSERS_1_21_6),
+                );
                 vec![p]
             }
             ServerEvent::Chat(text) => {
