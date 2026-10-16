@@ -367,6 +367,17 @@ impl<'a> PacketIn<'a> {
         Ok(u16::from_be_bytes(b.try_into().unwrap()))
     }
 
+    /// Read a big-endian `i32`.
+    pub fn i32(&mut self) -> io::Result<i32> {
+        let end = self.pos + 4;
+        let b = self
+            .buf
+            .get(self.pos..end)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "i32 eof"))?;
+        self.pos = end;
+        Ok(i32::from_be_bytes(b.try_into().unwrap()))
+    }
+
     /// Read a big-endian `i64`.
     pub fn i64(&mut self) -> io::Result<i64> {
         let end = self.pos + 8;

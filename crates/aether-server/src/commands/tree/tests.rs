@@ -218,29 +218,89 @@ fn every_argument_kind_parses_a_valid_word() {
         let mut r = StringReader::new(text);
         let out = kind.parse(&mut r);
         assert!(out.is_ok(), "{kind:?} rejected `{text}`: {out:?}");
-        let _ = kind.parser();
+        let _ = kind.parser_name();
+        let _ = kind.registry_name();
+        let _ = kind.properties();
     }
 }
 
 #[test]
-fn the_by_id_parser_indices_match_the_vanilla_registry() {
-    // Vanilla's order is not the order the kinds are written in: bool=0,
-    // float=1, double=2, integer=3, long=4, string=5. Getting these wrong is
-    // invisible until an integer-typed node reaches a client.
-    assert_eq!(ArgKind::Bool.parser().id, 0);
-    assert_eq!(ArgKind::Float.parser().id, 1);
-    assert_eq!(ArgKind::Double.parser().id, 2);
-    assert_eq!(ArgKind::Integer.parser().id, 3);
-    assert_eq!(ArgKind::Long.parser().id, 4);
-    assert_eq!(ArgKind::String.parser().id, 5);
-    assert_eq!(ArgKind::GreedyString.parser().id, 5);
-    // The string modes: word=0, quotable=1, greedy=2.
-    assert_eq!(ArgKind::String.parser().properties, 0);
-    assert_eq!(ArgKind::Quotable.parser().properties, 1);
-    assert_eq!(ArgKind::GreedyString.parser().properties, 2);
-    // The by-name spelling stays the pre-1.19 identifier.
-    assert_eq!(ArgKind::Integer.parser().name, "brigadier:integer");
+fn the_wire_parser_and_properties_match_each_kind() {
+    // The by-id indices themselves are checked against `minecraft-data` in
+    // `protocol::commands`, where the per-release registries live. Here the
+    // tree's own half: the pre-1.19 identifier, the property shape, and that
+    // every argument kind names a parser at all.
+    assert_eq!(ArgKind::Bool.parser_name(), "brigadier:bool");
+    assert_eq!(ArgKind::Float.parser_name(), "brigadier:float");
+    assert_eq!(ArgKind::Double.parser_name(), "brigadier:double");
+    assert_eq!(ArgKind::Integer.parser_name(), "brigadier:integer");
+    assert_eq!(ArgKind::Long.parser_name(), "brigadier:long");
+    assert_eq!(ArgKind::String.parser_name(), "brigadier:string");
+    assert_eq!(ArgKind::GreedyString.parser_name(), "brigadier:string");
+    // The string modes: word=0, quotable=1, greedy=2, as a VarInt property.
+    assert_eq!(ArgKind::String.properties(), ArgProperties::VarInt(0));
+    assert_eq!(ArgKind::Quotable.properties(), ArgProperties::VarInt(1));
+    assert_eq!(ArgKind::GreedyString.properties(), ArgProperties::VarInt(2));
+    // A parser with no properties writes nothing at all, so no stray byte
+    // shifts the next node.
+    assert_eq!(ArgKind::Bool.properties(), ArgProperties::None);
+    assert_eq!(ArgKind::BlockPos.properties(), ArgProperties::None);
+    // The numeric bounds flags, and the entity/score-holder flags.
+    assert_eq!(ArgKind::Integer.properties(), ArgProperties::Flags(0));
+    assert_eq!(ArgKind::Long.properties(), ArgProperties::Flags(0));
+    assert_eq!(ArgKind::Float.properties(), ArgProperties::Flags(0));
+    assert_eq!(ArgKind::Double.properties(), ArgProperties::Flags(0));
+    assert_eq!(ArgKind::Entity.properties(), ArgProperties::Flags(0x01));
+    assert_eq!(ArgKind::Entities.properties(), ArgProperties::Flags(0x00));
+    assert_eq!(
+        ArgKind::ScoreHolder.properties(),
+        ArgProperties::Flags(0x00)
+    );
+    assert_eq!(ArgKind::Time.properties(), ArgProperties::Time);
+    // Every kind names a parser, and a registry name that is either present
+    // in the releases or the string fallback.
+    for kind in ALL_KINDS {
+        assert!(!kind.parser_name().is_empty(), "{kind:?}");
+        assert!(!kind.registry_name().is_empty(), "{kind:?}");
+    }
 }
+
+/// Every argument kind, for the exhaustive tree-level checks.
+const ALL_KINDS: &[ArgKind] = &[
+    ArgKind::String,
+    ArgKind::Quotable,
+    ArgKind::GreedyString,
+    ArgKind::Message,
+    ArgKind::Integer,
+    ArgKind::Long,
+    ArgKind::Float,
+    ArgKind::Double,
+    ArgKind::Bool,
+    ArgKind::Enum(&["a", "b"]),
+    ArgKind::Entity,
+    ArgKind::Entities,
+    ArgKind::BlockPos,
+    ArgKind::Vec3,
+    ArgKind::Vec2,
+    ArgKind::BlockState,
+    ArgKind::ItemStack,
+    ArgKind::NbtCompound,
+    ArgKind::NbtPath,
+    ArgKind::Component,
+    ArgKind::ResourceLocation,
+    ArgKind::ResourceOrTag,
+    ArgKind::GameProfile,
+    ArgKind::Time,
+    ArgKind::Gamemode,
+    ArgKind::Difficulty,
+    ArgKind::Particle,
+    ArgKind::ScoreHolder,
+    ArgKind::Swizzle,
+    ArgKind::Angle,
+    ArgKind::Operation,
+    ArgKind::Rotation,
+    ArgKind::Uuid,
+];
 
 #[test]
 fn integer_types_parse_and_reject_with_vanilla_text() {

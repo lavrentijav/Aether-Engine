@@ -154,63 +154,117 @@ pub enum ArgKind {
 }
 
 impl ArgKind {
-    /// How this kind appears in a Declare Commands packet. CMD-04 replaces
-    /// the placeholder mapping with a faithful per-version one; the string
-    /// kinds (the only ones registered today) are already exact.
-    pub fn parser(self) -> ParserRef {
+    /// The parser identifier a **pre-1.19** Declare Commands packet names for
+    /// this kind (`brigadier:string`, `minecraft:entity`, …).
+    ///
+    /// The string kinds — the only ones the tree registers today — are exact.
+    /// The rest are named from `minecraft-data`'s `command_node` table for
+    /// 1.18.2, the last release before parser ids replaced names. The kinds
+    /// that stand in for a fixed set of words, or for a parser that carries a
+    /// registry the kind does not have, are declared as a plain
+    /// `brigadier:string`: the client then colours them but does not
+    /// misparse a property field it was never sent.
+    pub fn parser_name(self) -> &'static str {
         match self {
-            ArgKind::String => ParserRef {
-                name: "brigadier:string",
-                id: 5,
-                properties: 0,
-            },
-            ArgKind::Quotable => ParserRef {
-                name: "brigadier:string",
-                id: 5,
-                properties: 1,
-            },
-            ArgKind::GreedyString | ArgKind::Message => ParserRef {
-                name: "brigadier:string",
-                id: 5,
-                properties: 2,
-            },
-            // The `ById` indices are the vanilla parser registry order, which
-            // is *not* the order the kinds are listed here: bool=0, float=1,
-            // double=2, integer=3, long=4, string=5. Checked against
-            // `minecraft-data` `command_node` for every release that uses ids.
-            ArgKind::Bool => ParserRef {
-                name: "brigadier:bool",
-                id: 0,
-                properties: 0,
-            },
-            ArgKind::Float => ParserRef {
-                name: "brigadier:float",
-                id: 1,
-                properties: 0,
-            },
-            ArgKind::Double => ParserRef {
-                name: "brigadier:double",
-                id: 2,
-                properties: 0,
-            },
-            ArgKind::Integer => ParserRef {
-                name: "brigadier:integer",
-                id: 3,
-                properties: 0,
-            },
-            ArgKind::Long => ParserRef {
-                name: "brigadier:long",
-                id: 4,
-                properties: 0,
-            },
-            // Everything else is declared as a single string until its own
-            // CMD task teaches the serializer the real parser. CMD-04 owns
-            // that mapping; keeping the kinds here is what it will build on.
-            _ => ParserRef {
-                name: "brigadier:string",
-                id: 5,
-                properties: 0,
-            },
+            // Fixed word sets are a single-word string on the wire.
+            ArgKind::String | ArgKind::Quotable | ArgKind::GreedyString | ArgKind::Enum(_) => {
+                "brigadier:string"
+            }
+            // No release registers a `minecraft:difficulty` parser; vanilla
+            // spells `/difficulty` as a string.
+            ArgKind::Difficulty => "brigadier:string",
+            // `minecraft:resource_or_tag` carries a registry identifier the
+            // kind cannot supply yet, so it is declared as a string until a
+            // CMD task gives the kind that data.
+            ArgKind::ResourceOrTag => "brigadier:string",
+            ArgKind::Message => "minecraft:message",
+            ArgKind::Integer => "brigadier:integer",
+            ArgKind::Long => "brigadier:long",
+            ArgKind::Float => "brigadier:float",
+            ArgKind::Double => "brigadier:double",
+            ArgKind::Bool => "brigadier:bool",
+            ArgKind::Entity | ArgKind::Entities => "minecraft:entity",
+            ArgKind::BlockPos => "minecraft:block_pos",
+            ArgKind::Vec3 => "minecraft:vec3",
+            ArgKind::Vec2 => "minecraft:vec2",
+            ArgKind::BlockState => "minecraft:block_state",
+            ArgKind::ItemStack => "minecraft:item_stack",
+            // Renamed `minecraft:nbt` when parser ids arrived in 1.19; the
+            // old spelling is what a ByName codec expects.
+            ArgKind::NbtCompound => "minecraft:nbt_compound_tag",
+            ArgKind::NbtPath => "minecraft:nbt_path",
+            ArgKind::Component => "minecraft:component",
+            ArgKind::ResourceLocation => "minecraft:resource_location",
+            ArgKind::GameProfile => "minecraft:game_profile",
+            ArgKind::Time => "minecraft:time",
+            ArgKind::Gamemode => "minecraft:gamemode",
+            ArgKind::Particle => "minecraft:particle",
+            ArgKind::ScoreHolder => "minecraft:score_holder",
+            ArgKind::Swizzle => "minecraft:swizzle",
+            ArgKind::Angle => "minecraft:angle",
+            ArgKind::Operation => "minecraft:operation",
+            ArgKind::Rotation => "minecraft:rotation",
+            ArgKind::Uuid => "minecraft:uuid",
+        }
+    }
+
+    /// The name a **1.19+** parser registry uses for this kind. It differs
+    /// from [`ArgKind::parser_name`] only for the NBT compound tag, which
+    /// `minecraft-data` lists as `minecraft:nbt` from 1.19 on.
+    pub fn registry_name(self) -> &'static str {
+        match self {
+            ArgKind::NbtCompound => "minecraft:nbt",
+            other => other.parser_name(),
+        }
+    }
+
+    /// The property field this kind writes after its parser.
+    ///
+    /// Bounds and registry names the tree does not model stay at their
+    /// defaults — an unbounded number, a single entity, a non-multiple score
+    /// holder — because a node cannot express anything else yet. A parser with
+    /// no properties writes nothing at all; writing the zero byte the old
+    /// shallow tree always wrote is what made a client read the next field
+    /// from the wrong offset.
+    pub fn properties(self) -> ArgProperties {
+        match self {
+            ArgKind::String | ArgKind::Enum(_) | ArgKind::Difficulty | ArgKind::ResourceOrTag => {
+                ArgProperties::VarInt(0)
+            }
+            ArgKind::Quotable => ArgProperties::VarInt(1),
+            ArgKind::GreedyString => ArgProperties::VarInt(2),
+            // Void properties: nothing follows the parser.
+            ArgKind::Message
+            | ArgKind::Bool
+            | ArgKind::BlockPos
+            | ArgKind::Vec3
+            | ArgKind::Vec2
+            | ArgKind::BlockState
+            | ArgKind::ItemStack
+            | ArgKind::NbtCompound
+            | ArgKind::NbtPath
+            | ArgKind::Component
+            | ArgKind::ResourceLocation
+            | ArgKind::GameProfile
+            | ArgKind::Gamemode
+            | ArgKind::Particle
+            | ArgKind::Swizzle
+            | ArgKind::Angle
+            | ArgKind::Operation
+            | ArgKind::Rotation
+            | ArgKind::Uuid => ArgProperties::None,
+            // The numeric kinds write a flags byte with the min/max bits;
+            // neither is present.
+            ArgKind::Integer | ArgKind::Long | ArgKind::Float | ArgKind::Double => {
+                ArgProperties::Flags(0)
+            }
+            // `0x01` is "single", as vanilla writes `EntityArgumentType`.
+            ArgKind::Entity => ArgProperties::Flags(0x01),
+            ArgKind::Entities => ArgProperties::Flags(0x00),
+            ArgKind::ScoreHolder => ArgProperties::Flags(0x00),
+            // An `i32` minimum from 1.19.4 on, and no field before that; the
+            // serializer decides from the codec's parser generation.
+            ArgKind::Time => ArgProperties::Time,
         }
     }
 
@@ -275,14 +329,23 @@ impl ArgKind {
     }
 }
 
-/// A parser as the Declare Commands packet names it.
-pub struct ParserRef {
-    /// Pre-1.19 name (`brigadier:string`).
-    pub name: &'static str,
-    /// 1.19+ index into the parser registry.
-    pub id: i32,
-    /// The properties var-int that follows (the string mode, usually).
-    pub properties: i32,
+/// The property field that follows a parser on the wire.
+///
+/// Only a few argument types carry one. The serializer writes the right
+/// number of bytes per variant, so a node can never emit the stray zero byte
+/// that shifts every field after it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArgProperties {
+    /// Nothing follows the parser.
+    None,
+    /// A VarInt: the string mode (`0` word, `1` quotable, `2` greedy).
+    VarInt(i32),
+    /// A single flags byte: the numeric bounds bits, or the entity and
+    /// score-holder flags.
+    Flags(u8),
+    /// An `i32` minimum — `minecraft:time` from 1.19.4 on, and no field at all
+    /// before that.
+    Time,
 }
 
 /// A requirement's verdict.
@@ -408,6 +471,93 @@ pub struct Match<'s> {
     pub node: &'s Node,
     /// The parsed arguments, in order.
     pub args: Vec<ParsedArg>,
+}
+
+/// Literal node flag: the node is a fixed word.
+pub const NODE_LITERAL: u8 = 0x01;
+/// Argument node flag: the node is a typed argument.
+pub const NODE_ARGUMENT: u8 = 0x02;
+/// Executable node flag: the grammar may end here.
+pub const NODE_EXECUTABLE: u8 = 0x04;
+
+/// A node flattened for the Declare Commands packet.
+///
+/// This is the serialization view of the tree: the protocol serializer never
+/// walks [`Node`]s itself, so the wire shape is described in exactly one
+/// place here and the per-version parser lookup stays in `protocol`.
+pub struct WireNode {
+    /// The node's flag byte: [`NODE_LITERAL`], [`NODE_ARGUMENT`] and
+    /// [`NODE_EXECUTABLE`]. Redirect (`0x08`) and suggestion-provider (`0x10`)
+    /// are not modelled yet.
+    pub flags: u8,
+    /// The literal word or argument name. Absent for the root.
+    pub name: Option<&'static str>,
+    /// The argument parser, for an argument node.
+    pub parser: Option<ArgKind>,
+    /// Indices into the same vector of the node's children.
+    pub children: Vec<usize>,
+}
+
+/// Flatten `t` for the wire. Index 0 is the root; a command and each of its
+/// aliases is its own literal node over the same children, and an argument
+/// node records its parser. Requirement-gated nodes are declared like any
+/// other: visibility is the client's decision from the tree, and permission
+/// is enforced on execution.
+pub fn wire_nodes(t: &CommandTree) -> (Vec<WireNode>, usize) {
+    let mut nodes = vec![WireNode {
+        flags: 0,
+        name: None,
+        parser: None,
+        children: Vec::new(),
+    }];
+    let mut root_children = Vec::new();
+    for command in t.commands() {
+        let children: Vec<usize> = command
+            .children
+            .iter()
+            .map(|child| flatten_node(&mut nodes, child))
+            .collect();
+        let mut names = vec![command.name];
+        names.extend(command.aliases.iter().copied());
+        for name in names {
+            let idx = nodes.len();
+            nodes.push(WireNode {
+                flags: NODE_LITERAL
+                    | if command.executable {
+                        NODE_EXECUTABLE
+                    } else {
+                        0
+                    },
+                name: Some(name),
+                parser: None,
+                children: children.clone(),
+            });
+            root_children.push(idx);
+        }
+    }
+    nodes[0].children = root_children;
+    (nodes, 0)
+}
+
+fn flatten_node(nodes: &mut Vec<WireNode>, node: &Node) -> usize {
+    let children: Vec<usize> = node
+        .children
+        .iter()
+        .map(|child| flatten_node(nodes, child))
+        .collect();
+    let executable = if node.executable { NODE_EXECUTABLE } else { 0 };
+    let (flags, parser) = match &node.kind {
+        Kind::Argument(kind) => (NODE_ARGUMENT | executable, Some(*kind)),
+        _ => (NODE_LITERAL | executable, None),
+    };
+    let idx = nodes.len();
+    nodes.push(WireNode {
+        flags,
+        name: Some(node.name),
+        parser,
+        children,
+    });
+    idx
 }
 
 /// The one shared tree, built once.
