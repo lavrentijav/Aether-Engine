@@ -209,6 +209,8 @@ impl Ledger {
                 inst.trail.push((e.seq, Place::Nowhere));
             }
             EventBody::ItemMerge { into, from, count } => self.merge(e.seq, *into, *from, *count),
+            // Player text changes no item, so the ledger is unaffected.
+            EventBody::ChatMessage { .. } => {}
             // A plugin event: the core does not know what it did to items, so
             // it changes nothing here.
             EventBody::Custom { .. } => {}

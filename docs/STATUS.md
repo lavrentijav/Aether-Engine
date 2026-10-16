@@ -60,6 +60,7 @@ modern versions run a server-side survival game).
 | A saved record that exists but cannot be read **refuses login** and is left untouched, instead of reading as empty and being overwritten by the first save (`server::stored`) | ✅ |
 | Inspect mode (`/inspect`): hitting a block reports its history instead of changing it | ✅ |
 | Filter language shared by `/lookup` and `/rollback` (`player:` `time:` `block:` `action:` `radius:`) + paged chat output (`/page`) | ✅ |
+| Chat, private-message and command logging (CH1): every line a player types is written to the server log (`[chat] name text`, `[pm] a -> b: text`, `[cmd] name: /line`) and journalled as an `EventBody::ChatMessage` (journal format v5: actor, time, position, text; tags 7–9). `[chat]` config with `log`, `log_commands`, a command-name redact list (`/login`, `/register`, `/l`, `/reg` masked as `****`) and per-player limits (text sanitized of control chars/`§`, capped at `max_len`, rate-limited by `rate_per_min`); `/msg` `/tell` `/w` are the core whisper commands — see [design/chat-logging.md](design/chat-logging.md) | ✅ |
 | **History API (PA2)**: read-only, cursor-paged journal queries — a block's full timeline (`block_history`), worldgen-original check, an area×time/actor/kind window, an item's provenance chain, a container's access log and a player's event stream (`aether-world::journal::history`). An **item index** (`I uid seq`) turns an item's timeline into a prefix read; a block or container query walks only its column index, never the journal | ✅ |
 | Recovery stash: a rollback returns what was *placed* (not the world's current content), grouped by block + state tags | ✅ |
 | Stash chest window on 1.21.11 — glass frame, page arrows; chat listing on versions without container support | 🚧 Preview |
@@ -72,6 +73,8 @@ modern versions run a server-side survival game).
 | Survival mode (`game_mode` in config): broken blocks drop to the player | ✅ |
 | Slash commands from 1.19+ clients: the client sends these on their own packet, not as chat, so a chat-only decoder never saw a single one | ✅ |
 | Command tree declared at join ("Declare Commands"), so the server's commands complete and colour in a real client | ✅ |
+| One Brigadier-style command tree (`commands::tree`) parses, suggests and executes every built-in verb; the old per-module `match` dispatchers are gone (CMD-03) | ✅ |
+| Permission core: vanilla op levels 0–4, a lower-case node model with allow/deny/op defaults, one `check(level, node, op)` for the command registry, the plugin commands, `is_operator` and the SDK's `permissions` service, and a built-in `op` group (level 4) seeded add-only from `config.operators` and persisted to `<world_dir>/permissions.toml` (atomic write) (`permissions.rs`, CMD-01); groups/inheritance/per-world/meta are CMD-02 | ✅ |
 | Shape updates when a neighbour changes: fences, walls, panes and stair corners settle both ways, not only towards a block that already existed | ✅ |
 | The vanilla generator serves a live join — 289 columns in ~21 s cold at view radius 8, inside five seconds once cached | ✅ |
 | Vanilla surface rules interpreted from the pack, all conditions including `temperature`, `steep`, `hole` and badlands banding — 99.9998% of blocks against the game's own surface stage | ✅ |

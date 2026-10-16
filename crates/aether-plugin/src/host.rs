@@ -147,6 +147,57 @@ pub trait HostBackend: Send + Sync {
         Vec::new()
     }
 
+    /// `permissions`: whether the online player with session id `id` holds
+    /// `node` for a command needing `op`.
+    ///
+    /// Used by the SDK `permissions` service. The default is **deny** — a host
+    /// (or a test) with no permission core fails closed, which is the safe
+    /// answer, and the server overrides it to front [`crate::permissions`].
+    fn permission_check(&self, _plugin: &str, _id: u64, _node: &str, _op: u8) -> bool {
+        false
+    }
+
+    /// `permissions`: the online player's effective level. The default is 0.
+    fn permission_level(&self, _plugin: &str, _id: u64) -> u8 {
+        0
+    }
+
+    /// `permissions`: the groups the online player belongs to. The default is
+    /// empty.
+    fn permission_groups(&self, _plugin: &str, _id: u64) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// `permissions`: a meta value (prefix/suffix/weight) for the online
+    /// player. The default is `None`; meta is CMD-02.
+    fn permission_meta(&self, _plugin: &str, _id: u64, _key: &str) -> Option<String> {
+        None
+    }
+
+    /// `permissions`: grant or deny `node` to `subject`. The default refuses:
+    /// the per-player write model is CMD-02, and a host without it must not
+    /// pretend the write happened.
+    fn permission_grant(
+        &self,
+        _plugin: &str,
+        _subject: &str,
+        _node: &str,
+        _value: bool,
+    ) -> std::result::Result<(), String> {
+        Err("the permission write model (CMD-02) is not available yet".to_string())
+    }
+
+    /// `permissions`: remove an explicit `node` from `subject`. The default
+    /// refuses, as [`Self::permission_grant`].
+    fn permission_revoke(
+        &self,
+        _plugin: &str,
+        _subject: &str,
+        _node: &str,
+    ) -> std::result::Result<(), String> {
+        Err("the permission write model (CMD-02) is not available yet".to_string())
+    }
+
     // --- History API (PA2) -------------------------------------------------
     //
     // Read-only journal queries behind the SDK `history` service. The defaults

@@ -595,6 +595,8 @@ pub struct Config {
     pub auth: AuthConfig,
     /// Optional history mirror.
     pub database: DatabaseConfig,
+    /// Chat and command logging. See [`ChatConfig`].
+    pub chat: ChatConfig,
     /// WebAssembly plugins: the directory and the per-plugin overrides.
     pub plugins: PluginsConfig,
     /// Who may run administrative commands: `name`, or `name@address` to
@@ -801,6 +803,63 @@ impl Default for DatabaseConfig {
     }
 }
 
+/// `[chat]` settings: logging every chat line, private message and command a
+/// player types.
+///
+/// On by default. The server log gets a line per event (`[chat] name text`,
+/// `[pm] a -> b: text`, `[cmd] name: /line`) and the same text is journalled as
+/// an event so the history API and web admin can show it. Commands that carry
+/// a secret are redacted: their arguments become `****` in both places.
+///
+/// Player text is sanitized of control characters and `§` so it cannot forge a
+/// log line or inject an ANSI escape, capped at [`max_len`](Self::max_len)
+/// characters, and rate-limited to
+/// [`rate_per_min`](Self::rate_per_min) lines per player per minute.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct ChatConfig {
+    /// Log public chat and private messages.
+    pub log: bool,
+    /// Log the command lines players type.
+    pub log_commands: bool,
+    /// Command names whose arguments are masked, without the leading `/`.
+    /// Matched case-insensitively. The default covers the common
+    /// authentication commands (`/login`, `/register`, `/l`, `/reg`).
+    pub redact: Vec<String>,
+    /// The most characters of player text kept in the log and the journal; a
+    /// longer line is truncated and marked with `…`. `0` means no limit.
+    pub max_len: usize,
+    /// The most lines one player may have logged/journalled per minute; `0`
+    /// disables the limit. Bounds how fast a chatty or hostile client can
+    /// grow the journal, which is appended synchronously on the game thread.
+    pub rate_per_min: u32,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            log: true,
+            log_commands: true,
+            redact: ["login", "register", "l", "reg"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            // Vanilla caps a chat line at 256 characters anyway.
+            max_len: 256,
+            rate_per_min: 120,
+        }
+    }
+}
+
+impl ChatConfig {
+    /// Whether the arguments of command `name` (without the leading `/`) are
+    /// redacted. Case-insensitive, and a leading `/` on `name` is ignored.
+    pub fn redacts(&self, name: &str) -> bool {
+        let name = name.strip_prefix('/').unwrap_or(name);
+        self.redact.iter().any(|r| r.eq_ignore_ascii_case(name))
+    }
+}
+
 /// `[cache]` settings: the disk cache for unmodified generated columns.
 ///
 /// Purely a speed feature — every entry is reproducible from the seed, so the
@@ -926,6 +985,23 @@ url = ""
 batch_size = 500        # write as soon as this many events are waiting
 batch_delay_ms = 1000   # ...or this long after the first one arrived
 queue_depth = 100000    # events that may wait before submissions are dropped
+
+[chat]
+# Log every chat line, private message and command players type. Each is
+# written to the server log ([chat] name text, [pm] a -> b: text,
+# [cmd] name: /line) and journalled as an event the history API can show.
+log = true           # public chat and private messages
+log_commands = true  # commands players type
+# Command names whose arguments are masked as **** in the log and the journal,
+# so a password can never leak through it. Case-insensitive, without the slash.
+redact = ["login", "register", "l", "reg"]
+# Player text is sanitized of control characters and § before it is logged or
+# journalled, so it cannot forge a log line or inject a terminal escape, and is
+# cut to this many characters (0 = no limit; a cut line ends with …).
+max_len = 256
+# The most lines one player may have logged/journalled per minute; 0 disables
+# the limit. Bounds how fast a client can grow the journal on the game thread.
+rate_per_min = 120
 
 [plugins]
 # WebAssembly plugins (a build with the `plugins` feature, the default). Each
@@ -1325,6 +1401,48 @@ mod tests {
         assert!(cfg
             .apply_env(|k| (k == "AETHER_PORT").then(|| "x".to_string()))
             .is_err());
+    }
+
+    #[test]
+    fn chat_logging_is_on_by_default_and_redacts_the_auth_commands() {
+        let cfg = Config::default();
+        assert!(cfg.chat.log, "chat logging is on by default");
+        assert!(cfg.chat.log_commands);
+        assert_eq!(cfg.chat.max_len, 256, "chat lines are capped by default");
+        assert_eq!(
+            cfg.chat.rate_per_min, 120,
+            "chat is rate-limited by default"
+        );
+        for name in ["login", "register", "l", "reg", "/login", "LOGIN"] {
+            assert!(cfg.chat.redacts(name), "{name} must be redacted");
+        }
+        for name in ["gamemode", "msg", "lookup", "r"] {
+            assert!(!cfg.chat.redacts(name), "{name} must not be redacted");
+        }
+    }
+
+    #[test]
+    fn the_chat_section_parses_and_can_replace_the_redact_list() {
+        let cfg: Config = toml::from_str(
+            "[chat]\nlog = false\nlog_commands = false\nredact = [\"password\", \"pw\"]\n",
+        )
+        .unwrap();
+        assert!(!cfg.chat.log);
+        assert!(!cfg.chat.log_commands);
+        assert_eq!(cfg.chat.redact, vec!["password", "pw"]);
+        assert!(cfg.chat.redacts("PW"), "matching is case-insensitive");
+        assert!(!cfg.chat.redacts("login"), "the default list was replaced");
+    }
+
+    #[test]
+    fn the_chat_length_and_rate_limits_are_configurable() {
+        let cfg: Config = toml::from_str("[chat]\nmax_len = 40\nrate_per_min = 7\n").unwrap();
+        assert_eq!(cfg.chat.max_len, 40);
+        assert_eq!(cfg.chat.rate_per_min, 7);
+        // Zero is the documented "off" value for both.
+        let off: Config = toml::from_str("[chat]\nmax_len = 0\nrate_per_min = 0\n").unwrap();
+        assert_eq!(off.chat.max_len, 0);
+        assert_eq!(off.chat.rate_per_min, 0);
     }
 
     #[test]

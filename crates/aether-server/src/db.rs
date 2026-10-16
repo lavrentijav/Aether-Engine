@@ -80,6 +80,8 @@ CREATE INDEX IF NOT EXISTS aether_events_item      ON aether_events (item_uid) W
 ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS cause        BIGINT;
 ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS derived_from BIGINT[];
 ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS reason       SMALLINT;
+ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS text         TEXT;
+ALTER TABLE aether_events ADD COLUMN IF NOT EXISTS peer         UUID;
 CREATE INDEX IF NOT EXISTS aether_events_cause     ON aether_events (cause) WHERE cause IS NOT NULL;
 CREATE INDEX IF NOT EXISTS aether_events_derived   ON aether_events USING GIN (derived_from) WHERE derived_from IS NOT NULL;
 CREATE TABLE IF NOT EXISTS aether_event_kinds (
@@ -103,7 +105,7 @@ CREATE TABLE IF NOT EXISTS aether_destroy_reasons (
 /// One text-shaped row builder plus a cast list is far less code than sixteen
 /// `&dyn ToSql` of four different types per event shape, and Postgres parses
 /// the text exactly as it would a literal.
-const COLUMNS: [(&str, &str); 19] = [
+const COLUMNS: [(&str, &str); 21] = [
     ("seq", "bigint"),
     ("at_ms", "bigint"),
     ("actor", "uuid"),
@@ -123,6 +125,10 @@ const COLUMNS: [(&str, &str); 19] = [
     ("cause", "bigint"),
     ("derived_from", "bigint[]"),
     ("reason", "smallint"),
+    // CH1: player text. `text` holds the chat line, private message or
+    // (redacted) command; `peer` is the recipient of a private message.
+    ("text", "text"),
+    ("peer", "uuid"),
 ];
 /// How many of them.
 const NCOLS: usize = COLUMNS.len();
@@ -409,6 +415,15 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
         // columns for a payload it does not understand. The bytes stay in the
         // journal; the mirror records only that the tag happened.
         EventBody::Custom { .. } => {}
+        // Player text: the kind is the tag (chat/pm/command), the text is the
+        // line and the peer is the private-message recipient. Public chat and
+        // commands have no peer.
+        EventBody::ChatMessage { peer, text, .. } => {
+            v[19] = Some(text.clone());
+            if *peer != aether_world::journal::ActorId::SERVER {
+                v[20] = Some(uuid_text(peer.0));
+            }
+        }
     }
     v[16] = e.cause.map(|c| c.to_string());
     v
@@ -718,7 +733,7 @@ mod live_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_world::journal::{ActorId, ItemUid};
+    use aether_world::journal::{ActorId, ChatKind, ItemUid};
     use aether_world::BlockStateId;
 
     fn block_event() -> Event {
@@ -935,6 +950,53 @@ mod tests {
         assert_eq!(v[3].as_deref(), Some("200"), "the custom tag is the kind");
         // The core has no column for a payload it does not understand.
         assert!(v[11].is_none() && v[12].is_none() && v[18].is_none());
+    }
+
+    #[test]
+    fn a_chat_row_carries_its_text_peer_and_position() {
+        let e = Event {
+            seq: 1,
+            at_ms: 2,
+            actor: ActorId(1),
+            cause: None,
+            body: EventBody::ChatMessage {
+                kind: ChatKind::Private,
+                x: 10,
+                y: 64,
+                z: -20,
+                peer: ActorId(9),
+                text: "hi there".to_string(),
+            },
+        };
+        let v = row_values(&e);
+        assert_eq!(v[3].as_deref(), Some("8"), "pm is tag 8");
+        assert_eq!(v[4].as_deref(), Some("10"), "x");
+        assert_eq!(v[5].as_deref(), Some("64"), "y");
+        assert_eq!(v[6].as_deref(), Some("-20"), "z");
+        assert_eq!(v[19].as_deref(), Some("hi there"), "text");
+        assert_eq!(v[20], Some(uuid_text(9)), "peer");
+        assert!(v[11].is_none(), "a chat event is not an item");
+    }
+
+    #[test]
+    fn a_public_chat_row_has_no_peer() {
+        let e = Event {
+            seq: 1,
+            at_ms: 2,
+            actor: ActorId(1),
+            cause: None,
+            body: EventBody::ChatMessage {
+                kind: ChatKind::Public,
+                x: 0,
+                y: 0,
+                z: 0,
+                peer: ActorId::SERVER,
+                text: "hello".to_string(),
+            },
+        };
+        let v = row_values(&e);
+        assert_eq!(v[19].as_deref(), Some("hello"));
+        assert!(v[20].is_none(), "public chat has no recipient");
     }
 
     #[test]
