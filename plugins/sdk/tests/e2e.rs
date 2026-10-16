@@ -72,6 +72,21 @@ impl HostBackend for Backend {
         Ok(())
     }
 
+    // CMD-01: the fixture's `/hist` is declared plainly (`commands = ["hist"]`),
+    // i.e. op level 0, so it is available to an **ordinary** player. The
+    // history test only ever dispatches `/hist` to reach the `history.read`
+    // gate; it is not testing command rights. This mirrors what the real
+    // server's load-time node declaration does for a public plugin command, so
+    // the dispatch below is gated exactly as the server would gate it — and a
+    // non-op passes.
+    fn permission_check(&self, _plugin: &str, _id: u64, node: &str, op: u8) -> bool {
+        node == "plugin.historian.hist" && op == 0
+    }
+
+    fn permission_level(&self, _plugin: &str, _id: u64) -> u8 {
+        0
+    }
+
     // Reached only when the caller passed the `history.read` gate.
     fn history_worldgen_original(&self, _plugin: &str, _x: i32, _y: i32, _z: i32) -> bool {
         self.worldgen_original
@@ -250,6 +265,15 @@ fn run_historian(historian_grant: Vec<String>) -> Vec<String> {
         name: "Steve".to_string(),
         operator: false,
     };
+    // The fixture command is public (op 0): an ordinary player may run it.
+    // Asserting it through the permission backend makes that explicit, so a
+    // future change that routes plugin commands through the CMD-01 gate still
+    // dispatches `/hist` for a non-op — this test is about `history.read`, not
+    // about command rights.
+    assert!(
+        backend.permission_check("historian", p.id, "plugin.historian.hist", 0),
+        "the fixture command must be available to an ordinary player"
+    );
     let result = host.on_command(&p, "hist", &[]).unwrap();
     assert!(result.handled);
     let logs = backend.logs.lock().unwrap().clone();
