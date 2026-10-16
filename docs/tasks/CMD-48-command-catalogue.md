@@ -42,6 +42,18 @@ Today there are effectively two lists that can drift:
    `status` (and, where relevant, nothing else) — no second list, no hardcoded "Implemented:" string.
    Do **not** use commented-out code as the mechanism (rustfmt/tests make that fragile); a `status`
    field is the maintained single list. Explain the rule in the module doc.
+5. **A generated markdown catalogue**, in sync with the Rust list (the owner asked for the `.md`
+   file). Add a small generator (a `[[bin]]`/example or a `tests/` helper, run via
+   `cargo-locked`, the same pattern the repo uses for `legacy_gen.rs`) that renders the whole
+   catalogue to **`docs/COMMANDS.md`** (and `docs/COMMANDS.ru.md`, since the project keeps EN+RU in
+   sync) and a test that **regenerates and byte-compares** it, so the doc cannot drift.
+   The markdown must have, per command, grouped by **category**:
+   - the command and its aliases (`/gamemode` (`gm`)), its **status** (working / `pending CMD-nn`),
+     the permission node and op level, and a one-line usage/description.
+   - a short header + legend (✅ working · 🚧 pending) and a per-category table of contents.
+   - a note that the file is generated (do not edit by hand) and the command to regenerate it.
+   Keep it consistent with `docs/design/commands.md` (which holds the *design decisions*); this file
+   is the *current state* list, and the two must not contradict each other.
 
 ## Constraints
 - Vanilla behaviour: command names/aliases/op levels/nodes must still match `docs/design/commands.md`
@@ -64,11 +76,15 @@ Today there are effectively two lists that can drift:
 - `crates/aether-server/src/commands/tree.rs` (`build`, `stub`), `commands/mod.rs` (`help_lines`,
   `RESERVED_COMMANDS`), and the `nodes()` in `game/commands.rs`, `economy/commands.rs`,
   `commands/core_nodes()`.
+- a generator + its example/bin (e.g. `crates/aether-server/examples/gen_commands_md.rs`) and
+  `docs/COMMANDS.md` + `docs/COMMANDS.ru.md`.
 - `docs/design/commands.md` — add the category table and the "one list" rule.
 
 ## Done criteria
 - One catalogue lists every command with a category and status; the tree, Declare Commands and
   `/help` are generated from it.
+- `docs/COMMANDS.md` (and `.ru.md`) generated from the same list, with a byte-compare test so it
+  cannot drift; the file names every command, grouped by category, marking pending ones.
 - Drift-guard tests above; `/help` marks pending commands.
 - fmt / clippy `-D warnings` / `cargo-locked test` clean.
 - A short note in `docs/design/commands.md` on how to add a command and how to flip it to working.
