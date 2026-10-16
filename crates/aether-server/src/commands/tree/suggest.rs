@@ -40,7 +40,7 @@ pub fn suggest_in(
             return children(node, "", handle, ctx);
         }
         let start = r.cursor;
-        let word = r.read_word();
+        let word = r.read_token();
         if let Some(child) = node.children.iter().find(|c| c.matches_literal(&word)) {
             if check(&child.requirement, handle).is_ok() {
                 node = child;

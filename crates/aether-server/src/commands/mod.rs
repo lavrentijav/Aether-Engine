@@ -128,7 +128,9 @@ pub(crate) fn core_nodes() -> Vec<Node> {
         tree::simple("stash", &[], Requirement::None, exec_stash),
         tree::simple("audit", &[], Requirement::None, exec_audit),
         tree::simple("cache", &[], Requirement::None, exec_cache),
-        tree::simple("help", &["?"], Requirement::None, exec_help),
+        // `/help [command]` takes an optional argument, so it is greedy until
+        // the tree-driven `/help` (CMD-05) replaces it.
+        tree::greedy("help", &["?"], Requirement::None, exec_help),
         tree::greedy("aether", &[], Requirement::Fn(require_admin), exec_aether),
     ]
 }

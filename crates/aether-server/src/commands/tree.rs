@@ -174,28 +174,32 @@ impl ArgKind {
                 id: 5,
                 properties: 2,
             },
-            ArgKind::Integer => ParserRef {
-                name: "brigadier:integer",
+            // The `ById` indices are the vanilla parser registry order, which
+            // is *not* the order the kinds are listed here: bool=0, float=1,
+            // double=2, integer=3, long=4, string=5. Checked against
+            // `minecraft-data` `command_node` for every release that uses ids.
+            ArgKind::Bool => ParserRef {
+                name: "brigadier:bool",
                 id: 0,
-                properties: 0,
-            },
-            ArgKind::Long => ParserRef {
-                name: "brigadier:long",
-                id: 1,
                 properties: 0,
             },
             ArgKind::Float => ParserRef {
                 name: "brigadier:float",
-                id: 2,
+                id: 1,
                 properties: 0,
             },
             ArgKind::Double => ParserRef {
                 name: "brigadier:double",
+                id: 2,
+                properties: 0,
+            },
+            ArgKind::Integer => ParserRef {
+                name: "brigadier:integer",
                 id: 3,
                 properties: 0,
             },
-            ArgKind::Bool => ParserRef {
-                name: "brigadier:bool",
+            ArgKind::Long => ParserRef {
+                name: "brigadier:long",
                 id: 4,
                 properties: 0,
             },
@@ -214,39 +218,41 @@ impl ArgKind {
     fn parse(self, r: &mut StringReader) -> Result<(Value, String), ParseError> {
         match self {
             ArgKind::GreedyString | ArgKind::Message => {
-                let t = r.read_remainder();
+                let t = r.read_remainder()?;
                 Ok((Value::Text(t.clone()), t))
             }
             ArgKind::String | ArgKind::Quotable => {
-                let t = r.read_word();
+                // A string argument is quoted-aware: an unterminated quote is
+                // `InvalidQuoted`, never a silently empty word.
+                let t = r.read_string_arg()?;
                 Ok((Value::Text(t.clone()), t))
             }
             ArgKind::Integer => {
-                let t = r.read_word();
+                let t = r.read_token();
                 t.parse::<i32>()
                     .map(|n| (Value::Int(n), t.clone()))
                     .map_err(|_| ParseError::InvalidInteger(t))
             }
             ArgKind::Long => {
-                let t = r.read_word();
+                let t = r.read_token();
                 t.parse::<i64>()
                     .map(|n| (Value::Long(n), t.clone()))
                     .map_err(|_| ParseError::InvalidLong(t))
             }
             ArgKind::Float => {
-                let t = r.read_word();
+                let t = r.read_token();
                 t.parse::<f32>()
                     .map(|n| (Value::Float(n), t.clone()))
                     .map_err(|_| ParseError::InvalidFloat(t))
             }
             ArgKind::Double => {
-                let t = r.read_word();
+                let t = r.read_token();
                 t.parse::<f64>()
                     .map(|n| (Value::Double(n), t.clone()))
                     .map_err(|_| ParseError::InvalidDouble(t))
             }
             ArgKind::Bool => {
-                let t = r.read_word();
+                let t = r.read_token();
                 match t.as_str() {
                     "true" => Ok((Value::Bool(true), t)),
                     "false" => Ok((Value::Bool(false), t)),
@@ -254,7 +260,7 @@ impl ArgKind {
                 }
             }
             ArgKind::Enum(words) => {
-                let t = r.read_word();
+                let t = r.read_token();
                 if words.contains(&t.as_str()) {
                     Ok((Value::Text(t.clone()), t))
                 } else {
@@ -262,7 +268,7 @@ impl ArgKind {
                 }
             }
             _ => {
-                let t = r.read_word();
+                let t = r.read_token();
                 Ok((Value::Text(t.clone()), t))
             }
         }
@@ -643,7 +649,7 @@ fn consume(
         Kind::Root => Ok(()),
         Kind::Literal => {
             let start = r.cursor;
-            let word = r.read_word();
+            let word = r.read_token();
             if node.matches_literal(&word) {
                 Ok(())
             } else {
@@ -728,19 +734,21 @@ impl<'a> StringReader<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        while self.peek() == Some(' ') {
-            self.cursor += 1;
+        while let Some(c) = self.peek() {
+            if !c.is_whitespace() {
+                break;
+            }
+            self.cursor += c.len_utf8();
         }
     }
 
-    /// One word: quoted if it starts with `"`, else up to the next space.
-    fn read_word(&mut self) -> String {
-        if self.peek() == Some('"') {
-            return self.read_quoted().unwrap_or_default();
-        }
+    /// One unquoted token: up to the next whitespace, quote characters taken
+    /// literally. This is what literal matching and the plain `string`
+    /// arguments read, and `split_whitespace` is its word-splitting peer.
+    fn read_token(&mut self) -> String {
         let start = self.cursor;
         while let Some(c) = self.peek() {
-            if c == ' ' {
+            if c.is_whitespace() {
                 break;
             }
             self.read();
@@ -748,22 +756,29 @@ impl<'a> StringReader<'a> {
         self.text[start..self.cursor].to_string()
     }
 
-    /// The rest of the line. A leading quote is read as a quoted string, the
-    /// remainder is appended verbatim (so a trailing slash survives).
-    fn read_remainder(&mut self) -> String {
+    /// A `string` argument: a quoted string if it opens with `"`, else a
+    /// token. An unterminated quote is an error.
+    fn read_string_arg(&mut self) -> Result<String, ParseError> {
         if self.peek() == Some('"') {
-            let quoted = self.read_quoted().unwrap_or_default();
+            self.read_quoted()
+        } else {
+            Ok(self.read_token())
+        }
+    }
+
+    /// The rest of the line. A leading quote is read as a quoted string, the
+    /// remainder is appended verbatim (so a trailing slash survives). An
+    /// unterminated quote is an error, not an empty argument.
+    fn read_remainder(&mut self) -> Result<String, ParseError> {
+        if self.peek() == Some('"') {
+            let quoted = self.read_quoted()?;
             let rest = &self.text[self.cursor..];
             self.cursor = self.text.len();
-            if rest.is_empty() {
-                quoted
-            } else {
-                format!("{quoted}{rest}")
-            }
+            Ok(format!("{quoted}{rest}"))
         } else {
             let rest = self.text[self.cursor..].to_string();
             self.cursor = self.text.len();
-            rest
+            Ok(rest)
         }
     }
 

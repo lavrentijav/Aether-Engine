@@ -125,16 +125,36 @@ fn parse_err(tree: &CommandTree, text: &str, handle: &PlayerHandle) -> ParseErro
 #[test]
 fn the_reader_reads_words_quotes_and_greedy_remainders() {
     let mut r = StringReader::new("alpha beta");
-    assert_eq!(r.read_word(), "alpha");
+    assert_eq!(r.read_token(), "alpha");
     r.skip_whitespace();
-    assert_eq!(r.read_word(), "beta");
+    assert_eq!(r.read_token(), "beta");
     assert!(!r.can_read());
 
-    let mut r = StringReader::new("\"hello world\" /tail");
-    assert_eq!(r.read_remainder(), "hello world /tail");
+    // Any whitespace separates, not just a space.
+    let mut r = StringReader::new("alpha\tbeta\ngamma");
+    assert_eq!(r.read_token(), "alpha");
+    r.skip_whitespace();
+    assert_eq!(r.read_token(), "beta");
+    r.skip_whitespace();
+    assert_eq!(r.read_token(), "gamma");
 
+    let mut r = StringReader::new("\"hello world\" /tail");
+    assert_eq!(r.read_remainder().unwrap(), "hello world /tail");
+
+    // A string argument honours quotes; a token does not.
+    let mut r = StringReader::new("\"a b\" c");
+    assert_eq!(r.read_string_arg().unwrap(), "a b");
+    let mut r = StringReader::new("\"a\tb\"");
+    assert_eq!(r.read_token(), "\"a");
+}
+
+#[test]
+fn an_unterminated_quote_is_an_error_not_an_empty_argument() {
     let mut r = StringReader::new("\"unterminated");
-    assert_eq!(r.read_word(), "");
+    assert_eq!(r.read_string_arg().unwrap_err(), ParseError::InvalidQuoted);
+    let mut r = StringReader::new("\"unterminated tail");
+    assert_eq!(r.read_remainder().unwrap_err(), ParseError::InvalidQuoted);
+    assert_eq!(ParseError::InvalidQuoted.message(), "Invalid quoted string");
 }
 
 #[test]
@@ -186,6 +206,26 @@ fn every_argument_kind_parses_a_valid_word() {
         assert!(out.is_ok(), "{kind:?} rejected `{text}`: {out:?}");
         let _ = kind.parser();
     }
+}
+
+#[test]
+fn the_by_id_parser_indices_match_the_vanilla_registry() {
+    // Vanilla's order is not the order the kinds are written in: bool=0,
+    // float=1, double=2, integer=3, long=4, string=5. Getting these wrong is
+    // invisible until an integer-typed node reaches a client.
+    assert_eq!(ArgKind::Bool.parser().id, 0);
+    assert_eq!(ArgKind::Float.parser().id, 1);
+    assert_eq!(ArgKind::Double.parser().id, 2);
+    assert_eq!(ArgKind::Integer.parser().id, 3);
+    assert_eq!(ArgKind::Long.parser().id, 4);
+    assert_eq!(ArgKind::String.parser().id, 5);
+    assert_eq!(ArgKind::GreedyString.parser().id, 5);
+    // The string modes: word=0, quotable=1, greedy=2.
+    assert_eq!(ArgKind::String.parser().properties, 0);
+    assert_eq!(ArgKind::Quotable.parser().properties, 1);
+    assert_eq!(ArgKind::GreedyString.parser().properties, 2);
+    // The by-name spelling stays the pre-1.19 identifier.
+    assert_eq!(ArgKind::Integer.parser().name, "brigadier:integer");
 }
 
 #[test]
@@ -546,6 +586,19 @@ fn history_commands_route_through_the_tree() {
     );
     assert!(one(&env, who, "/l").contains("Lookup") || run(&env, who, "/l").is_empty());
     let _ = run(&env, who, "/pg");
+    // `/inventory` is an alias of `/inv`.
+    assert_eq!(
+        one(&env, who, "/inventory"),
+        "the server has you carrying nothing"
+    );
+    // `/rollback` with no filter refuses, and `/rb` routes to the same node.
+    let refusal = vec![
+        "refusing to roll back the entire history with no filter.".to_string(),
+        "add at least one: player:<name>, time:<duration>, radius:<n>.".to_string(),
+        "to really undo everything, use  /rollback time:9999d".to_string(),
+    ];
+    assert_eq!(run(&env, who, "/rollback"), refusal);
+    assert_eq!(run(&env, who, "/rb"), refusal);
 }
 
 #[test]
@@ -619,6 +672,10 @@ fn economy_commands_are_unchanged_while_the_economy_is_disabled() {
         "/listings",
         "/pay bob 5",
         "/econ",
+        "/sell 1 5",
+        "/market",
+        "/buy 1",
+        "/unlist 1",
     ] {
         assert_eq!(run(&env, who, text), disabled, "`{text}`");
     }
@@ -639,6 +696,28 @@ fn non_commands_and_unknown_commands_are_handled_by_the_tree() {
     assert_eq!(
         one(&env, &env.tester, "/inspect extra"),
         "Incorrect argument for command"
+    );
+    // An unterminated quote is a syntax error, not a silently empty argument.
+    assert_eq!(
+        one(&env, &env.tester, "/lookup \"unterminated"),
+        "Invalid quoted string"
+    );
+}
+
+#[test]
+fn help_still_explains_a_single_command() {
+    let env = env();
+    // `/help <command>` works again: the node is greedy, so an argument is
+    // accepted rather than rejected as "incorrect argument".
+    assert_eq!(
+        one(&env, &env.tester, "/help stop"),
+        "/stop — minecraft.command.stop (op level 4), planned in CMD-09"
+    );
+    assert!(one(&env, &env.tester, "/help").contains("not implemented yet"));
+    // The `?` alias routes to the same node.
+    assert_eq!(
+        one(&env, &env.tester, "/? stop"),
+        "/stop — minecraft.command.stop (op level 4), planned in CMD-09"
     );
 }
 

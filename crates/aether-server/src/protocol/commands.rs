@@ -46,7 +46,13 @@ pub fn write_tree(p: &mut PacketOut, parsers: Parsers) {
         for child in &node.children {
             p.var_int(*child as i32);
         }
-        p.string(node.name.as_deref().unwrap_or(""));
+        // Only a literal (1) or an argument (2) carries a name; a root (0)
+        // writes none. The name byte is gated on the node type, exactly as
+        // `command_node` gates it, or the client reads the next node's flags
+        // as a string and the whole tree is misparsed.
+        if node.flags & 0x03 != 0 {
+            p.string(node.name.as_deref().unwrap_or(""));
+        }
         if let Some(parser) = &node.parser {
             match parsers {
                 Parsers::ByName => {
@@ -145,27 +151,64 @@ mod tests {
                 .map(|_| pin.var_int().unwrap())
                 .collect::<Vec<_>>();
             assert_eq!(flags & 0x08, 0, "nothing here redirects");
-            let name = pin.string().unwrap();
-            let parser = match flags & 0x03 {
+            // Only a literal or an argument carries a name — a root writes
+            // none. Reading one unconditionally is what let the root-extra-byte
+            // regression through before.
+            let (name, parser) = match flags & 0x03 {
+                0 => (None, None),
+                1 => (Some(pin.string().unwrap()), None),
                 2 => {
+                    let name = pin.string().unwrap();
                     let parser = match parsers {
                         Parsers::ByName => (pin.string().unwrap(), -1),
                         Parsers::ById => (String::new(), pin.var_int().unwrap()),
                     };
                     let _properties = pin.var_int().unwrap();
-                    Some(parser)
+                    (Some(name), Some(parser))
                 }
-                _ => None,
+                _ => panic!("no node type 3 exists"),
             };
             nodes.push(Decoded {
                 flags,
                 children,
-                name: Some(name),
+                name,
                 parser,
             });
         }
         let root = pin.var_int().unwrap();
+        // The packet ends here: a leftover byte means a node wrote more than
+        // the format allows.
+        assert_eq!(
+            pin.remaining(),
+            0,
+            "trailing bytes after the root index — a node wrote too much"
+        );
         (nodes, root)
+    }
+
+    #[test]
+    fn the_root_node_writes_no_name() {
+        // The exact regression the first review caught: the root must write
+        // flags, children and nothing else. Decode raw and check that the byte
+        // after the root's children is the next node's flags, not a name.
+        let mut p = PacketOut::new(0x10);
+        write_tree(&mut p, Parsers::ById);
+        let mut wire = Vec::new();
+        p.write_to(&mut wire, None).unwrap();
+        let mut pin = crate::proto::PacketIn::new(&wire);
+        let _len = pin.var_int().unwrap();
+        let _id = pin.var_int().unwrap();
+        let count = pin.var_int().unwrap();
+        // Node 0 is the root.
+        let root_flags = pin.u8().unwrap();
+        assert_eq!(root_flags, 0x00);
+        let children = pin.var_int().unwrap();
+        for _ in 0..children {
+            let _ = pin.var_int().unwrap();
+        }
+        // Node 1 begins immediately: a literal's flags.
+        let next = pin.u8().unwrap();
+        assert_eq!(next & 0x03, 1, "expected the next node's literal flags");
     }
 
     #[test]
