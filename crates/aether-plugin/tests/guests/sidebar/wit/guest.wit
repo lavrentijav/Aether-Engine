@@ -1,0 +1,10 @@
+/// The world a sidebar/placeholder-dependent guest exports: the frozen plugin
+/// world plus the shared placeholders service and the sidebar service. Its own
+/// package, so the guest is a normal component the host loads.
+package test:sidebar-guest@0.1.0;
+
+world guest {
+    include aether:plugin/plugin@0.1.0;
+    import aether:sdk/placeholders@0.1.0;
+    import aether:sidebar/sidebar@0.1.0;
+}

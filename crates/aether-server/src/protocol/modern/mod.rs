@@ -515,6 +515,10 @@ impl ProtocolCodec for Codec {
         let seq = super::trailing_var_int(&pkt.data);
         let p = self.0.packets;
         match pkt.id {
+            id if id == p.sb_keep_alive => match pin.i64() {
+                Ok(id) => ClientEvent::KeepAlive(id),
+                Err(_) => ClientEvent::Ignored,
+            },
             id if id == p.sb_set_carried_item => match pin.u16() {
                 Ok(slot) => ClientEvent::HeldSlot(slot as u8),
                 Err(_) => ClientEvent::Ignored,
@@ -1239,6 +1243,18 @@ mod tests {
         match C.decode(&pkt, any_pos()) {
             ClientEvent::HeldSlot(slot) => assert_eq!(slot, 3),
             _ => panic!("a held-item packet must decode as a slot selection"),
+        }
+    }
+
+    #[test]
+    fn a_keep_alive_reply_decodes_with_its_long_id() {
+        let pkt = RawPacket {
+            id: C.0.packets.sb_keep_alive,
+            data: 0x0102_0304_0506_0708u64.to_be_bytes().to_vec(),
+        };
+        match C.decode(&pkt, any_pos()) {
+            ClientEvent::KeepAlive(id) => assert_eq!(id, 0x0102_0304_0506_0708),
+            _ => panic!("a keep-alive packet must decode as a reply"),
         }
     }
 

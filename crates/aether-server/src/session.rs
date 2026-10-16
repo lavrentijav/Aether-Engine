@@ -586,6 +586,7 @@ fn may_move_items(event: &ClientEvent) -> bool {
             | ClientEvent::Sprint(_)
             | ClientEvent::Input { .. }
             | ClientEvent::Swing { .. }
+            | ClientEvent::KeepAlive(_)
             | ClientEvent::Ignored
     )
 }
@@ -617,6 +618,11 @@ fn play_loop(
     // second, so silence this long means the client is gone.
     let mut last_heard = Instant::now();
     let mut keepalive_id: i64 = 1;
+    // The keep-alive id awaiting a reply and when it was sent, so the round
+    // trip can be timed when the client echoes it back. One outstanding at a
+    // time: a reply that arrives after a second keep-alive was sent simply
+    // matches the newer one.
+    let mut awaiting_keepalive: Option<(i64, Instant)> = None;
     let mut last_paid = Instant::now();
     let mut last_saved = Instant::now();
 
@@ -650,6 +656,7 @@ fn play_loop(
         // Send a keep-alive roughly every 10s (clients disconnect after ~30s).
         if last_keepalive.elapsed() >= Duration::from_secs(10) {
             handle.emit(&ServerEvent::KeepAlive(keepalive_id), world);
+            awaiting_keepalive = Some((keepalive_id, Instant::now()));
             keepalive_id = keepalive_id.wrapping_add(1);
             last_keepalive = Instant::now();
         }
@@ -1040,6 +1047,16 @@ fn play_loop(
                 interact::set_stance(handle, registry, world, Some(sneak), None)
             }
             ClientEvent::PickBlock { x, y, z } => interact::pick_block(handle, world, x, y, z),
+            ClientEvent::KeepAlive(id) => {
+                // A reply to our last keep-alive times the round trip. Vanilla
+                // reports the ping in the tab list; here it feeds `%ping%`.
+                if let Some((sent_id, at)) = awaiting_keepalive {
+                    if sent_id == id {
+                        handle.set_ping(at.elapsed().as_millis().min(u32::MAX as u128) as u32);
+                        awaiting_keepalive = None;
+                    }
+                }
+            }
             ClientEvent::ChangeGameMode(mode) => {
                 // The switcher is the client asking; only an operator is
                 // answered, the way vanilla gates it on permission level 2.

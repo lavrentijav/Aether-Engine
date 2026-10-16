@@ -1,0 +1,33 @@
+/// The Aether **sidebar** service, package `aether:sidebar@0.1`.
+///
+/// The sidebar plugin publishes this service; any plugin — native or WASM —
+/// imports it to override a line or toggle a player's panel. The *lines*
+/// themselves are composed from config and `%placeholders%`, and the
+/// placeholder registry is shared with menus and chat — it lives in the SDK's
+/// `placeholders` service (`aether:sdk/placeholders@0.1`), not here.
+///
+/// The package is versioned independently of the frozen plugin world; adding a
+/// function here is additive (a component requests a subset), a breaking
+/// change bumps it (`aether:sidebar@0.2`).
+package aether:sidebar@0.1.0;
+
+/// The sidebar a plugin may override a line on and toggle.
+interface sidebar {
+    use aether:plugin/types@0.1.0.{player};
+
+    /// Override line `index` (0 is the top, up to 14) for `p`, replacing the
+    /// config line until `clear-line`.
+    set-line: func(p: player, index: u8, text: string);
+
+    /// Drop the override for line `index`, so the config line shows again.
+    clear-line: func(p: player, index: u8);
+
+    /// Show the sidebar to `p`.
+    show: func(p: player);
+
+    /// Hide the sidebar from `p`.
+    hide: func(p: player);
+
+    /// Toggle and return the new visibility.
+    toggle: func(p: player) -> bool;
+}

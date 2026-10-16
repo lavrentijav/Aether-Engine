@@ -39,6 +39,8 @@ static AGE: AtomicU64 = AtomicU64::new(0);
 
 /// The slowest tick since the status line last read it, in microseconds.
 pub static SLOWEST_TICK_US: AtomicU64 = AtomicU64::new(0);
+/// The measured ticks per second, as `f64` bits; `0` means "not measured yet".
+static TPS_BITS: AtomicU64 = AtomicU64::new(0);
 static TIME_OF_DAY: AtomicI64 = AtomicI64::new(1000);
 
 /// The player registry, once the game has started.
@@ -64,6 +66,23 @@ pub fn time_of_day() -> i64 {
 /// Set the time of day.
 pub fn set_time_of_day(t: i64) {
     TIME_OF_DAY.store(t.rem_euclid(24000), Ordering::Relaxed);
+}
+
+/// The measured ticks per second, smoothed; the ideal 20 before the first
+/// measurement. Read by the status line and the `%tps%` placeholder.
+pub fn tps() -> f64 {
+    let bits = TPS_BITS.load(Ordering::Relaxed);
+    if bits == 0 {
+        20.0
+    } else {
+        f64::from_bits(bits)
+    }
+}
+
+/// Fold one measured tick rate into the smoothed value.
+pub fn set_tps(instant: f64) {
+    let smoothed = tps() * 0.9 + instant * 0.1;
+    TPS_BITS.store(smoothed.to_bits(), Ordering::Relaxed);
 }
 
 /// Whether it is night — when monsters spawn under the open sky.

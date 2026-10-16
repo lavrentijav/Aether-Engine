@@ -24,8 +24,10 @@
 mod host;
 pub mod manifest;
 pub mod native;
+pub mod placeholders;
 pub mod sdk;
 pub mod service;
+pub mod sidebar;
 
 /// The generated component-model bindings for the `plugin` world.
 ///
