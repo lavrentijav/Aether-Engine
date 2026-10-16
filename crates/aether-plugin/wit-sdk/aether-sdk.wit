@@ -305,6 +305,30 @@ interface history {
     player-events: func(actor-low: u64, actor-high: u64, before: option<u64>, limit: u32) -> page;
 }
 
+/// The shared `%name%` placeholder registry, used by the sidebar, menus and
+/// chat. A native provider registers a closure; a component cannot, so it
+/// declares a name and pushes a per-player value.
+///
+/// **Ownership.** A custom name is owned by the caller that first declares or
+/// sets it: another caller's `register`/`set` for that name is refused, so one
+/// plugin cannot spoof another's `%economy_balance%`. The built-in names
+/// (`%player%`, `%tps%`, …) are reserved. Reading (`resolve`) is unrestricted.
+interface placeholders {
+    use aether:plugin/types@0.1.0.{player};
+
+    /// Declare `name` (without the surrounding `%`) that this caller will fill
+    /// with `set`, so it counts as known before the first value. Returns
+    /// whether the caller now owns the name; `false` if it is a reserved
+    /// built-in or already owned by another caller.
+    register: func(name: string) -> bool;
+    /// Set `name`'s value for `p`. Implies `register`; refused if the name is
+    /// a reserved built-in or owned by another caller.
+    set: func(name: string, p: player, value: string);
+    /// Resolve every `%name%` in `text` for `p`. An unknown token is left
+    /// literal.
+    resolve: func(p: player, text: string) -> string;
+}
+
 /// A world importing the plugin host interface plus every SDK service
 /// interface, so the host can generate **one** linker entry covering all the
 /// imports a dependent component may use. Importing both here is what keeps
@@ -321,4 +345,7 @@ world services {
     import cooldowns;
     import confirm;
     import history;
+    import placeholders;
+    /// The sidebar service (a separate package, versioned on its own).
+    import aether:sidebar/sidebar@0.1.0;
 }

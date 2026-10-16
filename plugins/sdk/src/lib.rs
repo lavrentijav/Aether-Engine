@@ -20,11 +20,14 @@
 //! `requires` one of its services refuses to load when no provider is present.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use aether_plugin::manifest::{Manifest, PluginTier};
+use aether_plugin::placeholders::{
+    register_placeholders, PlaceholderFn, PlaceholderQuery, PlaceholdersService,
+};
 use aether_plugin::sdk::{
     self, ArgKind, CommandSpec, CommandsService, ConfirmService, CooldownsService, HistoryPage,
     HistoryService, HistoryWindow, MessagesService, PermissionsService, PlayersService, Pos,
@@ -87,6 +90,7 @@ pub struct SdkPlugin {
     scheduler: Arc<Scheduler>,
     cooldowns: Arc<Cooldowns>,
     confirm: Arc<Confirm>,
+    placeholders: Arc<Placeholders>,
 }
 
 impl Default for SdkPlugin {
@@ -103,7 +107,8 @@ impl Default for SdkPlugin {
             cooldowns: Arc::new(Cooldowns::new(Arc::clone(&clock))),
             confirm: Arc::new(Confirm::new(clock, Arc::clone(&messages))),
             messages,
-            players: Arc::new(Players::new(backend)),
+            players: Arc::new(Players::new(Arc::clone(&backend))),
+            placeholders: Arc::new(Placeholders::new(backend)),
         }
     }
 }
@@ -113,7 +118,17 @@ impl NativePlugin for SdkPlugin {
         let backend = Arc::clone(ctx.backend);
         self.commands.set_backend(Arc::clone(&backend));
         self.messages.set_backend(Arc::clone(&backend));
+        self.placeholders.set_backend(Arc::clone(&backend));
         self.players.set_backend(backend);
+        // The resolved-token cache is a tick count; let the operator widen or
+        // disable it (`[plugins.sdk] placeholder_cache_ticks`).
+        if let Some(ttl) = ctx
+            .config
+            .get("placeholder_cache_ticks")
+            .and_then(|v| v.parse().ok())
+        {
+            self.placeholders.set_ttl(ttl);
+        }
 
         let commands: Arc<dyn CommandsService> = self.commands.clone();
         sdk::register_commands(ctx.services, commands)?;
@@ -138,11 +153,13 @@ impl NativePlugin for SdkPlugin {
         // and WASM dependents are checked alike.
         let history: Arc<dyn HistoryService> = Arc::new(History::new(Arc::clone(ctx.backend)));
         sdk::register_history(ctx.services, history)?;
+        let placeholders: Arc<dyn PlaceholdersService> = self.placeholders.clone();
+        register_placeholders(ctx.services, placeholders)?;
 
         ctx.log(
             LogLevel::Info,
             "SDK services registered (permissions, commands, messages, players, \
-             scheduler, cooldowns, confirm, history)",
+             scheduler, cooldowns, confirm, history, placeholders)",
         );
         Ok(())
     }
@@ -151,6 +168,8 @@ impl NativePlugin for SdkPlugin {
         // Advance the clock the timer-driven services read, then fire due
         // timers into the pending queue a dependent polls.
         self.scheduler.advance(n);
+        // Refresh the placeholder query memo for the new tick.
+        self.placeholders.advance(n);
     }
 }
 
@@ -724,6 +743,346 @@ impl PlayersService for Players {
         // Nothing could be given, so all of it is "left over".
         count as u64
     }
+}
+
+// --- placeholders ------------------------------------------------------
+
+/// The shared placeholder registry (`sdk.placeholders`): named providers
+/// (native closures and WASM-pushed per-player values), the built-ins, and a
+/// short-lived cache so a provider is not called for every consumer on every
+/// redraw. The sidebar, menus and chat all resolve through this one instance.
+struct Placeholders {
+    backend: Arc<OnceLock<Arc<dyn HostBackend>>>,
+    state: RwLock<PlaceholderState>,
+    /// Per-player query, reused within the tick it was built. Cleared each
+    /// tick so per-tick facts (position, ping) refresh.
+    queries: Mutex<HashMap<u64, (u64, Arc<PlaceholderQuery>)>>,
+    /// The current world tick, advanced by the SDK's own `on_tick`.
+    tick: AtomicU64,
+    /// How long a resolved token is reused, in ticks. `0` disables the cache.
+    ttl: AtomicU64,
+}
+
+#[derive(Default)]
+struct PlaceholderState {
+    /// Native closures, by token name.
+    providers: HashMap<String, PlaceholderFn>,
+    /// Names declared by a WASM caller (before any value arrives).
+    declared: HashSet<String>,
+    /// Pushed values: token → player id → last value.
+    values: HashMap<String, HashMap<u64, String>>,
+    /// Which caller owns each custom token, so one plugin cannot overwrite
+    /// another's `%name%`. A built-in is never shown here (it is reserved).
+    owners: HashMap<String, String>,
+    /// Resolved-token cache: player id → token → (value, tick).
+    cache: HashMap<u64, HashMap<String, (String, u64)>>,
+}
+
+impl Placeholders {
+    fn new(backend: Arc<OnceLock<Arc<dyn HostBackend>>>) -> Placeholders {
+        Placeholders {
+            backend,
+            state: RwLock::new(PlaceholderState::default()),
+            queries: Mutex::new(HashMap::new()),
+            tick: AtomicU64::new(0),
+            // A second's worth, matching the sidebar's 4 Hz redraw.
+            ttl: AtomicU64::new(20),
+        }
+    }
+
+    fn set_backend(&self, backend: Arc<dyn HostBackend>) {
+        let _ = self.backend.set(backend);
+    }
+
+    fn set_ttl(&self, ticks: u64) {
+        self.ttl.store(ticks, Ordering::Relaxed);
+    }
+
+    /// Advance the clock and drop the per-tick query memo.
+    fn advance(&self, n: u64) {
+        self.tick.store(n, Ordering::Relaxed);
+        self.queries.lock().unwrap().clear();
+    }
+
+    fn now(&self) -> u64 {
+        self.tick.load(Ordering::Relaxed)
+    }
+
+    /// The query for `player`, built once per tick and reused across tokens.
+    fn query_for(&self, caller: &str, p: &Player) -> Arc<PlaceholderQuery> {
+        let tick = self.now();
+        {
+            let map = self.queries.lock().unwrap();
+            if let Some((t, q)) = map.get(&p.id) {
+                if *t == tick {
+                    return Arc::clone(q);
+                }
+            }
+        }
+        let q = Arc::new(self.build_query(caller, p));
+        self.queries
+            .lock()
+            .unwrap()
+            .insert(p.id, (tick, Arc::clone(&q)));
+        q
+    }
+
+    fn build_query(&self, caller: &str, p: &Player) -> PlaceholderQuery {
+        let b = self.backend.get();
+        PlaceholderQuery {
+            player: p.id,
+            name: p.name.clone(),
+            extra: b.and_then(|b| b.player_extra(caller, p.id)),
+            online: b.map(|b| b.online_players(caller).len()).unwrap_or(0),
+            max_players: b.map(|b| b.max_players(caller)).unwrap_or(20),
+            tps: b.map(|b| b.server_tps(caller)).unwrap_or(20.0),
+            time: b.map(|b| b.world_time(caller)).unwrap_or(0),
+            unix_time: unix_now(),
+        }
+    }
+
+    /// Resolve `text` for `player`: one pass, a token at a time, each resolved
+    /// token cached. An unmatched `%` and an unknown token are left literal.
+    fn substitute(&self, caller: &str, p: &Player, text: &str) -> String {
+        if !text.contains('%') {
+            return text.to_string();
+        }
+        let q = self.query_for(caller, p);
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(start) = rest.find('%') {
+            out.push_str(&rest[..start]);
+            let after = &rest[start + 1..];
+            match after.find('%') {
+                Some(end) => {
+                    let token = &after[..end];
+                    match self.resolve_token(p.id, token, &q) {
+                        Some(v) => out.push_str(&v),
+                        None => {
+                            // Keep the literal, `%` included, so a typo shows.
+                            out.push('%');
+                            out.push_str(token);
+                            out.push('%');
+                        }
+                    }
+                    rest = &after[end + 1..];
+                }
+                None => {
+                    out.push_str(&rest[start..]);
+                    rest = "";
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// One token's value, honouring the cache.
+    fn resolve_token(&self, player: u64, token: &str, q: &PlaceholderQuery) -> Option<String> {
+        let tick = self.now();
+        let ttl = self.ttl.load(Ordering::Relaxed);
+        if ttl > 0 {
+            let st = self.state.read().unwrap();
+            if let Some((v, at)) = st.cache.get(&player).and_then(|m| m.get(token)) {
+                if tick.wrapping_sub(*at) < ttl {
+                    return Some(v.clone());
+                }
+            }
+        }
+        let v = self.compute(player, token, q);
+        if ttl > 0 {
+            if let Some(v) = &v {
+                self.state
+                    .write()
+                    .unwrap()
+                    .cache
+                    .entry(player)
+                    .or_default()
+                    .insert(token.to_string(), (v.clone(), tick));
+            }
+        }
+        v
+    }
+
+    /// The uncached value: a native provider, then a pushed value, then a
+    /// built-in. The provider is cloned out before it is called, so a closure
+    /// that re-enters the registry cannot deadlock the lock.
+    fn compute(&self, player: u64, token: &str, q: &PlaceholderQuery) -> Option<String> {
+        let provider = self.state.read().unwrap().providers.get(token).cloned();
+        if let Some(provider) = provider {
+            if let Some(v) = provider(q) {
+                return Some(v);
+            }
+        }
+        let pushed = self
+            .state
+            .read()
+            .unwrap()
+            .values
+            .get(token)
+            .and_then(|m| m.get(&player))
+            .cloned();
+        if pushed.is_some() {
+            return pushed;
+        }
+        builtin(token, q)
+    }
+
+    /// Log a refused registration/push, so a spoofing attempt is visible in
+    /// the server log rather than silently ignored.
+    fn refuse(&self, caller: &str, name: &str, why: &str) {
+        if let Some(b) = self.backend.get() {
+            b.log(
+                caller,
+                LogLevel::Warn,
+                &format!("placeholder `%{name}%` refused: {why}"),
+            );
+        }
+    }
+}
+
+/// The built-in token names. A plugin may not push a value under one of these
+/// (a native closure still may, being trusted-by-install).
+fn is_builtin(token: &str) -> bool {
+    matches!(
+        token,
+        "player"
+            | "name"
+            | "displayname"
+            | "display_name"
+            | "online"
+            | "max"
+            | "max_players"
+            | "tps"
+            | "ping"
+            | "world"
+            | "x"
+            | "y"
+            | "z"
+            | "health"
+            | "level"
+            | "time"
+            | "world_time"
+            | "server_time"
+    )
+}
+
+impl PlaceholdersService for Placeholders {
+    fn register(&self, caller: &str, name: String, provider: PlaceholderFn) -> bool {
+        let mut st = self.state.write().unwrap();
+        if let Some(owner) = st.owners.get(&name).cloned() {
+            if owner != caller {
+                drop(st);
+                self.refuse(caller, &name, &format!("owned by `{owner}`"));
+                return false;
+            }
+        }
+        st.providers.insert(name.clone(), provider);
+        st.owners.insert(name, caller.to_string());
+        // A new provider must be visible immediately, not after the cache
+        // expires.
+        st.cache.clear();
+        true
+    }
+
+    fn register_name(&self, caller: &str, name: String) -> bool {
+        if is_builtin(&name) {
+            self.refuse(caller, &name, "reserved built-in");
+            return false;
+        }
+        let mut st = self.state.write().unwrap();
+        if let Some(owner) = st.owners.get(&name).cloned() {
+            if owner != caller {
+                drop(st);
+                self.refuse(caller, &name, &format!("owned by `{owner}`"));
+                return false;
+            }
+        }
+        st.declared.insert(name.clone());
+        st.owners.insert(name, caller.to_string());
+        true
+    }
+
+    fn set_value(&self, caller: &str, name: String, player: u64, value: String) {
+        if is_builtin(&name) {
+            self.refuse(caller, &name, "reserved built-in");
+            return;
+        }
+        let tick = self.now();
+        let mut st = self.state.write().unwrap();
+        if let Some(owner) = st.owners.get(&name).cloned() {
+            if owner != caller {
+                drop(st);
+                self.refuse(caller, &name, &format!("owned by `{owner}`"));
+                return;
+            }
+        }
+        st.declared.insert(name.clone());
+        st.owners
+            .entry(name.clone())
+            .or_insert_with(|| caller.to_string());
+        st.values
+            .entry(name.clone())
+            .or_default()
+            .insert(player, value.clone());
+        st.cache
+            .entry(player)
+            .or_default()
+            .insert(name, (value, tick));
+    }
+
+    fn resolve(&self, caller: &str, player: &Player, text: &str) -> String {
+        self.substitute(caller, player, text)
+    }
+}
+
+/// The built-in placeholders, answered from the host's per-player view.
+fn builtin(token: &str, q: &PlaceholderQuery) -> Option<String> {
+    let extra = q.extra.as_ref();
+    Some(match token {
+        "player" | "name" => q.name.clone(),
+        "displayname" | "display_name" => extra
+            .map(|e| e.display_name.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| q.name.clone()),
+        "online" => q.online.to_string(),
+        "max" | "max_players" => q.max_players.to_string(),
+        "tps" => format!("{:.1}", q.tps),
+        "ping" => extra.map(|e| e.ping.to_string())?,
+        "world" => extra.map(|e| e.world.clone())?,
+        "x" => extra.map(|e| e.x.floor() as i64)?.to_string(),
+        "y" => extra.map(|e| e.y.floor() as i64)?.to_string(),
+        "z" => extra.map(|e| e.z.floor() as i64)?.to_string(),
+        "health" => extra.map(|e| format!("{:.1}", e.health))?,
+        "level" => extra.map(|e| e.level.to_string())?,
+        "time" | "world_time" => world_clock(q.time),
+        "server_time" => wall_clock(q.unix_time),
+        _ => return None,
+    })
+}
+
+/// Format a world time in ticks as `HH:MM` (Minecraft's day starts at 06:00).
+fn world_clock(time: i64) -> String {
+    let time = time.rem_euclid(24_000);
+    let hours = (time / 1000 + 6) % 24;
+    let minutes = (time % 1000) * 60 / 1000;
+    format!("{hours:02}:{minutes:02}")
+}
+
+/// Format a Unix timestamp as `HH:MM` in UTC.
+fn wall_clock(unix: i64) -> String {
+    let secs = unix.rem_euclid(86_400);
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    format!("{hours:02}:{minutes:02}")
+}
+
+/// The current Unix time in seconds.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 // --- scheduler / cooldowns / confirm -----------------------------------
@@ -1805,5 +2164,232 @@ mod cost {
             }
         });
         assert_eq!(allocs, 0, "unknown-key reads must not allocate");
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    //! The shared placeholder runtime: built-ins, registration, pushed values
+    //! and the resolved-token cache.
+
+    use super::*;
+    use aether_plugin::placeholders::PlayerExtra;
+
+    /// A backend with a fixed per-player view, so the built-ins resolve to
+    /// known values.
+    struct ViewBackend;
+
+    impl HostBackend for ViewBackend {
+        fn kv_get(&self, _: &str, _: &str) -> Option<Vec<u8>> {
+            None
+        }
+        fn kv_put(&self, _: &str, _: &str, _: &[u8]) {}
+        fn kv_delete(&self, _: &str, _: &str) {}
+        fn kv_list(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn log(&self, _: &str, _: LogLevel, _: &str) {}
+        fn config(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn supports(&self, _: &str, _: &str) -> bool {
+            false
+        }
+        fn online_players(&self, _: &str) -> Vec<Player> {
+            vec![who()]
+        }
+        fn player_extra(&self, _: &str, _: u64) -> Option<PlayerExtra> {
+            Some(PlayerExtra {
+                ping: 42,
+                world: "minecraft:overworld".to_string(),
+                x: 10.4,
+                y: 64.0,
+                z: -3.9,
+                health: 19.5,
+                level: 5,
+                display_name: "Steve".to_string(),
+            })
+        }
+        fn max_players(&self, _: &str) -> u32 {
+            20
+        }
+        fn server_tps(&self, _: &str) -> f64 {
+            19.9
+        }
+        fn world_time(&self, _: &str) -> i64 {
+            6000
+        }
+    }
+
+    fn who() -> Player {
+        Player {
+            id: 7,
+            name: "Steve".to_string(),
+            operator: false,
+        }
+    }
+
+    fn placeholders() -> Placeholders {
+        let p = Placeholders::new(Arc::new(OnceLock::new()));
+        p.set_backend(Arc::new(ViewBackend));
+        p.advance(1);
+        p
+    }
+
+    #[test]
+    fn builtins_resolve_from_the_host_view() {
+        let p = placeholders();
+        let q = who();
+        assert_eq!(p.substitute("sdk", &q, "%player%"), "Steve");
+        assert_eq!(p.substitute("sdk", &q, "%online%/%max%"), "1/20");
+        assert_eq!(p.substitute("sdk", &q, "%ping%"), "42");
+        assert_eq!(p.substitute("sdk", &q, "%x% %y% %z%"), "10 64 -4");
+        assert_eq!(p.substitute("sdk", &q, "%tps%"), "19.9");
+        assert_eq!(p.substitute("sdk", &q, "%time%"), "12:00", "world clock");
+    }
+
+    #[test]
+    fn an_unknown_token_is_left_literal() {
+        let p = placeholders();
+        assert_eq!(p.substitute("sdk", &who(), "hi %nope%"), "hi %nope%");
+        assert_eq!(p.substitute("sdk", &who(), "100%"), "100%");
+        // No `%` at all is returned unchanged.
+        assert_eq!(p.substitute("sdk", &who(), "plain"), "plain");
+    }
+
+    #[test]
+    fn a_native_provider_overrides_a_builtin() {
+        let p = placeholders();
+        p.register(
+            "p",
+            "player".to_string(),
+            Arc::new(|q: &PlaceholderQuery| Some(format!("[{}]", q.name))),
+        );
+        assert_eq!(p.substitute("p", &who(), "%player%"), "[Steve]");
+    }
+
+    #[test]
+    fn a_provider_that_declines_falls_back_to_the_builtin() {
+        let p = placeholders();
+        p.register("p", "online".to_string(), Arc::new(|_| None));
+        assert_eq!(p.substitute("p", &who(), "%online%"), "1");
+    }
+
+    #[test]
+    fn a_pushed_value_resolves_and_updates_immediately() {
+        let p = placeholders();
+        p.set_value("wasm", "balance".to_string(), 7, "0".to_string());
+        assert_eq!(p.substitute("wasm", &who(), "%balance%"), "0");
+        p.set_value("wasm", "balance".to_string(), 7, "10".to_string());
+        assert_eq!(p.substitute("wasm", &who(), "%balance%"), "10");
+        // Another player's value is independent.
+        assert_eq!(
+            p.substitute("wasm", &Player { id: 8, ..who() }, "%balance%"),
+            "%balance%"
+        );
+    }
+
+    #[test]
+    fn a_second_caller_cannot_hijack_anothers_name() {
+        let p = placeholders();
+        // `economy` owns `%balance%`.
+        assert!(p.register_name("economy", "balance".to_string()));
+        p.set_value("economy", "balance".to_string(), 7, "100".to_string());
+        // An untrusted `evil` cannot claim or overwrite it.
+        assert!(!p.register_name("evil", "balance".to_string()), "owned");
+        p.set_value("evil", "balance".to_string(), 7, "0".to_string());
+        assert_eq!(
+            p.substitute("sidebar", &who(), "%balance%"),
+            "100",
+            "the owner's value is untouched"
+        );
+        // A native closure from another caller is refused too.
+        assert!(!p.register(
+            "evil",
+            "balance".to_string(),
+            Arc::new(|_| Some("0".into()))
+        ));
+        assert_eq!(p.substitute("sidebar", &who(), "%balance%"), "100");
+    }
+
+    #[test]
+    fn a_plugin_cannot_shadow_a_builtin_by_pushing() {
+        let p = placeholders();
+        assert!(
+            !p.register_name("evil", "player".to_string()),
+            "built-ins are reserved"
+        );
+        p.set_value("evil", "player".to_string(), 7, "Notch".to_string());
+        assert_eq!(
+            p.substitute("evil", &who(), "%player%"),
+            "Steve",
+            "the pushed built-in is ignored"
+        );
+    }
+
+    #[test]
+    fn the_same_caller_may_update_its_own_pushed_name() {
+        let p = placeholders();
+        assert!(p.register_name("economy", "balance".to_string()));
+        p.set_value("economy", "balance".to_string(), 7, "1".to_string());
+        p.set_value("economy", "balance".to_string(), 7, "2".to_string());
+        assert_eq!(p.substitute("sidebar", &who(), "%balance%"), "2");
+    }
+
+    #[test]
+    fn a_resolved_token_is_cached_for_the_ttl() {
+        let p = placeholders();
+        let calls = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&calls);
+        p.register(
+            "p",
+            "hit".to_string(),
+            Arc::new(move |_q: &PlaceholderQuery| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                Some("X".to_string())
+            }),
+        );
+        p.advance(1);
+        assert_eq!(p.substitute("p", &who(), "%hit%"), "X");
+        assert_eq!(p.substitute("p", &who(), "%hit%"), "X");
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "the second hit cached");
+        // Past the 20-tick ttl the provider is consulted again.
+        p.advance(22);
+        assert_eq!(p.substitute("p", &who(), "%hit%"), "X");
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_new_provider_is_visible_immediately_despite_the_cache() {
+        let p = placeholders();
+        assert_eq!(p.substitute("p", &who(), "%late%"), "%late%");
+        p.register(
+            "p",
+            "late".to_string(),
+            Arc::new(|_| Some("now".to_string())),
+        );
+        assert_eq!(p.substitute("p", &who(), "%late%"), "now");
+    }
+
+    #[test]
+    fn the_query_is_rebuilt_each_tick() {
+        // A per-tick fact is not frozen by the query memo: a new tick rebuilds.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let p = placeholders();
+        p.register(
+            "p",
+            "tick".to_string(),
+            Arc::new(move |_q: &PlaceholderQuery| {
+                sink.lock().unwrap().push(());
+                Some("t".to_string())
+            }),
+        );
+        p.advance(1);
+        let _ = p.substitute("p", &who(), "%tick%");
+        p.advance(100);
+        let _ = p.substitute("p", &who(), "%tick%");
+        // The provider is called twice: the ttl expired across the ticks.
+        assert_eq!(seen.lock().unwrap().len(), 2);
     }
 }

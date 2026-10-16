@@ -33,6 +33,7 @@ pub mod bindings {
         pub_export_macro: true,
         path: [
             "../aether-plugin/wit",
+            "../aether-plugin/wit-sidebar",
             "../aether-plugin/wit-sdk",
             "wit",
         ],
@@ -65,7 +66,11 @@ pub mod prelude {
         CommandResult, Decision, LogLevel, ManifestAck, Player,
     };
     pub use crate::bindings::aether::sdk::{
-        commands, config, confirm, cooldowns, history, messages, permissions, players, scheduler,
+        commands, config, confirm, cooldowns, history, messages, permissions, placeholders,
+        players, scheduler,
     };
+    /// The sidebar service, so a dependent can override a line or toggle a
+    /// player's panel.
+    pub use crate::bindings::aether::sidebar::sidebar;
     pub use crate::bindings::{export, Guest};
 }

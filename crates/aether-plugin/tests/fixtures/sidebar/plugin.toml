@@ -1,0 +1,13 @@
+# Manifest for the sidebar-dependent test fixture. See
+# crates/aether-plugin/src/manifest.rs.
+id = "sid"
+name = "Sid"
+version = "0.1.0"
+api = "0.1"
+entry = "sidebar.wasm"
+priority = 0
+
+capabilities = ["log"]
+
+subscribe = ["on-command"]
+commands = ["sid"]

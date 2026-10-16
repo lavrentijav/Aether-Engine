@@ -26,7 +26,7 @@ use crate::service::ServiceRegistry;
 /// type as the one in an event — no conversion at the boundary.
 pub mod bindings {
     wasmtime::component::bindgen!({
-        path: ["wit", "wit-sdk"],
+        path: ["wit", "wit-sidebar", "wit-sdk"],
         world: "aether:sdk/services",
         with: {
             "aether:plugin/types@0.1.0": crate::bindings::aether::plugin::types,
@@ -864,6 +864,87 @@ impl bindings::aether::sdk::history::Host for StoreData {
             None => {
                 self.service_unavailable(HISTORY_SERVICE, "player-events");
                 empty_history_page()
+            }
+        }
+    }
+}
+
+/// The placeholders bridge: a WASM dependent's `aether:sdk/placeholders` import
+/// is forwarded to the registered [`crate::placeholders::PlaceholdersService`]
+/// (the SDK plugin), or answered neutrally when no provider is present.
+impl bindings::aether::sdk::placeholders::Host for StoreData {
+    fn register(&mut self, name: String) -> bool {
+        match crate::placeholders::placeholders(&self.services) {
+            Some(svc) => svc.register_name(&self.plugin, name),
+            None => {
+                self.service_unavailable(crate::placeholders::PLACEHOLDERS_SERVICE, "register");
+                false
+            }
+        }
+    }
+
+    fn set(&mut self, name: String, p: Player, value: String) {
+        match crate::placeholders::placeholders(&self.services) {
+            Some(svc) => svc.set_value(&self.plugin, name, p.id, value),
+            None => {
+                self.service_unavailable(crate::placeholders::PLACEHOLDERS_SERVICE, "set");
+            }
+        }
+    }
+
+    fn resolve(&mut self, p: Player, text: String) -> String {
+        match crate::placeholders::placeholders(&self.services) {
+            Some(svc) => svc.resolve(&self.plugin, &p, &text),
+            None => {
+                self.service_unavailable(crate::placeholders::PLACEHOLDERS_SERVICE, "resolve");
+                text
+            }
+        }
+    }
+}
+
+/// The sidebar bridge: a WASM dependent's `aether:sidebar` import is forwarded
+/// to the registered [`crate::sidebar::SidebarService`] (the `plugins/sidebar`
+/// plugin), or answered neutrally when no provider is present.
+impl bindings::aether::sidebar::sidebar::Host for StoreData {
+    fn set_line(&mut self, p: Player, index: u8, text: String) {
+        if let Some(svc) = crate::sidebar::sidebar(&self.services) {
+            svc.set_line(p.id, index as usize, text);
+        } else {
+            self.warn("sidebar service is not registered; refused `set-line`");
+        }
+    }
+
+    fn clear_line(&mut self, p: Player, index: u8) {
+        if let Some(svc) = crate::sidebar::sidebar(&self.services) {
+            svc.clear_line(p.id, index as usize);
+        } else {
+            self.warn("sidebar service is not registered; refused `clear-line`");
+        }
+    }
+
+    fn show(&mut self, p: Player) {
+        if let Some(svc) = crate::sidebar::sidebar(&self.services) {
+            svc.show(p.id);
+        } else {
+            self.warn("sidebar service is not registered; refused `show`");
+        }
+    }
+
+    fn hide(&mut self, p: Player) {
+        if let Some(svc) = crate::sidebar::sidebar(&self.services) {
+            svc.hide(p.id);
+        } else {
+            self.warn("sidebar service is not registered; refused `hide`");
+        }
+    }
+
+    fn toggle(&mut self, p: Player) -> bool {
+        match crate::sidebar::sidebar(&self.services) {
+            Some(svc) => svc.toggle(p.id),
+            None => {
+                self.warn("sidebar service is not registered; refused `toggle`");
+                false
             }
         }
     }

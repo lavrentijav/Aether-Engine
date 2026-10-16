@@ -39,8 +39,16 @@ pub fn start(registry: SharedRegistry, world: Arc<DemoWorld>) {
         .name("game-tick".into())
         .spawn(move || {
             let mut rng = tables::Rng::from_time();
+            let mut last = Instant::now();
             loop {
                 let start = Instant::now();
+                // The wall time between tick starts is the real rate; folding
+                // it in smooths the jitter of a single slow tick.
+                let dt = start.duration_since(last).as_secs_f64();
+                if dt > 0.0 {
+                    super::set_tps(1.0 / dt);
+                }
+                last = start;
                 tick_once(&registry, &world, &mut rng);
                 let took = start.elapsed();
                 super::SLOWEST_TICK_US.fetch_max(took.as_micros() as u64, Ordering::Relaxed);

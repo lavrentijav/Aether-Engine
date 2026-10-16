@@ -294,6 +294,81 @@ mod imp {
                     .player_events(actor, before, limit as usize),
             )
         }
+
+        fn set_sidebar(
+            &self,
+            _plugin: &str,
+            player: u64,
+            board: &aether_plugin::sidebar::SidebarBoard,
+        ) {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return;
+            };
+            let board = crate::protocol::scoreboard::SidebarBoard::new(
+                board.title.clone(),
+                board.lines.clone(),
+            );
+            handle.update_sidebar(Some(&board), &*self.world);
+        }
+
+        fn clear_sidebar(&self, _plugin: &str, player: u64) {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return;
+            };
+            handle.update_sidebar(None, &*self.world);
+        }
+
+        fn set_tab_header_footer(&self, _plugin: &str, player: u64, header: &str, footer: &str) {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return;
+            };
+            handle.set_tab_header_footer(header, footer, &*self.world);
+        }
+
+        fn player_extra(
+            &self,
+            _plugin: &str,
+            player: u64,
+        ) -> Option<aether_plugin::placeholders::PlayerExtra> {
+            let handle = self.registry.by_entity(player as i32)?;
+            let pos = handle.pos();
+            let (health, _food) = {
+                let game = handle.game();
+                (game.health, game.food)
+            };
+            Some(aether_plugin::placeholders::PlayerExtra {
+                // The measured keep-alive round trip; `0` until the first
+                // reply.
+                ping: handle.ping() as i32,
+                world: "minecraft:overworld".to_string(),
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+                health,
+                level: 0,
+                display_name: handle.name.clone(),
+            })
+        }
+
+        fn max_players(&self, _plugin: &str) -> u32 {
+            self.config.server.max_players
+        }
+
+        fn server_tps(&self, _plugin: &str) -> f64 {
+            // The tick loop's measured rate.
+            crate::game::tps()
+        }
+
+        fn world_time(&self, _plugin: &str) -> i64 {
+            crate::game::time_of_day()
+        }
+
+        fn vanilla_sidebar_claimed(&self, _plugin: &str, _player: u64) -> bool {
+            // The vanilla scoreboard model (CMD-15) is not implemented yet, so
+            // no `/scoreboard objectives setdisplay sidebar` can have claimed
+            // the slot. When it lands, this reads that model.
+            false
+        }
     }
 
     /// An empty plugin-facing page.
@@ -533,15 +608,40 @@ mod imp {
             .collect()
     }
 
-    /// Add the compiled-in native plugins. Today just the SDK.
+    /// Add the compiled-in native plugins, in dependency order: the SDK first
+    /// (so the sidebar's optional permission checks resolve it), then the
+    /// sidebar.
     ///
     /// A native plugin is a plugin like any other — same manifest, enable
     /// flag and load error handling — except that it is compiled in and
     /// reaches the host through the in-process [`PluginHost::add_native`]
-    /// rather than a `.wasm` file. Loading it before the on-disk discovery is
+    /// rather than a `.wasm` file. Loading them before the on-disk discovery is
     /// what lets a WASM dependent's `requires` be satisfied.
     fn install_native(host: &mut PluginHost, cfg: &Arc<Config>, grant_sink: &Arc<ServerBackend>) {
-        let registration = aether_sdk_plugin::registration();
+        install_native_one(
+            host,
+            cfg,
+            grant_sink,
+            aether_sdk_plugin::registration(),
+            "native SDK",
+        );
+        install_native_one(
+            host,
+            cfg,
+            grant_sink,
+            aether_sidebar_plugin::registration(),
+            "native sidebar",
+        );
+    }
+
+    /// Load one compiled-in native plugin from its build-time registration.
+    fn install_native_one(
+        host: &mut PluginHost,
+        cfg: &Arc<Config>,
+        grant_sink: &Arc<ServerBackend>,
+        registration: aether_plugin::NativeRegistration,
+        what: &str,
+    ) {
         let id = registration.manifest.id.clone();
         let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
         if !entry.enabled() {
@@ -553,8 +653,8 @@ mod imp {
             dir: std::path::PathBuf::new(),
             manifest: registration.manifest,
         };
-        // The SDK asks the operator for no host capabilities of its own; a
-        // service method still checks its *caller's* capabilities.
+        // Native plugins ask the operator for no host capabilities of their
+        // own; a service method still checks its *caller's* capabilities.
         let caps = effective_capabilities(&file.manifest.capabilities, &entry.capabilities);
         match host.add_native(&file, &caps, &entry.config, (registration.new)()) {
             Ok(()) => {
@@ -563,7 +663,7 @@ mod imp {
                     .lock()
                     .unwrap()
                     .insert(id.clone(), caps.clone());
-                crate::log::info(&format!("plugin     : {id} (native SDK)"));
+                crate::log::info(&format!("plugin     : {id} ({what})"));
             }
             Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
         }

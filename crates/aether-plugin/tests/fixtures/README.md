@@ -30,3 +30,12 @@ so `cargo test` needs no WebAssembly target and no network.
   cargo build --release --target wasm32-wasip2
   cp "$CARGO_TARGET_DIR/wasm32-wasip2/release/historian.wasm" ../../fixtures/historian/historian.wasm
   ```
+
+- `sidebar/sidebar.wasm` — built from `tests/guests/sidebar`, a plugin that
+  drives the `aether:sidebar` import. Regenerate the same way:
+
+  ```sh
+  cd tests/guests/sidebar
+  cargo build --release --target wasm32-wasip2
+  cp "$CARGO_TARGET_DIR/wasm32-wasip2/release/sidebar.wasm" ../../fixtures/sidebar/sidebar.wasm
+  ```

@@ -14,6 +14,7 @@ wit_bindgen::generate!({
     generate_all,
     path: [
         "../../../../aether-plugin/wit",
+        "../../../../aether-plugin/wit-sidebar",
         "../../../../aether-plugin/wit-sdk",
         "../../../../aether-plugin-sdk/wit",
     ],
