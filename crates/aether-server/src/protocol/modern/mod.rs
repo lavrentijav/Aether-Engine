@@ -75,6 +75,10 @@ const META_END: u8 = 0xFF;
 /// offer from a new one across reconnects.
 const RESOURCE_PACK_ID: u128 = 0xae74_e701_0000_4000_8000_0000_0000_0001;
 
+/// The largest plugin-channel payload the server accepts or sends. Voice
+/// handshakes are a few hundred bytes; this is generous but bounded.
+const MAX_PLUGIN_PAYLOAD: usize = 32_767;
+
 /// The codec of one modern protocol version; see [`version`].
 pub struct Codec(pub &'static version::Version);
 
@@ -476,6 +480,17 @@ impl ProtocolCodec for Codec {
                 p.bytes(&super::nbt::string(text).to_network()).bool(false); // not an action-bar overlay
                 vec![p]
             }
+            ServerEvent::PluginMessage { channel, data } => {
+                // An older release whose table carries no custom-payload id
+                // sends nothing rather than a packet with id -1.
+                if self.0.packets.cb_custom_payload < 0 {
+                    Vec::new()
+                } else {
+                    let mut p = PacketOut::new(self.0.packets.cb_custom_payload);
+                    p.string(channel).var_int(data.len() as i32).bytes(data);
+                    vec![p]
+                }
+            }
             other => play::encode(self.0, other).unwrap_or_default(),
         }
     }
@@ -519,6 +534,14 @@ impl ProtocolCodec for Codec {
                 Ok(id) => ClientEvent::KeepAlive(id),
                 Err(_) => ClientEvent::Ignored,
             },
+            // A plugin-channel message: an identifier then a length-prefixed
+            // byte array. The voice plugin reads its handshake from here.
+            id if id == p.sb_custom_payload => {
+                match (pin.string(), pin.byte_array(MAX_PLUGIN_PAYLOAD)) {
+                    (Ok(channel), Ok(data)) => ClientEvent::PluginMessage { channel, data },
+                    _ => ClientEvent::Ignored,
+                }
+            }
             id if id == p.sb_set_carried_item => match pin.u16() {
                 Ok(slot) => ClientEvent::HeldSlot(slot as u8),
                 Err(_) => ClientEvent::Ignored,

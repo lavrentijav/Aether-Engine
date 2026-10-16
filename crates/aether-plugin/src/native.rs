@@ -74,6 +74,19 @@ pub trait NativePlugin: Send {
         None
     }
 
+    /// A plugin-channel (custom payload) message from a player. Only called
+    /// when the manifest subscribes to `on-plugin-message`. Native-only: the
+    /// frozen WIT world has no such callback, and a WASM plugin cannot reach
+    /// the network anyway. The body is opaque to the host.
+    fn on_plugin_message(
+        &mut self,
+        _ctx: &mut NativeContext,
+        _p: &Player,
+        _channel: &str,
+        _data: &[u8],
+    ) {
+    }
+
     // --- before-*: neutral default is `Allow` ------------------------------
 
     fn before_block_break(

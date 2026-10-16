@@ -507,6 +507,10 @@ pub enum ServerEvent<'a> {
     /// per-player path renders it with the version's `playerlist_header`
     /// packet.
     TabHeaderFooter { header: String, footer: String },
+    /// A plugin-channel (custom payload) message to the client. Only the
+    /// releases whose packet table carries `custom_payload` render it; an
+    /// older codec emits nothing.
+    PluginMessage { channel: String, data: Vec<u8> },
 }
 
 /// A game window's kind.
@@ -679,6 +683,15 @@ pub enum ClientEvent {
     /// play loop matches it against the send time to measure round-trip
     /// latency (see `PlayerHandle::set_ping`).
     KeepAlive(i64),
+    /// A plugin-channel (custom payload) message from the client. The voice
+    /// plugin reads the Simple Voice Chat and Plasmo Voice handshakes here;
+    /// the core never interprets the body.
+    PluginMessage {
+        /// The channel, `namespace:path` (e.g. `voicechat:request_secret`).
+        channel: String,
+        /// The opaque payload.
+        data: Vec<u8>,
+    },
     /// Anything this server does not act on (animations, ...).
     Ignored,
 }

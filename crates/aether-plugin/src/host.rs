@@ -51,6 +51,28 @@ pub trait HostBackend: Send + Sync {
     /// Broadcast a chat line to every online player.
     fn broadcast(&self, _plugin: &str, _text: &str) {}
 
+    /// Send a plugin-channel (custom payload) message to one player. The
+    /// default does nothing; the server encodes it in the player's own codec.
+    /// Used by the voice plugin for the Simple Voice Chat and Plasmo Voice
+    /// handshake.
+    fn send_plugin_message(&self, _plugin: &str, _player: u64, _channel: &str, _data: &[u8]) {}
+
+    /// A player's 128-bit UUID, for a plugin whose protocol (voice chat) keys
+    /// everything by UUID rather than the session entity id. The default is
+    /// `None`.
+    fn player_uuid(&self, _plugin: &str, _player: u64) -> Option<u128> {
+        None
+    }
+
+    /// A player's current world name and position, for proximity voice. The
+    /// default is `None`, which makes every listener "out of range".
+    fn player_position(&self, _plugin: &str, _player: u64) -> Option<(String, f64, f64, f64)> {
+        None
+    }
+
+    /// Disconnect a player with `reason`. The default does nothing.
+    fn disconnect_player(&self, _plugin: &str, _player: u64, _reason: &str) {}
+
     /// The online players, for the SDK `players` service. The default is empty.
     fn online_players(&self, _plugin: &str) -> Vec<Player> {
         Vec::new()
@@ -852,6 +874,40 @@ impl LoadedPlugin {
             }
         }
     }
+
+    /// A plugin-channel message. Native plugins subscribed to
+    /// `on-plugin-message` are called in order; the frozen WASM world has no
+    /// callback, so a WASM plugin is a no-op here.
+    fn call_on_plugin_message(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        channel: &str,
+        data: &[u8],
+    ) -> std::result::Result<(), String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { .. } => Ok(()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                n.on_plugin_message(&mut ctx, p, channel, data);
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Discover every `plugin.toml` directly under `dir` or one level below it.
@@ -1512,6 +1568,31 @@ impl PluginHost {
             }
         }
         None
+    }
+
+    /// `on-plugin-message`: every native plugin subscribed to the event is
+    /// notified. It is observe-only — a plugin cannot cancel or rewrite the
+    /// payload.
+    pub fn on_plugin_message(&mut self, p: &Player, channel: &str, data: &[u8]) {
+        let event = manifest::EVENT_ON_PLUGIN_MESSAGE;
+        let services = Arc::clone(&self.services);
+        let backend = Arc::clone(&self.backend);
+        for i in 0..self.plugins.len() {
+            if !self.plugins[i].receives(event) {
+                continue;
+            }
+            let ms = self.call_budget_ms();
+            if ms == 0 {
+                continue;
+            }
+            self.plugins[i].set_deadline(ms);
+            let started = Instant::now();
+            let r = self.plugins[i].call_on_plugin_message(&services, &backend, p, channel, data);
+            self.charge_tick(started, ms, r.is_err());
+            if let Err(e) = r {
+                self.fault(i, event, e);
+            }
+        }
     }
 }
 

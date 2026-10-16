@@ -156,6 +156,35 @@ mod imp {
                 .broadcast(&ServerEvent::Chat(text.to_string()), &*self.world);
         }
 
+        fn send_plugin_message(&self, _plugin: &str, player: u64, channel: &str, data: &[u8]) {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return;
+            };
+            handle.emit(
+                &ServerEvent::PluginMessage {
+                    channel: channel.to_string(),
+                    data: data.to_vec(),
+                },
+                &*self.world,
+            );
+        }
+
+        fn player_uuid(&self, _plugin: &str, player: u64) -> Option<u128> {
+            self.registry.by_entity(player as i32).map(|h| h.uuid)
+        }
+
+        fn player_position(&self, _plugin: &str, player: u64) -> Option<(String, f64, f64, f64)> {
+            let handle = self.registry.by_entity(player as i32)?;
+            let pos = handle.pos();
+            Some(("minecraft:overworld".to_string(), pos.x, pos.y, pos.z))
+        }
+
+        fn disconnect_player(&self, _plugin: &str, player: u64, reason: &str) {
+            if let Some(handle) = self.registry.by_entity(player as i32) {
+                handle.disconnect(reason);
+            }
+        }
+
         fn online_players(&self, _plugin: &str) -> Vec<Player> {
             self.registry
                 .snapshot()
@@ -383,6 +412,13 @@ mod imp {
             aether_sidebar_plugin::registration(),
             "native sidebar",
         );
+        install_native_one(
+            host,
+            cfg,
+            grant_sink,
+            aether_voice_plugin::registration(),
+            "native voice",
+        );
     }
 
     /// Load one compiled-in native plugin from its build-time registration.
@@ -414,6 +450,10 @@ mod imp {
                     .lock()
                     .unwrap()
                     .insert(id.clone(), caps.clone());
+                // Register the native plugin's commands, exactly as for a
+                // WASM plugin, so `/sidebar` and `/voice` are dispatched and
+                // permission-checked through the core registry.
+                register_commands(&file.manifest);
                 crate::log::info(&format!("plugin     : {id} ({what})"));
             }
             Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
@@ -569,6 +609,12 @@ mod imp {
         })
     }
 
+    /// A plugin-channel message from a player, forwarded to every native plugin
+    /// subscribed to `on-plugin-message`.
+    pub fn on_plugin_message(handle: &PlayerHandle, channel: &str, data: &[u8]) {
+        with((), |h| h.on_plugin_message(&player(handle), channel, data));
+    }
+
     pub fn shutdown() {
         with((), |h| h.shutdown());
     }
@@ -699,6 +745,7 @@ mod imp {
     pub fn on_command(_h: &PlayerHandle, _n: &str, _a: &[String]) -> Option<Vec<String>> {
         None
     }
+    pub fn on_plugin_message(_h: &PlayerHandle, _c: &str, _d: &[u8]) {}
     pub fn shutdown() {}
 }
 

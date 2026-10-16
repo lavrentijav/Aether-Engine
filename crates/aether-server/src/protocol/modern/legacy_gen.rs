@@ -13,6 +13,8 @@ pub mod v1_20_2 {
     use super::Packets;
 
     pub static PACKETS: Packets = Packets {
+        sb_custom_payload: 15,
+        cb_custom_payload: 24,
         cb_add_entity: 1,
         cb_animate: 3,
         cb_swing_animation: -1,
@@ -254,6 +256,8 @@ pub mod v1_20_4 {
     use super::Packets;
 
     pub static PACKETS: Packets = Packets {
+        sb_custom_payload: 16,
+        cb_custom_payload: 24,
         cb_add_entity: 1,
         cb_animate: 3,
         cb_swing_animation: -1,
@@ -497,6 +501,8 @@ pub mod v1_20_5 {
     use super::Packets;
 
     pub static PACKETS: Packets = Packets {
+        sb_custom_payload: 18,
+        cb_custom_payload: 25,
         cb_add_entity: 1,
         cb_animate: 3,
         cb_swing_animation: -1,
@@ -741,6 +747,8 @@ pub mod v1_21_1 {
     use super::Packets;
 
     pub static PACKETS: Packets = Packets {
+        sb_custom_payload: 18,
+        cb_custom_payload: 25,
         cb_add_entity: 1,
         cb_animate: 3,
         cb_swing_animation: -1,
@@ -985,6 +993,8 @@ pub mod v1_21_3 {
     use super::Packets;
 
     pub static PACKETS: Packets = Packets {
+        sb_custom_payload: 20,
+        cb_custom_payload: 25,
         cb_add_entity: 1,
         cb_animate: 3,
         cb_swing_animation: -1,
@@ -1249,6 +1259,8 @@ pub mod v1_21_4 {
     use super::Packets;
 
     pub static PACKETS: Packets = Packets {
+        sb_custom_payload: 20,
+        cb_custom_payload: 25,
         cb_add_entity: 1,
         cb_animate: 3,
         cb_swing_animation: -1,
@@ -1512,6 +1524,8 @@ pub mod v1_21_5 {
     use super::Packets;
 
     pub static PACKETS: Packets = Packets {
+        sb_custom_payload: 20,
+        cb_custom_payload: 24,
         cb_add_entity: 1,
         cb_animate: 2,
         cb_swing_animation: -1,
@@ -1776,6 +1790,8 @@ pub mod v1_21_6 {
     use super::Packets;
 
     pub static PACKETS: Packets = Packets {
+        sb_custom_payload: 21,
+        cb_custom_payload: 24,
         cb_add_entity: 1,
         cb_animate: 2,
         cb_swing_animation: -1,
@@ -2041,6 +2057,8 @@ pub mod v1_21_8 {
     use super::Packets;
 
     pub static PACKETS: Packets = Packets {
+        sb_custom_payload: 21,
+        cb_custom_payload: 24,
         cb_add_entity: 1,
         cb_animate: 2,
         cb_swing_animation: -1,
@@ -2306,6 +2324,8 @@ pub mod v1_21_9 {
     use super::Packets;
 
     pub static PACKETS: Packets = Packets {
+        sb_custom_payload: 21,
+        cb_custom_payload: 24,
         cb_add_entity: 1,
         cb_animate: 2,
         cb_swing_animation: -1,

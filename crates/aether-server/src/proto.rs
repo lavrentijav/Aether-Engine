@@ -393,6 +393,27 @@ impl<'a> PacketIn<'a> {
         Ok(self.u8()? != 0)
     }
 
+    /// Read a length-prefixed byte array (a plugin-channel payload). `max`
+    /// bounds the accepted length so a hostile prefix cannot make the server
+    /// allocate unboundedly.
+    pub fn byte_array(&mut self, max: usize) -> io::Result<Vec<u8>> {
+        let len = self.var_int()? as usize;
+        if len > max {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "byte-array length above the limit",
+            ));
+        }
+        let end = self
+            .pos
+            .checked_add(len)
+            .filter(|e| *e <= self.buf.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "byte-array eof"))?;
+        let v = self.buf[self.pos..end].to_vec();
+        self.pos = end;
+        Ok(v)
+    }
+
     /// Read a big-endian `f32`.
     pub fn f32(&mut self) -> io::Result<f32> {
         let end = self.pos + 4;

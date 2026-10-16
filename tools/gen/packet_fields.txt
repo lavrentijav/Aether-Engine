@@ -43,6 +43,7 @@ cb_remove_entities
 cb_remove_mob_effect
 cb_system_chat
 cb_commands
+cb_custom_payload
 sb_accept_teleportation
 sb_chat_command
 sb_chat_command_signed
@@ -68,6 +69,7 @@ sb_move_player_rot
 sb_move_player_status_only
 sb_change_game_mode
 sb_keep_alive
+sb_custom_payload
 cfg_cb_finish_configuration
 cfg_cb_registry_data
 cfg_cb_resource_pack_push
