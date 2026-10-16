@@ -202,8 +202,8 @@ fn every_argument_kind_parses_a_valid_word() {
         ArgKind::Entity,
         ArgKind::Entities,
         ArgKind::BlockPos,
-        ArgKind::Vec3,
-        ArgKind::Vec2,
+        ArgKind::Vec3(true),
+        ArgKind::Vec2(true),
         ArgKind::BlockState,
         ArgKind::ItemStack,
         ArgKind::NbtCompound,
@@ -228,6 +228,19 @@ fn every_argument_kind_parses_a_valid_word() {
             ArgKind::Integer | ArgKind::Long | ArgKind::Float | ArgKind::Double => "1",
             ArgKind::Bool => "true",
             ArgKind::Enum(_) => "a",
+            ArgKind::BlockPos | ArgKind::Vec3(_) => "~0 ~ ~",
+            ArgKind::Vec2(_) => "1 2",
+            ArgKind::Rotation => "~ ~",
+            ArgKind::Swizzle => "xyz",
+            ArgKind::Angle => "~90",
+            ArgKind::BlockState => "minecraft:stone",
+            ArgKind::ItemStack => "minecraft:stone",
+            ArgKind::NbtCompound => "{a:1}",
+            ArgKind::Component => "\"hi\"",
+            ArgKind::Time => "1s",
+            ArgKind::Gamemode => "creative",
+            ArgKind::Difficulty => "normal",
+            ArgKind::Operation => "+=",
             _ => "word",
         };
         let mut r = StringReader::new(text);
@@ -295,8 +308,8 @@ const ALL_KINDS: &[ArgKind] = &[
     ArgKind::Entity,
     ArgKind::Entities,
     ArgKind::BlockPos,
-    ArgKind::Vec3,
-    ArgKind::Vec2,
+    ArgKind::Vec3(true),
+    ArgKind::Vec2(true),
     ArgKind::BlockState,
     ArgKind::ItemStack,
     ArgKind::NbtCompound,
@@ -405,6 +418,46 @@ fn typed_arguments_flow_through_the_parser() {
 }
 
 #[test]
+fn a_coordinate_argument_consumes_three_tokens_in_the_tree() {
+    let noop = |_ctx: &mut Ctx| Reply(Vec::new());
+    let tree = CommandTree {
+        root: Node {
+            name: "",
+            aliases: Vec::new(),
+            kind: Kind::Root,
+            executable: false,
+            requirement: Requirement::None,
+            executor: None,
+            usage: None,
+            task: None,
+            children: vec![Builder::literal("setblock")
+                .then(Builder::arg("pos", ArgKind::BlockPos).executable(noop))
+                .build()],
+        },
+    };
+    let handle = bare_handle("bob");
+    let m = tree.parse("setblock ~0 ~ ~", &handle).unwrap();
+    assert_eq!(m.args.len(), 1);
+    // The three tokens are kept as one argument's text, so `ctx.refs()`
+    // hands the executor the same three words it always saw.
+    assert_eq!(m.args[0].text, "~0 ~ ~");
+    assert!(matches!(
+        m.args[0].value,
+        Value::Coordinates(c) if c.is_relative()
+    ));
+    // Garbage is a rendered error, never a panic — and no trailing token is
+    // left behind for a later argument to misread.
+    assert!(matches!(
+        parse_err(&tree, "setblock x y z", &handle),
+        ParseError::Argument(_)
+    ));
+    assert!(matches!(
+        parse_err(&tree, "setblock 1 2", &handle),
+        ParseError::IncompletePos { .. }
+    ));
+}
+
+#[test]
 fn unknown_literal_and_trailing_input_use_the_vanilla_errors() {
     let tree = sample_tree();
     let handle = bare_handle("bob");
@@ -446,11 +499,11 @@ fn unknown_literal_and_trailing_input_use_the_vanilla_errors() {
 // Requirements
 // ---------------------------------------------------------------------------
 
-fn always_hidden(_h: &PlayerHandle) -> Result<(), Deny> {
+fn always_hidden(_h: &Source) -> Result<(), Deny> {
     Err(Deny::Hidden)
 }
 
-fn always_denied(_h: &PlayerHandle) -> Result<(), Deny> {
+fn always_denied(_h: &Source) -> Result<(), Deny> {
     Err(Deny::Message("nope".into()))
 }
 
@@ -560,6 +613,35 @@ fn suggestions_filter_literals_by_prefix_and_never_run_a_command() {
         suggest_in(&tree, "/mode s", &handle, &ctx),
         vec!["survival"]
     );
+}
+
+#[test]
+fn registry_arguments_suggest_from_the_vanilla_tables() {
+    let noop = |_ctx: &mut Ctx| Reply(Vec::new());
+    let tree = CommandTree {
+        root: Node {
+            name: "",
+            aliases: Vec::new(),
+            kind: Kind::Root,
+            executable: false,
+            requirement: Requirement::None,
+            executor: None,
+            usage: None,
+            task: None,
+            children: vec![Builder::literal("setblock")
+                .then(Builder::arg("block", ArgKind::BlockState).executable(noop))
+                .build()],
+        },
+    };
+    let registry: SharedRegistry = Arc::new(Registry::default());
+    let handle = join(&registry, "bob", 1);
+    let ctx = SuggestCtx {
+        registry: &registry,
+        world: None,
+    };
+    let s = suggest_in(&tree, "/setblock minecraft:sto", &handle, &ctx);
+    assert!(s.contains(&"minecraft:stone".to_string()), "{s:?}");
+    assert!(s.iter().all(|w| w.starts_with("minecraft:sto")), "{s:?}");
 }
 
 #[test]
@@ -830,10 +912,11 @@ fn help_renders_from_the_tree_with_usages_and_stub_marks() {
         one(&env, &env.tester, "/help gm"),
         "/gamemode (gm) <gamemode> [<targets>]"
     );
-    // A specified-but-unimplemented command is listed and marked.
+    // A specified-but-unimplemented command is listed and marked. (`/stop` and
+    // `/save-all` are CMD-07 now, so a CMD-09 stub like `/save-on` stands in.)
     assert_eq!(
-        one(&env, &env.tester, "/help stop"),
-        "/stop — not implemented yet (CMD-09)"
+        one(&env, &env.tester, "/help save-on"),
+        "/save-on — not implemented yet (CMD-09)"
     );
     // The `?` alias routes to the same node.
     assert_eq!(
@@ -844,6 +927,17 @@ fn help_renders_from_the_tree_with_usages_and_stub_marks() {
     assert_eq!(
         run(&env, &env.tester, "/help definitely-not-a-command"),
         vec!["Unknown command. Try /help".to_string()]
+    );
+    // A category word lists just that category from the catalogue (CMD-48):
+    // the admin verbs appear, the gameplay verbs do not.
+    let admin = run(&env, &env.tester, "/help admin");
+    assert!(
+        admin.iter().any(|l| l.contains("/op")),
+        "/help admin lists the admin category: {admin:?}"
+    );
+    assert!(
+        !admin.iter().any(|l| l.contains("/gamemode")),
+        "/help admin must not list another category: {admin:?}"
     );
 }
 
@@ -864,7 +958,7 @@ fn help_with_no_argument_lists_the_visible_tree_paged() {
     );
     assert!(
         all.iter()
-            .any(|l| l.contains("/stop (not implemented yet)")),
+            .any(|l| l.contains("/save-on (not implemented yet)")),
         "{all:?}"
     );
     // `all_help` left the pager on the last page; run `/help` again so the
@@ -917,9 +1011,8 @@ fn help_does_not_leak_op_only_commands_to_a_non_op() {
         bob_help.iter().any(|l| l.starts_with("/kill ")) || bob_help.iter().any(|l| l == "/kill")
     );
     // The operator sees it, so the filter is the caller, not the tree.
-    assert!(all_help(&env, &env.tester)
-        .iter()
-        .any(|l| l.starts_with("/stop ")));
+    // (`/stop` is implemented by CMD-07 and has no usage, so it lists bare.)
+    assert!(all_help(&env, &env.tester).iter().any(|l| l == "/stop"));
 }
 
 #[test]
@@ -982,13 +1075,13 @@ fn a_function_is_silenced_while_a_player_keeps_their_errors() {
 fn the_stub_registry_is_on_the_tree() {
     let env = env();
     // A specified-but-unimplemented command answers with its task id, and its
-    // op level is enforced by the tree.
+    // op level is enforced by the tree. (`/stop` and `/save-all` are CMD-07.)
     assert_eq!(
-        one(&env, &env.tester, "/stop"),
-        "/stop is not implemented yet (CMD-09)"
+        one(&env, &env.tester, "/save-on"),
+        "/save-on is not implemented yet (CMD-09)"
     );
     assert_eq!(
-        one(&env, &env.bob, "/stop"),
+        one(&env, &env.bob, "/save-on"),
         "You do not have permission to run this command."
     );
     assert_eq!(

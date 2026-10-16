@@ -14,15 +14,116 @@
 
 use std::sync::OnceLock;
 
+use super::args::{BlockState, ItemStack};
+use super::catalogue::{self, Status};
+use super::coordinates::{Coordinates, Coordinates2, Swizzle, WorldCoordinate};
 use super::feedback::Feedback;
-use super::registry;
 use super::Reply;
 use crate::economy::Economy;
-use crate::players::{PlayerHandle, SharedRegistry};
+use crate::players::{PlayerHandle, PosLook, SharedRegistry};
+use crate::protocol::nbt::Nbt;
 use crate::session::DemoWorld;
 
 pub mod suggest;
 pub use suggest::{suggest, suggest_in, SuggestCtx};
+
+/// A server-side command source: the console or an RCON connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerKind {
+    /// The server's own console (stdin).
+    Console,
+    /// A remote RCON connection.
+    Rcon,
+}
+
+impl ServerKind {
+    /// The name the source runs under, for feedback and logs.
+    pub const fn name(self) -> &'static str {
+        match self {
+            ServerKind::Console => "Server",
+            ServerKind::Rcon => "RCON",
+        }
+    }
+}
+
+/// Where a command came from.
+///
+/// The tree, its requirements and its executors are written against this so a
+/// connected player and the server console share one dispatch. A server source
+/// has op level 4 (an owner), but **no entity and no position**: a command that
+/// needs a player's body or coordinates fails the way vanilla's console does.
+#[derive(Clone, Copy)]
+pub enum Source<'a> {
+    /// A connected player.
+    Player(&'a PlayerHandle),
+    /// The server console or an RCON client.
+    Server(ServerKind),
+}
+
+impl<'a> Source<'a> {
+    /// The player, when the command came from one.
+    pub fn player(self) -> Option<&'a PlayerHandle> {
+        match self {
+            Source::Player(p) => Some(p),
+            Source::Server(_) => None,
+        }
+    }
+
+    /// The name the source runs under.
+    pub fn name(self) -> &'a str {
+        match self {
+            Source::Player(p) => &p.name,
+            Source::Server(k) => k.name(),
+        }
+    }
+
+    /// Whether this is a server-side source (console or RCON).
+    pub fn is_server(self) -> bool {
+        matches!(self, Source::Server(_))
+    }
+
+    /// The source's effective permission level: a player's from the store, the
+    /// owner level for the console and RCON.
+    pub fn level(self) -> crate::permissions::Level {
+        match self {
+            Source::Player(p) => crate::permissions::level(&p.name, p.ip),
+            Source::Server(_) => crate::permissions::Level::OWNER,
+        }
+    }
+
+    /// Whether the source is an operator. The console and RCON always are.
+    pub fn is_operator(self) -> bool {
+        match self {
+            Source::Player(p) => crate::is_operator(p),
+            Source::Server(_) => true,
+        }
+    }
+
+    /// The source's entity id, or `None` for a server source.
+    pub fn entity_id(self) -> Option<i32> {
+        self.player().map(|p| p.entity_id)
+    }
+
+    /// The source's position, or `None` for a server source. A command that
+    /// needs coordinates fails rather than inventing an origin at `0 0 0`.
+    pub fn position(self) -> Option<PosLook> {
+        self.player().map(|p| p.pos())
+    }
+
+    /// This source as the feedback layer's [`CommandSource`], so a reply can
+    /// be styled and gated by the vanilla per-source/per-kind rule
+    /// ([`crate::commands::feedback`]).
+    ///
+    /// [`CommandSource`]: crate::commands::source::CommandSource
+    pub fn feedback_source(self) -> crate::commands::source::CommandSource<'a> {
+        use crate::commands::source::CommandSource;
+        match self {
+            Source::Player(handle) => CommandSource::Player(handle),
+            Source::Server(ServerKind::Console) => CommandSource::Console,
+            Source::Server(ServerKind::Rcon) => CommandSource::Rcon,
+        }
+    }
+}
 
 /// A closure that runs a command. Boxed (not a bare `fn`) so a node can carry
 /// a value derived from a registry entry — the stubs capture their task id.
@@ -31,8 +132,8 @@ pub type ExecFn = dyn for<'a, 'b> Fn(&mut Ctx<'a, 'b>) -> Reply + Send + Sync;
 /// A command source: who typed it, the live world and registry, the economy,
 /// and the already-parsed arguments of the matched command.
 pub struct Ctx<'a, 'e> {
-    /// The player who typed the command.
-    pub handle: &'a PlayerHandle,
+    /// Who typed the command: a player, or the console/RCON.
+    pub source: Source<'a>,
     /// Online players, for name lookups and broadcasts.
     pub registry: &'a SharedRegistry,
     /// The world the command acts on.
@@ -43,7 +144,7 @@ pub struct Ctx<'a, 'e> {
     pub args: Vec<ParsedArg>,
 }
 
-impl Ctx<'_, '_> {
+impl<'a> Ctx<'a, '_> {
     /// The raw text of every parsed argument, split on whitespace, for the
     /// bodies that still parse their own filters (`/lookup`, `/tp`, …). A
     /// greedy argument holds the whole remainder as one piece; the ported
@@ -53,6 +154,20 @@ impl Ctx<'_, '_> {
             .iter()
             .flat_map(|a| a.text.split_whitespace())
             .collect()
+    }
+
+    /// The player running the command, when it came from one.
+    pub fn player(&self) -> Option<&'a PlayerHandle> {
+        self.source.player()
+    }
+
+    /// The reply a player-only command gives a server source: there is no
+    /// entity to act on, so it names the source rather than guessing one.
+    pub fn needs_player(&self) -> Reply {
+        Reply::one(format!(
+            "{} cannot run this command: it needs a player.",
+            self.source.name()
+        ))
     }
 }
 
@@ -79,6 +194,25 @@ pub enum Value {
     Double(f64),
     /// A parsed `bool`.
     Bool(bool),
+    /// An unresolved coordinate triple (`block_pos`, `vec3`).
+    Coordinates(Coordinates),
+    /// An unresolved coordinate pair (`vec2`).
+    Vec2(Coordinates2),
+    /// An unresolved yaw/pitch pair (`rotation`).
+    Rotation(Coordinates2),
+    /// A `swizzle` axis mask.
+    Swizzle(Swizzle),
+    /// A single `angle`, absolute or relative.
+    Angle(WorldCoordinate),
+    /// A block state resolved through the block table, with any block-entity
+    /// NBT a `{…}` suffix carried.
+    BlockState(BlockState),
+    /// An item stack: an item and its optional component patch.
+    ItemStack(ItemStack),
+    /// A parsed SNBT value (`nbt_compound`, `component`).
+    Nbt(Nbt),
+    /// A namespaced resource location, or `#tag`.
+    ResourceLocation(String),
 }
 
 /// Every argument kind the tree understands. The set is the one the brief
@@ -112,10 +246,13 @@ pub enum ArgKind {
     Entities,
     /// `minecraft:block_pos`.
     BlockPos,
-    /// `minecraft:vec3`.
-    Vec3,
-    /// `minecraft:vec2`.
-    Vec2,
+    /// `minecraft:vec3`. The flag is vanilla's `centerIntegers`: `true` (the
+    /// default for `/tp`, `/summon`, `/execute positioned`, …) adds `0.5` to
+    /// absolute X and Z; `false` is the raw delta form `/particle` uses.
+    Vec3(bool),
+    /// `minecraft:vec2`. The flag is `centerIntegers` (`vec2()` defaults to
+    /// `true`, which centers both components).
+    Vec2(bool),
     /// `minecraft:block_state`.
     BlockState,
     /// `minecraft:item_stack`.
@@ -186,8 +323,8 @@ impl ArgKind {
             ArgKind::Bool => "brigadier:bool",
             ArgKind::Entity | ArgKind::Entities => "minecraft:entity",
             ArgKind::BlockPos => "minecraft:block_pos",
-            ArgKind::Vec3 => "minecraft:vec3",
-            ArgKind::Vec2 => "minecraft:vec2",
+            ArgKind::Vec3(_) => "minecraft:vec3",
+            ArgKind::Vec2(_) => "minecraft:vec2",
             ArgKind::BlockState => "minecraft:block_state",
             ArgKind::ItemStack => "minecraft:item_stack",
             // Renamed `minecraft:nbt` when parser ids arrived in 1.19; the
@@ -238,8 +375,8 @@ impl ArgKind {
             ArgKind::Message
             | ArgKind::Bool
             | ArgKind::BlockPos
-            | ArgKind::Vec3
-            | ArgKind::Vec2
+            | ArgKind::Vec3(_)
+            | ArgKind::Vec2(_)
             | ArgKind::BlockState
             | ArgKind::ItemStack
             | ArgKind::NbtCompound
@@ -270,63 +407,11 @@ impl ArgKind {
     }
 
     /// Parse one argument from `r`, returning its typed value and source text.
-    fn parse(self, r: &mut StringReader) -> Result<(Value, String), ParseError> {
-        match self {
-            ArgKind::GreedyString | ArgKind::Message => {
-                let t = r.read_remainder()?;
-                Ok((Value::Text(t.clone()), t))
-            }
-            ArgKind::String | ArgKind::Quotable => {
-                // A string argument is quoted-aware: an unterminated quote is
-                // `InvalidQuoted`, never a silently empty word.
-                let t = r.read_string_arg()?;
-                Ok((Value::Text(t.clone()), t))
-            }
-            ArgKind::Integer => {
-                let t = r.read_token();
-                t.parse::<i32>()
-                    .map(|n| (Value::Int(n), t.clone()))
-                    .map_err(|_| ParseError::InvalidInteger(t))
-            }
-            ArgKind::Long => {
-                let t = r.read_token();
-                t.parse::<i64>()
-                    .map(|n| (Value::Long(n), t.clone()))
-                    .map_err(|_| ParseError::InvalidLong(t))
-            }
-            ArgKind::Float => {
-                let t = r.read_token();
-                t.parse::<f32>()
-                    .map(|n| (Value::Float(n), t.clone()))
-                    .map_err(|_| ParseError::InvalidFloat(t))
-            }
-            ArgKind::Double => {
-                let t = r.read_token();
-                t.parse::<f64>()
-                    .map(|n| (Value::Double(n), t.clone()))
-                    .map_err(|_| ParseError::InvalidDouble(t))
-            }
-            ArgKind::Bool => {
-                let t = r.read_token();
-                match t.as_str() {
-                    "true" => Ok((Value::Bool(true), t)),
-                    "false" => Ok((Value::Bool(false), t)),
-                    _ => Err(ParseError::InvalidBool(t)),
-                }
-            }
-            ArgKind::Enum(words) => {
-                let t = r.read_token();
-                if words.contains(&t.as_str()) {
-                    Ok((Value::Text(t.clone()), t))
-                } else {
-                    Err(ParseError::IncorrectArg)
-                }
-            }
-            _ => {
-                let t = r.read_token();
-                Ok((Value::Text(t.clone()), t))
-            }
-        }
+    ///
+    /// The bodies live in [`super::args`]; this is the seam the tree calls
+    /// once it has decided which node matched.
+    pub(crate) fn parse(self, r: &mut StringReader) -> Result<(Value, String), ParseError> {
+        super::args::parse(self, r)
     }
 }
 
@@ -364,7 +449,7 @@ pub enum Requirement {
     /// No requirement.
     None,
     /// A named check, e.g. "is an operator", with its own denial message.
-    Fn(fn(&PlayerHandle) -> Result<(), Deny>),
+    Fn(fn(&Source) -> Result<(), Deny>),
     /// An op-level gate from the core registry (CMD-01/CMD0b), with the
     /// generic permission message.
     Level {
@@ -375,19 +460,19 @@ pub enum Requirement {
     },
 }
 
-/// Whether `req` lets `handle` see and run the node.
-pub fn check(req: &Requirement, handle: &PlayerHandle) -> Result<(), Deny> {
+/// Whether `req` lets `source` see and run the node.
+pub fn check(req: &Requirement, source: &Source) -> Result<(), Deny> {
     match req {
         Requirement::None => Ok(()),
-        Requirement::Fn(f) => f(handle),
+        Requirement::Fn(f) => f(source),
         Requirement::Level { op, node } => {
-            // The CMD-01 core: the player's level comes from the persisted
-            // store (seeded from `config.operators`), the node's default
-            // resolves from the store, and the command's `op` level is the
-            // floor. This is the same gate `commands::permitted` exposes; the
-            // tree calls the core directly so a `Level` node is unambiguous.
-            let level = crate::permissions::level(&handle.name, handle.ip);
-            if crate::permissions::check(level, node, *op) {
+            // The CMD-01 core: a player's level comes from the persisted store
+            // (seeded from `config.operators`), the console and RCON are
+            // owners, the node's default resolves from the store, and the
+            // command's `op` level is the floor. This is the same gate
+            // `commands::permitted` exposes; the tree calls the core directly
+            // so a `Level` node is unambiguous.
+            if crate::permissions::check(source.level(), node, *op) {
                 Ok(())
             } else {
                 Err(Deny::Message(
@@ -492,13 +577,24 @@ impl CommandTree {
         None
     }
 
-    /// Parse `text` and return the matched executable node plus its arguments.
+    /// Parse `text` for a player and return the matched executable node plus
+    /// its arguments.
     pub fn parse<'s>(&'s self, text: &str, handle: &PlayerHandle) -> Result<Match<'s>, ParseError> {
+        self.parse_source(text, &Source::Player(handle))
+    }
+
+    /// Parse `text` for any command source, returning the matched executable
+    /// node plus its arguments.
+    pub fn parse_source<'s>(
+        &'s self,
+        text: &str,
+        source: &Source,
+    ) -> Result<Match<'s>, ParseError> {
         let text = text.trim();
         let text = text.strip_prefix('/').unwrap_or(text);
         let mut r = StringReader::new(text);
         let mut args = Vec::new();
-        let node = parse_node(&self.root, &mut r, handle, &mut args)?;
+        let node = parse_node(&self.root, &mut r, source, &mut args)?;
         Ok(Match { node, args })
     }
 }
@@ -610,10 +706,14 @@ fn build() -> CommandTree {
     children.extend(super::core_nodes());
     children.extend(crate::game::commands::nodes());
     children.extend(crate::economy::commands::nodes());
-    // The not-yet-implemented core commands: registered now so completion and
-    // permission checks are right from day one. A name a real command already
-    // answers is skipped — there must be exactly one owner.
-    for entry in registry::CORE {
+    // The not-yet-implemented core commands are derived from the one catalogue
+    // (`catalogue::CATALOGUE`, the single source of truth): registered now so
+    // completion and permission checks are right from day one. A name a real
+    // command already answers is skipped — there must be exactly one owner.
+    for entry in catalogue::CATALOGUE
+        .iter()
+        .filter(|c| c.status == Status::Pending)
+    {
         if children
             .iter()
             .any(|n| n.name == entry.name || entry.aliases.iter().any(|a| n.aliases.contains(a)))
@@ -638,8 +738,8 @@ fn build() -> CommandTree {
 }
 
 /// A stub node for a specified-but-unimplemented command. Its executor names
-/// the CMD task; the requirement is the registry's op level.
-fn stub(entry: &'static registry::Entry) -> Node {
+/// the CMD task; the requirement is the catalogue's node and op level.
+fn stub(entry: &'static catalogue::Command) -> Node {
     let mut b = Builder::literal(entry.name).requires(Requirement::Level {
         op: entry.op,
         node: entry.node,
@@ -839,6 +939,15 @@ pub enum ParseError {
     InvalidBool(String),
     /// A quoted string never closed.
     InvalidQuoted,
+    /// A coordinate argument ended before all its components arrived.
+    IncompletePos {
+        /// How many components the argument expected.
+        expected: u8,
+    },
+    /// A fully-rendered argument error: an unknown block or item, a bad
+    /// resource location, malformed NBT, a mixed coordinate. The message is
+    /// already the chat line to send.
+    Argument(String),
     /// A requirement refused: the denial reply.
     Denied(String),
 }
@@ -855,6 +964,10 @@ impl ParseError {
             ParseError::InvalidDouble(x) => format!("Invalid double '{x}'"),
             ParseError::InvalidBool(x) => format!("Invalid bool '{x}'"),
             ParseError::InvalidQuoted => "Invalid quoted string".into(),
+            ParseError::IncompletePos { expected } => {
+                format!("Incomplete (expected {expected} coordinates)")
+            }
+            ParseError::Argument(m) => m.clone(),
             ParseError::Denied(m) => m.clone(),
         }
     }
@@ -863,7 +976,7 @@ impl ParseError {
 fn parse_node<'s>(
     node: &'s Node,
     r: &mut StringReader,
-    handle: &PlayerHandle,
+    source: &Source,
     args: &mut Vec<ParsedArg>,
 ) -> Result<&'s Node, ParseError> {
     r.skip_whitespace();
@@ -880,10 +993,10 @@ fn parse_node<'s>(
         r.cursor = start;
         let args_len = args.len();
         match consume(child, r, args) {
-            Ok(()) => match check(&child.requirement, handle) {
+            Ok(()) => match check(&child.requirement, source) {
                 Err(Deny::Hidden) => {}
                 Err(Deny::Message(m)) => return Err(ParseError::Denied(m)),
-                Ok(()) => match parse_node(child, r, handle, args) {
+                Ok(()) => match parse_node(child, r, source, args) {
                     Ok(found) => return Ok(found),
                     Err(ParseError::Denied(m)) => return Err(ParseError::Denied(m)),
                     Err(e) => best = best.or(Some(e)),
@@ -964,12 +1077,68 @@ pub fn execute_feedback(
     registry: &SharedRegistry,
     world: &DemoWorld,
 ) -> Option<Feedback> {
+    execute_feedback_from(text, Source::Player(handle), registry, world)
+}
+
+/// Run `text` against the tree for any source, as a lines-only reply. `None`
+/// means ordinary chat (no leading `/`) — which only a player can produce.
+pub fn execute_from(
+    text: &str,
+    source: Source,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+) -> Option<Reply> {
+    execute_feedback_from(text, source, registry, world).map(|f| Reply(f.lines))
+}
+
+/// Run `text` against the tree for any source, keeping success/error.
+///
+/// This is the source-generic form of [`execute_feedback`]: the console and
+/// RCON reach it with a [`Source::Server`], and their feedback is always shown
+/// ([`crate::commands::feedback::accepts`]).
+pub fn execute_feedback_from(
+    text: &str,
+    source: Source,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+) -> Option<Feedback> {
     let trimmed = text.trim();
     let body = trimmed.strip_prefix('/')?;
-    match tree().parse(body, handle) {
+    run_body(body, source, registry, world)
+}
+
+/// Run one console/RCON line as a command, with or without a leading slash.
+///
+/// The vanilla console types commands without `/`, so everything here is a
+/// command; an empty line produces nothing.
+pub fn run_command(
+    text: &str,
+    source: Source,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+) -> Reply {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Reply(Vec::new());
+    }
+    let body = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    match run_body(body, source, registry, world) {
+        Some(feedback) => Reply(feedback.lines),
+        None => Reply(Vec::new()),
+    }
+}
+
+/// Parse and run one command body (no leading slash), for any source.
+fn run_body(
+    body: &str,
+    source: Source,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+) -> Option<Feedback> {
+    match tree().parse_source(body, &source) {
         Ok(m) => {
             let mut ctx = Ctx {
-                handle,
+                source,
                 registry,
                 world,
                 econ: crate::economy::get(),
@@ -983,8 +1152,12 @@ pub fn execute_feedback(
             // A name the tree does not own might belong to a plugin; the
             // plugin path is the only other place a verb can be answered, and
             // it refuses every core name, so the core gate is never bypassed.
-            if let Some(reply) = super::plugin_command(body, handle) {
-                return Some(Feedback::success(reply.0));
+            // Plugins are player-facing, so a server source does not reach
+            // them.
+            if let Source::Player(handle) = source {
+                if let Some(reply) = super::plugin_command(body, handle) {
+                    return Some(Feedback::success(reply.0));
+                }
             }
             Some(Feedback::error(vec![e.message()]))
         }
@@ -1005,11 +1178,11 @@ impl<'a> StringReader<'a> {
         StringReader { text, cursor: 0 }
     }
 
-    fn can_read(&self) -> bool {
+    pub(crate) fn can_read(&self) -> bool {
         self.cursor < self.text.len()
     }
 
-    fn peek(&self) -> Option<char> {
+    pub(crate) fn peek(&self) -> Option<char> {
         self.text[self.cursor..].chars().next()
     }
 
@@ -1019,7 +1192,7 @@ impl<'a> StringReader<'a> {
         Some(c)
     }
 
-    fn skip_whitespace(&mut self) {
+    pub(crate) fn skip_whitespace(&mut self) {
         while let Some(c) = self.peek() {
             if !c.is_whitespace() {
                 break;
@@ -1028,10 +1201,16 @@ impl<'a> StringReader<'a> {
         }
     }
 
+    /// The text consumed since byte offset `from`, as a string. Used to give a
+    /// multi-token argument its exact source text for `ctx.refs()`.
+    pub(crate) fn text_from(&self, from: usize) -> String {
+        self.text[from..self.cursor].to_string()
+    }
+
     /// One unquoted token: up to the next whitespace, quote characters taken
     /// literally. This is what literal matching and the plain `string`
     /// arguments read, and `split_whitespace` is its word-splitting peer.
-    fn read_token(&mut self) -> String {
+    pub(crate) fn read_token(&mut self) -> String {
         let start = self.cursor;
         while let Some(c) = self.peek() {
             if c.is_whitespace() {
@@ -1042,9 +1221,48 @@ impl<'a> StringReader<'a> {
         self.text[start..self.cursor].to_string()
     }
 
+    /// A brace- and quote-aware token: whitespace inside `{}`, `[]` or a quoted
+    /// span does not end it. This is what a block state (`…[a=b, c=d]`), an NBT
+    /// compound (`{a: 1}`) or an item stack (`id{…}`) needs.
+    pub(crate) fn read_component_token(&mut self) -> String {
+        let start = self.cursor;
+        let mut depth = 0i32;
+        let mut quote: Option<char> = None;
+        while let Some(c) = self.peek() {
+            if let Some(q) = quote {
+                self.read();
+                if c == '\\' {
+                    self.read();
+                } else if c == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match c {
+                '"' | '\'' => {
+                    quote = Some(c);
+                    self.read();
+                }
+                '{' | '[' => {
+                    depth += 1;
+                    self.read();
+                }
+                '}' | ']' => {
+                    depth -= 1;
+                    self.read();
+                }
+                c if c.is_whitespace() && depth <= 0 => break,
+                _ => {
+                    self.read();
+                }
+            }
+        }
+        self.text[start..self.cursor].to_string()
+    }
+
     /// A `string` argument: a quoted string if it opens with `"`, else a
     /// token. An unterminated quote is an error.
-    fn read_string_arg(&mut self) -> Result<String, ParseError> {
+    pub(crate) fn read_string_arg(&mut self) -> Result<String, ParseError> {
         if self.peek() == Some('"') {
             self.read_quoted()
         } else {
@@ -1055,7 +1273,7 @@ impl<'a> StringReader<'a> {
     /// The rest of the line. A leading quote is read as a quoted string, the
     /// remainder is appended verbatim (so a trailing slash survives). An
     /// unterminated quote is an error, not an empty argument.
-    fn read_remainder(&mut self) -> Result<String, ParseError> {
+    pub(crate) fn read_remainder(&mut self) -> Result<String, ParseError> {
         if self.peek() == Some('"') {
             let quoted = self.read_quoted()?;
             let rest = &self.text[self.cursor..];
@@ -1068,7 +1286,7 @@ impl<'a> StringReader<'a> {
         }
     }
 
-    fn read_quoted(&mut self) -> Result<String, ParseError> {
+    pub(crate) fn read_quoted(&mut self) -> Result<String, ParseError> {
         self.read(); // opening quote
         let mut out = String::new();
         loop {

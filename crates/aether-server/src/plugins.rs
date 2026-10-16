@@ -1164,15 +1164,12 @@ mod imp {
     }
 
     /// Every core command name, implemented or specified: the set a plugin may
-    /// never answer.
+    /// never answer. Derived from the one catalogue, so it cannot drift.
     fn reserved_command_names() -> Vec<String> {
-        let mut names: Vec<String> = crate::commands::RESERVED_COMMANDS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-        for e in crate::commands::registry::CORE {
-            names.push(e.name.to_string());
-            names.extend(e.aliases.iter().map(|a| (*a).to_string()));
+        let mut names: Vec<String> = Vec::new();
+        for c in crate::commands::catalogue::CATALOGUE {
+            names.push(c.name.to_string());
+            names.extend(c.aliases.iter().map(|a| (*a).to_string()));
         }
         names
     }
