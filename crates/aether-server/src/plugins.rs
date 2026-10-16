@@ -349,9 +349,7 @@ mod imp {
         /// player the registry does not know fails closed.
         fn permission_check(&self, _plugin: &str, id: u64, node: &str, op: u8) -> bool {
             match self.by_session(id) {
-                Some(h) => {
-                    crate::permissions::check(crate::permissions::level(&h.name, h.ip), node, op)
-                }
+                Some(h) => crate::permissions::check_for(&h.name, h.ip, node, op),
                 None => false,
             }
         }
@@ -368,23 +366,28 @@ mod imp {
                 .unwrap_or_default()
         }
 
+        fn permission_meta(&self, _plugin: &str, id: u64, key: &str) -> Option<String> {
+            self.by_session(id)
+                .and_then(|h| crate::permissions::meta(&h.name, h.ip, key))
+        }
+
         fn permission_grant(
             &self,
             _plugin: &str,
-            _subject: &str,
-            _node: &str,
-            _value: bool,
+            subject: &str,
+            node: &str,
+            value: bool,
         ) -> Result<(), String> {
-            Err("the permission write model (CMD-02) is not available yet".to_string())
+            crate::permissions::set_node(subject, node, None, value)
         }
 
         fn permission_revoke(
             &self,
             _plugin: &str,
-            _subject: &str,
-            _node: &str,
+            subject: &str,
+            node: &str,
         ) -> Result<(), String> {
-            Err("the permission write model (CMD-02) is not available yet".to_string())
+            crate::permissions::unset_node(subject, node, None)
         }
 
         // --- History API (PA2) ------------------------------------------

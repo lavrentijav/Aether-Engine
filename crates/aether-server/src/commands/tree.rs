@@ -493,13 +493,17 @@ pub fn check(req: &Requirement, source: &Source) -> Result<(), Deny> {
         Requirement::None => Ok(()),
         Requirement::Fn(f) => f(source),
         Requirement::Level { op, node } => {
-            // The CMD-01 core: a player's level comes from the persisted store
-            // (seeded from `config.operators`), the console and RCON are
-            // owners, the node's default resolves from the store, and the
-            // command's `op` level is the floor. This is the same gate
-            // `commands::permitted` exposes; the tree calls the core directly
-            // so a `Level` node is unambiguous.
-            if crate::permissions::check(source.level(), node, *op) {
+            // The CMD-01/CMD-02 core: a player's level and explicit nodes come
+            // from the persisted store (seeded from `config.operators`), the
+            // console and RCON are owners, the node's default resolves from the
+            // store, and the command's `op` level is the floor. A player goes
+            // through the subject-aware resolver so per-player grants/denies
+            // and groups apply; a server source has no subject to resolve.
+            let allowed = match source.player() {
+                Some(p) => crate::permissions::check_for(&p.name, p.ip, node, *op),
+                None => crate::permissions::check(crate::permissions::Level::OWNER, node, *op),
+            };
+            if allowed {
                 Ok(())
             } else {
                 Err(Deny::Message(
