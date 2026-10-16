@@ -14,8 +14,8 @@
 
 use std::sync::OnceLock;
 
+use super::catalogue::{self, Status};
 use super::feedback::Feedback;
-use super::registry;
 use super::Reply;
 use crate::economy::Economy;
 use crate::players::{PlayerHandle, PosLook, SharedRegistry};
@@ -733,10 +733,14 @@ fn build() -> CommandTree {
     children.extend(super::core_nodes());
     children.extend(crate::game::commands::nodes());
     children.extend(crate::economy::commands::nodes());
-    // The not-yet-implemented core commands: registered now so completion and
-    // permission checks are right from day one. A name a real command already
-    // answers is skipped — there must be exactly one owner.
-    for entry in registry::CORE {
+    // The not-yet-implemented core commands are derived from the one catalogue
+    // (`catalogue::CATALOGUE`, the single source of truth): registered now so
+    // completion and permission checks are right from day one. A name a real
+    // command already answers is skipped — there must be exactly one owner.
+    for entry in catalogue::CATALOGUE
+        .iter()
+        .filter(|c| c.status == Status::Pending)
+    {
         if children
             .iter()
             .any(|n| n.name == entry.name || entry.aliases.iter().any(|a| n.aliases.contains(a)))
@@ -761,8 +765,8 @@ fn build() -> CommandTree {
 }
 
 /// A stub node for a specified-but-unimplemented command. Its executor names
-/// the CMD task; the requirement is the registry's op level.
-fn stub(entry: &'static registry::Entry) -> Node {
+/// the CMD task; the requirement is the catalogue's node and op level.
+fn stub(entry: &'static catalogue::Command) -> Node {
     let mut b = Builder::literal(entry.name).requires(Requirement::Level {
         op: entry.op,
         node: entry.node,

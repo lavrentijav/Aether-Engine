@@ -801,18 +801,21 @@ mod tests {
     }
 
     #[test]
-    fn every_stub_registry_name_is_declared() {
+    fn every_pending_catalogue_name_is_declared() {
         // CMD0b: every specified-but-unimplemented core command is on the tree
         // (and so on the wire) from day one, so completion and permissions are
         // right before the command's own CMD task lands.
         let (nodes, _) = decode(Parsers::ById(&PARSERS_1_21_6));
-        for entry in crate::commands::registry::CORE {
+        for entry in crate::commands::catalogue::CATALOGUE
+            .iter()
+            .filter(|c| c.status == crate::commands::catalogue::Status::Pending)
+        {
             assert!(
                 nodes[0]
                     .children
                     .iter()
                     .any(|&i| nodes[i as usize].name.as_deref() == Some(entry.name)),
-                "`/{}` ({}) is in the stub registry but not declared",
+                "`/{}` ({}) is pending in the catalogue but not declared",
                 entry.name,
                 entry.task
             );

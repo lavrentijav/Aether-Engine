@@ -19,6 +19,7 @@
 //! which is why the mode has to be per-player state and cannot be inferred
 //! from the packet.
 
+pub mod catalogue;
 pub mod console;
 pub mod feedback;
 pub mod pager;
@@ -58,63 +59,6 @@ impl Reply {
         Reply(vec![s.into()])
     }
 }
-
-/// Every built-in command name, across the game, economy and history layers.
-///
-/// Passed to the plugin host as its reserved set, so a plugin can never be
-/// handed one of these names. The tree is the single dispatcher now; this list
-/// is the readable form of the names it owns, kept for the host.
-#[allow(dead_code)]
-pub const RESERVED_COMMANDS: &[&str] = &[
-    // game
-    "gamemode",
-    "gm",
-    "time",
-    "give",
-    "summon",
-    "killall",
-    "kill",
-    "spawn",
-    "tp",
-    "block",
-    "food",
-    "heal",
-    "visibility",
-    // server lifecycle (console/RCON)
-    "stop",
-    "save-all",
-    // messaging
-    "msg",
-    "tell",
-    "w",
-    // history
-    "inspect",
-    "i",
-    "lookup",
-    "l",
-    "rollback",
-    "rb",
-    "page",
-    "pg",
-    "inv",
-    "inventory",
-    "stash",
-    "audit",
-    "cache",
-    "help",
-    "?",
-    // economy
-    "balance",
-    "bal",
-    "money",
-    "pay",
-    "sell",
-    "market",
-    "buy",
-    "listings",
-    "unlist",
-    "econ",
-];
 
 /// Handle `text` if it is a command. `None` means it was ordinary chat.
 ///
@@ -403,32 +347,35 @@ pub fn permitted_level(level: u8, node: &str, op: u8) -> bool {
     crate::permissions::check(crate::permissions::Level::new(level), node, op)
 }
 
-/// `/help [command]` — every command the caller may run, or one command's
-/// usage.
+/// `/help [command|category]` — every command the source may run, grouped by
+/// category; one command's usage; or one category.
 ///
-/// This is generated from the command tree, not a hand-kept list: the same
-/// nodes the parser dispatches on decide what is listed, so a newly registered
-/// command appears here (and a mis-declared one cannot be missing from the
-/// grammar yet present in the help).
+/// The listing is generated from the command catalogue (CMD-48), so pending
+/// commands are marked and the category grouping is the catalogue's; each
+/// line's usage and stub note come from its tree node (CMD-05). Nothing here
+/// is a hand-kept list.
 ///
-/// * no argument: every command the caller's permission level allows, paged
-///   through [`pager::Pager`] so `/page next` works as for any other answer.
+/// * no argument: every command the source's permission level allows, grouped
+///   by category. A player's answer is paged through [`pager::Pager`] so
+///   `/page next` works as for any other answer; a server source
+///   (console/RCON) gets the whole list.
+/// * a category (`/help admin`): just that category.
 /// * a command or alias: its usage, built from the tree (or the node's
 ///   explicit usage), with its aliases spelled out.
 ///
-/// A command the caller may not run reads exactly like a name no command
-/// owns — this is the permission-filtering guarantee: `/help` must not let a
-/// non-op enumerate the op-only catalogue.
-///
-/// `/help <category>` is deliberately not handled here: categories are the
-/// CMD-48 command catalogue's to define, and it builds its `/help` listing on
-/// this one.
+/// A command the source may not run reads exactly like a name no command
+/// owns — the permission-filtering guarantee: `/help` must not let a non-op
+/// (or the console, for a player-only verb) enumerate commands it cannot run.
 fn help(args: &[&str], source: Source) -> Reply {
     let cmd_tree = tree::tree();
     let Some(word) = args.first() else {
-        return help_list(cmd_tree, source);
+        return help_list(cmd_tree, source, None);
     };
-    // Either no such command, or one this caller cannot see: the same answer
+    // A category word lists that category from the catalogue (CMD-48).
+    if let Some(cat) = catalogue::Category::ALL.iter().find(|c| c.key() == *word) {
+        return help_list(cmd_tree, source, Some(*cat));
+    }
+    // Either no such command, or one this source cannot see: the same answer
     // keeps the second case indistinguishable from the first.
     if let Some(node) = cmd_tree
         .find_command(word)
@@ -439,18 +386,45 @@ fn help(args: &[&str], source: Source) -> Reply {
     Reply::one(feedback::lang::UNKNOWN_COMMAND)
 }
 
-/// The paged list of every command `source` may run.
+/// The list of every command `source` may run, grouped by category — or
+/// restricted to one category when `only` is set.
 ///
 /// A player gets the answer parked in their pager (`/page next` works); a
 /// server source (console/RCON) has no per-player pager, so the list is
 /// returned whole.
-fn help_list(cmd_tree: &tree::CommandTree, source: Source) -> Reply {
-    let lines: Vec<String> = cmd_tree
-        .commands()
-        .iter()
-        .filter(|node| tree::check(&node.requirement, &source).is_ok())
-        .map(|node| help_line(node, false))
-        .collect();
+fn help_list(
+    cmd_tree: &tree::CommandTree,
+    source: Source,
+    only: Option<catalogue::Category>,
+) -> Reply {
+    let all = only.is_none();
+    let mut lines: Vec<String> = if all {
+        vec!["Commands — ✅ working, 🚧 pending (task):".to_string()]
+    } else {
+        Vec::new()
+    };
+    for cat in catalogue::Category::ALL {
+        if only.is_some_and(|o| o != *cat) {
+            continue;
+        }
+        // Only commands this source may run are listed, as in vanilla (no leak
+        // of op-only names to a non-op, nor of player-only verbs to the
+        // console).
+        let in_cat: Vec<String> = catalogue::CATALOGUE
+            .iter()
+            .filter(|c| c.category == *cat)
+            .filter_map(|c| cmd_tree.find_command(c.name))
+            .filter(|node| tree::check(&node.requirement, &source).is_ok())
+            .map(|node| help_line(node, false))
+            .collect();
+        if in_cat.is_empty() {
+            continue;
+        }
+        if all {
+            lines.push(format!("  {}:", cat.key()));
+        }
+        lines.extend(in_cat);
+    }
     match source.player() {
         Some(handle) => {
             let mut s = handle.session();
@@ -955,15 +929,16 @@ mod tests {
     }
 
     #[test]
-    fn the_reserved_set_covers_the_operator_verbs() {
+    fn the_catalogue_owns_the_operator_verbs() {
         // The host refuses these before any plugin sees them; if one were
-        // dropped from the list a plugin could shadow it again.
+        // dropped from the catalogue a plugin could shadow it again.
         for verb in [
-            "give", "tp", "gamemode", "summon", "killall", "time", "heal", "food", "pay", "econ",
+            "give", "teleport", "tp", "gamemode", "summon", "killall", "time", "heal", "food",
+            "pay", "econ",
         ] {
             assert!(
-                super::RESERVED_COMMANDS.contains(&verb),
-                "`{verb}` must be reserved"
+                super::catalogue::owns(verb),
+                "`{verb}` must be owned by the catalogue"
             );
         }
     }
@@ -1017,8 +992,8 @@ mod tests {
     #[test]
     fn the_registry_owns_both_implemented_and_specified_core_names() {
         // `core_owns` is the ownership check a plugin registration faces: it
-        // must reject an implemented name even if the reserved list drifted,
-        // and a specified-but-unimplemented one.
+        // must reject both an implemented name and a specified-but-unimplemented
+        // one, straight from the catalogue.
         assert!(super::registry::core_owns("give"), "implemented");
         assert!(super::registry::core_owns("stop"), "specified stub");
         assert!(!super::registry::core_owns("definitely_a_plugin_name"));

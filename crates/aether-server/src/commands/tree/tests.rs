@@ -846,6 +846,17 @@ fn help_renders_from_the_tree_with_usages_and_stub_marks() {
         run(&env, &env.tester, "/help definitely-not-a-command"),
         vec!["Unknown command. Try /help".to_string()]
     );
+    // A category word lists just that category from the catalogue (CMD-48):
+    // the admin verbs appear, the gameplay verbs do not.
+    let admin = run(&env, &env.tester, "/help admin");
+    assert!(
+        admin.iter().any(|l| l.contains("/op")),
+        "/help admin lists the admin category: {admin:?}"
+    );
+    assert!(
+        !admin.iter().any(|l| l.contains("/gamemode")),
+        "/help admin must not list another category: {admin:?}"
+    );
 }
 
 #[test]
