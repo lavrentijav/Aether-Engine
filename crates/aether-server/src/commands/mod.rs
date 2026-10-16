@@ -806,6 +806,31 @@ mod tests {
     }
 
     #[test]
+    fn a_public_plugin_command_is_available_to_a_non_op() {
+        // The historian fixture declares `/hist` plainly (`commands = ["hist"]`),
+        // i.e. op level 0. Registered through the core registry the way the
+        // server does at plugin load, its node must resolve so that an ordinary
+        // player — no operator rights — may run it. This is the property the
+        // SDK `history` e2e relies on: that test is about the `history.read`
+        // capability, not about command rights.
+        crate::commands::registry::register_plugin(
+            "hist_fixture_test",
+            "historian",
+            "plugin.historian.hist",
+            0,
+        )
+        .unwrap();
+        assert!(
+            super::permitted_level(0, "plugin.historian.hist", 0),
+            "an op-0 plugin command must be available to a non-op"
+        );
+        assert!(super::permitted_level(4, "plugin.historian.hist", 0));
+        // The CMD-01 gate is not weakened: a node nobody declared still fails
+        // closed for a non-op.
+        assert!(!super::permitted_level(0, "plugin.historian.unset", 0));
+    }
+
+    #[test]
     fn the_registry_owns_both_implemented_and_specified_core_names() {
         // `core_owns` is the ownership check a plugin registration faces: it
         // must reject an implemented name even if the reserved list drifted,
