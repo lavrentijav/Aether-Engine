@@ -3,6 +3,7 @@ name = "aether-redstone"
 description = "Aether Engine redstone core: a standalone, storage-free model of vanilla 1.21.11 redstone power, wire, repeaters, torches and lamps."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true

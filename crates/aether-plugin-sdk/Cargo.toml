@@ -3,6 +3,7 @@ name = "aether-plugin-sdk"
 description = "Thin typed client for dependent plugins: generated `aether:sdk` bindings, the `dependent` world and a prelude. No logic — the SDK itself is the native `plugins/sdk` plugin."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true

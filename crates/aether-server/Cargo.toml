@@ -3,6 +3,7 @@ name = "aether-server"
 description = "Aether Engine minimal join server: a Minecraft 1.8.9 (protocol 47) listener that lets a vanilla client connect and spawn in a full-bright flat world."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true

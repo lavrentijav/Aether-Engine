@@ -3,6 +3,7 @@ name = "aether-menus-plugin"
 description = "The Aether menus plugin, provided as a native plugin: a shared, safe chest-menu host (builder + declarative files) that every other plugin opens menus through."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
