@@ -19,18 +19,31 @@
 //! * `@p`/`@r` with no players online, and `@s` with no executing entity, are
 //!   errors even at the raw-find level;
 //! * an argument that needs a single entity rejects a selector that can match
-//!   more than one (`Only one entity is allowed, …`);
+//!   more than one (`Only one entity is allowed, …`, or the player wording for
+//!   a player-only argument);
 //! * `distance`, `level`, `x_rotation` and `y_rotation` take ranges: `n`,
-//!   `n..`, `..n`, `n..m`.
+//!   `n..`, `..n`, `n..m`. `distance` is a double range, `level` and `scores`
+//!   an integer range, and the rotations a **wrapped** angle range (so
+//!   `y_rotation=170..-170` is valid and both bounds and the entity's angle
+//!   are folded into `[-180, 180)`);
+//! * `@e` and `@n` only match live entities; `@a`, `@p`, `@r` and `@s` may
+//!   match a dead one;
+//! * an option may not mix an inclusive and an exclusive form where vanilla
+//!   forbids it (`name`, `gamemode`, `type`, `team`'s inclusive form), and
+//!   `limit`/`sort` may not be used on `@s`;
+//! * a `type=` id is checked against the entity-type table
+//!   (`Invalid or unknown entity type`), as vanilla checks its registry.
 //!
 //! # Lock order
 //!
 //! Selection must never hold the entity lock while parsing. Parsing touches no
 //! source at all, and [`Selector::find`] calls [`SelectorSource::players`] and
 //! [`SelectorSource::entities`] **once each**, up front, and then filters the
-//! owned snapshots they return. So an implementation that clones under the
-//! entity lock releases it before any predicate runs, and the caller never
-//! keeps a lock across a call back into the source. See
+//! owned snapshots they return; the caller never keeps a lock across a call
+//! back into the source for those. The one predicate that does call back into
+//! the source is `type=#tag`, through
+//! [`SelectorSource::entity_type_in_tag`] — once per candidate entity — so an
+//! implementation of that hook must not take the entity lock. See
 //! `docs/storage-v2/lock-order.md`.
 //!
 //! The trait is named [`SelectorSource`] rather than `CommandSource`, which
@@ -38,7 +51,7 @@
 
 use aether_api::Vector3 as Vec3;
 
-use super::coordinates::Rotation;
+use super::coordinates::{wrap_degrees, Rotation};
 use super::snbt;
 use crate::protocol::nbt::Nbt;
 use crate::protocol::GameMode as WireGameMode;
@@ -62,7 +75,15 @@ pub struct EntityRef {
     pub kind: String,
     /// Whether this is a player. Player-only filters key on it.
     pub is_player: bool,
-    /// The profile name for a player, or a custom name for another entity.
+    /// Whether the entity is alive. `@e` and `@n` only match live entities
+    /// (`EntitySelectorParser.parseSelector` adds an `Entity::isAlive`
+    /// predicate for those two variables); the others may match a dead one.
+    pub alive: bool,
+    /// The entity's plain-text display name, for `name=`.
+    ///
+    /// For a player this is the profile name; for another entity it is its
+    /// custom name, or `None` to fall back to the type's own display name
+    /// ([`EntityRef::stringified_name`]).
     pub name: Option<String>,
     /// Feet position.
     pub pos: Vec3,
@@ -95,6 +116,7 @@ impl EntityRef {
             uuid: id as u128,
             kind: "minecraft:player".into(),
             is_player: true,
+            alive: true,
             name: Some(name),
             pos,
             rotation: Rotation::new(0.0, 0.0),
@@ -117,6 +139,7 @@ impl EntityRef {
             uuid: (id as u128) | (1 << 127),
             kind: kind.into(),
             is_player: false,
+            alive: true,
             name: None,
             pos,
             rotation: Rotation::new(0.0, 0.0),
@@ -130,6 +153,38 @@ impl EntityRef {
             nbt: Nbt::Compound(Vec::new()),
         }
     }
+
+    /// The plain-text name a `name=` filter compares, the way vanilla's
+    /// `Entity.getStringifiedName()` does: the explicit name if there is one,
+    /// else a display name derived from the entity type (`minecraft:zombie`
+    /// → `Zombie`).
+    ///
+    /// This server does not carry the vanilla language table, so a mob's
+    /// display name is humanised from its id rather than localised; a caller
+    /// that has the real name should put it in [`EntityRef::name`].
+    pub fn stringified_name(&self) -> String {
+        match &self.name {
+            Some(name) => name.clone(),
+            None => humanize_kind(&self.kind),
+        }
+    }
+}
+
+/// `minecraft:experience_orb` → `Experience Orb`.
+fn humanize_kind(kind: &str) -> String {
+    let short = kind.strip_prefix("minecraft:").unwrap_or(kind);
+    let mut out = String::new();
+    for (i, word) in short.split('_').enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let mut chars = word.chars();
+        if let Some(c) = chars.next() {
+            out.extend(c.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    out
 }
 
 /// A player's progress on one advancement.
@@ -292,6 +347,28 @@ impl Variable {
             Variable::SelfEntity => (1, Sort::Arbitrary),
         }
     }
+
+    /// Whether the selector can initially match a non-player.
+    ///
+    /// `@a`/`@p`/`@r` are player-only (`limitToType(PLAYER)` in vanilla);
+    /// `@e`/`@n`/`@s` start including entities. Options such as `gamemode`,
+    /// `level`, `advancements` and `type=player` narrow it back down.
+    fn includes_entities_default(self) -> bool {
+        matches!(
+            self,
+            Variable::AllEntities | Variable::NearestEntity | Variable::SelfEntity
+        )
+    }
+
+    /// Whether the variable is `@s`, for which `limit`/`sort` are inapplicable.
+    fn is_self(self) -> bool {
+        self == Variable::SelfEntity
+    }
+
+    /// Whether `@e`/`@n` require their targets to be alive.
+    fn requires_alive(self) -> bool {
+        matches!(self, Variable::AllEntities | Variable::NearestEntity)
+    }
 }
 
 /// How a selector orders the entities before applying `limit`.
@@ -354,6 +431,52 @@ impl NumRange {
     }
 }
 
+/// An inclusive integer range (`MinMaxBounds.Ints`), for `level=` and
+/// `scores=`. `n` is `min == max`, `n..` has no maximum, `..n` no minimum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntRange {
+    /// The lower bound, inclusive.
+    pub min: Option<i32>,
+    /// The upper bound, inclusive.
+    pub max: Option<i32>,
+}
+
+impl IntRange {
+    /// Whether `v` lies inside the range.
+    pub fn contains(&self, v: i32) -> bool {
+        self.min.map_or(true, |m| v >= m) && self.max.map_or(true, |m| v <= m)
+    }
+}
+
+/// An inclusive **wrapped** angle range (`MinMaxBounds.FloatDegrees`), for
+/// `x_rotation=` and `y_rotation=`.
+///
+/// Vanilla does not reject a swapped range here: both bounds and the entity's
+/// angle are folded into `[-180, 180)` and a swapped pair (`170..-170`) means
+/// "outside the 20° gap", so the test is `h >= min || h <= max` rather than
+/// `min <= h <= max`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AngleRange {
+    /// The first bound (default `0`).
+    pub min: Option<f32>,
+    /// The second bound (default `359`).
+    pub max: Option<f32>,
+}
+
+impl AngleRange {
+    /// Whether `angle` (degrees) lies inside the wrapped range.
+    pub fn contains(&self, angle: f32) -> bool {
+        let lo = wrap_degrees(self.min.unwrap_or(0.0));
+        let hi = wrap_degrees(self.max.unwrap_or(359.0));
+        let a = wrap_degrees(angle);
+        if lo > hi {
+            a >= lo || a <= hi
+        } else {
+            a >= lo && a <= hi
+        }
+    }
+}
+
 /// A `type=` value: a concrete entity type or an entity type tag.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TypeValue {
@@ -381,6 +504,15 @@ pub struct Selector {
     pub variable: Variable,
     /// How many entities the owning argument accepts.
     pub amount: Amount,
+    /// Whether the owning argument is a player-type argument, which forbids a
+    /// selector that can include non-players (`@e`).
+    pub players_only: bool,
+    /// Whether the selector can still match a non-player.
+    ///
+    /// Vanilla's `EntitySelector.includesEntities`: `false` for `@a`/`@p`/`@r`
+    /// and for any selector narrowed to players (`type=player`, `gamemode`,
+    /// `level`, `advancements`). Used to enforce a player-only argument.
+    pub includes_entities: bool,
     /// Include/exclude by name.
     pub name: Vec<Invert<String>>,
     /// Include/exclude by entity type.
@@ -388,7 +520,7 @@ pub struct Selector {
     /// `distance=<range>`.
     pub distance: Option<NumRange>,
     /// `level=<range>`.
-    pub level: Option<NumRange>,
+    pub level: Option<IntRange>,
     /// `x=` (selector origin).
     pub x: Option<f64>,
     /// `y=` (selector origin).
@@ -402,9 +534,9 @@ pub struct Selector {
     /// `dz=` (volume).
     pub dz: Option<f64>,
     /// `x_rotation=<range>` (pitch).
-    pub x_rotation: Option<NumRange>,
+    pub x_rotation: Option<AngleRange>,
     /// `y_rotation=<range>` (yaw).
-    pub y_rotation: Option<NumRange>,
+    pub y_rotation: Option<AngleRange>,
     /// Include/exclude by scoreboard tag.
     pub tags: Vec<Invert<String>>,
     /// Include/exclude by team.
@@ -412,7 +544,7 @@ pub struct Selector {
     /// Include/exclude by game mode.
     pub gamemode: Vec<Invert<Gamemode>>,
     /// `scores={objective=range,…}`.
-    pub scores: Vec<(String, NumRange)>,
+    pub scores: Vec<(String, IntRange)>,
     /// `advancements={…}`.
     pub advancements: Vec<AdvancementTest>,
     /// Include/exclude by predicate id.
@@ -425,19 +557,150 @@ pub struct Selector {
     pub sort: Sort,
 }
 
+/// Whether `key` is a selector option at all (vanilla's `OPTIONS` table).
+fn is_known_option(key: &str) -> bool {
+    matches!(
+        key,
+        "name"
+            | "distance"
+            | "level"
+            | "x"
+            | "y"
+            | "z"
+            | "dx"
+            | "dy"
+            | "dz"
+            | "x_rotation"
+            | "y_rotation"
+            | "limit"
+            | "sort"
+            | "gamemode"
+            | "team"
+            | "type"
+            | "tag"
+            | "nbt"
+            | "scores"
+            | "advancements"
+            | "predicate"
+    )
+}
+
+/// The per-option "already set" flags vanilla keeps on the parser.
+///
+/// These drive each option's applicability predicate (`canUse`) and the
+/// extra mixed-positive/negative checks inside a modifier, so duplicates and
+/// illegal combinations surface as `argument.entity.options.inapplicable`
+/// rather than a second, invented message.
+struct OptState {
+    has_name_equals: bool,
+    has_name_not_equals: bool,
+    is_limited: bool,
+    is_sorted: bool,
+    has_gamemode_equals: bool,
+    has_gamemode_not_equals: bool,
+    has_team_equals: bool,
+    has_team_not_equals: bool,
+    type_limited: bool,
+    type_limited_inversely: bool,
+    has_scores: bool,
+    has_advancements: bool,
+    distance: bool,
+    level: bool,
+    x: bool,
+    y: bool,
+    z: bool,
+    dx: bool,
+    dy: bool,
+    dz: bool,
+    x_rotation: bool,
+    y_rotation: bool,
+}
+
+impl OptState {
+    fn new(type_limited: bool) -> OptState {
+        OptState {
+            has_name_equals: false,
+            has_name_not_equals: false,
+            is_limited: false,
+            is_sorted: false,
+            has_gamemode_equals: false,
+            has_gamemode_not_equals: false,
+            has_team_equals: false,
+            has_team_not_equals: false,
+            type_limited,
+            type_limited_inversely: false,
+            has_scores: false,
+            has_advancements: false,
+            distance: false,
+            level: false,
+            x: false,
+            y: false,
+            z: false,
+            dx: false,
+            dy: false,
+            dz: false,
+            x_rotation: false,
+            y_rotation: false,
+        }
+    }
+
+    /// Vanilla's `Option.canUse` predicates.
+    fn can_use(&self, key: &str, variable: Variable) -> bool {
+        match key {
+            "name" => !self.has_name_equals,
+            "distance" => !self.distance,
+            "level" => !self.level,
+            "x" => !self.x,
+            "y" => !self.y,
+            "z" => !self.z,
+            "dx" => !self.dx,
+            "dy" => !self.dy,
+            "dz" => !self.dz,
+            "x_rotation" => !self.x_rotation,
+            "y_rotation" => !self.y_rotation,
+            "limit" => !variable.is_self() && !self.is_limited,
+            "sort" => !variable.is_self() && !self.is_sorted,
+            "gamemode" => !self.has_gamemode_equals,
+            "team" => !self.has_team_equals,
+            "type" => !self.type_limited,
+            "tag" | "nbt" | "predicate" => true,
+            "scores" => !self.has_scores,
+            "advancements" => !self.has_advancements,
+            _ => false,
+        }
+    }
+}
+
 impl Selector {
-    /// Parse a selector for a multiple-entity argument.
+    /// Parse a selector for a multiple-entity argument (`EntityArgument.entities`).
     pub fn parse(input: &str) -> Result<Selector, ParseError> {
-        Selector::parse_with_amount(input, Amount::Multiple)
+        Selector::parse_with_amount(input, Amount::Multiple, false)
     }
 
-    /// Parse a selector for a single-entity argument, rejecting anything that
-    /// could match more than one (`Only one entity is allowed, …`).
+    /// Parse a selector for a single-entity argument (`EntityArgument.entity`),
+    /// rejecting anything that could match more than one.
     pub fn parse_single(input: &str) -> Result<Selector, ParseError> {
-        Selector::parse_with_amount(input, Amount::Single)
+        Selector::parse_with_amount(input, Amount::Single, false)
     }
 
-    fn parse_with_amount(input: &str, amount: Amount) -> Result<Selector, ParseError> {
+    /// Parse a selector for a player-type multiple argument
+    /// (`EntityArgument.players`): a selector that can include non-players is
+    /// rejected (`Only players may be affected by this command, …`).
+    pub fn parse_players(input: &str) -> Result<Selector, ParseError> {
+        Selector::parse_with_amount(input, Amount::Multiple, true)
+    }
+
+    /// Parse a selector for a player-type single argument
+    /// (`EntityArgument.player`).
+    pub fn parse_single_player(input: &str) -> Result<Selector, ParseError> {
+        Selector::parse_with_amount(input, Amount::Single, true)
+    }
+
+    fn parse_with_amount(
+        input: &str,
+        amount: Amount,
+        players_only: bool,
+    ) -> Result<Selector, ParseError> {
         let mut r = Reader::new(input);
         r.skip_ws();
         if r.peek() != Some('@') {
@@ -450,6 +713,8 @@ impl Selector {
         let mut selector = Selector {
             variable,
             amount,
+            players_only,
+            includes_entities: variable.includes_entities_default(),
             name: Vec::new(),
             entity_type: Vec::new(),
             distance: None,
@@ -480,7 +745,14 @@ impl Selector {
             return Err(ParseError::Trailing);
         }
         if amount == Amount::Single && !selector.is_single() {
-            return Err(ParseError::TooManyEntities);
+            return Err(if players_only {
+                ParseError::TooManyPlayers
+            } else {
+                ParseError::TooManyEntities
+            });
+        }
+        if players_only && selector.includes_entities && !selector.variable.is_self() {
+            return Err(ParseError::OnlyPlayersAllowed);
         }
         Ok(selector)
     }
@@ -497,8 +769,9 @@ impl Selector {
 
     fn parse_options(&mut self, r: &mut Reader) -> Result<(), ParseError> {
         r.bump(); // '['
-        let mut seen: Vec<&'static str> = Vec::new();
-        let mut type_equality = false;
+                  // Vanilla pre-seeds `type=player` on the player-only variables, so
+                  // `type` is already "limited" and every `type=` is inapplicable.
+        let mut state = OptState::new(self.variable.is_player_only());
         loop {
             r.skip_ws();
             match r.peek() {
@@ -510,8 +783,13 @@ impl Selector {
                 _ => {}
             }
             let key = r.read_word();
-            if key.is_empty() {
-                return Err(ParseError::UnknownKey(String::new()));
+            if !is_known_option(key) {
+                return Err(ParseError::UnknownKey(key.to_string()));
+            }
+            // `EntitySelectorOptions.get` tests the option's applicability
+            // before its value is read.
+            if !state.can_use(key, self.variable) {
+                return Err(ParseError::Inapplicable(key.to_string()));
             }
             r.skip_ws();
             if r.peek() != Some('=') {
@@ -519,7 +797,7 @@ impl Selector {
             }
             r.bump();
             r.skip_ws();
-            self.parse_option(key, r, &mut seen, &mut type_equality)?;
+            self.parse_option(key, r, &mut state)?;
             r.skip_ws();
             match r.peek() {
                 Some(',') => {
@@ -529,9 +807,6 @@ impl Selector {
                 Some(_) => return Err(ParseError::Unterminated),
             }
         }
-        if self.variable.is_player_only() && !self.entity_type.is_empty() {
-            return Err(ParseError::Inapplicable("type".into()));
-        }
         Ok(())
     }
 
@@ -539,19 +814,31 @@ impl Selector {
         &mut self,
         key: &str,
         r: &mut Reader,
-        seen: &mut Vec<&'static str>,
-        type_equality: &mut bool,
+        state: &mut OptState,
     ) -> Result<(), ParseError> {
         match key {
             "name" => {
                 let f = read_invert_string(r)?;
-                if !f.inverted {
-                    once(seen, "name")?;
+                // `hasNameNotEquals() && !negated` → inapplicable.
+                if state.has_name_not_equals && !f.inverted {
+                    return Err(ParseError::Inapplicable("name".into()));
+                }
+                if f.inverted {
+                    state.has_name_not_equals = true;
+                } else {
+                    state.has_name_equals = true;
                 }
                 self.name.push(f);
             }
             "type" => {
                 let inverted = eat_bang(r);
+                // `isTypeLimitedInversely() && !negated` → inapplicable.
+                if state.type_limited_inversely && !inverted {
+                    return Err(ParseError::Inapplicable("type".into()));
+                }
+                if inverted {
+                    state.type_limited_inversely = true;
+                }
                 let word = r.read_word();
                 if word.is_empty() {
                     return Err(ParseError::BadValue {
@@ -569,66 +856,73 @@ impl Selector {
                     TypeValue::Tag(format!("#{}", normalize_resource(tag)))
                 } else {
                     let norm = normalize_resource(word);
-                    if !valid_resource(&norm) {
-                        return Err(ParseError::UnknownType(word.to_string()));
+                    if !valid_resource(&norm) || !known_entity_type(&norm) {
+                        // Vanilla reports the parsed identifier, so a bare
+                        // name is named with its `minecraft:` namespace.
+                        return Err(ParseError::UnknownType(norm));
+                    }
+                    // `limitToType`: only a positive **concrete** type limits
+                    // the selector's type. `type=player` also narrows it to
+                    // players; a negated type does neither.
+                    if !inverted {
+                        state.type_limited = true;
+                        if norm == "minecraft:player" {
+                            self.includes_entities = false;
+                        }
                     }
                     TypeValue::Name(norm)
                 };
-                if !inverted {
-                    if *type_equality {
-                        return Err(ParseError::Duplicate("type".into()));
-                    }
-                    *type_equality = true;
-                }
                 self.entity_type.push(Invert { value, inverted });
             }
             "distance" => {
-                once(seen, "distance")?;
-                let range = read_range(r, "distance")?;
+                state.distance = true;
+                let range = read_double_range(r, "distance")?;
                 if range.min.is_some_and(|v| v < 0.0) || range.max.is_some_and(|v| v < 0.0) {
                     return Err(ParseError::Negative("distance".into()));
                 }
                 self.distance = Some(range);
             }
             "level" => {
-                once(seen, "level")?;
+                state.level = true;
                 let range = read_int_range(r, "level")?;
-                if range.min.is_some_and(|v| v < 0.0) || range.max.is_some_and(|v| v < 0.0) {
+                if range.min.is_some_and(|v| v < 0) || range.max.is_some_and(|v| v < 0) {
                     return Err(ParseError::Negative("level".into()));
                 }
                 self.level = Some(range);
+                // `level` naturally excludes non-players.
+                self.includes_entities = false;
             }
             "x" => {
-                once(seen, "x")?;
+                state.x = true;
                 self.x = Some(read_double(r, "x")?);
             }
             "y" => {
-                once(seen, "y")?;
+                state.y = true;
                 self.y = Some(read_double(r, "y")?);
             }
             "z" => {
-                once(seen, "z")?;
+                state.z = true;
                 self.z = Some(read_double(r, "z")?);
             }
             "dx" => {
-                once(seen, "dx")?;
+                state.dx = true;
                 self.dx = Some(read_double(r, "dx")?);
             }
             "dy" => {
-                once(seen, "dy")?;
+                state.dy = true;
                 self.dy = Some(read_double(r, "dy")?);
             }
             "dz" => {
-                once(seen, "dz")?;
+                state.dz = true;
                 self.dz = Some(read_double(r, "dz")?);
             }
             "x_rotation" => {
-                once(seen, "x_rotation")?;
-                self.x_rotation = Some(read_range(r, "x_rotation")?);
+                state.x_rotation = true;
+                self.x_rotation = Some(read_angle_range(r, "x_rotation")?);
             }
             "y_rotation" => {
-                once(seen, "y_rotation")?;
-                self.y_rotation = Some(read_range(r, "y_rotation")?);
+                state.y_rotation = true;
+                self.y_rotation = Some(read_angle_range(r, "y_rotation")?);
             }
             "tag" => {
                 let f = read_invert_string(r)?;
@@ -636,32 +930,43 @@ impl Selector {
             }
             "team" => {
                 let f = read_invert_string(r)?;
-                if !f.inverted {
-                    once(seen, "team")?;
+                if f.inverted {
+                    state.has_team_not_equals = true;
+                } else {
+                    state.has_team_equals = true;
                 }
                 self.team.push(f);
             }
             "gamemode" => {
                 let f = read_invert_string(r)?;
+                if state.has_gamemode_not_equals && !f.inverted {
+                    return Err(ParseError::Inapplicable("gamemode".into()));
+                }
                 let mode = Gamemode::parse(&f.value)
                     .ok_or_else(|| ParseError::UnknownGamemode(f.value.clone()))?;
-                if !f.inverted {
-                    once(seen, "gamemode")?;
+                if f.inverted {
+                    state.has_gamemode_not_equals = true;
+                } else {
+                    state.has_gamemode_equals = true;
                 }
                 self.gamemode.push(Invert {
                     value: mode,
                     inverted: f.inverted,
                 });
+                self.includes_entities = false;
             }
             "scores" => {
-                once(seen, "scores")?;
+                state.has_scores = true;
                 let text = r.read_balanced('{', '}')?;
                 self.scores = parse_scores(text)?;
             }
             "advancements" => {
-                once(seen, "advancements")?;
+                state.has_advancements = true;
                 let text = r.read_balanced('{', '}')?;
                 self.advancements = parse_advancements(text)?;
+                if !self.advancements.is_empty() {
+                    self.includes_entities = false;
+                }
             }
             "predicate" => {
                 let f = read_invert_string(r)?;
@@ -691,7 +996,7 @@ impl Selector {
                 });
             }
             "limit" => {
-                once(seen, "limit")?;
+                state.is_limited = true;
                 let word = r.read_word();
                 let n: i64 = word.parse().map_err(|_| ParseError::BadValue {
                     key: "limit".into(),
@@ -703,7 +1008,7 @@ impl Selector {
                 self.limit = n as usize;
             }
             "sort" => {
-                once(seen, "sort")?;
+                state.is_sorted = true;
                 let word = r.read_word();
                 let sort =
                     Sort::parse(word).ok_or_else(|| ParseError::UnknownSort(word.to_string()))?;
@@ -755,6 +1060,11 @@ impl Selector {
                 all
             }
         };
+        // `@e` and `@n` only match live entities (`Entity::isAlive` in vanilla);
+        // `@a`, `@p`, `@r` and `@s` may match a dead one.
+        if self.variable.requires_alive() {
+            candidates.retain(|e| e.alive);
+        }
         candidates.retain(|e| self.matches(e, origin, source));
         match self.sort {
             Sort::Nearest => candidates.sort_by(|a, b| {
@@ -802,7 +1112,7 @@ impl Selector {
             return Err(self.empty_error());
         }
         if out.len() > 1 {
-            return Err(if self.variable.is_player_only() {
+            return Err(if self.players_only {
                 SelectError::TooManyPlayers
             } else {
                 SelectError::TooManyEntities
@@ -822,7 +1132,7 @@ impl Selector {
     /// Whether `e` passes every filter.
     fn matches(&self, e: &EntityRef, origin: Vec3, source: &dyn SelectorSource) -> bool {
         for f in &self.name {
-            let hit = e.name.as_deref().unwrap_or("") == f.value;
+            let hit = e.stringified_name() == f.value;
             if hit == f.inverted {
                 return false;
             }
@@ -841,6 +1151,12 @@ impl Selector {
                 return false;
             }
         }
+        // NOTE: vanilla tests `box.intersects(entity.getBoundingBox())`; this
+        // server's [`EntityRef`] carries only the feet position, so the test is
+        // the feet point against the same box. An entity straddling a boundary
+        // (or one whose hitbox is larger than a point) can differ. A future
+        // `EntityRef` bounding box would close the gap; the box itself
+        // (`span`, with vanilla's mandatory `+1` extension) already matches.
         if self.dx.is_some() || self.dy.is_some() || self.dz.is_some() {
             let (min_x, max_x) = span(origin.x, self.dx.unwrap_or(0.0));
             let (min_y, max_y) = span(origin.y, self.dy.unwrap_or(0.0));
@@ -853,7 +1169,7 @@ impl Selector {
             }
         }
         if let Some(range) = &self.level {
-            if !e.is_player || !range.contains(e.level as f64) {
+            if !e.is_player || !range.contains(e.level) {
                 return false;
             }
         }
@@ -867,12 +1183,12 @@ impl Selector {
             }
         }
         if let Some(range) = &self.x_rotation {
-            if !range.contains(e.rotation.pitch as f64) {
+            if !range.contains(e.rotation.pitch) {
                 return false;
             }
         }
         if let Some(range) = &self.y_rotation {
-            if !range.contains(e.rotation.yaw as f64) {
+            if !range.contains(e.rotation.yaw) {
                 return false;
             }
         }
@@ -894,7 +1210,7 @@ impl Selector {
         }
         for (objective, range) in &self.scores {
             match e.scores.iter().find(|(o, _)| o == objective) {
-                Some((_, v)) if range.contains(*v as f64) => {}
+                Some((_, v)) if range.contains(*v) => {}
                 _ => return false,
             }
         }
@@ -1017,8 +1333,12 @@ pub enum ParseError {
     UnknownKey(String),
     /// A key with no `=`.
     MissingValue(String),
-    /// A key set twice.
-    Duplicate(String),
+    /// An integer range bound that was not a whole number (`Invalid integer
+    /// '%s'`, Brigadier's `readerInvalidInt`).
+    InvalidInteger(String),
+    /// An angle range bound that was not a number (`Invalid float '%s'`,
+    /// Brigadier's `readerInvalidFloat`).
+    InvalidFloat(String),
     /// A value that did not fit its key.
     BadValue {
         /// The key.
@@ -1044,15 +1364,12 @@ pub enum ParseError {
     SwappedRange,
     /// A negative `distance` or `level`.
     Negative(String),
-    /// A `level`/`scores` bound that was not a whole number.
-    NonInteger {
-        /// The key.
-        key: String,
-        /// The offending value.
-        value: String,
-    },
     /// A single-entity argument was given a multi-entity selector.
     TooManyEntities,
+    /// A single-player argument was given a multi-player selector.
+    TooManyPlayers,
+    /// A player-only argument was given a selector that can include entities.
+    OnlyPlayersAllowed,
 }
 
 impl std::fmt::Display for ParseError {
@@ -1068,10 +1385,11 @@ impl ParseError {
     pub fn message(&self) -> String {
         match self {
             ParseError::MissingVariable => "Missing selector type".into(),
-            ParseError::UnknownVariable(c) => format!("Unknown selector type '{c}'"),
+            ParseError::UnknownVariable(c) => format!("Unknown selector type '@{c}'"),
             ParseError::UnknownKey(k) => format!("Unknown option '{k}'"),
             ParseError::MissingValue(k) => format!("Expected value for option '{k}'"),
-            ParseError::Duplicate(k) => format!("Option '{k}' is already set"),
+            ParseError::InvalidInteger(v) => format!("Invalid integer '{v}'"),
+            ParseError::InvalidFloat(v) => format!("Invalid float '{v}'"),
             ParseError::BadValue { key, value } => {
                 format!("Invalid value '{value}' for option '{key}'")
             }
@@ -1085,13 +1403,16 @@ impl ParseError {
             ParseError::SwappedRange => "Min cannot be bigger than max".into(),
             ParseError::Negative(k) => match k.as_str() {
                 "distance" => "Distance cannot be negative".into(),
-                _ => format!("Option '{k}' shouldn't be negative"),
+                _ => "Level shouldn't be negative".into(),
             },
-            ParseError::NonInteger { key, value } => {
-                format!("Only whole numbers are allowed for option '{key}': found '{value}'")
-            }
             ParseError::TooManyEntities => {
                 "Only one entity is allowed, but the provided selector allows more than one".into()
+            }
+            ParseError::TooManyPlayers => {
+                "Only one player is allowed, but the provided selector allows more than one".into()
+            }
+            ParseError::OnlyPlayersAllowed => {
+                "Only players may be affected by this command, but the provided selector includes entities".into()
             }
         }
     }
@@ -1241,14 +1562,6 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn once(seen: &mut Vec<&'static str>, key: &'static str) -> Result<(), ParseError> {
-    if seen.contains(&key) {
-        return Err(ParseError::Duplicate(key.to_string()));
-    }
-    seen.push(key);
-    Ok(())
-}
-
 fn eat_bang(r: &mut Reader) -> bool {
     if r.peek() == Some('!') {
         r.bump();
@@ -1272,61 +1585,101 @@ fn read_double(r: &mut Reader, key: &'static str) -> Result<f64, ParseError> {
     })
 }
 
-fn read_int_range(r: &mut Reader, key: &'static str) -> Result<NumRange, ParseError> {
-    let word = r.read_word();
-    let range = parse_range(word, key)?;
-    for bound in [range.min, range.max].into_iter().flatten() {
-        if bound.fract() != 0.0 {
-            return Err(ParseError::NonInteger {
-                key: key.to_string(),
-                value: word.to_string(),
-            });
-        }
-    }
-    Ok(range)
+/// Whether `name` is a known entity type, the registry check vanilla's
+/// `type=` does against `BuiltInRegistries.ENTITY_TYPE` (`type.invalid` if
+/// not). This server's table (`game::data::ENTITY_TYPES`) is the closest
+/// equivalent.
+fn known_entity_type(name: &str) -> bool {
+    crate::game::tables::entity_type(name).is_some()
 }
 
-fn read_range(r: &mut Reader, key: &'static str) -> Result<NumRange, ParseError> {
-    let word = r.read_word();
-    parse_range(word, key)
-}
-
-/// Parse `n`, `n..`, `..n`, `n..m`.
-fn parse_range(word: &str, key: &'static str) -> Result<NumRange, ParseError> {
+/// Split `word` into `(min, max)` bound texts around a `..`; a bare number is
+/// both bounds, an absent side is `None`, and an empty range is an error.
+fn split_bounds<'a>(
+    word: &'a str,
+    key: &'static str,
+) -> Result<(Option<&'a str>, Option<&'a str>), ParseError> {
     let bad = || ParseError::BadValue {
         key: key.to_string(),
         value: word.to_string(),
     };
-    if let Some((lo, hi)) = word.split_once("..") {
-        if lo.is_empty() && hi.is_empty() {
-            return Err(bad());
-        }
-        let min = if lo.is_empty() {
-            None
-        } else {
-            Some(lo.parse::<f64>().map_err(|_| bad())?)
-        };
-        let max = if hi.is_empty() {
-            None
-        } else {
-            Some(hi.parse::<f64>().map_err(|_| bad())?)
-        };
-        if let (Some(a), Some(b)) = (min, max) {
-            if a > b {
-                return Err(ParseError::SwappedRange);
+    match word.split_once("..") {
+        Some((lo, hi)) => {
+            if lo.is_empty() && hi.is_empty() {
+                return Err(bad());
             }
+            if lo.contains("..") || hi.contains("..") {
+                return Err(bad());
+            }
+            Ok((
+                (!lo.is_empty()).then_some(lo),
+                (!hi.is_empty()).then_some(hi),
+            ))
         }
-        Ok(NumRange { min, max })
-    } else {
-        let v = word.parse::<f64>().map_err(|_| bad())?;
-        Ok(NumRange {
-            min: Some(v),
-            max: Some(v),
-        })
+        None => {
+            if word.is_empty() {
+                return Err(bad());
+            }
+            Ok((Some(word), Some(word)))
+        }
     }
 }
 
-fn parse_scores(text: &str) -> Result<Vec<(String, NumRange)>, ParseError> {
+/// Parse a double range (`MinMaxBounds.Doubles`): `n`, `n..`, `..n`, `n..m`,
+/// rejecting a swapped pair (`argument.range.swapped`).
+fn read_double_range(r: &mut Reader, key: &'static str) -> Result<NumRange, ParseError> {
+    let word = r.read_word();
+    let (lo, hi) = split_bounds(word, key)?;
+    let parse = |s: &str| {
+        s.parse::<f64>().map_err(|_| ParseError::BadValue {
+            key: key.to_string(),
+            value: word.to_string(),
+        })
+    };
+    let min = lo.map(parse).transpose()?;
+    let max = hi.map(parse).transpose()?;
+    if let (Some(a), Some(b)) = (min, max) {
+        if a > b {
+            return Err(ParseError::SwappedRange);
+        }
+    }
+    Ok(NumRange { min, max })
+}
+
+/// Parse an integer range (`MinMaxBounds.Ints`): `n`, `n..`, `..n`, `n..m`.
+/// A non-integer bound surfaces the Brigadier `Invalid integer '%s'`.
+fn read_int_range(r: &mut Reader, key: &'static str) -> Result<IntRange, ParseError> {
+    let word = r.read_word();
+    let (lo, hi) = split_bounds(word, key)?;
+    let parse = |s: &str| {
+        s.parse::<i32>()
+            .map_err(|_| ParseError::InvalidInteger(s.to_string()))
+    };
+    let min = lo.map(parse).transpose()?;
+    let max = hi.map(parse).transpose()?;
+    if let (Some(a), Some(b)) = (min, max) {
+        if a > b {
+            return Err(ParseError::SwappedRange);
+        }
+    }
+    Ok(IntRange { min, max })
+}
+
+/// Parse a wrapped angle range (`MinMaxBounds.FloatDegrees`): `n`, `n..`,
+/// `..n`, `n..m`. Vanilla does **not** reject a swapped pair here.
+fn read_angle_range(r: &mut Reader, key: &'static str) -> Result<AngleRange, ParseError> {
+    let word = r.read_word();
+    let (lo, hi) = split_bounds(word, key)?;
+    let parse = |s: &str| {
+        s.parse::<f32>()
+            .map_err(|_| ParseError::InvalidFloat(s.to_string()))
+    };
+    let min = lo.map(parse).transpose()?;
+    let max = hi.map(parse).transpose()?;
+    Ok(AngleRange { min, max })
+}
+
+fn parse_scores(text: &str) -> Result<Vec<(String, IntRange)>, ParseError> {
     let inner = text
         .strip_prefix('{')
         .and_then(|s| s.strip_suffix('}'))
@@ -1342,10 +1695,28 @@ fn parse_scores(text: &str) -> Result<Vec<(String, NumRange)>, ParseError> {
             value: entry.to_string(),
         })?;
         let objective = objective.trim().to_string();
-        let range = parse_range(value.trim(), "scores")?;
+        // Vanilla parses each score with `MinMaxBounds.Ints`.
+        let range = parse_int_bounds(value.trim(), "scores")?;
         out.push((objective, range));
     }
     Ok(out)
+}
+
+/// Parse an integer range from text (no reader), for a `scores=` entry.
+fn parse_int_bounds(word: &str, key: &'static str) -> Result<IntRange, ParseError> {
+    let (lo, hi) = split_bounds(word, key)?;
+    let parse = |s: &str| {
+        s.parse::<i32>()
+            .map_err(|_| ParseError::InvalidInteger(s.to_string()))
+    };
+    let min = lo.map(parse).transpose()?;
+    let max = hi.map(parse).transpose()?;
+    if let (Some(a), Some(b)) = (min, max) {
+        if a > b {
+            return Err(ParseError::SwappedRange);
+        }
+    }
+    Ok(IntRange { min, max })
 }
 
 fn parse_advancements(text: &str) -> Result<Vec<AdvancementTest>, ParseError> {
@@ -1599,9 +1970,9 @@ mod tests {
         );
         assert_eq!(
             s.level,
-            Some(NumRange {
-                min: Some(10.0),
-                max: Some(20.0)
+            Some(IntRange {
+                min: Some(10),
+                max: Some(20)
             })
         );
         assert_eq!(s.x, Some(1.0));
@@ -1658,18 +2029,104 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_equality_options_are_rejected_but_negations_repeat() {
-        assert_eq!(
-            parse_err("@e[limit=1,limit=2]"),
-            ParseError::Duplicate("limit".into())
-        );
-        assert_eq!(
-            parse_err("@e[type=creeper,type=pig]"),
-            ParseError::Duplicate("type".into())
-        );
-        // Repeated negations are allowed, as in vanilla.
+    fn duplicate_options_report_inapplicable_not_a_custom_string() {
+        // Vanilla has no "already set" key: a second occurrence fails the
+        // option's applicability predicate.
+        for text in [
+            "@e[limit=1,limit=2]",
+            "@e[distance=1,distance=2]",
+            "@e[level=1,level=2]",
+            "@e[x=1,x=2]",
+            "@e[x_rotation=1,x_rotation=2]",
+            "@e[sort=nearest,sort=random]",
+            "@e[scores={a=1},scores={b=2}]",
+            "@e[advancements={a=true},advancements={b=true}]",
+            "@e[type=creeper,type=pig]",
+            "@a[name=Alice,name=Bob]",
+            "@a[gamemode=creative,gamemode=survival]",
+            "@a[team=red,team=blue]",
+        ] {
+            let key = text
+                .split_once('[')
+                .unwrap()
+                .1
+                .split_once('=')
+                .unwrap()
+                .0
+                .to_string();
+            assert_eq!(parse_err(text), ParseError::Inapplicable(key), "{text}");
+        }
+        // Repeated negations and repeated multi-valued options are allowed.
         assert!(Selector::parse("@e[type=!creeper,type=!pig]").is_ok());
         assert!(Selector::parse("@e[tag=a,tag=b]").is_ok());
+        assert!(Selector::parse("@e[nbt={a:1},nbt={b:2}]").is_ok());
+        assert!(Selector::parse("@e[predicate=a:1,predicate=a:2]").is_ok());
+    }
+
+    #[test]
+    fn positive_and_negated_forms_cannot_mix() {
+        // Vanilla's `excludesX() && !negated` check: a positive after a
+        // negation is inapplicable for `name`, `gamemode` and `type`.
+        for text in [
+            "@e[type=!creeper,type=pig]",
+            "@a[name=!Alice,name=Bob]",
+            "@a[gamemode=!creative,gamemode=survival]",
+        ] {
+            let key = text
+                .split_once('[')
+                .unwrap()
+                .1
+                .split_once('=')
+                .unwrap()
+                .0
+                .to_string();
+            assert_eq!(parse_err(text), ParseError::Inapplicable(key), "{text}");
+        }
+        // Positive-then-negative is caught by the applicability predicate.
+        for text in [
+            "@e[type=creeper,type=!pig]",
+            "@a[name=Alice,name=!Bob]",
+            "@a[gamemode=creative,gamemode=!survival]",
+            "@a[team=red,team=!blue]",
+        ] {
+            let key = text
+                .split_once('[')
+                .unwrap()
+                .1
+                .split_once('=')
+                .unwrap()
+                .0
+                .to_string();
+            assert_eq!(parse_err(text), ParseError::Inapplicable(key), "{text}");
+        }
+        // Negation-then-positive is allowed for `team` (no `excludesTeam`).
+        assert!(Selector::parse("@a[team=!red,team=blue]").is_ok());
+        // Negative-then-negative is always fine.
+        assert!(Selector::parse("@a[name=!A,name=!B]").is_ok());
+        assert!(Selector::parse("@a[gamemode=!creative,gamemode=!survival]").is_ok());
+    }
+
+    #[test]
+    fn limit_and_sort_are_inapplicable_on_self() {
+        for text in [
+            "@s[limit=2]",
+            "@s[sort=nearest]",
+            "@s[limit=1]",
+            "@s[sort=random]",
+        ] {
+            let key = text
+                .split_once('[')
+                .unwrap()
+                .1
+                .split_once('=')
+                .unwrap()
+                .0
+                .to_string();
+            assert_eq!(parse_err(text), ParseError::Inapplicable(key), "{text}");
+        }
+        // Still fine on every other variable.
+        assert!(Selector::parse("@a[limit=2,sort=nearest]").is_ok());
+        assert!(Selector::parse("@e[limit=2]").is_ok());
     }
 
     #[test]
@@ -1685,6 +2142,20 @@ mod tests {
         assert!(Selector::parse("@e[type=zombie]").is_ok());
         assert!(Selector::parse("@n[type=zombie]").is_ok());
         assert!(Selector::parse("@s[type=zombie]").is_ok());
+    }
+
+    #[test]
+    fn an_unknown_entity_type_is_rejected() {
+        // Vanilla checks the id against the entity-type registry and reports
+        // `type.invalid` with the parsed identifier.
+        let e = parse_err("@e[type=notarealtype]");
+        assert_eq!(e, ParseError::UnknownType("minecraft:notarealtype".into()));
+        assert_eq!(
+            e.message(),
+            "Invalid or unknown entity type 'minecraft:notarealtype'"
+        );
+        // A known mob type is accepted.
+        assert!(Selector::parse("@e[type=minecraft:zombie]").is_ok());
     }
 
     #[test]
@@ -1709,56 +2180,159 @@ mod tests {
         );
         assert_eq!(
             parse_err("@e[level=1.5]"),
-            ParseError::NonInteger {
-                key: "level".into(),
-                value: "1.5".into()
-            }
+            ParseError::InvalidInteger("1.5".into())
+        );
+        assert_eq!(
+            parse_err("@e[scores={foo=1.5}]"),
+            ParseError::InvalidInteger("1.5".into())
+        );
+        assert_eq!(
+            parse_err("@e[x_rotation=sideways]"),
+            ParseError::InvalidFloat("sideways".into())
+        );
+        // Vanilla's `level` uses the Brigadier integer message.
+        assert_eq!(
+            parse_err("@e[level=1.5]").message(),
+            "Invalid integer '1.5'"
+        );
+        assert_eq!(
+            parse_err("@e[level=-1]").message(),
+            "Level shouldn't be negative"
         );
     }
 
     #[test]
     fn all_range_forms_work_for_every_range_option() {
-        for key in ["distance", "level", "x_rotation", "y_rotation"] {
-            for (text, want) in [
-                (
-                    "5",
-                    NumRange {
-                        min: Some(5.0),
-                        max: Some(5.0),
-                    },
-                ),
-                (
-                    "5..",
-                    NumRange {
-                        min: Some(5.0),
-                        max: None,
-                    },
-                ),
-                (
-                    "..5",
-                    NumRange {
-                        min: None,
-                        max: Some(5.0),
-                    },
-                ),
-                (
-                    "2..5",
-                    NumRange {
-                        min: Some(2.0),
-                        max: Some(5.0),
-                    },
-                ),
-            ] {
-                let s = Selector::parse(&format!("@e[{key}={text}]")).unwrap();
-                let got = match key {
-                    "distance" => s.distance,
-                    "level" => s.level,
-                    "x_rotation" => s.x_rotation,
-                    _ => s.y_rotation,
-                };
-                assert_eq!(got, Some(want), "{key}={text}");
-            }
+        // Double range.
+        for (text, want) in [
+            (
+                "5",
+                NumRange {
+                    min: Some(5.0),
+                    max: Some(5.0),
+                },
+            ),
+            (
+                "5..",
+                NumRange {
+                    min: Some(5.0),
+                    max: None,
+                },
+            ),
+            (
+                "..5",
+                NumRange {
+                    min: None,
+                    max: Some(5.0),
+                },
+            ),
+            (
+                "2..5",
+                NumRange {
+                    min: Some(2.0),
+                    max: Some(5.0),
+                },
+            ),
+        ] {
+            let s = Selector::parse(&format!("@e[distance={text}]")).unwrap();
+            assert_eq!(s.distance, Some(want), "distance={text}");
         }
+        // Integer range.
+        for (text, want) in [
+            (
+                "5",
+                IntRange {
+                    min: Some(5),
+                    max: Some(5),
+                },
+            ),
+            (
+                "5..",
+                IntRange {
+                    min: Some(5),
+                    max: None,
+                },
+            ),
+            (
+                "..5",
+                IntRange {
+                    min: None,
+                    max: Some(5),
+                },
+            ),
+            (
+                "2..5",
+                IntRange {
+                    min: Some(2),
+                    max: Some(5),
+                },
+            ),
+        ] {
+            let s = Selector::parse(&format!("@e[level={text}]")).unwrap();
+            assert_eq!(s.level, Some(want), "level={text}");
+        }
+        // Wrapped angle range.
+        for (text, want) in [
+            (
+                "5",
+                AngleRange {
+                    min: Some(5.0),
+                    max: Some(5.0),
+                },
+            ),
+            (
+                "5..",
+                AngleRange {
+                    min: Some(5.0),
+                    max: None,
+                },
+            ),
+            (
+                "..5",
+                AngleRange {
+                    min: None,
+                    max: Some(5.0),
+                },
+            ),
+            (
+                "2..5",
+                AngleRange {
+                    min: Some(2.0),
+                    max: Some(5.0),
+                },
+            ),
+        ] {
+            let s = Selector::parse(&format!("@e[x_rotation={text}]")).unwrap();
+            assert_eq!(s.x_rotation, Some(want), "x_rotation={text}");
+        }
+    }
+
+    #[test]
+    fn angle_ranges_wrap_and_allow_a_swapped_pair() {
+        // Vanilla's `FloatDegrees` does not reject `170..-170`; it wraps both
+        // bounds and the entity's angle.
+        let s = Selector::parse("@e[y_rotation=170..-170]").unwrap();
+        let range = s.y_rotation.unwrap();
+        assert!(range.contains(180.0), "180 is just west of north");
+        assert!(range.contains(-175.0));
+        assert!(!range.contains(0.0), "0 is due south, in the 20 gap");
+        assert!(!range.contains(90.0));
+
+        // A plain range still behaves normally, around the wrap point.
+        let s = Selector::parse("@e[y_rotation=170..200]").unwrap();
+        let range = s.y_rotation.unwrap();
+        assert!(range.contains(175.0));
+        assert!(range.contains(-160.0), "200 wraps to -160");
+        assert!(!range.contains(0.0));
+
+        // Vanilla's predicate fills an absent bound with `0`/`359` and then
+        // wraps, so `..n` is `0..n` and `n..` is `n..359` rather than
+        // unbounded. `x_rotation=..0` is therefore exactly `0`.
+        let s = Selector::parse("@e[x_rotation=..0]").unwrap();
+        let range = s.x_rotation.unwrap();
+        assert!(range.contains(0.0));
+        assert!(!range.contains(-1.0));
+        assert!(!range.contains(90.0));
     }
 
     #[test]
@@ -1782,6 +2356,37 @@ mod tests {
             Selector::parse_single("@e[limit=2]").unwrap_err(),
             ParseError::TooManyEntities
         );
+    }
+
+    #[test]
+    fn player_arguments_use_the_player_wording_and_reject_entities() {
+        // A player single argument given `@a`/`@e` reports the player cap.
+        assert_eq!(
+            Selector::parse_single_player("@a").unwrap_err(),
+            ParseError::TooManyPlayers
+        );
+        assert_eq!(
+            Selector::parse_single_player("@a").unwrap_err().message(),
+            "Only one player is allowed, but the provided selector allows more than one"
+        );
+        assert!(Selector::parse_single_player("@p").is_ok());
+        assert!(Selector::parse_single_player("@e[type=player,limit=1]").is_ok());
+
+        // A player multiple argument rejects a selector that can include
+        // non-players, but accepts one narrowed to players or `@s`.
+        assert_eq!(
+            Selector::parse_players("@e").unwrap_err(),
+            ParseError::OnlyPlayersAllowed
+        );
+        assert_eq!(
+            Selector::parse_players("@e").unwrap_err().message(),
+            "Only players may be affected by this command, but the provided selector includes entities"
+        );
+        assert!(Selector::parse_players("@a").is_ok());
+        assert!(Selector::parse_players("@s").is_ok());
+        assert!(Selector::parse_players("@e[type=player]").is_ok());
+        assert!(Selector::parse_players("@e[gamemode=creative]").is_ok());
+        assert!(Selector::parse_players("@e[level=1..]").is_ok());
     }
 
     // -----------------------------------------------------------------
@@ -2003,7 +2608,8 @@ mod tests {
             ["Alice"]
         );
         assert_eq!(check("@a[predicate=mymod:test]"), ["Alice"]);
-        assert_eq!(check("@a[x_rotation=..0]"), ["Alice"]);
+        // Alice looks 10° up (pitch -10); a wrapped angle range brackets it.
+        assert_eq!(check("@a[x_rotation=-90..0]"), ["Alice"]);
         assert_eq!(check("@a[y_rotation=0..90]"), ["Alice"]);
     }
 
@@ -2082,17 +2688,25 @@ mod tests {
             players: vec![player("a", 1, 0.0, 0.0, 0.0), player("b", 2, 1.0, 0.0, 0.0)],
             ..Default::default()
         };
+        // An entity argument reports the entity wording...
         assert_eq!(
             Selector::parse("@a")
                 .unwrap()
                 .select_one(&world, &mut rng()),
-            Err(SelectError::TooManyPlayers)
+            Err(SelectError::TooManyEntities)
         );
         assert_eq!(
             Selector::parse("@e")
                 .unwrap()
                 .select_one(&world, &mut rng()),
             Err(SelectError::TooManyEntities)
+        );
+        // ...a player argument the player wording.
+        assert_eq!(
+            Selector::parse_players("@a")
+                .unwrap()
+                .select_one(&world, &mut rng()),
+            Err(SelectError::TooManyPlayers)
         );
         let one = Selector::parse("@p")
             .unwrap()
@@ -2152,6 +2766,78 @@ mod tests {
         assert!(none.is_empty());
     }
 
+    #[test]
+    fn e_and_n_only_match_live_entities() {
+        let mut dead_mob = mob("minecraft:zombie", 100, 2.0, 0.0, 0.0);
+        dead_mob.alive = false;
+        let mut dead_player = player("ghost", 2, 3.0, 0.0, 0.0);
+        dead_player.alive = false;
+        let world = Fixture {
+            players: vec![player("alive", 1, 0.0, 0.0, 0.0), dead_player],
+            entities: vec![dead_mob],
+            ..Default::default()
+        };
+        // `@e` drops the dead mob.
+        let out = Selector::parse("@e")
+            .unwrap()
+            .find(&world, &mut rng())
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name.as_deref(), Some("alive"));
+
+        // `@n` too.
+        let nearest = Selector::parse("@n")
+            .unwrap()
+            .find(&world, &mut rng())
+            .unwrap();
+        assert_eq!(nearest[0].name.as_deref(), Some("alive"));
+
+        // `@a` may still see a dead player.
+        let players = Selector::parse("@a")
+            .unwrap()
+            .find(&world, &mut rng())
+            .unwrap();
+        assert_eq!(names(&players), ["alive", "ghost"]);
+    }
+
+    #[test]
+    fn name_falls_back_to_the_type_display_name() {
+        // A mob with no custom name matches its humanised type name, as
+        // vanilla's `getStringifiedName` would.
+        let world = Fixture {
+            entities: vec![mob("minecraft:experience_orb", 100, 0.0, 0.0, 0.0)],
+            ..Default::default()
+        };
+        assert_eq!(
+            Selector::parse("@e[name=\"Experience Orb\"]")
+                .unwrap()
+                .find(&world, &mut rng())
+                .unwrap()
+                .len(),
+            1
+        );
+        // An explicit name wins over the fallback.
+        let mut named = mob("minecraft:zombie", 101, 1.0, 0.0, 0.0);
+        named.name = Some("Bob".into());
+        let world = Fixture {
+            entities: vec![named],
+            ..Default::default()
+        };
+        assert_eq!(
+            Selector::parse("@e[name=Bob]")
+                .unwrap()
+                .find(&world, &mut rng())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(Selector::parse("@e[name=Zombie]")
+            .unwrap()
+            .find(&world, &mut rng())
+            .unwrap()
+            .is_empty());
+    }
+
     // -----------------------------------------------------------------
     // Lock-order shape
     // -----------------------------------------------------------------
@@ -2168,13 +2854,16 @@ mod tests {
     #[test]
     fn find_snapshots_the_source_once_each() {
         // The lock order depends on `find` taking the player and entity lists
-        // once and then filtering owned copies — never reaching back into a
-        // locked source per entity.
+        // once and then filtering owned copies. The one per-entity callback,
+        // `entity_type_in_tag` for `type=#tag`, must not be used to reach back
+        // into a locked source's lists — the two list hooks are each called
+        // exactly once.
         use std::cell::Cell;
         struct Counting<'a> {
             inner: &'a Fixture,
             player_calls: Cell<usize>,
             entity_calls: Cell<usize>,
+            tag_calls: Cell<usize>,
         }
         impl SelectorSource for Counting<'_> {
             fn players(&self) -> Vec<EntityRef> {
@@ -2185,24 +2874,46 @@ mod tests {
                 self.entity_calls.set(self.entity_calls.get() + 1);
                 self.inner.entities()
             }
+            fn entity_type_in_tag(&self, kind: &str, tag: &str) -> bool {
+                self.tag_calls.set(self.tag_calls.get() + 1);
+                self.inner.entity_type_in_tag(kind, tag)
+            }
         }
         let inner = Fixture {
             players: vec![player("a", 1, 0.0, 0.0, 0.0)],
             entities: vec![mob("minecraft:zombie", 100, 2.0, 0.0, 0.0)],
+            tags: vec![("minecraft:zombie".into(), "#minecraft:undead".into())],
             ..Default::default()
         };
         let counting = Counting {
             inner: &inner,
             player_calls: Cell::new(0),
             entity_calls: Cell::new(0),
+            tag_calls: Cell::new(0),
         };
-        let out = Selector::parse("@e[type=!player]")
+        let out = Selector::parse("@e[type=#minecraft:undead]")
             .unwrap()
             .find(&counting, &mut rng())
             .unwrap();
         assert_eq!(out.len(), 1);
+        // Both snapshots are taken up front; the tag hook runs once per
+        // candidate, but never triggers another snapshot.
         assert_eq!(counting.player_calls.get(), 1);
         assert_eq!(counting.entity_calls.get(), 1);
+        assert_eq!(counting.tag_calls.get(), 2, "one per candidate entity");
+
+        // A selector without a type tag never calls the tag hook.
+        let counting = Counting {
+            inner: &inner,
+            player_calls: Cell::new(0),
+            entity_calls: Cell::new(0),
+            tag_calls: Cell::new(0),
+        };
+        let _ = Selector::parse("@e[type=!player]")
+            .unwrap()
+            .find(&counting, &mut rng())
+            .unwrap();
+        assert_eq!(counting.tag_calls.get(), 0);
     }
 
     // -----------------------------------------------------------------
