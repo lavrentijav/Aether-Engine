@@ -214,7 +214,13 @@ pub fn dispatch(
                 return deny();
             }
             let action = args.first().copied();
-            let (bypass, reply) = {
+            // `/visibility off` is the explicit per-player bypass toggle (an
+            // alias kept alongside `/spectate xray off`); `/visibility status`
+            // reports the effective state. Operators are **not** bypassed
+            // implicitly — see `crate::anti_xray_bypass`. `reveal` is set only
+            // by an explicit turn-off, so a plain `/visibility status` never
+            // re-sends anything.
+            let reveal = {
                 let mut st = handle.visibility();
                 match action {
                     Some("on") => {
@@ -222,31 +228,28 @@ pub fn dispatch(
                         // A bypassed player is skipped on the tick, so force
                         // the next search when culling comes back.
                         st.mark_dirty();
-                        (false, "Visibility culling on".to_string())
+                        false
                     }
                     Some("off") => {
                         st.bypass = true;
-                        (
-                            true,
-                            "Visibility culling off: you are sent every section".to_string(),
-                        )
+                        true
                     }
-                    _ => (
-                        st.bypass,
-                        format!(
-                            "Visibility culling is {}",
-                            if st.bypass { "off" } else { "on" }
-                        ),
-                    ),
+                    Some("status") | None => false,
+                    Some(other) => {
+                        return Some(vec![format!("/visibility on|off|status (not `{other}`)")])
+                    }
                 }
             };
             // Turning culling off must reveal the columns already sent as
             // stone, not wait for them to re-stream. Done with the visibility
             // lock released: re-encoding a column takes it again.
-            if bypass {
+            if reveal {
                 crate::visibility::reveal_all(handle, world);
             }
-            vec![reply]
+            // The reply is the *effective* state, so `/visibility on` on an
+            // admin who still holds a bypass grant reads as bypassed rather
+            // than lying.
+            vec![crate::visibility::player_status(handle)]
         }
         _ => return None,
     })

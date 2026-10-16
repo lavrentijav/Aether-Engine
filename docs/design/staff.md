@@ -112,9 +112,10 @@ splits its passes by each player's effective mode:
 | `<n>` | culling with margin `n` blocks (a larger margin hides less) |
 | `default` | follow `[anti_xray]` and the bypass rules |
 
-An override also *turns anti-xray on* for an operator who would otherwise bypass
-it, which is the point: a spectating admin can lower the level and see exactly
-what a normal player would see. On change the columns the admin holds are
+An override also *turns anti-xray on* for an admin who holds an explicit bypass
+grant (operators are not bypassed automatically; see
+[Known Issues A.16](../KNOWN_ISSUES.md)), which is the point: a spectating admin
+can lower the level and see exactly what a normal player would see. On change the columns the admin holds are
 re-sent (the reachable set is invalidated first, so a margin change is
 recomputed) and the override is dropped with the spectate snapshot.
 

@@ -55,6 +55,19 @@ the core. See [`docs/design/staff.md`](../design/staff.md) (EN) and
 - **Not wired because the core feature is absent**: `/list` (CMD-09 stub), the
   static command tree, the server-list sample and the sleep count.
 
+## Follow-up (after review)
+
+- **Operators are no longer bypassed automatically.** `anti_xray_bypass` no
+  longer consults `is_operator`; bypass is explicit only — `/spectate xray off`,
+  `/visibility off`, a name in `[anti_xray] bypass_players`, or the
+  `aether.antixray.bypass` node granted through the new `[permissions] grants`
+  list (`name:node`, `name@address` supported). This lets an operator watch the
+  protection work and turn it off deliberately.
+- **`/visibility status`** reports the effective anti-xray state for the
+  player (`visibility::player_status`); `/visibility off` stays as the explicit
+  toggle alias.
+- The startup INFO line (`anti-xray  : <mode> (...)`) is unchanged.
+
 ## Checks
 
 - `cargo fmt --all -- --check` — clean.

@@ -17,8 +17,8 @@ Branch `oc/AX1`, from `main`. Commits start with `AX1`.
 
 Both go through the existing per-version chunk writers as a `BlockSource` wrapper
 (`EngineColumn` / `MaskedColumn`). Config: `hidden_blocks`, `worlds` (per-world toggle),
-`bypass_players`; bypass also via the `aether.antixray.bypass` node (operators until CMD-01) and
-`/visibility off`.
+`bypass_players`; bypass also via the `aether.antixray.bypass` node (granted explicitly, not
+implied by being an operator — see the SP1 follow-up) and `/visibility off`.
 
 ## Backward compatibility (review (c))
 

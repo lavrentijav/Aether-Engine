@@ -22,9 +22,10 @@ use crate::session::DemoWorld;
 
 /// A per-player anti-xray override, set by `/spectate xray`.
 ///
-/// `Default` follows the server config and the operator/bypass rules; every
+/// `Default` follows the server config and the explicit bypass rules; every
 /// other value is an explicit choice for this one admin, so it can turn
-/// anti-xray *on* for a spectator who would otherwise bypass it as an operator.
+/// anti-xray *on* for a spectator who would otherwise bypass it by an explicit
+/// grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AntiXrayLevel {
     /// Follow the `[anti_xray]` config and the bypass rules.

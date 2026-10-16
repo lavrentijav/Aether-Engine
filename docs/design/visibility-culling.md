@@ -82,8 +82,9 @@ Switchable: `[anti_xray] enabled = false` by default until it is proven; per wor
   work at all because it substitutes whole block states, which every version already speaks.
 - Fast movement (elytra, ender pearl, teleport, high speed): widen the margin with velocity, and
   send real sections ahead along the motion vector.
-- Admin bypass (`/visibility off` for a player, the `aether.antixray.bypass` permission node, and
-  the `bypass_players` config list), and spectators get everything.
+- Admin bypass is explicit (`/visibility off` for a player, the `aether.antixray.bypass`
+  permission node granted via `[permissions] grants`, and the `bypass_players` config list);
+  **operators are not bypassed automatically**, and `/visibility status` reports the state.
 
 ## Tests to write with it
 

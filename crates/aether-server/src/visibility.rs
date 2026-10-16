@@ -454,6 +454,31 @@ pub fn effective_enabled(handle: &PlayerHandle) -> bool {
     handle.staff().xray() != crate::staff::AntiXrayLevel::Default || crate::anti_xray_enabled()
 }
 
+/// A human-readable summary of the anti-xray state **for this player**, for
+/// `/visibility status`: whether they bypass it (and why) or what mode they
+/// are under.
+pub fn player_status(handle: &PlayerHandle) -> String {
+    if !effective_enabled(handle) {
+        return "anti-xray is off (server config)".to_string();
+    }
+    if crate::anti_xray_bypass(handle) {
+        let reason = match handle.staff().xray() {
+            crate::staff::AntiXrayLevel::Off => "/spectate xray off",
+            _ if handle.visibility().bypass => "/visibility off",
+            _ => "an explicit bypass grant",
+        };
+        return format!("you bypass anti-xray ({reason})");
+    }
+    let hidden = crate::anti_xray_config().hidden_block_names().len();
+    match effective_mode(handle) {
+        AntiXrayMode::Engine => format!("anti-xray: engine, {hidden} hidden block(s)"),
+        AntiXrayMode::Culling => format!(
+            "anti-xray: culling, margin {} blocks, {hidden} hidden block(s)",
+            effective_margin(handle)
+        ),
+    }
+}
+
 /// Which sections of column `(cx, cz)` are hidden for this visible set.
 ///
 /// Bit `i` set means section `SECTION_MIN_Y + i` is not visible.

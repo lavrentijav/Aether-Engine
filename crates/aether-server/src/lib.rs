@@ -520,9 +520,10 @@ fn warn_if_exposed(cfg: &Config) {
 
 /// The permission node that lets a player bypass anti-xray.
 ///
-/// Until the permission store (CMD-01) lands, a player's only levels are 4 (an
-/// operator) and 0 (everyone else), so this node is effectively
-/// [`is_operator`]; it is named now so the store can resolve it later.
+/// **Not implied by being an operator.** Until the permission store (CMD-01)
+/// lands, it is granted explicitly through `[permissions] grants` (see
+/// [`config::PermissionsConfig`]); the node is named here so the store can
+/// resolve it without a rename later.
 pub const ANTIXRAY_BYPASS_PERMISSION: &str = "aether.antixray.bypass";
 
 /// The `[anti_xray]` settings, or the defaults (off) before startup installs
@@ -566,34 +567,48 @@ pub fn anti_xray_enabled() -> bool {
     }
 }
 
-/// Whether `handle` may see everything: an explicit `/visibility off`, the
-/// [`ANTIXRAY_BYPASS_PERMISSION`] node (operators, until CMD-01), or a name in
-/// `[anti_xray] bypass_players`.
+/// Whether `handle` may see everything.
+///
+/// **Being an operator is not enough.** Bypass is always explicit: the
+/// `/spectate xray` override, the per-player `/visibility off` toggle, the
+/// [`ANTIXRAY_BYPASS_PERMISSION`] node granted through `[permissions]`, or a
+/// name in `[anti_xray] bypass_players`. An operator who wants to watch the
+/// protection work is therefore left under it by default — and can turn it off
+/// with `/visibility off` when they need to.
 pub fn anti_xray_bypass(handle: &players::PlayerHandle) -> bool {
-    // A `/spectate xray` override wins over everything else: `off` shows
-    // everything, and `engine`/`culling`/`<level>` turn anti-xray *on* for a
-    // spectator who would otherwise bypass it as an operator.
-    match handle.staff().xray() {
-        staff::AntiXrayLevel::Off => return true,
+    let (node, listed) = match CONFIG.get() {
+        Some(c) => (
+            c.permissions
+                .granted(&handle.name, handle.ip, ANTIXRAY_BYPASS_PERMISSION),
+            c.anti_xray
+                .bypass_players
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(&handle.name)),
+        ),
+        None => (false, false),
+    };
+    bypass_decision(
+        handle.staff().xray(),
+        handle.visibility().bypass,
+        node || listed,
+    )
+}
+
+/// The bypass decision itself, without a handle, so it can be tested and
+/// reused: the `/spectate xray` override wins over everything, then the
+/// explicit per-player toggle or grant.
+///
+/// `Off` shows everything; `engine`/`culling`/`<margin>` *force anti-xray on*
+/// even for someone who would otherwise bypass it; `Default` falls back to the
+/// explicit toggle/grant.
+pub fn bypass_decision(level: staff::AntiXrayLevel, toggle: bool, explicit_grant: bool) -> bool {
+    match level {
+        staff::AntiXrayLevel::Off => true,
         staff::AntiXrayLevel::Engine
         | staff::AntiXrayLevel::Culling
-        | staff::AntiXrayLevel::Margin(_) => return false,
-        staff::AntiXrayLevel::Default => {}
+        | staff::AntiXrayLevel::Margin(_) => false,
+        staff::AntiXrayLevel::Default => toggle || explicit_grant,
     }
-    if handle.visibility().bypass {
-        return true;
-    }
-    let cfg = match CONFIG.get() {
-        Some(c) => c,
-        None => return false,
-    };
-    if cfg.is_operator(&handle.name, handle.ip) {
-        return true;
-    }
-    cfg.anti_xray
-        .bypass_players
-        .iter()
-        .any(|n| n.eq_ignore_ascii_case(&handle.name))
 }
 
 /// The chunk radius kept loaded around a player, from the config.
@@ -614,4 +629,40 @@ static GAME_MODE: std::sync::OnceLock<protocol::GameMode> = std::sync::OnceLock:
 /// every version of this server did before the setting existed.
 pub fn server_game_mode() -> protocol::GameMode {
     GAME_MODE.get().copied().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bypass_decision;
+    use super::staff::AntiXrayLevel;
+
+    #[test]
+    fn an_operator_with_neither_toggle_nor_grant_is_not_bypassed() {
+        // The regression this covers: previously `is_operator` returned `true`
+        // here, so an operator could not watch the anti-xray protection work.
+        assert!(!bypass_decision(AntiXrayLevel::Default, false, false));
+    }
+
+    #[test]
+    fn bypass_is_only_explicit() {
+        // `/visibility off` (the per-player toggle).
+        assert!(bypass_decision(AntiXrayLevel::Default, true, false));
+        // The `aether.antixray.bypass` node or `[anti_xray] bypass_players`.
+        assert!(bypass_decision(AntiXrayLevel::Default, false, true));
+        // `/spectate xray off`.
+        assert!(bypass_decision(AntiXrayLevel::Off, false, false));
+    }
+
+    #[test]
+    fn a_spectate_xray_level_forces_anti_xray_on_over_any_grant() {
+        // The override wins: an explicitly-granted admin still sees masking at
+        // a forced level, which is the point of per-admin control.
+        for level in [
+            AntiXrayLevel::Engine,
+            AntiXrayLevel::Culling,
+            AntiXrayLevel::Margin(8),
+        ] {
+            assert!(!bypass_decision(level, true, true), "{level:?}");
+        }
+    }
 }
