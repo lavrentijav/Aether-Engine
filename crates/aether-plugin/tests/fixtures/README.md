@@ -20,3 +20,22 @@ so `cargo test` needs no WebAssembly target and no network.
   ```
 
   (omit `$CARGO_TARGET_DIR/` when it is not set).
+- `historian/` — a SDK-backed dependent built from
+  `tests/guests/historian`, used by `plugins/sdk/tests/e2e.rs` to prove the
+  `history.read` gate end to end through a real WASM component. Regenerate the
+  same way, copying over `historian/historian.wasm`.
+
+  ```sh
+  cd tests/guests/historian
+  cargo build --release --target wasm32-wasip2
+  cp "$CARGO_TARGET_DIR/wasm32-wasip2/release/historian.wasm" ../../fixtures/historian/historian.wasm
+  ```
+
+- `sidebar/sidebar.wasm` — built from `tests/guests/sidebar`, a plugin that
+  drives the `aether:sidebar` import. Regenerate the same way:
+
+  ```sh
+  cd tests/guests/sidebar
+  cargo build --release --target wasm32-wasip2
+  cp "$CARGO_TARGET_DIR/wasm32-wasip2/release/sidebar.wasm" ../../fixtures/sidebar/sidebar.wasm
+  ```

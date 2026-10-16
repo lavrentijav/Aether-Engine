@@ -83,6 +83,15 @@ pub struct PlayerHandle {
     /// without the carrier textures — so carriers require both this and the
     /// loaded status. Set once, at join, from the offer the codec was handed.
     compat_pack: AtomicBool,
+    /// The sidebar this client currently shows, so an update can diff against
+    /// it and resend only the lines that changed. `None` means hidden.
+    sidebar: Mutex<Option<crate::protocol::scoreboard::SidebarBoard>>,
+    /// The tab-list header/footer last sent, so an unchanged pair is not
+    /// resent every tick.
+    tab: Mutex<Option<(String, String)>>,
+    /// The last measured keep-alive round trip, in milliseconds. Read by the
+    /// `%ping%` placeholder; `0` until the first reply arrives.
+    ping_ms: std::sync::atomic::AtomicU32,
 }
 
 impl PlayerHandle {
@@ -94,6 +103,17 @@ impl PlayerHandle {
     /// Record a new position/look (called by the owning connection thread).
     pub fn set_pos(&self, p: PosLook) {
         *self.pos.lock().unwrap() = p;
+    }
+
+    /// Record a measured keep-alive round trip, in milliseconds.
+    pub fn set_ping(&self, ms: u32) {
+        self.ping_ms.store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The last measured keep-alive round trip, in milliseconds (`0` until the
+    /// first reply).
+    pub fn ping(&self) -> u32 {
+        self.ping_ms.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Borrow this player's command session (inspect mode, current pager).
@@ -209,6 +229,48 @@ impl PlayerHandle {
         self.outbox.push_paced(frames);
     }
 
+    /// Replace this client's sidebar, writing only the packets that change it.
+    ///
+    /// The diff lives here — next to the per-player state it needs — rather
+    /// than in the plugin, so the plugin may hand over the whole board on
+    /// every tick and only the lines that actually changed reach the client.
+    /// `None` hides the sidebar.
+    pub fn update_sidebar(
+        &self,
+        board: Option<&crate::protocol::scoreboard::SidebarBoard>,
+        world: &dyn BlockSource,
+    ) {
+        let style = self.codec.sidebar_style();
+        let ops = {
+            let mut prev = self.sidebar.lock().unwrap();
+            let ops = crate::protocol::scoreboard::present(style, prev.as_ref(), board);
+            *prev = board.cloned();
+            ops
+        };
+        for op in ops {
+            self.emit(&ServerEvent::Scoreboard(op), world);
+        }
+    }
+
+    /// Set this client's tab-list header and footer, resending only when the
+    /// pair actually changes.
+    pub fn set_tab_header_footer(&self, header: &str, footer: &str, world: &dyn BlockSource) {
+        {
+            let mut last = self.tab.lock().unwrap();
+            if last.as_ref() == Some(&(header.to_string(), footer.to_string())) {
+                return;
+            }
+            *last = Some((header.to_string(), footer.to_string()));
+        }
+        self.emit(
+            &ServerEvent::TabHeaderFooter {
+                header: header.to_string(),
+                footer: footer.to_string(),
+            },
+            world,
+        );
+    }
+
     fn render(&self, ev: &ServerEvent, world: &dyn BlockSource) -> Vec<Vec<u8>> {
         let legacy = if self.full() { None } else { ev.legacy() };
         let ev = legacy.as_ref().unwrap_or(ev);
@@ -229,17 +291,26 @@ impl PlayerHandle {
                     None => world,
                 };
                 let view = crate::protocol::ColumnView::new(base, *cx, *cz);
-                // Anti-xray: mask the sections this player cannot see before
-                // the codec ever reads them, so every version's cheapest
-                // single-valued stone form falls out of the existing encoder.
-                let hidden = crate::visibility::hidden_mask_for_render(self, world, *cx, *cz);
-                if hidden != 0 {
-                    let fill = crate::visibility::fill_for(self);
-                    let masked =
-                        crate::visibility::MaskedColumn::new(&view, *cx, *cz, hidden, fill);
-                    self.codec.encode(ev, &masked)
-                } else {
-                    self.codec.encode(ev, &view)
+                // Anti-xray: mask what this player cannot see before the codec
+                // ever reads it. Culling hides whole sections; engine hides
+                // individual buried ores. Both go through the existing per-
+                // version encoder, so no codec knows about either.
+                match crate::visibility::mask_for_render(self, world, *cx, *cz) {
+                    crate::visibility::ColumnMask::None => self.codec.encode(ev, &view),
+                    crate::visibility::ColumnMask::Sections { hidden, fill } => {
+                        let masked =
+                            crate::visibility::MaskedColumn::new(&view, *cx, *cz, hidden, fill);
+                        self.codec.encode(ev, &masked)
+                    }
+                    crate::visibility::ColumnMask::Engine => {
+                        let masked = crate::visibility::EngineColumn::new(
+                            &view,
+                            crate::visibility::hidden_states(),
+                        );
+                        let packets = self.codec.encode(ev, &masked);
+                        crate::visibility::record_engine(self, *cx, *cz, masked.masked_any());
+                        packets
+                    }
                 }
             }
             ServerEvent::UnloadColumn { cx, cz } => {
@@ -247,16 +318,46 @@ impl PlayerHandle {
                 self.codec.encode(ev, world)
             }
             // A single block change must be a carrier state too, or a placed
-            // or mined block would flip back to the stand-in.
-            ServerEvent::BlockChange { x, y, z, block } if table.is_some() => {
-                let t = table.expect("guarded by the match arm");
-                let remapped = ServerEvent::BlockChange {
-                    x: *x,
-                    y: *y,
-                    z: *z,
-                    block: t.display(*block),
-                };
-                self.codec.encode(&remapped, world)
+            // or mined block would flip back to the stand-in — and it must be
+            // masked, or a server-side write of a hidden block (`/setblock`,
+            // creative, `/rollback`) would leak it.
+            ServerEvent::BlockChange { x, y, z, block } => {
+                let block = crate::visibility::mask_block(self, world, *x, *y, *z, *block);
+                match table {
+                    Some(t) => {
+                        let remapped = ServerEvent::BlockChange {
+                            x: *x,
+                            y: *y,
+                            z: *z,
+                            block: t.display(block),
+                        };
+                        self.codec.encode(&remapped, world)
+                    }
+                    None => {
+                        let masked = ServerEvent::BlockChange {
+                            x: *x,
+                            y: *y,
+                            z: *z,
+                            block,
+                        };
+                        self.codec.encode(&masked, world)
+                    }
+                }
+            }
+            // The scoreboard path is the same on every codec — its ids and
+            // field shapes come from the version table — so it is rendered
+            // here rather than duplicated in twenty-four `encode`s.
+            ServerEvent::Scoreboard(op) => match self.codec.scoreboard_wire() {
+                Some(wire) => crate::protocol::scoreboard::encode(&wire, op),
+                None => Vec::new(),
+            },
+            ServerEvent::TabHeaderFooter { header, footer } => {
+                match crate::protocol::scoreboard::tab_for(self.codec.protocol_id()) {
+                    Some(wire) => vec![crate::protocol::scoreboard::encode_tab(
+                        &wire, header, footer,
+                    )],
+                    None => Vec::new(),
+                }
             }
             _ => self.codec.encode(ev, world),
         };
@@ -377,6 +478,9 @@ impl Registry {
             visibility: Mutex::new(crate::visibility::State::default()),
             pack: AtomicU8::new(PACK_UNKNOWN),
             compat_pack: AtomicBool::new(false),
+            sidebar: Mutex::new(None),
+            tab: Mutex::new(None),
+            ping_ms: std::sync::atomic::AtomicU32::new(0),
         });
         self.players
             .write()

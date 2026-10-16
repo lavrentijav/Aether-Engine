@@ -840,10 +840,8 @@ root = {}
         // process-wide store, and a temp world dir so `install`'s persistence
         // does not touch the source tree.
         let dir = std::env::temp_dir().join(format!("aether-perm-install-{}", std::process::id()));
-        let mut cfg = Config {
-            operators: vec!["perm_core_test_op".into()],
-            ..Config::default()
-        };
+        let mut cfg = Config::default();
+        cfg.operators = vec!["perm_core_test_op".into()];
         cfg.server.world_dir = dir.to_string_lossy().into_owned();
         install(&cfg);
         assert!(is_operator("perm_core_test_op", None));

@@ -323,6 +323,18 @@ impl<'a> PacketIn<'a> {
         self.buf.len().saturating_sub(self.pos)
     }
 
+    /// Skip `n` bytes (an NBT payload this codec does not decode, say).
+    /// Errors rather than reading past the end.
+    pub fn skip(&mut self, n: usize) -> io::Result<()> {
+        let end = self
+            .pos
+            .checked_add(n)
+            .filter(|e| *e <= self.buf.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "skip eof"))?;
+        self.pos = end;
+        Ok(())
+    }
+
     /// Read a length-prefixed string.
     pub fn string(&mut self) -> io::Result<String> {
         let len = self.var_int()? as usize;
