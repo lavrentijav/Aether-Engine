@@ -713,7 +713,12 @@ fn help_still_explains_a_single_command() {
         one(&env, &env.tester, "/help stop"),
         "/stop — minecraft.command.stop (op level 4), planned in CMD-09"
     );
-    assert!(one(&env, &env.tester, "/help").contains("not implemented yet"));
+    assert!(
+        run(&env, &env.tester, "/help")
+            .iter()
+            .any(|l| l.contains("not implemented yet")),
+        "/help with no argument lists the stubs"
+    );
     // The `?` alias routes to the same node.
     assert_eq!(
         one(&env, &env.tester, "/? stop"),

@@ -198,7 +198,7 @@ mod tests {
         let mut pin = crate::proto::PacketIn::new(&wire);
         let _len = pin.var_int().unwrap();
         let _id = pin.var_int().unwrap();
-        let count = pin.var_int().unwrap();
+        let _count = pin.var_int().unwrap();
         // Node 0 is the root.
         let root_flags = pin.u8().unwrap();
         assert_eq!(root_flags, 0x00);
