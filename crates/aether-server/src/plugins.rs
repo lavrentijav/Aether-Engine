@@ -808,7 +808,21 @@ mod imp {
         // before it loads. The SDK is the only one today; it is a plugin like
         // any other, disabled by `[plugins.sdk] enabled = false`, and a
         // dependent that needs it then refuses to load with a clear error.
-        install_native(&mut host, cfg, &grant_sink);
+        //
+        // The live-ops service the web admin reads is published before the
+        // native plugins, so `webadmin`'s `requires = ["ops@0.1"]` resolves.
+        let ops = Arc::new(aether_ops::OpsHandle(Arc::new(crate::web::ServerOps::new(
+            Arc::clone(world),
+            Arc::clone(registry),
+            Arc::clone(cfg),
+        ))));
+        if let Err(e) = host
+            .services()
+            .register(aether_ops::SERVICE, aether_ops::VERSION, ops)
+        {
+            crate::log::warn(&format!("ops service not registered: {e}"));
+        }
+        install_native(&mut host, cfg, &grant_sink, world);
         for file in discover(Path::new(&cfg.plugins.dir)) {
             let id = file.manifest.id.clone();
             let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
@@ -865,15 +879,20 @@ mod imp {
     }
 
     /// Add the compiled-in native plugins, in dependency order: the SDK first
-    /// (so the sidebar's optional permission checks resolve it), then the
-    /// sidebar.
+    /// (so the sidebar's optional permission checks and the web admin's
+    /// `requires` resolve), then the sidebar, then the admin web interface.
     ///
     /// A native plugin is a plugin like any other — same manifest, enable
     /// flag and load error handling — except that it is compiled in and
     /// reaches the host through the in-process [`PluginHost::add_native`]
     /// rather than a `.wasm` file. Loading them before the on-disk discovery is
     /// what lets a WASM dependent's `requires` be satisfied.
-    fn install_native(host: &mut PluginHost, cfg: &Arc<Config>, grant_sink: &Arc<ServerBackend>) {
+    fn install_native(
+        host: &mut PluginHost,
+        cfg: &Arc<Config>,
+        grant_sink: &Arc<ServerBackend>,
+        world: &Arc<DemoWorld>,
+    ) {
         install_native_one(
             host,
             cfg,
@@ -895,6 +914,37 @@ mod imp {
             aether_menus_plugin::registration(),
             "native menus",
         );
+
+        // The admin web interface is the one native plugin that needs the live
+        // world, which the server attaches here — the plugin host gives a
+        // native plugin no world handle, by design. It also resolves the
+        // live-ops service, published by `install` above.
+        let id = "webadmin".to_string();
+        let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
+        if !entry.enabled() {
+            crate::log::info(&format!("plugin `{id}` disabled by config"));
+            return;
+        }
+        let registration = aether_webadmin::registration();
+        let caps = effective_capabilities(&registration.manifest.capabilities, &entry.capabilities);
+        let file = ManifestFile {
+            dir: std::path::PathBuf::new(),
+            manifest: registration.manifest,
+        };
+        let plugin = Box::new(aether_webadmin::WebAdminPlugin::with_world(Arc::clone(
+            world,
+        )));
+        match host.add_native(&file, &caps, &entry.config, plugin) {
+            Ok(()) => {
+                grant_sink
+                    .granted
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), caps.clone());
+                crate::log::info(&format!("plugin     : {id} (native web admin)"));
+            }
+            Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
+        }
     }
 
     /// Load one compiled-in native plugin from its build-time registration.
@@ -911,14 +961,14 @@ mod imp {
             crate::log::info(&format!("plugin `{id}` disabled by config"));
             return;
         }
+        // Native plugins ask the operator for no host capabilities of their
+        // own; a service method still checks its *caller's* capabilities.
+        let caps = effective_capabilities(&registration.manifest.capabilities, &entry.capabilities);
         let file = ManifestFile {
             // Native plugins are compiled in; there is no directory.
             dir: std::path::PathBuf::new(),
             manifest: registration.manifest,
         };
-        // Native plugins ask the operator for no host capabilities of their
-        // own; a service method still checks its *caller's* capabilities.
-        let caps = effective_capabilities(&file.manifest.capabilities, &entry.capabilities);
         match host.add_native(&file, &caps, &entry.config, (registration.new)()) {
             Ok(()) => {
                 grant_sink

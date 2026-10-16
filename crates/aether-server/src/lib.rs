@@ -38,6 +38,7 @@ pub mod session;
 pub mod stash;
 pub mod stored;
 pub mod visibility;
+pub mod web;
 pub mod worldgen;
 
 use std::io;
@@ -242,6 +243,9 @@ pub fn run() -> std::process::ExitCode {
     // The world ticks on its own thread, independently of whether anyone is
     // connected: time, mobs, items on the floor, furnaces.
     game::tick::start(Arc::clone(&registry), Arc::clone(&world));
+    // Region activity is sampled for the web admin's heat map on its own
+    // thread, once a second, so it never touches the tick thread's budget.
+    web::spawn_sampler();
 
     // Loot tables are read from the same pack. Parse them once now so the
     // report of what the parser skipped is complete before it is logged.
