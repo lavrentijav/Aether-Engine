@@ -1,22 +1,25 @@
-# 4. inventory-persist — give items, reconnect, inventory still there.
+# 4. inventory-persist — give an item, reconnect, the server still has it.
+# Asserts on the server's authoritative view (`/inv`, the history command) and
+# on a fixed main-inventory slot (9, shown on /inv page 1). The previous
+# version read the held hotbar slot through MCC's local inventory cache, which
+# lags behind the server after a creative slot write, so it was flaky.
 wait 22
 send /gamemode creative
 wait 2
 expect is now in Creative mode
-send /inventory creativedelete 36
-wait 1
-expect Requested to clear slot #36
-send /inventory creativegive 36 Stone 5
+send /inventory creativedelete 9
 wait 2
-expect Requested Stone x5 in slot #36
+expect Requested to clear slot #9
+send /inventory creativegive 9 NetherStar 7
+wait 2
+expect Requested NetherStar x7 in slot #9
 send /inv
 wait 3
-expect Inventory — page
-expect 5x minecraft:stone
+expect slot 9: 7x minecraft:nether_star
 send /reco
 wait 25
 expect Server was successfully joined
 send /inv
 wait 3
-expect 5x minecraft:stone
+expect slot 9: 7x minecraft:nether_star
 reject unreadable

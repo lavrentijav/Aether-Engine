@@ -87,6 +87,57 @@ pub trait HostBackend: Send + Sync {
     fn capabilities(&self, _plugin: &str) -> Vec<String> {
         Vec::new()
     }
+
+    /// Replace a player's sidebar. The core diffs the board against what the
+    /// player already shows and writes only the packets that changed, so a
+    /// caller may hand over the whole board every update. The default does
+    /// nothing, so a host (or a test) without a scoreboard still satisfies the
+    /// trait.
+    fn set_sidebar(&self, _plugin: &str, _player: u64, _board: &crate::sidebar::SidebarBoard) {}
+
+    /// Hide a player's sidebar. The default does nothing.
+    fn clear_sidebar(&self, _plugin: &str, _player: u64) {}
+
+    /// Set a player's tab-list header and footer (plain text, `§` codes). The
+    /// core resends only when the pair changes. The default does nothing.
+    fn set_tab_header_footer(&self, _plugin: &str, _player: u64, _header: &str, _footer: &str) {}
+
+    /// Whether the vanilla `/scoreboard` model already owns the `sidebar`
+    /// display slot for `player` (an objective other than the plugin's set
+    /// with `setdisplay sidebar`). The sidebar plugin reads this to honour
+    /// `mode = "yield"`. Until CMD-15 lands the core keeps no vanilla
+    /// scoreboard, so the default is `false`.
+    fn vanilla_sidebar_claimed(&self, _plugin: &str, _player: u64) -> bool {
+        false
+    }
+
+    /// The extra per-player facts a placeholder can show (position, world,
+    /// ping, health, level). The default is `None`: a host that cannot answer
+    /// simply leaves those placeholders empty.
+    fn player_extra(
+        &self,
+        _plugin: &str,
+        _player: u64,
+    ) -> Option<crate::placeholders::PlayerExtra> {
+        None
+    }
+
+    /// Ticks per second, for `%tps%`. The default is the ideal 20.
+    fn server_tps(&self, _plugin: &str) -> f64 {
+        20.0
+    }
+
+    /// The configured player-slot cap, for `%max%`. The default is the vanilla
+    /// default.
+    fn max_players(&self, _plugin: &str) -> u32 {
+        20
+    }
+
+    /// The world time of day, in ticks (`0..24000`), for the world clock. The
+    /// default is sunrise.
+    fn world_time(&self, _plugin: &str) -> i64 {
+        0
+    }
 }
 
 /// Sandbox and scheduling limits for the whole host.
