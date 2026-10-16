@@ -6,9 +6,14 @@
 //!   opaque blocks is sent as the surrounding stone/deepslate/netherrack, and
 //!   revealed again the moment a neighbour changes so it is on the client
 //!   before the player can mine to it.
-//! - **culling** (the design doc): the pure graph and breadth-first search in
-//!   [`aether_world::visibility`] decide which sections a player can reach by
-//!   sight; an unreachable section is sent as solid stone.
+//! - **culling** (the design doc): the pure section graph and breadth-first
+//!   search in [`aether_world::visibility`] decide which `16³` sections a
+//!   player can reach by sight; then each visible section's own cached cell
+//!   mask decides, locally, which of its `4×4×2` AVX-cells are real and which
+//!   are sent as solid stone. The atomic unit is the cell, so a
+//!   partially-visible section no longer leaks the ores in its hidden cells,
+//!   and there is no global per-cell search (which was ~128× the cost and
+//!   stalled the tick).
 //!
 //! Both are [`BlockSource`] wrappers: the codec reads a hidden block/section
 //! and is handed the substitute for it, so the existing per-version encoders
@@ -42,8 +47,156 @@ pub const SECTION_MAX_Y: i32 = 23;
 /// Sections in a column.
 pub const SECTION_COUNT: usize = (SECTION_MAX_Y - SECTION_MIN_Y + 1) as usize;
 
-/// Solid stone, what a hidden section is filled with by default.
+/// Cells along X inside a `16³` section (`16 / 4`).
+const CELLS_X: i32 = SECTION_SIZE / BoxDims::CELL.x as i32;
+/// Cells along Y inside a section (`16 / 2`).
+const CELLS_Y: i32 = SECTION_SIZE / BoxDims::CELL.y as i32;
+/// Cells along Z inside a section (`16 / 4`).
+const CELLS_Z: i32 = SECTION_SIZE / BoxDims::CELL.z as i32;
+/// `4×4×2` cells in one `16³` section (`4 × 8 × 4`).
+const CELLS_PER_SECTION: usize = (CELLS_X * CELLS_Y * CELLS_Z) as usize;
+
+/// The lowest `4×4×2` cell `y` the world has (`-64 >> 1`).
+const CELL_MIN_Y: i32 = (SECTION_MIN_Y * SECTION_SIZE) >> 1;
+/// The highest cell `y` (`(384 - 1) >> 1`).
+const CELL_MAX_Y: i32 = (SECTION_MAX_Y * SECTION_SIZE + SECTION_SIZE - 1) >> 1;
+/// Cells stacked vertically in a column (`224`).
+const CELL_Y_COUNT: usize = (CELL_MAX_Y - CELL_MIN_Y + 1) as usize;
+/// `4×4×2` cells in one column (`4 × 4 × 224`).
+const CELLS_PER_COLUMN: usize = (CELLS_X * CELLS_Z) as usize * CELL_Y_COUNT;
+/// `u64` words backing one column's cell mask.
+const CELL_MASK_WORDS: usize = CELLS_PER_COLUMN.div_ceil(64);
+
+/// Solid stone, what a hidden cell is filled with by default.
 const STONE: BlockStateId = aether_world::registry::ids::STONE;
+
+/// The `4×4×2` cell holding block `(x, y, z)`.
+///
+/// Arithmetic shift is floor division for powers of two, so this is correct
+/// for negative coordinates too.
+#[inline]
+pub fn cell_of(x: i32, y: i32, z: i32) -> (i32, i32, i32) {
+    (x >> 2, y >> 1, z >> 2)
+}
+
+/// Index of cell `(x, y, z)` inside its own column's 3584-bit mask, or `None`
+/// when the cell lies outside the world's vertical range.
+#[inline]
+fn cell_mask_index(x: i32, y: i32, z: i32) -> Option<usize> {
+    if !(CELL_MIN_Y..=CELL_MAX_Y).contains(&y) {
+        return None;
+    }
+    let ix = (x & 3) as usize;
+    let iz = (z & 3) as usize;
+    let iy = (y - CELL_MIN_Y) as usize;
+    Some(ix | (iz << 2) | (iy << 4))
+}
+
+/// A per-column set of hidden `4×4×2` cells, one bit per cell.
+///
+/// A column is `16 × 384 × 16` blocks: `4 × 224 × 4 = 3584` cells, exactly 56
+/// `u64` words, so the mask has no partial trailing word. This is the compact
+/// form the reveal planner diffs; a `HashSet` of the same cells is built only
+/// when a wrapper needs it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CellMask {
+    words: [u64; CELL_MASK_WORDS],
+}
+
+impl Default for CellMask {
+    fn default() -> Self {
+        Self {
+            words: [0; CELL_MASK_WORDS],
+        }
+    }
+}
+
+impl CellMask {
+    /// Every cell hidden; the mask of a column none of whose cells is visible.
+    fn full() -> Self {
+        Self {
+            words: [u64::MAX; CELL_MASK_WORDS],
+        }
+    }
+
+    /// Build a mask from the given hidden cells (cells outside the vertical
+    /// range are ignored).
+    fn from_cells(cells: impl IntoIterator<Item = (i32, i32, i32)>) -> Self {
+        let mut mask = Self::default();
+        for (x, y, z) in cells {
+            mask.set(x, y, z);
+        }
+        mask
+    }
+
+    /// Whether `(x, y, z)` is hidden in this column's mask.
+    pub fn contains(&self, x: i32, y: i32, z: i32) -> bool {
+        match cell_mask_index(x, y, z) {
+            Some(i) => self.words[i >> 6] & (1u64 << (i & 63)) != 0,
+            None => false,
+        }
+    }
+
+    /// Whether no cell of the column is hidden.
+    pub fn is_empty(&self) -> bool {
+        self.words.iter().all(|w| *w == 0)
+    }
+
+    /// The number of hidden cells (a diagnostic for tests).
+    pub fn len(&self) -> usize {
+        self.words.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    #[inline]
+    fn set(&mut self, x: i32, y: i32, z: i32) {
+        if let Some(i) = cell_mask_index(x, y, z) {
+            self.words[i >> 6] |= 1u64 << (i & 63);
+        }
+    }
+
+    #[inline]
+    fn clear(&mut self, x: i32, y: i32, z: i32) {
+        if let Some(i) = cell_mask_index(x, y, z) {
+            self.words[i >> 6] &= !(1u64 << (i & 63));
+        }
+    }
+
+    /// Mark every cell of section `(cx, cy, cz)` hidden.
+    fn hide_section(&mut self, cx: i32, cy: i32, cz: i32) {
+        for iy in 0..CELLS_Y {
+            for iz in 0..CELLS_Z {
+                for ix in 0..CELLS_X {
+                    self.set(cx * CELLS_X + ix, cy * CELLS_Y + iy, cz * CELLS_Z + iz);
+                }
+            }
+        }
+    }
+
+    /// Clear the cells of section `(cx, cy, cz)` whose bit is set in `visible`
+    /// (a section-local mask, index `ix | iz << 2 | iy << 4`), so the column
+    /// mask agrees with the section's own `SectionCells::visible`.
+    fn reveal_section(&mut self, cx: i32, cy: i32, cz: i32, visible: u128) {
+        let mut bits = visible;
+        while bits != 0 {
+            let i = bits.trailing_zeros();
+            bits &= bits - 1;
+            let ix = (i & 3) as i32;
+            let iz = ((i >> 2) & 3) as i32;
+            let iy = ((i >> 4) & 7) as i32;
+            self.clear(cx * CELLS_X + ix, cy * CELLS_Y + iy, cz * CELLS_Z + iz);
+        }
+    }
+
+    /// Whether any cell is hidden here but visible in `desired` — a cell the
+    /// client holds as `fill` that has become visible, so the column must be
+    /// re-sent.
+    fn has_extra(&self, desired: &CellMask) -> bool {
+        self.words
+            .iter()
+            .zip(desired.words.iter())
+            .any(|(held, want)| held & !want != 0)
+    }
+}
 
 /// One player's visibility bookkeeping.
 ///
@@ -52,7 +205,7 @@ const STONE: BlockStateId = aether_world::registry::ids::STONE;
 pub struct State {
     /// Set by `/visibility off`: this player sees everything.
     pub bypass: bool,
-    /// The section the last search was rooted at.
+    /// The `16³` section the last search was rooted at.
     center: Option<(i32, i32, i32)>,
     /// A graph inside this player's view changed since the last search. Set
     /// from a writer thread, cleared by the next search.
@@ -60,11 +213,18 @@ pub struct State {
     /// Bumped on every search. A reveal plan computed for one search id is not
     /// recomputed for the same id unless it was cut short by the budget.
     search_id: u64,
-    /// Sections the player can currently see.
-    visible: HashSet<(i32, i32, i32)>,
-    /// For each column sent, the bitmask of hidden sections (bit `i` is
-    /// section `SECTION_MIN_Y + i`). What the client currently holds.
-    sent: HashMap<(i32, i32), u32>,
+    /// The sections the player can currently reach by sight (the coarse
+    /// section BFS). The per-cell mask is derived from these locally, from
+    /// each visible section's own cached cell graph, not from a global cell
+    /// search.
+    visible_sections: HashSet<(i32, i32, i32)>,
+    /// The exact `4×4×2` cell the player's feet are in. It is always revealed,
+    /// so a player sealed in a one-block pocket is not encased in stone (the
+    /// old global search seeded the player's own cell too).
+    own_cell: Option<(i32, i32, i32)>,
+    /// For each column sent, the set of hidden `4×4×2` cells the client holds
+    /// as `fill` (compact per-column bitmask). What the client currently holds.
+    sent: HashMap<(i32, i32), CellMask>,
     /// The search id the reveal plan was last computed for.
     planned_search: u64,
     /// Set when a reveal plan hit the per-tick budget, so the next tick
@@ -93,13 +253,19 @@ impl State {
         self.center == Some(section) && !self.dirty
     }
 
-    /// Force the next search to recompute, even at the same section. Used when
+    /// Force the next search to recompute, even at the same centre. Used when
     /// a `/spectate xray` margin change makes the old reachable set wrong.
     pub fn invalidate(&mut self) {
         self.center = None;
     }
 
-    /// Adopt a freshly computed reachable set.
+    /// Remember the exact cell the player's feet are in, so it is never
+    /// masked (a sealed pocket must not encase the player).
+    pub fn set_own_cell(&mut self, cell: (i32, i32, i32)) {
+        self.own_cell = Some(cell);
+    }
+
+    /// Adopt a freshly computed reachable section set.
     ///
     /// `epoch_at_start` is the global edit epoch when the search began. The
     /// stale flag is only cleared if no block was written while the search
@@ -108,55 +274,100 @@ impl State {
     pub fn set_visible_if(
         &mut self,
         section: (i32, i32, i32),
-        visible: HashSet<(i32, i32, i32)>,
+        visible_sections: HashSet<(i32, i32, i32)>,
         epoch_at_start: u64,
     ) {
         self.center = Some(section);
-        self.visible = visible;
+        self.visible_sections = visible_sections;
         self.search_id = self.search_id.wrapping_add(1);
         if EDIT_EPOCH.load(Ordering::Relaxed) == epoch_at_start {
             self.dirty = false;
         }
     }
 
-    /// Adopt a reachable set together with the columns already sent, for the
-    /// join path where the first columns go out before a handle exists.
+    /// Adopt a reachable section set together with the columns already sent,
+    /// for the join path where the first columns go out before a handle
+    /// exists.
     pub fn seed(
         &mut self,
         section: (i32, i32, i32),
-        visible: HashSet<(i32, i32, i32)>,
-        sent: HashMap<(i32, i32), u32>,
+        visible_sections: HashSet<(i32, i32, i32)>,
+        sent: HashMap<(i32, i32), CellMask>,
     ) {
         self.center = Some(section);
         self.dirty = false;
-        self.visible = visible;
-        self.sent = sent;
+        self.visible_sections = visible_sections;
+        self.sent = sent.into_iter().filter(|(_, m)| !m.is_empty()).collect();
         self.search_id = self.search_id.wrapping_add(1);
         self.planned_search = self.search_id;
         self.reveal_pending = false;
     }
 
-    /// The hidden-section mask for a column of the current reachable set.
-    pub fn hidden_for(&self, cx: i32, cz: i32) -> u32 {
-        desired_hidden(&self.visible, cx, cz)
+    /// Adopt the columns of an engine-mode join burst, so `/visibility off`
+    /// knows to re-send them. Engine mode masks individual enclosed ores, so
+    /// every loaded column is a possible re-send and the mask content is
+    /// irrelevant — only "non-empty" is used.
+    pub fn seed_engine(&mut self, section: (i32, i32, i32), columns: &[(i32, i32)]) {
+        self.center = Some(section);
+        self.dirty = false;
+        self.visible_sections.clear();
+        self.sent = columns.iter().map(|&c| (c, CellMask::full())).collect();
+        self.search_id = self.search_id.wrapping_add(1);
+        self.planned_search = self.search_id;
+        self.reveal_pending = false;
     }
 
-    /// Record the mask a column was actually sent with.
-    pub fn record_sent(&mut self, cx: i32, cz: i32, mask: u32) {
-        self.sent.insert((cx, cz), mask);
+    /// The hidden-cell mask for column `(cx, cz)` of the current reachable set.
+    pub fn hidden_for(&self, world: &dyn BlockSource, cx: i32, cz: i32) -> CellMask {
+        let mut mask = column_hidden(world, &self.visible_sections, cx, cz);
+        if let Some(c) = self.own_cell {
+            if c.0 >> 4 == cx && c.2 >> 4 == cz {
+                mask.clear(c.0, c.1, c.2);
+            }
+        }
+        mask
     }
 
-    /// The mask to render column `(cx, cz)` with, updating what the client
-    /// holds.
+    /// Record the cells a column was actually sent with (an empty mask records
+    /// that the client holds the column real).
+    pub fn record_sent(&mut self, cx: i32, cz: i32, hidden: CellMask) {
+        if hidden.is_empty() {
+            self.sent.remove(&(cx, cz));
+        } else {
+            self.sent.insert((cx, cz), hidden);
+        }
+    }
+
+    /// Record an engine-mode column as possibly masked (`masked`) or real.
+    pub fn record_sent_engine(&mut self, cx: i32, cz: i32, masked: bool) {
+        if masked {
+            self.sent.insert((cx, cz), CellMask::full());
+        } else {
+            self.sent.remove(&(cx, cz));
+        }
+    }
+
+    /// The hidden cells to render column `(cx, cz)` with, updating what the
+    /// client holds.
     ///
     /// `bypass` is the caller's current flag. It matters even on the last
     /// column: `/visibility off` re-renders the columns it had masked, and
-    /// recording the zero mask here is what tells the planner the client now
+    /// recording the empty mask here is what tells the planner the client now
     /// holds the real blocks (round-2 N4 / round-3 New-2).
-    pub fn mask_for_render(&mut self, cx: i32, cz: i32, bypass: bool) -> u32 {
-        let mask = if bypass { 0 } else { self.hidden_for(cx, cz) };
-        self.record_sent(cx, cz, mask);
-        mask
+    pub fn mask_for_render(
+        &mut self,
+        world: &dyn BlockSource,
+        cx: i32,
+        cz: i32,
+        bypass: bool,
+    ) -> CellMask {
+        let hidden = if bypass {
+            CellMask::default()
+        } else {
+            self.hidden_for(world, cx, cz)
+        };
+        self.record_sent(cx, cz, hidden.clone());
+        hidden
     }
 
     /// Forget a column the client no longer has.
@@ -173,7 +384,8 @@ impl State {
     pub fn reset(&mut self) {
         self.center = None;
         self.dirty = true;
-        self.visible.clear();
+        self.visible_sections.clear();
+        self.own_cell = None;
         self.sent.clear();
         self.revealed.clear();
         self.search_id = self.search_id.wrapping_add(1);
@@ -182,7 +394,7 @@ impl State {
     }
 
     /// Mark this player's reachable set stale if any of `sections` falls
-    /// inside the view box rooted at their current section.
+    /// inside the view box rooted at their current cell.
     ///
     /// A change outside that box cannot alter the answer: the breadth-first
     /// search never looks outside it. The vertical axis is always in range,
@@ -207,7 +419,7 @@ impl State {
     /// The columns to re-send this tick: newly visible ones, nearest first,
     /// at most `budget`. A plan cut short by the budget is continued on the
     /// next tick rather than dropped.
-    pub fn reveal_step(&mut self, budget: u32) -> Vec<(i32, i32)> {
+    pub fn reveal_step(&mut self, world: &dyn BlockSource, budget: u32) -> Vec<(i32, i32)> {
         if budget == 0 {
             return Vec::new();
         }
@@ -216,7 +428,8 @@ impl State {
         }
         self.planned_search = self.search_id;
         let plan = plan_reveals(
-            &self.visible,
+            world,
+            &self.visible_sections,
             &self.sent,
             self.center.unwrap_or((0, 0, 0)),
             budget,
@@ -227,44 +440,179 @@ impl State {
 
     /// The sections this player can currently see (tests and diagnostics).
     pub fn visible(&self) -> &HashSet<(i32, i32, i32)> {
-        &self.visible
+        &self.visible_sections
     }
 
-    /// The columns sent and their last-known hidden masks (tests).
-    pub fn sent(&self) -> &HashMap<(i32, i32), u32> {
+    /// The columns sent and their last-known hidden-cell masks (tests).
+    pub fn sent(&self) -> &HashMap<(i32, i32), CellMask> {
         &self.sent
     }
 }
 
-/// The shared section-graph cache.
+/// The section-level face graph and the section-local visible-cell mask of one
+/// `16³` section, computed together from one snapshot of its blocks.
+struct SectionCells {
+    /// The section-level face graph the coarse BFS runs on.
+    section: SectionGraph,
+    /// The section-local cells visible through the section's own openings,
+    /// computed once here (world-only, so it is cached and shared): index
+    /// `ix | iz << 2 | iy << 4`. This is what gives cell granularity without a
+    /// global cell search.
+    visible: u128,
+}
+
+/// Index of cell `(ix, iy, iz)` (each local to the section) in
+/// [`SectionCells::graphs`]: `ix | iz << 2 | iy << 4`.
+#[inline]
+fn cell_local_index(ix: i32, iy: i32, iz: i32) -> usize {
+    (ix & 3) as usize | ((iz & 3) as usize) << 2 | ((iy & 7) as usize) << 4
+}
+
+/// The cells of a section visible through its own open faces, as a 128-bit
+/// section-local mask (index `ix | iz << 2 | iy << 4`).
 ///
-/// The graph of a section depends only on the world, so one cache serves every
-/// player. A graph is computed from a snapshot of the blocks *outside* the
-/// lock; it is stored only if the global edit epoch is unchanged between the
+/// Seeded from every non-opaque boundary cell (a cell on a section face whose
+/// face can be seen), flooded through passable (air) cells; every reached
+/// non-opaque cell, and every opaque cell touching one, is visible. A cell
+/// buried inside solid rock, and an interior pocket no opening reaches, stay
+/// hidden. Bounded to the 128 cells of one section — this is the local
+/// computation that replaces the global per-cell breadth-first search.
+fn compute_cell_visible(non_opaque: u128, air: u128) -> u128 {
+    let mut visible = 0u128;
+    let mut stack: Vec<usize> = Vec::new();
+    for i in 0..CELLS_PER_SECTION {
+        if non_opaque >> i & 1 == 0 {
+            continue;
+        }
+        let ix = (i & 3) as i32;
+        let iz = ((i >> 2) & 3) as i32;
+        let iy = ((i >> 4) & 7) as i32;
+        let boundary = ix == 0
+            || ix == CELLS_X - 1
+            || iz == 0
+            || iz == CELLS_Z - 1
+            || iy == 0
+            || iy == CELLS_Y - 1;
+        if !boundary {
+            continue;
+        }
+        visible |= 1u128 << i;
+        if air >> i & 1 != 0 {
+            stack.push(i);
+        }
+    }
+    while let Some(i) = stack.pop() {
+        let ix = (i & 3) as i32;
+        let iz = ((i >> 2) & 3) as i32;
+        let iy = ((i >> 4) & 7) as i32;
+        for (dx, dy, dz) in NEIGHBOURS {
+            let (nx, ny, nz) = (ix + dx, iy + dy, iz + dz);
+            if !(0..CELLS_X).contains(&nx)
+                || !(0..CELLS_Y).contains(&ny)
+                || !(0..CELLS_Z).contains(&nz)
+            {
+                continue;
+            }
+            let n = cell_local_index(nx, ny, nz);
+            if visible >> n & 1 != 0 || non_opaque >> n & 1 == 0 {
+                continue;
+            }
+            visible |= 1u128 << n;
+            if air >> n & 1 != 0 {
+                stack.push(n);
+            }
+        }
+    }
+    // An opaque cell touching a visible cell shows its face, so it is visible
+    // too; a second layer of rock is not.
+    let mut lit = visible;
+    let mut adj = 0u128;
+    while lit != 0 {
+        let i = lit.trailing_zeros() as usize;
+        lit &= lit - 1;
+        let ix = (i & 3) as i32;
+        let iz = ((i >> 2) & 3) as i32;
+        let iy = ((i >> 4) & 7) as i32;
+        for (dx, dy, dz) in NEIGHBOURS {
+            let (nx, ny, nz) = (ix + dx, iy + dy, iz + dz);
+            if !(0..CELLS_X).contains(&nx)
+                || !(0..CELLS_Y).contains(&ny)
+                || !(0..CELLS_Z).contains(&nz)
+            {
+                continue;
+            }
+            adj |= 1u128 << cell_local_index(nx, ny, nz);
+        }
+    }
+    visible | adj
+}
+
+/// Compute a section's face graph and its local visible-cell mask from its
+/// `4096` blocks (indexed `x | z << 4 | y << 8`).
+fn compute_section_cells(blocks: &[BlockStateId; 4096]) -> SectionCells {
+    let section = compute_section_graph(blocks, default_is_opaque, default_is_air);
+    let mut non_opaque = 0u128;
+    let mut air = 0u128;
+    for iy in 0..CELLS_Y {
+        for iz in 0..CELLS_Z {
+            for ix in 0..CELLS_X {
+                let mut any_non_opaque = false;
+                let mut any_air = false;
+                for by in 0..BoxDims::CELL.y as i32 {
+                    for bz in 0..BoxDims::CELL.z as i32 {
+                        for bx in 0..BoxDims::CELL.x as i32 {
+                            let sx = ix * BoxDims::CELL.x as i32 + bx;
+                            let sy = iy * BoxDims::CELL.y as i32 + by;
+                            let sz = iz * BoxDims::CELL.z as i32 + bz;
+                            let block = blocks[(sx | (sz << 4) | (sy << 8)) as usize];
+                            any_non_opaque |= !default_is_opaque(block);
+                            any_air |= default_is_air(block);
+                        }
+                    }
+                }
+                let i = cell_local_index(ix, iy, iz);
+                if any_non_opaque {
+                    non_opaque |= 1u128 << i;
+                }
+                if any_air {
+                    air |= 1u128 << i;
+                }
+            }
+        }
+    }
+    let visible = compute_cell_visible(non_opaque, air);
+    SectionCells { section, visible }
+}
+
+/// The shared section-cell-graph cache.
+///
+/// The cell graphs of a section depend only on the world, so one cache serves
+/// every player. They are computed from a snapshot of the blocks *outside* the
+/// lock and stored only if the global edit epoch is unchanged between the
 /// snapshot and the store, so a write that lands in that window discards the
-/// stale graph (finding 4).
+/// stale entry (finding 4).
 ///
 /// The epoch is global and monotonic rather than a per-section counter that is
 /// reset on store: a per-section reset lets an in-flight compute that read the
 /// reset value be re-admitted after a newer graph is stored, poisoning the
 /// cache with a pre-write graph (round-3 New-1). A global version that only
 /// ever increases cannot be re-created, and it removes the per-section map
-/// entirely, so there is nothing to grow without bound (round-2 N3).
+/// entirely (round-2 N3).
 #[derive(Default)]
 struct GraphCache {
-    graphs: HashMap<(i32, i32, i32), SectionGraph>,
+    sections: HashMap<(i32, i32, i32), Arc<SectionCells>>,
 }
 
-/// Store `graph` for `key` only if no write landed since `computed_at` was
+/// Store `cells` for `key` only if no write landed since `computed_at` was
 /// read.
-fn store_graph(
+fn store_section_cells(
     cache: &mut GraphCache,
     key: (i32, i32, i32),
-    graph: SectionGraph,
+    cells: Arc<SectionCells>,
     computed_at: u64,
 ) {
     if EDIT_EPOCH.load(Ordering::Relaxed) == computed_at {
-        cache.graphs.insert(key, graph);
+        cache.sections.insert(key, cells);
     }
 }
 
@@ -283,9 +631,9 @@ fn cache() -> &'static Mutex<GraphCache> {
 /// (round-2 N2). It is a single relaxed increment — no lock, no allocation.
 static EDIT_EPOCH: AtomicU64 = AtomicU64::new(0);
 
-/// Drop `key`'s cached graph and advance the epoch.
+/// Drop `key`'s cached cell graphs and advance the epoch.
 fn invalidate_section(cache: &mut GraphCache, key: (i32, i32, i32)) {
-    cache.graphs.remove(&key);
+    cache.sections.remove(&key);
     EDIT_EPOCH.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -320,11 +668,14 @@ pub fn invalidate_block(x: i32, y: i32, z: i32) {
     if !crate::anti_xray_enabled() {
         return;
     }
-    match crate::anti_xray_config().mode {
-        AntiXrayMode::Culling => record_invalidation((x >> 4, y >> 4, z >> 4)),
-        AntiXrayMode::Engine => {
-            dirty_blocks().lock().unwrap().insert((x, y, z));
-        }
+    // Always evict the section's cached cell graphs and record the section for
+    // the coarse culling pass, regardless of the global mode: a player may hold
+    // a per-player `/spectate xray <margin>` override (effective mode culling)
+    // while the server runs `engine`, so their cell set must be invalidated by
+    // a block write too. The write path is not hot when anti-xray is on.
+    record_invalidation((x >> 4, y >> 4, z >> 4));
+    if crate::anti_xray_config().mode == AntiXrayMode::Engine {
+        dirty_blocks().lock().unwrap().insert((x, y, z));
     }
 }
 
@@ -337,17 +688,18 @@ fn record_invalidation(key: (i32, i32, i32)) {
 /// Drop every cached graph. Used by tests to start from a clean cache.
 #[cfg(test)]
 pub fn invalidate_all() {
-    cache().lock().unwrap().graphs.clear();
+    cache().lock().unwrap().sections.clear();
     dirty_sections().lock().unwrap().clear();
     EDIT_EPOCH.fetch_add(1, Ordering::Relaxed);
 }
 
-/// The section graph for `c`, computed and cached on first ask.
+/// The `4×4×2` cell graphs and section graph of section `s`, computed and
+/// cached on first ask.
 ///
 /// `None` outside the world's vertical range, which stops the search at the
 /// floor and ceiling.
-fn graph(world: &dyn BlockSource, c: (i32, i32, i32)) -> Option<SectionGraph> {
-    if !(SECTION_MIN_Y..=SECTION_MAX_Y).contains(&c.1) {
+fn section_cells(world: &dyn BlockSource, s: (i32, i32, i32)) -> Option<Arc<SectionCells>> {
+    if !(SECTION_MIN_Y..=SECTION_MAX_Y).contains(&s.1) {
         return None;
     }
     // Read the epoch under the lock, at the same moment the miss is observed,
@@ -356,19 +708,32 @@ fn graph(world: &dyn BlockSource, c: (i32, i32, i32)) -> Option<SectionGraph> {
     // and is caught at the store (finding 4).
     let computed_at = {
         let cc = cache().lock().unwrap();
-        if let Some(g) = cc.graphs.get(&c) {
-            return Some(*g);
+        if let Some(cells) = cc.sections.get(&s) {
+            return Some(cells.clone());
         }
         EDIT_EPOCH.load(Ordering::Relaxed)
     };
     let mut blocks = [BlockStateId::AIR; 4096];
-    world.copy_section(c.0, c.1, c.2, &mut blocks);
-    let g = compute_section_graph(&blocks, default_is_opaque, default_is_air);
-    store_graph(&mut cache().lock().unwrap(), c, g, computed_at);
-    Some(g)
+    world.copy_section(s.0, s.1, s.2, &mut blocks);
+    let cells = Arc::new(compute_section_cells(&blocks));
+    store_section_cells(&mut cache().lock().unwrap(), s, cells.clone(), computed_at);
+    Some(cells)
 }
 
-/// The section a player's feet are in.
+/// The `4×4×2` cell a player's feet are in.
+pub fn cell_of_pos(pos: crate::players::PosLook) -> (i32, i32, i32) {
+    cell_of(
+        pos.x.floor() as i32,
+        pos.y.floor() as i32,
+        pos.z.floor() as i32,
+    )
+}
+
+/// The `16³` section a player's feet are in. The reachable set is keyed on
+/// this: the coarse section search is re-run when the player crosses a section
+/// border, not on every `4×4×2` cell, so a sub-section move reuses the
+/// previous answer. Cell granularity is applied afterwards, per visible
+/// section, by [`column_hidden`].
 pub fn section_of(pos: crate::players::PosLook) -> (i32, i32, i32) {
     (
         (pos.x.floor() as i32) >> 4,
@@ -392,8 +757,14 @@ pub fn visible_from(
     )
 }
 
-/// The reachable section set with an explicit margin, for the per-player
+/// The reachable **section** set with an explicit margin, for the per-player
 /// anti-xray override (`/spectate xray <level>`).
+///
+/// This is the cheap, coarse search: sections, not `4×4×2` cells, so
+/// `view_distance` is a view distance in chunks/sections as it has always
+/// been. Cell granularity is applied later, per visible section, by
+/// [`column_hidden`] from each section's own cached cell graph — never by a
+/// global cell search, which would be ~128× the cost.
 pub fn visible_from_margin(
     world: &dyn BlockSource,
     pos: (f64, f64, f64),
@@ -401,13 +772,23 @@ pub fn visible_from_margin(
     margin_blocks: i32,
 ) -> HashSet<(i32, i32, i32)> {
     let margin = margin_blocks as f64;
+    // One shared lookup per search: the BFS asks for the same section many
+    // times, so memoise the (small, `Copy`) section graph locally and touch
+    // the process-wide cache — a lock and an atomic refcount — only on the
+    // first ask. This is what keeps the all-air worst case in the low
+    // milliseconds instead of tens.
+    let mut memo: HashMap<(i32, i32, i32), Option<SectionGraph>> = HashMap::new();
     reachable_sections(
         pos,
         margin,
         view_distance,
         SECTION_MIN_Y,
         SECTION_MAX_Y,
-        |x, y, z| graph(world, (x, y, z)),
+        |x, y, z| {
+            *memo
+                .entry((x, y, z))
+                .or_insert_with(|| section_cells(world, (x, y, z)).map(|cells| cells.section))
+        },
     )
 }
 
@@ -415,7 +796,13 @@ pub fn visible_from_margin(
 /// an in-view graph changed since the last search.
 fn ensure_visible(handle: &PlayerHandle, world: &dyn BlockSource) {
     let pos = handle.pos();
+    let cell = cell_of_pos(pos);
     let section = section_of(pos);
+    // Track the player's exact cell every call, before the early return: a
+    // move within the same section keeps the section set fresh, but the own
+    // cell changes, and it must never be masked (or the client would show the
+    // player encased in stone for a frame).
+    handle.visibility().set_own_cell(cell);
     if handle.visibility().is_fresh(section) {
         return;
     }
@@ -474,58 +861,38 @@ pub fn player_status(handle: &PlayerHandle) -> String {
     match effective_mode(handle) {
         AntiXrayMode::Engine => format!("anti-xray: engine, {hidden} hidden block(s)"),
         AntiXrayMode::Culling => format!(
-            "anti-xray: culling, margin {} blocks, {hidden} hidden block(s)",
+            "anti-xray: culling (cells 4x4x2), margin {} blocks, {hidden} hidden block(s)",
             effective_margin(handle)
         ),
     }
 }
 
-/// Which sections of column `(cx, cz)` are hidden for this visible set.
+/// The hidden `4×4×2` cells of column `(cx, cz)` for a reachable **section**
+/// set.
 ///
-/// Bit `i` set means section `SECTION_MIN_Y + i` is not visible.
-pub fn desired_hidden(visible: &HashSet<(i32, i32, i32)>, cx: i32, cz: i32) -> u32 {
-    let mut mask = 0u32;
+/// A section not in `visible_sections` is hidden whole (every cell `fill`). A
+/// visible section contributes its own cached per-cell visible mask
+/// ([`SectionCells::visible`]), so a partly-visible section — the surface, a
+/// wall the player stands next to — is masked cell by cell. This is the whole
+/// cell-granular path, and it is bounded: it iterates the column's sections,
+/// never a global cell search.
+pub fn column_hidden(
+    world: &dyn BlockSource,
+    visible_sections: &HashSet<(i32, i32, i32)>,
+    cx: i32,
+    cz: i32,
+) -> CellMask {
+    let mut mask = CellMask::full();
     for i in 0..SECTION_COUNT {
         let cy = SECTION_MIN_Y + i as i32;
-        if !visible.contains(&(cx, cy, cz)) {
-            mask |= 1 << i;
+        if !visible_sections.contains(&(cx, cy, cz)) {
+            continue;
+        }
+        if let Some(cells) = section_cells(world, (cx, cy, cz)) {
+            mask.reveal_section(cx, cy, cz, cells.visible);
         }
     }
     mask
-}
-
-/// Which `4×4×2` cells of column `(cx, cz)` are hidden for this visible set.
-///
-/// `dims` is the cell size ([`BoxDims::CELL`]); the cells of the column are
-/// `(cx * 16 / dims.x + i, cy, cz * 16 / dims.z + j)` for local `i`/`j` and
-/// every world `cy` in the vertical cell range, and a cell not in `visible` is
-/// hidden. This is the pure helper the wiring step (AX3c) uses to turn a
-/// player's reachable cell set into a per-column mask; for a column that is
-/// wholly visible it returns an empty set.
-pub fn desired_hidden_cells(
-    visible: &HashSet<(i32, i32, i32)>,
-    dims: BoxDims,
-    cx: i32,
-    cz: i32,
-) -> HashSet<(i32, i32, i32)> {
-    let nx = SECTION_SIZE as usize / dims.x;
-    let nz = SECTION_SIZE as usize / dims.z;
-    let y_min = (SECTION_MIN_Y * SECTION_SIZE).div_euclid(dims.y as i32);
-    let y_max = (SECTION_MAX_Y * SECTION_SIZE + SECTION_SIZE - 1).div_euclid(dims.y as i32);
-    let base_x = cx * nx as i32;
-    let base_z = cz * nz as i32;
-    let mut hidden = HashSet::new();
-    for cy in y_min..=y_max {
-        for i in 0..nx {
-            for j in 0..nz {
-                let cell = (base_x + i as i32, cy, base_z + j as i32);
-                if !visible.contains(&cell) {
-                    hidden.insert(cell);
-                }
-            }
-        }
-    }
-    hidden
 }
 
 /// The fill block for this player.
@@ -549,9 +916,11 @@ pub fn fill_for_mode(mode: GameMode) -> BlockStateId {
 pub enum ColumnMask {
     /// Send the column as it is.
     None,
-    /// `culling`: encode these sections (bit `i` is `SECTION_MIN_Y + i`) as
-    /// `fill`.
-    Sections { hidden: u32, fill: BlockStateId },
+    /// `culling`: encode these hidden `4×4×2` cells as `fill`.
+    Cells {
+        hidden: Box<CellMask>,
+        fill: BlockStateId,
+    },
     /// `engine`: wrap the column in an [`EngineColumn`] so enclosed hidden
     /// blocks become their surrounding block.
     Engine,
@@ -574,12 +943,12 @@ pub fn mask_for_render(
             if !bypass {
                 ensure_visible(handle, world);
             }
-            let hidden = handle.visibility().mask_for_render(cx, cz, bypass);
-            if hidden == 0 {
+            let hidden = handle.visibility().mask_for_render(world, cx, cz, bypass);
+            if hidden.is_empty() {
                 ColumnMask::None
             } else {
-                ColumnMask::Sections {
-                    hidden,
+                ColumnMask::Cells {
+                    hidden: Box::new(hidden),
                     fill: fill_for(handle),
                 }
             }
@@ -588,7 +957,7 @@ pub fn mask_for_render(
         // lookup); a bypassed player gets the plain view and records nothing.
         AntiXrayMode::Engine => {
             if bypass {
-                handle.visibility().record_sent(cx, cz, 0);
+                handle.visibility().record_sent_engine(cx, cz, false);
                 ColumnMask::None
             } else {
                 ColumnMask::Engine
@@ -600,7 +969,7 @@ pub fn mask_for_render(
 /// Record the mask an engine-mode column was sent with, so `/visibility off`
 /// knows to re-send it.
 pub fn record_engine(handle: &PlayerHandle, cx: i32, cz: i32, masked: bool) {
-    handle.visibility().record_sent(cx, cz, masked as u32);
+    handle.visibility().record_sent_engine(cx, cz, masked);
 }
 
 /// Mask a single block change for a player, so a server-side write of a hidden
@@ -634,7 +1003,7 @@ pub fn mask_block(
             }
         }
         AntiXrayMode::Culling => {
-            if section_hidden(handle, world, x >> 4, y >> 4, z >> 4) {
+            if cell_hidden(handle, world, x, y, z) {
                 fill_for(handle)
             } else {
                 block
@@ -643,16 +1012,26 @@ pub fn mask_block(
     }
 }
 
-/// Whether section `(cx, cy, cz)` is hidden from this player in culling mode.
-fn section_hidden(
-    handle: &PlayerHandle,
-    world: &dyn BlockSource,
-    cx: i32,
-    cy: i32,
-    cz: i32,
-) -> bool {
+/// Whether the `4×4×2` cell holding `(x, y, z)` is hidden from this player in
+/// culling mode.
+fn cell_hidden(handle: &PlayerHandle, world: &dyn BlockSource, x: i32, y: i32, z: i32) -> bool {
+    if cell_of(x, y, z) == cell_of_pos(handle.pos()) {
+        return false;
+    }
     ensure_visible(handle, world);
-    !handle.visibility().visible().contains(&(cx, cy, cz))
+    let section = (x >> 4, y >> 4, z >> 4);
+    if !handle.visibility().visible().contains(&section) {
+        return true;
+    }
+    // The section is reachable; its own cached mask says which cells of it the
+    // player can actually see.
+    match section_cells(world, section) {
+        Some(cells) => {
+            let local = cell_local_index((x >> 2) & 3, (y >> 1) & 7, (z >> 2) & 3);
+            cells.visible & (1u128 << local) == 0
+        }
+        None => true,
+    }
 }
 
 /// Forget a column the client no longer has.
@@ -660,10 +1039,10 @@ pub fn forget_column(handle: &PlayerHandle, cx: i32, cz: i32) {
     handle.visibility().forget(cx, cz);
 }
 
-/// The sections whose mask is currently non-zero, for `/visibility off`.
-fn masked_columns(sent: &HashMap<(i32, i32), u32>) -> Vec<(i32, i32)> {
+/// The columns whose cell mask is currently non-empty, for `/visibility off`.
+fn masked_columns(sent: &HashMap<(i32, i32), CellMask>) -> Vec<(i32, i32)> {
     sent.iter()
-        .filter(|(_, mask)| **mask != 0)
+        .filter(|(_, mask)| !mask.is_empty())
         .map(|(&column, _)| column)
         .collect()
 }
@@ -671,8 +1050,8 @@ fn masked_columns(sent: &HashMap<(i32, i32), u32>) -> Vec<(i32, i32)> {
 /// Re-send every column this client currently holds masked, so `/visibility
 /// off` shows the real blocks without waiting for columns to re-stream.
 ///
-/// The caller sets `bypass` first: with it on, re-encoding a column records a
-/// zero mask, so the client ends up with every section real and the reveal
+/// The caller sets `bypass` first: with it on, re-encoding a column records an
+/// empty mask, so the client ends up with every cell real and the reveal
 /// planner has nothing left to do.
 pub fn reveal_all(handle: &PlayerHandle, world: &dyn BlockSource) {
     let columns = masked_columns(handle.visibility().sent());
@@ -704,25 +1083,35 @@ pub fn reset_columns(handle: &PlayerHandle) {
 
 /// Columns to re-send (reveal) this pass, nearest first, capped at `budget`.
 ///
-/// A reveal is a section whose bit is set in what the client holds but clear
-/// in the current visible set. Sections that went the other way (visible,
+/// A reveal is a column that holds a cell the client currently has as `fill`
+/// but that is visible now. Columns where a cell went the other way (visible,
 /// then hidden) are left as they are: the client has already seen them, and
 /// re-hiding would cost a full column re-send for no gain.
+///
+/// The desired mask is recomputed per sent column from the coarse section set
+/// and each visible section's cached cell graph ([`column_hidden`]); columns
+/// the client holds entirely real are skipped, so a settled view costs only
+/// the columns that were ever masked.
 pub fn plan_reveals(
-    visible: &HashSet<(i32, i32, i32)>,
-    sent: &HashMap<(i32, i32), u32>,
+    world: &dyn BlockSource,
+    visible_sections: &HashSet<(i32, i32, i32)>,
+    sent: &HashMap<(i32, i32), CellMask>,
     player_section: (i32, i32, i32),
     budget: u32,
 ) -> Vec<(i32, i32)> {
+    if budget == 0 {
+        return Vec::new();
+    }
     let (px, pz) = (player_section.0, player_section.2);
     let mut candidates: Vec<((i32, i32), i64)> = Vec::new();
-    for (&(cx, cz), &old) in sent {
-        let now = desired_hidden(visible, cx, cz);
-        if old & !now != 0 {
-            let dx = (cx - px) as i64;
-            let dz = (cz - pz) as i64;
-            candidates.push(((cx, cz), dx * dx + dz * dz));
+    for (&(cx, cz), held) in sent {
+        let desired = column_hidden(world, visible_sections, cx, cz);
+        if !held.has_extra(&desired) {
+            continue;
         }
+        let dx = (cx - px) as i64;
+        let dz = (cz - pz) as i64;
+        candidates.push(((cx, cz), dx * dx + dz * dz));
     }
     candidates.sort_by_key(|&(_, distance)| distance);
     candidates.truncate(budget as usize);
@@ -731,9 +1120,12 @@ pub fn plan_reveals(
 
 /// One per-player pass, run from the game tick.
 ///
-/// `culling`: a search only reruns when the player crosses a section border or
-/// an in-view graph changed; a reveal that hit the budget keeps the plan
-/// pending so the rest of the backlog goes out on following ticks.
+/// `culling`: a search only reruns when the player crosses a `16³` section
+/// border or an in-view graph changed; the search is the cheap section BFS,
+/// and the per-cell mask is derived from the cached cell graphs per column
+/// ([`column_hidden`]), so the tick never runs a global cell search. A reveal
+/// that hit the budget keeps the plan pending so the rest of the backlog goes
+/// out on following ticks.
 ///
 /// `engine`: a block written since the last tick may expose the ore next to
 /// it, so the players whose view covers it are sent that ore for real.
@@ -786,7 +1178,9 @@ fn culling_tick(players: &[Arc<PlayerHandle>], world: &dyn BlockSource) {
             continue;
         }
         ensure_visible(player, world);
-        let plan = player.visibility().reveal_step(cfg.reveal_budget_per_tick);
+        let plan = player
+            .visibility()
+            .reveal_step(world, cfg.reveal_budget_per_tick);
         for (cx, cz) in plan {
             player.emit(&ServerEvent::ChunkColumn { cx, cz }, world);
         }
@@ -1077,23 +1471,6 @@ fn surrounding_block<S: BlockSource + ?Sized>(
         .unwrap_or(STONE)
 }
 
-/// `(nx, ny, nz)`: how many `dims`-sized cells fit along each axis of a `16³`
-/// section.
-#[inline]
-fn cell_grid(dims: BoxDims) -> (usize, usize, usize) {
-    (
-        SECTION_SIZE as usize / dims.x,
-        SECTION_SIZE as usize / dims.y,
-        SECTION_SIZE as usize / dims.z,
-    )
-}
-
-/// The world `4×4×2` cell holding block `(x, y, z)`.
-#[inline]
-fn cell_of(x: i32, y: i32, z: i32) -> (i32, i32, i32) {
-    (x >> 2, y >> 1, z >> 2)
-}
-
 /// A [`BlockSource`] that reports a hidden `4×4×2` cell as a single repeated
 /// block.
 ///
@@ -1104,14 +1481,14 @@ fn cell_of(x: i32, y: i32, z: i32) -> (i32, i32, i32) {
 /// blocks or wholly `fill`, never split, so a partially-visible `16³` section
 /// no longer leaks the ores in its hidden cells.
 ///
-/// The mask is a per-column set of hidden cells ([`desired_hidden_cells`]),
-/// which the wiring step will build from the player's reachable cell set. The
-/// legacy section bitmask constructor is kept until then.
+/// The mask is a per-column [`CellMask`] built by [`column_hidden`] from the
+/// player's reachable section set; the mask is a plain `[u64; N]`, so no
+/// `HashSet` is built or walked on the send path.
 pub struct MaskedColumn<'a> {
     inner: &'a dyn BlockSource,
     cx: i32,
     cz: i32,
-    hidden_cells: HashSet<(i32, i32, i32)>,
+    hidden: CellMask,
     fill: BlockStateId,
 }
 
@@ -1119,10 +1496,10 @@ impl<'a> MaskedColumn<'a> {
     /// Mask `hidden` (bit `i` is section `SECTION_MIN_Y + i`) of column
     /// `(cx, cz)` with `fill`.
     ///
-    /// The legacy whole-section mask: each hidden section is expanded to its
-    /// `4×4×2` cells so the encoder sees the same per-cell mask as
-    /// [`Self::from_cells`]. Kept while the wiring step still hands over
-    /// section masks.
+    /// The section-level mask: each hidden section is expanded to its
+    /// `4×4×2` cells. The wired send path uses [`Self::from_mask`] with the
+    /// per-cell mask from [`column_hidden`]; this remains for callers (and the
+    /// size benchmark) that hold a section mask.
     pub fn new(
         inner: &'a dyn BlockSource,
         cx: i32,
@@ -1130,54 +1507,49 @@ impl<'a> MaskedColumn<'a> {
         hidden: u32,
         fill: BlockStateId,
     ) -> Self {
-        let (nx, ny, nz) = cell_grid(BoxDims::CELL);
-        let mut hidden_cells = HashSet::new();
+        let mut mask = CellMask::default();
         for i in 0..SECTION_COUNT {
             if hidden & (1 << i) == 0 {
                 continue;
             }
-            let cy = SECTION_MIN_Y + i as i32;
-            let base_x = cx * nx as i32;
-            let base_y = cy * ny as i32;
-            let base_z = cz * nz as i32;
-            for iy in 0..ny {
-                for ix in 0..nx {
-                    for iz in 0..nz {
-                        hidden_cells.insert((
-                            base_x + ix as i32,
-                            base_y + iy as i32,
-                            base_z + iz as i32,
-                        ));
-                    }
-                }
-            }
+            mask.hide_section(cx, SECTION_MIN_Y + i as i32, cz);
         }
         Self {
             inner,
             cx,
             cz,
-            hidden_cells,
+            hidden: mask,
             fill,
         }
     }
 
-    /// Mask exactly the given world `4×4×2` cells of column `(cx, cz)` with
-    /// `fill`. Cells of other columns are ignored, so only the column's mask
-    /// matters.
-    pub fn from_cells(
+    /// Mask exactly the given per-column cells of `(cx, cz)` with `fill`.
+    pub fn from_mask(
         inner: &'a dyn BlockSource,
         cx: i32,
         cz: i32,
-        hidden_cells: HashSet<(i32, i32, i32)>,
+        hidden: CellMask,
         fill: BlockStateId,
     ) -> Self {
         Self {
             inner,
             cx,
             cz,
-            hidden_cells,
+            hidden,
             fill,
         }
+    }
+
+    /// Mask the given world `4×4×2` cells of column `(cx, cz)` with `fill`
+    /// (a convenience for tests).
+    pub fn from_cells(
+        inner: &'a dyn BlockSource,
+        cx: i32,
+        cz: i32,
+        hidden_cells: impl IntoIterator<Item = (i32, i32, i32)>,
+        fill: BlockStateId,
+    ) -> Self {
+        Self::from_mask(inner, cx, cz, CellMask::from_cells(hidden_cells), fill)
     }
 
     /// Whether the `4×4×2` cell holding `(x, y, z)` is hidden.
@@ -1186,7 +1558,8 @@ impl<'a> MaskedColumn<'a> {
         if x >> 4 != self.cx || z >> 4 != self.cz {
             return false;
         }
-        self.hidden_cells.contains(&cell_of(x, y, z))
+        let (cx, cy, cz) = cell_of(x, y, z);
+        self.hidden.contains(cx, cy, cz)
     }
 }
 
@@ -1199,15 +1572,15 @@ impl BlockSource for MaskedColumn<'_> {
     }
 
     fn copy_section(&self, cx: i32, cy: i32, cz: i32, out: &mut [BlockStateId; 4096]) {
-        if cx != self.cx || cz != self.cz || self.hidden_cells.is_empty() {
+        if cx != self.cx || cz != self.cz || self.hidden.is_empty() {
             self.inner.copy_section(cx, cy, cz, out);
             return;
         }
         let dims = BoxDims::CELL;
-        let (nx, ny, nz) = cell_grid(dims);
-        let base_x = cx * nx as i32;
-        let base_y = cy * ny as i32;
-        let base_z = cz * nz as i32;
+        let (nx, ny, nz) = (CELLS_X, CELLS_Y, CELLS_Z);
+        let base_x = cx * nx;
+        let base_y = cy * ny;
+        let base_z = cz * nz;
         // Count the hidden cells of this section first: a wholly-hidden
         // section is filled without reading the world at all, and a wholly-
         // visible one is just the world copy.
@@ -1215,17 +1588,13 @@ impl BlockSource for MaskedColumn<'_> {
         for iy in 0..ny {
             for ix in 0..nx {
                 for iz in 0..nz {
-                    if self.hidden_cells.contains(&(
-                        base_x + ix as i32,
-                        base_y + iy as i32,
-                        base_z + iz as i32,
-                    )) {
+                    if self.hidden.contains(base_x + ix, base_y + iy, base_z + iz) {
                         hidden += 1;
                     }
                 }
             }
         }
-        if hidden == nx * ny * nz {
+        if hidden == (nx * ny * nz) as usize {
             out.fill(self.fill);
             return;
         }
@@ -1237,20 +1606,16 @@ impl BlockSource for MaskedColumn<'_> {
         for iy in 0..ny {
             for ix in 0..nx {
                 for iz in 0..nz {
-                    if !self.hidden_cells.contains(&(
-                        base_x + ix as i32,
-                        base_y + iy as i32,
-                        base_z + iz as i32,
-                    )) {
+                    if !self.hidden.contains(base_x + ix, base_y + iy, base_z + iz) {
                         continue;
                     }
-                    for by in 0..dims.y {
-                        let y = iy * dims.y + by;
-                        for bz in 0..dims.z {
-                            let z = iz * dims.z + bz;
-                            for bx in 0..dims.x {
-                                let x = ix * dims.x + bx;
-                                out[x | (z << 4) | (y << 8)] = self.fill;
+                    for by in 0..dims.y as i32 {
+                        let y = iy * dims.y as i32 + by;
+                        for bz in 0..dims.z as i32 {
+                            let z = iz * dims.z as i32 + bz;
+                            for bx in 0..dims.x as i32 {
+                                let x = ix * dims.x as i32 + bx;
+                                out[(x | (z << 4) | (y << 8)) as usize] = self.fill;
                             }
                         }
                     }
@@ -1281,23 +1646,49 @@ mod tests {
         }
     }
 
-    fn visible(sections: &[(i32, i32, i32)]) -> HashSet<(i32, i32, i32)> {
-        sections.iter().copied().collect()
+    /// A world that is air everywhere, so every section is fully clear and
+    /// every cell of it visible.
+    struct AllAir;
+    impl BlockSource for AllAir {
+        fn block_at(&self, _x: i32, _y: i32, _z: i32) -> BlockStateId {
+            BlockStateId::AIR
+        }
     }
 
-    /// A state whose reachable set is every section of `columns`.
-    fn state_showing(columns: &[(i32, i32)], search_id: u64) -> State {
-        let mut vis = HashSet::new();
-        for &(cx, cz) in columns {
-            for i in 0..SECTION_COUNT {
-                vis.insert((cx, SECTION_MIN_Y + i as i32, cz));
+    /// A world with stone below `GROUND` and air above, so the section that
+    /// spans `GROUND` is only partly visible — the case cell culling fixes.
+    struct GroundWorld {
+        ground: i32,
+    }
+    impl BlockSource for GroundWorld {
+        fn block_at(&self, _x: i32, y: i32, _z: i32) -> BlockStateId {
+            if y < self.ground {
+                STONE
+            } else {
+                BlockStateId::AIR
             }
         }
+    }
+
+    /// Every section of `columns`, at every world height.
+    fn all_sections(columns: &[(i32, i32)]) -> HashSet<(i32, i32, i32)> {
+        let mut vis = HashSet::new();
+        for &(cx, cz) in columns {
+            for cy in SECTION_MIN_Y..=SECTION_MAX_Y {
+                vis.insert((cx, cy, cz));
+            }
+        }
+        vis
+    }
+
+    /// A state whose coarse reachable set is every section of `columns`.
+    fn state_showing(columns: &[(i32, i32)], search_id: u64) -> State {
         State {
             center: Some((0, 0, 0)),
             dirty: false,
             search_id,
-            visible: vis,
+            visible_sections: all_sections(columns),
+            own_cell: None,
             sent: HashMap::new(),
             planned_search: search_id,
             reveal_pending: false,
@@ -1306,54 +1697,67 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_fully_visible_column_has_no_hidden_sections() {
-        let all: Vec<(i32, i32, i32)> = (0..SECTION_COUNT)
-            .map(|i| (0, SECTION_MIN_Y + i as i32, 0))
-            .collect();
-        assert_eq!(desired_hidden(&visible(&all), 0, 0), 0);
+    /// Mark every cell of `(cx, cz)` hidden in what the client holds.
+    fn sent_full(st: &mut State, cx: i32, cz: i32) {
+        st.sent.insert((cx, cz), CellMask::full());
     }
 
     #[test]
-    fn a_sealed_cave_section_is_hidden() {
-        // Everything visible except the sections at y=-2 and y=-1 (a cave
-        // behind rock), which must stay hidden. Index `i` is `cy =
-        // SECTION_MIN_Y + i`, so y=-2 is 2 and y=-1 is 3.
-        let all: Vec<(i32, i32, i32)> = (0..SECTION_COUNT)
-            .filter_map(|i| {
-                let cy = SECTION_MIN_Y + i as i32;
-                (!(-2..=-1).contains(&cy)).then_some((0, cy, 0))
-            })
-            .collect();
-        let mask = desired_hidden(&visible(&all), 0, 0);
-        assert_eq!(mask, (1 << 2) | (1 << 3));
+    fn a_fully_visible_column_has_no_hidden_cells() {
+        let _guard = global_test_lock();
+        invalidate_all();
+        let hidden = column_hidden(&AllAir, &all_sections(&[(0, 0)]), 0, 0);
+        assert!(hidden.is_empty());
+    }
+
+    #[test]
+    fn a_lone_sealed_section_of_a_column_is_hidden_whole() {
+        // A column whose only visible section is one of them: every other
+        // section's cells stay hidden. The section-level rule that a fully
+        // opaque section is never visible is what keeps this from leaking.
+        let _guard = global_test_lock();
+        invalidate_all();
+        let mut visible = HashSet::new();
+        visible.insert((0, 4, 0));
+        let hidden = column_hidden(&GroundWorld { ground: 8 }, &visible, 0, 0);
+        // The visible section's sky cells are real; everything else stone.
+        assert!(
+            !hidden.contains(0, 35, 0),
+            "the visible section's air is real"
+        );
+        assert!(
+            hidden.contains(0, -30, 0),
+            "a section not in the set is hidden"
+        );
     }
 
     #[test]
     fn a_reveal_plan_cut_short_by_the_budget_continues_next_tick() {
-        // Every column is sent fully hidden and every section is now visible:
+        // Every column is sent fully hidden and every cell is now visible:
         // six columns, two per tick. All six must go out across ticks, not
         // just the first two (finding 1).
+        let _guard = global_test_lock();
+        invalidate_all();
         let columns = [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0)];
         let mut st = state_showing(&columns, 1);
         // The masks are stale relative to the fresh reachable set, so a plan
         // is due (the planner has not run for this search id yet).
         st.planned_search = 0;
         for &col in &columns {
-            st.record_sent(col.0, col.1, u32::MAX);
+            sent_full(&mut st, col.0, col.1);
         }
         let mut revealed = Vec::new();
         let mut ticks = 0;
         loop {
-            let plan = st.reveal_step(2);
+            let plan = st.reveal_step(&AllAir, 2);
             if plan.is_empty() {
                 break;
             }
             ticks += 1;
             assert!(ticks < 100, "the reveal must make progress");
             for (cx, cz) in plan {
-                let mask = st.hidden_for(cx, cz);
-                st.record_sent(cx, cz, mask);
+                let hidden = st.hidden_for(&AllAir, cx, cz);
+                st.record_sent(cx, cz, hidden);
                 revealed.push((cx, cz));
             }
         }
@@ -1366,15 +1770,15 @@ mod tests {
 
     #[test]
     fn the_reveal_plan_is_nearest_first_and_budgeted() {
-        let all: Vec<(i32, i32, i32)> = (0..SECTION_COUNT)
-            .map(|i| (0, SECTION_MIN_Y + i as i32, 0))
-            .collect();
-        let vis = visible(&all);
+        let _guard = global_test_lock();
+        invalidate_all();
+        let columns = [(0, 0), (1, 0), (2, 0), (5, 0), (10, 0)];
+        let vis = all_sections(&columns);
         let mut sent = HashMap::new();
-        for (cx, cz) in [(0, 0), (1, 0), (5, 0), (2, 0), (10, 0)] {
-            sent.insert((cx, cz), u32::MAX);
+        for &col in &columns {
+            sent.insert(col, CellMask::full());
         }
-        let plan = plan_reveals(&vis, &sent, (0, 0, 0), 2);
+        let plan = plan_reveals(&AllAir, &vis, &sent, (0, 0, 0), 2);
         assert_eq!(plan.len(), 2);
         assert_eq!(plan[0], (0, 0));
         assert!(plan.contains(&(1, 0)), "nearest first: {plan:?}");
@@ -1382,26 +1786,28 @@ mod tests {
 
     #[test]
     fn no_reveal_when_nothing_became_visible() {
-        let all: Vec<(i32, i32, i32)> = (0..SECTION_COUNT)
-            .map(|i| (0, SECTION_MIN_Y + i as i32, 0))
-            .collect();
-        let vis = visible(&all);
+        let _guard = global_test_lock();
+        invalidate_all();
+        let columns = [(0, 0), (1, 0)];
+        let vis = all_sections(&columns);
         let mut sent = HashMap::new();
-        sent.insert((0, 0), 0);
-        sent.insert((1, 0), 0);
-        assert!(plan_reveals(&vis, &sent, (0, 0, 0), 32).is_empty());
+        sent.insert((0, 0), CellMask::default());
+        sent.insert((1, 0), CellMask::default());
+        assert!(plan_reveals(&AllAir, &vis, &sent, (0, 0, 0), 32).is_empty());
     }
 
     #[test]
     fn an_idle_player_does_not_replan() {
+        let _guard = global_test_lock();
+        invalidate_all();
         let columns = [(0, 0), (1, 0)];
         let mut st = state_showing(&columns, 7);
         for &col in &columns {
-            st.record_sent(col.0, col.1, 0);
+            st.sent.insert(col, CellMask::default());
         }
-        assert!(st.reveal_step(32).is_empty());
+        assert!(st.reveal_step(&AllAir, 32).is_empty());
         // Still nothing a second time.
-        assert!(st.reveal_step(32).is_empty());
+        assert!(st.reveal_step(&AllAir, 32).is_empty());
     }
 
     #[test]
@@ -1413,12 +1819,12 @@ mod tests {
             planned_search: 5,
             ..Default::default()
         };
-        st.record_sent(0, 0, u32::MAX);
-        st.record_sent(1, 0, u32::MAX);
+        sent_full(&mut st, 0, 0);
+        sent_full(&mut st, 1, 0);
         st.reset();
         assert!(st.sent().is_empty(), "reset drops the old columns");
         assert!(st.visible().is_empty());
-        assert!(st.reveal_step(32).is_empty());
+        assert!(st.reveal_step(&AllAir, 32).is_empty());
     }
 
     #[test]
@@ -1490,13 +1896,23 @@ mod tests {
         // A: reads the new version, computes post-write, stores.
         let a_version = EDIT_EPOCH.load(Ordering::Relaxed);
         assert_ne!(a_version, b_version, "the write advanced the version");
-        store_graph(&mut cc, key, SectionGraph::sealed(), a_version);
-        assert!(cc.graphs.contains_key(&key), "A's fresh graph is cached");
+        store_section_cells(
+            &mut cc,
+            key,
+            Arc::new(compute_section_cells(&[STONE; 4096])),
+            a_version,
+        );
+        assert!(cc.sections.contains_key(&key), "A's fresh graph is cached");
 
         // B: stores its stale pre-write graph with the version it read.
-        store_graph(&mut cc, key, SectionGraph::open(), b_version);
+        store_section_cells(
+            &mut cc,
+            key,
+            Arc::new(compute_section_cells(&[BlockStateId::AIR; 4096])),
+            b_version,
+        );
         assert_eq!(
-            cc.graphs.get(&key).copied(),
+            cc.sections.get(&key).map(|c| c.section),
             Some(SectionGraph::sealed()),
             "B's stale graph must not overwrite A's"
         );
@@ -1523,20 +1939,20 @@ mod tests {
         let _guard = global_test_lock();
         invalidate_all();
         let key = (0, 2, 0);
-        assert!(graph(&WriteDuringSnapshot, key).is_some());
+        assert!(section_cells(&WriteDuringSnapshot, key).is_some());
         assert!(
-            !cache().lock().unwrap().graphs.contains_key(&key),
-            "a graph whose snapshot raced a write must not be cached"
+            !cache().lock().unwrap().sections.contains_key(&key),
+            "graphs whose snapshot raced a write must not be cached"
         );
         // The same call without a racing write caches it, and a later write
         // evicts it.
-        assert!(graph(&FlatWorld, key).is_some());
+        assert!(section_cells(&FlatWorld, key).is_some());
         assert!(
-            cache().lock().unwrap().graphs.contains_key(&key),
+            cache().lock().unwrap().sections.contains_key(&key),
             "an un-raced graph is cached"
         );
         record_invalidation(key);
-        assert!(!cache().lock().unwrap().graphs.contains_key(&key));
+        assert!(!cache().lock().unwrap().sections.contains_key(&key));
     }
 
     /// Serialises the tests that touch the process-wide cache, epoch and
@@ -1553,20 +1969,20 @@ mod tests {
         // Once on, it records the section and evicts the graph.
         let _guard = global_test_lock();
         invalidate_all();
-        graph(&FlatWorld, (0, 2, 0));
+        section_cells(&FlatWorld, (0, 2, 0));
         invalidate_block(0, 32, 0);
         assert!(
             dirty_sections().lock().unwrap().is_empty(),
             "a disabled write must not record a section"
         );
         assert!(
-            cache().lock().unwrap().graphs.contains_key(&(0, 2, 0)),
+            cache().lock().unwrap().sections.contains_key(&(0, 2, 0)),
             "a disabled write must not evict a cached graph"
         );
 
         // The enabled path (what `invalidate_block` runs once the flag is on).
         record_invalidation((0, 2, 0));
-        assert!(!cache().lock().unwrap().graphs.contains_key(&(0, 2, 0)));
+        assert!(!cache().lock().unwrap().sections.contains_key(&(0, 2, 0)));
         assert!(dirty_sections().lock().unwrap().contains(&(0, 2, 0)));
         dirty_sections().lock().unwrap().clear();
     }
@@ -1600,9 +2016,9 @@ mod tests {
         // N4: `/visibility off` must re-send the columns holding stone, and
         // leave the unmasked ones alone.
         let mut sent = HashMap::new();
-        sent.insert((0, 0), 0);
-        sent.insert((1, 0), u32::MAX);
-        sent.insert((2, 0), 1 << 3);
+        sent.insert((0, 0), CellMask::default());
+        sent.insert((1, 0), CellMask::full());
+        sent.insert((2, 0), CellMask::from_cells([(4, 0, 4)]));
         let mut got = masked_columns(&sent);
         got.sort();
         assert_eq!(got, vec![(1, 0), (2, 0)]);
@@ -1610,19 +2026,21 @@ mod tests {
 
     #[test]
     fn rendering_a_bypassed_column_records_a_zero_mask() {
+        let _guard = global_test_lock();
+        invalidate_all();
         // N4 / New-2: `/visibility off` re-renders the masked columns; each
-        // must record a zero mask, or the planner keeps believing the client
+        // must record an empty mask, or the planner keeps believing the client
         // holds stone and re-plans columns it already has.
         let columns = [(0, 0), (1, 0)];
         let mut st = state_showing(&columns, 1);
         for &col in &columns {
-            st.record_sent(col.0, col.1, u32::MAX);
+            sent_full(&mut st, col.0, col.1);
         }
         assert_eq!(masked_columns(st.sent()).len(), 2, "both start masked");
 
         // The reveal pass re-renders each column with bypass on.
         for (cx, cz) in masked_columns(st.sent()) {
-            assert_eq!(st.mask_for_render(cx, cz, true), 0);
+            assert!(st.mask_for_render(&AllAir, cx, cz, true).is_empty());
         }
         assert!(
             masked_columns(st.sent()).is_empty(),
@@ -1630,9 +2048,9 @@ mod tests {
         );
 
         // A non-bypassed render still records the real mask: a column the
-        // player cannot see comes back with every section hidden.
-        let all_hidden = (1u32 << SECTION_COUNT) - 1;
-        assert_eq!(st.mask_for_render(9, 9, false), all_hidden);
+        // player cannot see comes back with every cell hidden.
+        let hidden = st.mask_for_render(&AllAir, 9, 9, false);
+        assert_eq!(hidden.len(), CELLS_PER_COLUMN, "every cell hidden");
     }
 
     #[test]
@@ -1667,36 +2085,43 @@ mod tests {
 
     #[test]
     fn re_rendering_a_column_keeps_the_mask_the_client_holds() {
+        let _guard = global_test_lock();
+        invalidate_all();
         // A column is rendered many times over a session (join, streaming,
         // reveal). Every render must compute the mask from the current
         // reachable set and record it, so a re-send cannot drop or add
-        // masking. An empty reachable set hides everything.
+        // masking. An empty reachable set hides every cell.
         let mut st = State::default();
-        let first = st.mask_for_render(0, 0, false);
-        assert_eq!(first, (1u32 << SECTION_COUNT) - 1, "all sections hidden");
-        let second = st.mask_for_render(0, 0, false);
+        let first = st.mask_for_render(&AllAir, 0, 0, false);
+        assert_eq!(first.len(), CELLS_PER_COLUMN, "all cells hidden");
+        let second = st.mask_for_render(&AllAir, 0, 0, false);
         assert_eq!(first, second, "a second render is identical");
-        assert_eq!(st.sent().get(&(0, 0)).copied(), Some(first));
+        assert!(!st.sent().get(&(0, 0)).unwrap().is_empty());
 
-        // Once the sections become visible, the same column renders unmasked,
+        // Once the sections are visible, the same column renders unmasked,
         // and `sent` records that the client now holds the real column.
-        let all: HashSet<(i32, i32, i32)> = (0..SECTION_COUNT)
-            .map(|i| (0, SECTION_MIN_Y + i as i32, 0))
-            .collect();
+        let all = all_sections(&[(0, 0)]);
         st.set_visible_if((0, 0, 0), all, EDIT_EPOCH.load(Ordering::Relaxed));
-        assert_eq!(st.mask_for_render(0, 0, false), 0);
-        assert_eq!(st.sent().get(&(0, 0)).copied(), Some(0));
+        assert!(st.mask_for_render(&AllAir, 0, 0, false).is_empty());
+        assert!(!st.sent().contains_key(&(0, 0)));
     }
 
     #[test]
-    fn a_flat_world_below_the_surface_caches_a_sealed_graph() {
+    fn a_flat_world_below_the_surface_caches_a_sealed_section_graph() {
         let _guard = global_test_lock();
         invalidate_all();
         let world = FlatWorld;
-        let g = graph(&world, (0, -2, 0)).unwrap();
-        assert_eq!(g.open_faces(), 0);
-        let g = graph(&world, (0, 2, 0)).unwrap();
-        assert_eq!(g.open_faces(), aether_world::visibility::ALL_FACES);
+        // A wholly stone section: sealed, no cell visible.
+        let cells = section_cells(&world, (0, -2, 0)).unwrap();
+        assert_eq!(cells.section.open_faces(), 0);
+        assert_eq!(cells.visible, 0);
+        // A wholly air section: fully open, every cell visible.
+        let cells = section_cells(&world, (0, 2, 0)).unwrap();
+        assert_eq!(
+            cells.section.open_faces(),
+            aether_world::visibility::ALL_FACES
+        );
+        assert_eq!(cells.visible, u128::MAX);
     }
 
     #[test]
@@ -1889,70 +2314,59 @@ mod tests {
     }
 
     #[test]
-    fn desired_hidden_cells_lists_exactly_the_missing_cells_of_a_column() {
-        let dims = BoxDims::CELL;
-        let (nx, _, nz) = test_grid();
-        let y_min = (SECTION_MIN_Y * SECTION_SIZE).div_euclid(dims.y as i32);
-        let y_max = (SECTION_MAX_Y * SECTION_SIZE + SECTION_SIZE - 1).div_euclid(dims.y as i32);
-        // A hand-built visible set: the whole column except three cells.
-        let missing: HashSet<(i32, i32, i32)> = [(0, y_min, 0), (1, 0, 2), (3, y_max, 3)]
-            .into_iter()
-            .collect();
-        let mut visible = HashSet::new();
-        for cy in y_min..=y_max {
-            for ix in 0..nx {
-                for iz in 0..nz {
-                    let cell = (ix, cy, iz);
-                    if !missing.contains(&cell) {
-                        visible.insert(cell);
-                    }
-                }
-            }
-        }
-        assert_eq!(desired_hidden_cells(&visible, dims, 0, 0), missing);
-
-        // A wholly visible column hides nothing.
-        let all: HashSet<(i32, i32, i32)> = (y_min..=y_max)
-            .flat_map(|cy| (0..nx).flat_map(move |ix| (0..nz).map(move |iz| (ix, cy, iz))))
-            .collect();
-        assert!(desired_hidden_cells(&all, dims, 0, 0).is_empty());
-
-        // A different column shares no cells, so every cell is hidden.
-        let cells_per_column = (nx * nz * (y_max - y_min + 1)) as usize;
-        assert_eq!(
-            desired_hidden_cells(&all, dims, 1, 1).len(),
-            cells_per_column,
-            "another column's cells are all hidden"
+    fn a_partly_visible_surface_section_is_masked_per_cell() {
+        // The owner's leak: a section with air on top and stone below is only
+        // partly visible. The cell mask must keep the sky real and the rock
+        // hidden — the section-level mask would send the whole section real.
+        let _guard = global_test_lock();
+        invalidate_all();
+        let world = GroundWorld { ground: 8 };
+        let vis = visible_from_margin(&world, (0.5, 20.5, 0.5), 1, 2);
+        let hidden = column_hidden(&world, &vis, 0, 0);
+        assert!(
+            !hidden.contains(0, 5, 0),
+            "open sky above the ground is real ([0,5,0] is cell y=10)"
         );
-
-        // For `BoxDims::SECTION` the same helper reduces to the section mask.
-        let section_visible: HashSet<(i32, i32, i32)> =
-            [(0, 0, 0), (0, -1, 0)].into_iter().collect();
-        let hidden_sections = desired_hidden_cells(&section_visible, BoxDims::SECTION, 0, 0);
-        assert!(hidden_sections.contains(&(0, 5, 0)), "a missing section");
-        assert!(!hidden_sections.contains(&(0, 0, 0)), "a present section");
-        assert!(!hidden_sections.contains(&(0, -1, 0)));
+        assert!(
+            !hidden.contains(0, 3, 0),
+            "the surface top-rock the player can see is real (block y=6)"
+        );
+        assert!(
+            hidden.contains(0, 1, 0),
+            "rock below the surface is hidden (block y=2)"
+        );
+        assert!(hidden.contains(0, -30, 0), "the deep underground is hidden");
     }
 
     #[test]
-    fn visible_from_hides_a_sealed_underground_column() {
+    fn the_section_search_covers_the_whole_view_distance() {
+        // Blocker 1 regression: `view_distance` is in sections, not cells, so
+        // an all-air view reaches `view_distance` * 16 blocks, not a quarter
+        // of it. A section 2 chunks out is visible; one past the radius is not.
         let _guard = global_test_lock();
         invalidate_all();
-        // The player is on the surface of the flat world: the solid sections
-        // far below must not be in the reachable set.
-        let vis = visible_from(&FlatWorld, (0.5, 5.5, 0.5), 8);
+        let vis = visible_from_margin(&AllAir, (0.5, 5.5, 0.5), 2, 2);
         assert!(
-            vis.contains(&(0, 0, 0)),
-            "the player's own section is visible"
+            vis.contains(&(2, 0, 0)),
+            "2 sections (32 blocks) is in view"
         );
-        assert!(!vis.contains(&(0, -4, 0)), "bedrock depth must stay hidden");
+        assert!(!vis.contains(&(3, 0, 0)), "past the radius is not");
+    }
+
+    #[test]
+    fn the_section_search_reaches_the_surface_and_not_the_deep_stone() {
+        let _guard = global_test_lock();
+        invalidate_all();
+        let vis = visible_from_margin(&FlatWorld, (0.5, 5.5, 0.5), 1, 2);
+        assert!(vis.contains(&(0, 0, 0)), "the surface air is visible");
+        assert!(!vis.contains(&(0, -1, 0)), "the deep stone stays hidden");
     }
 
     #[test]
     fn the_spawn_column_is_masked_the_way_the_join_path_masks_it() {
         // The join path masks its first columns through exactly these calls
-        // (finding 2). A buried ore a section below the surface must not reach
-        // the client as itself.
+        // (finding 2). A buried ore below the surface must not reach the
+        // client as itself.
         let _guard = global_test_lock();
         invalidate_all();
         struct BuriedOre;
@@ -1968,22 +2382,26 @@ mod tests {
             }
         }
         let world = BuriedOre;
-        let vis = visible_from(&world, (0.5, 5.5, 0.5), 8);
-        let hidden = desired_hidden(&vis, 0, 0);
-        assert_ne!(hidden, 0, "the deep sections must be hidden");
-        let masked = MaskedColumn::new(&world, 0, 0, hidden, fill_for_mode(GameMode::Creative));
+        let vis = visible_from_margin(&world, (0.5, 5.5, 0.5), 2, 2);
+        let hidden = column_hidden(&world, &vis, 0, 0);
+        assert!(
+            hidden.contains(0, -24, 0),
+            "the deep ore cell must be hidden"
+        );
+        let masked =
+            MaskedColumn::from_mask(&world, 0, 0, hidden, fill_for_mode(GameMode::Creative));
         assert_eq!(
             masked.block_at(0, -48, 0),
             STONE,
             "the buried ore must be sent as stone"
         );
-        // A column the mask does not cover keeps the real block.
-        let unmasked = MaskedColumn::new(&world, 1, 0, hidden, STONE);
+        // A column with no mask keeps the real block.
+        let unmasked = MaskedColumn::from_mask(&world, 1, 0, CellMask::default(), STONE);
         assert_eq!(unmasked.block_at(0, -48, 0), BlockStateId(1234));
     }
 
     #[test]
-    fn section_of_floors_negative_coordinates() {
+    fn cell_of_floors_negative_coordinates() {
         let pos = crate::players::PosLook {
             x: -0.5,
             y: -1.0,
@@ -1992,7 +2410,67 @@ mod tests {
             pitch: 0.0,
             on_ground: false,
         };
-        assert_eq!(section_of(pos), (-1, -1, 0));
+        assert_eq!(cell_of_pos(pos), (-1, -1, 3));
+    }
+
+    #[test]
+    fn the_players_own_sealed_pocket_is_not_encased() {
+        // A player sealed in a one-block air pocket in solid rock: the pocket
+        // is interior, so the section mask hides it — but the player's own
+        // cell must be revealed, or the client would encase them in stone.
+        let _guard = global_test_lock();
+        invalidate_all();
+        struct Pocket;
+        impl BlockSource for Pocket {
+            fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+                if (x, y, z) == (8, 8, 8) {
+                    BlockStateId::AIR
+                } else {
+                    STONE
+                }
+            }
+        }
+        let mut st = State::default();
+        let mut sections = HashSet::new();
+        sections.insert((0, 0, 0));
+        st.set_visible_if((0, 0, 0), sections, EDIT_EPOCH.load(Ordering::Relaxed));
+        st.set_own_cell(cell_of(8, 8, 8));
+        let mask = st.hidden_for(&Pocket, 0, 0);
+        assert!(
+            !mask.contains(2, 4, 2),
+            "the player's own pocket cell must not be masked"
+        );
+        assert!(
+            mask.contains(2, 1, 2),
+            "a buried cell of the same section stays hidden"
+        );
+    }
+
+    #[test]
+    fn the_reachable_set_seed_is_quantised_to_the_section() {
+        // The performance bound: two positions inside the same `16³` section
+        // share the freshness key, so moving a cell within it reuses the
+        // previous (cheap section) search instead of re-running it.
+        let a = crate::players::PosLook {
+            x: 1.0,
+            y: 5.0,
+            z: 1.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: false,
+        };
+        let b = crate::players::PosLook {
+            x: 14.0,
+            y: 14.0,
+            z: 14.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: false,
+        };
+        assert_eq!(section_of(a), section_of(b));
+        // A move across the border is a new key.
+        let c = crate::players::PosLook { x: 16.5, ..a };
+        assert_ne!(section_of(a), section_of(c));
     }
 
     // ---- engine mode ----------------------------------------------------
@@ -2149,30 +2627,47 @@ mod tests {
         }
     }
 
-    fn sy_bit(cy: i32) -> u32 {
-        1 << (cy - SECTION_MIN_Y) as u32
-    }
-
     #[test]
     fn a_far_buried_ore_behind_solid_stone_is_hidden() {
         // The player is on the surface; a far column is solid stone with an
-        // ore one section under the surface (the "shell" beside open air) and
-        // another two sections down. Both must arrive as stone: a fully opaque
-        // section may not be marked visible just because its face touches the
-        // air — a whole section sent real leaks every ore in it.
+        // ore under the surface (the "shell" beside open air) and another
+        // deeper. Both stay hidden because their section is fully opaque, so
+        // the coarse search never marks it visible and `column_hidden` leaves
+        // every cell of it as `fill` — the ore cannot be sent real.
+        //
+        // Note this is a *section-level* guarantee, not the `adj` cell rule:
+        // `compute_cell_visible` deliberately marks an opaque cell visible when
+        // it borders a visible one (so the surface dirt/water the player looks
+        // at is real). A sealed section has no visible cell in it to seed that,
+        // so the ore is hidden. The cell-level rule is exercised by
+        // `a_partly_visible_surface_section_is_masked_per_cell`.
         let _guard = global_test_lock();
         invalidate_all();
         let world = DeepGround {
             ore: ore("minecraft:coal_ore"),
             ore_at: Some((40, -5, 0)),
         };
-        let vis = visible_from(&world, (0.5, 5.5, 0.5), 8);
-        // x=40 is section 2, within the radius-8 view.
-        let hidden = desired_hidden(&vis, 2, 0);
-        assert_ne!(hidden & sy_bit(-1), 0, "the shell ore section is hidden");
-        assert_ne!(hidden & sy_bit(-2), 0, "the deep section is hidden");
-        // The air section above the surface is still sent real.
-        assert_eq!(hidden & sy_bit(0), 0, "open-air surface stays visible");
+        let vis = visible_from_margin(&world, (0.5, 5.5, 0.5), 2, 2);
+        // x=40 is column 2, within the view.
+        assert!(
+            !vis.contains(&(2, -1, 0)),
+            "the fully opaque ore section is not reachable"
+        );
+        let hidden = column_hidden(&world, &vis, 2, 0);
+        assert!(
+            hidden.contains(10, -3, 0),
+            "the shell ore cell is hidden (block y=-5)"
+        );
+        assert!(
+            hidden.contains(10, -10, 0),
+            "a deep stone cell is hidden (block y=-20)"
+        );
+        // The air above the surface is still real.
+        let hidden0 = column_hidden(&world, &vis, 0, 0);
+        assert!(
+            !hidden0.contains(0, 3, 0),
+            "open-air surface is visible (block y=5)"
+        );
     }
 
     #[test]
@@ -2198,19 +2693,26 @@ mod tests {
         }
         let _guard = global_test_lock();
         invalidate_all();
-        let vis = visible_from(&WaterCave, (0.5, 5.5, 0.5), 8);
-        let hidden = desired_hidden(&vis, 0, 0);
-        // The flooded cave at y=-40..-38 is section sy=-3.
-        assert_ne!(hidden & sy_bit(-3), 0, "the unseen water cave is hidden");
-        assert_ne!(
-            hidden & sy_bit(-2),
-            0,
-            "the shaft below the surface is hidden"
+        let vis = visible_from_margin(&WaterCave, (0.5, 5.5, 0.5), 1, 2);
+        let hidden = column_hidden(&WaterCave, &vis, 0, 0);
+        assert!(
+            hidden.contains(1, -20, 0),
+            "the unseen water cave is hidden (block y=-40)"
+        );
+        assert!(
+            hidden.contains(1, -10, 0),
+            "the shaft deep below the surface is hidden (block y=-20)"
+        );
+        // The water touching the surface is visible; it just does not let the
+        // search continue into the cave.
+        assert!(
+            !hidden.contains(1, -1, 0),
+            "the water face at the surface is visible (block y=-1)"
         );
     }
 
     #[test]
-    fn a_one_block_move_does_not_change_the_visible_set() {
+    fn a_sub_cell_move_does_not_change_the_visible_set() {
         // Moving within a section must not reveal a hidden ore: the search is
         // seeded by section, so two positions in the same section answer the
         // same, and the reveal planner then has nothing to re-send.
@@ -2220,19 +2722,61 @@ mod tests {
             ore: ore("minecraft:diamond_ore"),
             ore_at: Some((40, -20, 0)),
         };
-        let before = visible_from(&world, (0.5, 5.5, 0.5), 8);
-        let after = visible_from(&world, (1.4, 5.5, 0.5), 8);
-        assert_eq!(before, after, "a sub-block move must not change the view");
+        let before = visible_from_margin(&world, (0.5, 5.5, 0.5), 2, 2);
+        let after = visible_from_margin(&world, (1.4, 5.5, 0.5), 2, 2);
+        assert_eq!(before, after, "a sub-cell move must not change the view");
 
-        // The masked column is identical, so the reveal plan is empty.
+        let hb = column_hidden(&world, &before, 2, 0);
+        let ha = column_hidden(&world, &after, 2, 0);
+        assert_eq!(hb, ha, "the masked column is identical");
+        assert!(
+            ha.contains(10, -10, 0),
+            "the far ore cell stays hidden (block y=-20)"
+        );
+    }
+
+    #[test]
+    fn a_move_replans_only_columns_that_gained_a_cell() {
+        // A column is re-sent only when one of its cells actually became
+        // visible, never just because the search re-ran.
+        let _guard = global_test_lock();
+        invalidate_all();
+        let world = DeepGround {
+            ore: ore("minecraft:iron_ore"),
+            ore_at: None,
+        };
+        let before = visible_from_margin(&world, (0.5, 5.5, 0.5), 2, 2);
+        let after = visible_from_margin(&world, (20.5, 5.5, 0.5), 2, 2);
+
         let mut sent = HashMap::new();
-        for cx in -8..=8 {
-            for cz in -8..=8 {
-                sent.insert((cx, cz), desired_hidden(&before, cx, cz));
+        for cx in -4..=4 {
+            for cz in -4..=4 {
+                let hidden = column_hidden(&world, &before, cx, cz);
+                if !hidden.is_empty() {
+                    sent.insert((cx, cz), hidden);
+                }
             }
         }
-        assert!(plan_reveals(&after, &sent, (0, 0, 0), 32).is_empty());
-        // The far ore section stays hidden in both.
-        assert_ne!(desired_hidden(&after, 2, 0) & sy_bit(-2), 0);
+        let plan = plan_reveals(&world, &after, &sent, (1, 0, 0), 4096);
+        for column in &plan {
+            let desired = column_hidden(&world, &after, column.0, column.1);
+            assert!(
+                sent[column].has_extra(&desired),
+                "a re-sent column must have gained a visible cell"
+            );
+        }
+    }
+
+    #[test]
+    fn visibility_status_reports_the_cell_mode() {
+        // `/visibility status` must name the live mode; the culling mode is
+        // the cell culling now.
+        let handle = PlayerHandle::for_test(1, "status-tester");
+        handle
+            .staff()
+            .set_xray(crate::staff::AntiXrayLevel::Culling);
+        let status = player_status(&handle);
+        assert!(status.contains("culling"), "{status}");
+        assert!(status.contains("4x4x2"), "{status}");
     }
 }

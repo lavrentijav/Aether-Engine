@@ -355,7 +355,7 @@ pub struct AntiXrayConfig {
     /// for a deployment that shares a config across several world
     /// directories; it matches the last component of `[server] world_dir`.
     pub worlds: Vec<String>,
-    /// `culling` mode only: how far, in blocks, a section may be from the
+    /// `culling` mode only: how far, in blocks, a `4×4×2` cell may be from the
     /// player and still be sent for real without being reached by sight —
     /// the "could see it if he turned his head or took a step" sphere.
     pub margin_blocks: i32,
@@ -480,7 +480,10 @@ pub enum AntiXrayMode {
     /// ore-candidate blocks do any work.
     #[default]
     Engine,
-    /// Hide whole sections the player cannot reach by sight.
+    /// Hide the `4×4×2` AVX-cells a player cannot reach by sight. A cell
+    /// behind solid rock, inside a wall or in an unseen cave is sent as
+    /// `hidden_fill`; a cell on the surface or in an open space is real, so a
+    /// partially-visible section no longer leaks the ores in its hidden cells.
     Culling,
 }
 
