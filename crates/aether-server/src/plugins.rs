@@ -668,6 +668,9 @@ mod imp {
                 out.to_place = Some(place_name(to));
                 out.sources = from.iter().map(|u| u.0).collect();
             }
+            // A player-text event carries no block/item side; its `kind`
+            // (chat/pm/command) and position are already on the record.
+            EventBody::ChatMessage { .. } => {}
             EventBody::Custom { .. } => {}
         }
         out

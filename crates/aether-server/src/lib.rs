@@ -14,6 +14,7 @@
 //! logic every version shares.
 
 pub mod auth;
+pub mod chatlog;
 pub mod commands;
 pub mod config;
 pub mod connections;
@@ -284,7 +285,7 @@ pub fn run() -> std::process::ExitCode {
         "world      : {described}, {:?}",
         cfg.server.game_mode
     ));
-    log::info(&visibility::status_line());
+    log::info(&format!("anti-xray  : {}", anti_xray_summary(&cfg)));
     log::info(&format!(
         "saved to   : {} (autosave every {}s)",
         cfg.server.world_dir, cfg.server.autosave_secs
@@ -540,6 +541,13 @@ pub fn anti_xray_config() -> config::AntiXrayConfig {
         .unwrap_or_default()
 }
 
+/// The `[chat]` settings, or the defaults before startup installs the config.
+/// The defaults log everything with the built-in redact list, so chat logging
+/// works even in a test that never installed a config.
+pub fn chat_config() -> config::ChatConfig {
+    CONFIG.get().map(|c| c.chat.clone()).unwrap_or_default()
+}
+
 /// Whether anti-xray is active for the running world, resolved once.
 ///
 /// The block-write path calls this for every write, so the per-world test
@@ -569,6 +577,47 @@ pub fn anti_xray_enabled() -> bool {
             }
             on
         }
+    }
+}
+
+/// A one-line description of the active anti-xray configuration, for the
+/// startup log — so an operator can see at a glance which mode is live and for
+/// which worlds, rather than inferring it from a silent config.
+///
+/// It reports the explicit bypass list, never "operators bypass": operators are
+/// not bypassed automatically (see [`anti_xray_bypass`], SP1).
+pub fn anti_xray_summary(cfg: &config::Config) -> String {
+    use config::AntiXrayMode;
+    let a = &cfg.anti_xray;
+    let worlds = if a.worlds.is_empty() {
+        "all worlds".to_string()
+    } else {
+        format!("worlds: {}", a.worlds.join(", "))
+    };
+    let applies = a.applies_to_world(&cfg.server.world_dir);
+    if !a.enabled {
+        return "off".to_string();
+    }
+    if !applies {
+        return format!(
+            "off for this world (`{}` not in {})",
+            cfg.server.world_dir, worlds
+        );
+    }
+    let bypass = if a.bypass_players.is_empty() {
+        "no automatic bypass".to_string()
+    } else {
+        format!("bypass: {}", a.bypass_players.join(", "))
+    };
+    match a.mode {
+        AntiXrayMode::Engine => format!(
+            "engine — {} hidden block(s), {worlds}, {bypass}",
+            a.hidden_block_names().len()
+        ),
+        AntiXrayMode::Culling => format!(
+            "culling — margin {} blocks, fill {:?}, reveal budget {}/tick, {worlds}, {bypass}",
+            a.margin_blocks, a.hidden_fill, a.reveal_budget_per_tick
+        ),
     }
 }
 
@@ -638,28 +687,49 @@ pub fn server_game_mode() -> protocol::GameMode {
 
 #[cfg(test)]
 mod tests {
-    use super::bypass_decision;
-    use super::staff::AntiXrayLevel;
+    use super::*;
 
     #[test]
-    fn an_operator_with_neither_toggle_nor_grant_is_not_bypassed() {
-        // The regression this covers: previously `is_operator` returned `true`
-        // here, so an operator could not watch the anti-xray protection work.
-        assert!(!bypass_decision(AntiXrayLevel::Default, false, false));
+    fn the_anti_xray_summary_reports_the_live_mode() {
+        let mut cfg = config::Config::default();
+        assert_eq!(anti_xray_summary(&cfg), "off");
+
+        cfg.anti_xray.enabled = true;
+        cfg.anti_xray.mode = config::AntiXrayMode::Culling;
+        let s = anti_xray_summary(&cfg);
+        assert!(s.starts_with("culling"), "{s}");
+        assert!(s.contains("margin 5"), "{s}");
+        assert!(s.contains("all worlds"), "{s}");
+
+        // A world the config does not list is reported off for that world.
+        cfg.anti_xray.mode = config::AntiXrayMode::Engine;
+        cfg.anti_xray.worlds = vec!["alpha".to_string()];
+        cfg.server.world_dir = "beta".to_string();
+        let s = anti_xray_summary(&cfg);
+        assert!(s.contains("off for this world"), "{s}");
+
+        // No "operators bypass": SP1 made bypass explicit only.
+        let mut cfg = config::Config::default();
+        cfg.anti_xray.enabled = true;
+        let s = anti_xray_summary(&cfg);
+        assert!(s.contains("no automatic bypass"), "{s}");
+        assert!(!s.contains("operators bypass"), "{s}");
     }
 
+    /// An operator with neither the toggle nor a grant is **not** bypassed, and
+    /// each explicit path works; a forced spectate level beats a grant.
     #[test]
     fn bypass_is_only_explicit() {
+        use super::staff::AntiXrayLevel;
+        // The regression this covers: previously `is_operator` bypassed an
+        // operator, so they could not watch the anti-xray protection work.
+        assert!(!bypass_decision(AntiXrayLevel::Default, false, false));
         // `/visibility off` (the per-player toggle).
         assert!(bypass_decision(AntiXrayLevel::Default, true, false));
         // The `aether.antixray.bypass` node or `[anti_xray] bypass_players`.
         assert!(bypass_decision(AntiXrayLevel::Default, false, true));
         // `/spectate xray off`.
         assert!(bypass_decision(AntiXrayLevel::Off, false, false));
-    }
-
-    #[test]
-    fn a_spectate_xray_level_forces_anti_xray_on_over_any_grant() {
         // The override wins: an explicitly-granted admin still sees masking at
         // a forced level, which is the point of per-admin control.
         for level in [

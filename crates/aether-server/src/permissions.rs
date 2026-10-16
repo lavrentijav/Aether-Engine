@@ -540,6 +540,29 @@ fn declare_command_node_in(store: &mut Store, node: &str, op: u8) -> Result<(), 
     store.declare_node(node, default)
 }
 
+/// Add `config.operators`-style entries to the `op` group of the process-wide
+/// store, without touching node defaults or other groups.
+///
+/// This is the seeding half of [`install`], split out so a caller that already
+/// has a store — including a test — can grant operator rights without resetting
+/// everything else the store holds. Add-only, exactly like [`Store::seed_operators`].
+pub fn seed_operators(entries: &[String]) -> usize {
+    write().seed_operators(entries)
+}
+
+/// A lock that serialises tests which mutate or depend on the process-wide
+/// store.
+///
+/// [`install`] replaces the whole store (its job: the persisted file is the
+/// source of truth), so a test that reads operator membership must not run
+/// while an install test does — otherwise the operator it just seeded is
+/// wiped. Production never hits this: `install` runs once, before any reader.
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// A player's effective level in the process-wide store.
 pub fn level(name: &str, ip: Option<IpAddr>) -> Level {
     read().level_of(name, ip)
@@ -836,6 +859,10 @@ root = {}
 
     #[test]
     fn the_process_wide_store_seeds_operators_from_config() {
+        // `install` replaces the whole store, so take the shared lock: another
+        // test that seeded an operator into the process-wide store must not
+        // have it wiped from under it.
+        let _guard = test_lock();
         // Unique names so this cannot collide with another test sharing the
         // process-wide store, and a temp world dir so `install`'s persistence
         // does not touch the source tree.

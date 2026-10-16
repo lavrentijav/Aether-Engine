@@ -982,6 +982,12 @@ fn play_loop(
                 }
             }
             ClientEvent::Chat(text) => {
+                // Every command is logged before it runs, so a plugin command
+                // and a core command are treated the same; secret arguments
+                // are masked inside `log_command`.
+                if text.trim_start().starts_with('/') {
+                    crate::chatlog::log_command(handle, &text, world);
+                }
                 if let Some(reply) = crate::commands::dispatch(&text, handle, registry, world) {
                     // Command output goes only to whoever typed it: a
                     // rollback report names players and sequence numbers
@@ -997,8 +1003,10 @@ fn play_loop(
                     }
                     continue;
                 }
+                // Log and journal only the chat that was actually delivered
+                // (a plugin veto above returns before this point).
+                crate::chatlog::log_chat(handle, &text, world);
                 let line = format!("<{}> {}", handle.name, text);
-                crate::log::info(&format!("[chat] {line}"));
                 let ev = ServerEvent::Chat(line);
                 handle.emit(&ev, world);
                 registry.broadcast_except(handle.entity_id, &ev, world);

@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use aether_world::registry::blocks;
 use aether_world::visibility::{
-    compute_section_graph, default_is_opaque, reachable_sections, SectionGraph,
+    compute_section_graph, default_is_air, default_is_opaque, reachable_sections, SectionGraph,
 };
 use aether_world::BlockStateId;
 
@@ -362,7 +362,7 @@ fn graph(world: &dyn BlockSource, c: (i32, i32, i32)) -> Option<SectionGraph> {
     };
     let mut blocks = [BlockStateId::AIR; 4096];
     world.copy_section(c.0, c.1, c.2, &mut blocks);
-    let g = compute_section_graph(&blocks, default_is_opaque);
+    let g = compute_section_graph(&blocks, default_is_opaque, default_is_air);
     store_graph(&mut cache().lock().unwrap(), c, g, computed_at);
     Some(g)
 }
@@ -846,38 +846,6 @@ fn is_buried<S: BlockSource + ?Sized>(world: &S, x: i32, y: i32, z: i32) -> bool
     NEIGHBOURS
         .iter()
         .all(|&(dx, dy, dz)| default_is_opaque(world.block_at(x + dx, y + dy, z + dz)))
-}
-
-/// The startup log line for the effective anti-xray configuration:
-/// `anti-xray  : off`, or
-/// `anti-xray  : <mode> (<worlds>, hidden N blocks)`.
-///
-/// Reads the globals, so it must be called after startup installs the config
-/// (where the log line is emitted). `off` is the *effective* answer for the
-/// running world — the module is disabled or `[anti_xray] worlds` does not
-/// name this world directory — so the line never claims it is on when
-/// [`crate::anti_xray_enabled`] says no.
-pub fn status_line() -> String {
-    status_for(crate::anti_xray_enabled(), &crate::anti_xray_config())
-}
-
-/// The pure formatter behind [`status_line`], so the wording is testable
-/// without the process-wide config and the cached-enabled flag.
-fn status_for(enabled: bool, cfg: &crate::config::AntiXrayConfig) -> String {
-    if !enabled {
-        return "anti-xray  : off".to_string();
-    }
-    let mode = match cfg.mode {
-        AntiXrayMode::Engine => "engine",
-        AntiXrayMode::Culling => "culling",
-    };
-    let worlds = if cfg.worlds.is_empty() {
-        "all worlds".to_string()
-    } else {
-        format!("worlds {}", cfg.worlds.join(", "))
-    };
-    let hidden = cfg.hidden_block_names().len();
-    format!("anti-xray  : {mode} ({worlds}, hidden {hidden} blocks)")
 }
 
 /// The process-wide set of block states that engine mode hides, resolved from
@@ -1422,45 +1390,6 @@ mod tests {
     }
 
     #[test]
-    fn the_startup_line_names_the_mode_worlds_and_hidden_count() {
-        use crate::config::{AntiXrayConfig, AntiXrayMode};
-        // Disabled (or not applicable to this world): a plain "off", never a
-        // mode that would overstate what the server does.
-        let cfg = AntiXrayConfig::default();
-        assert_eq!(status_for(false, &cfg), "anti-xray  : off");
-
-        // Enabled: the mode, the worlds and the hidden-block count. The
-        // default config's hidden list is the built-in ore set.
-        let cfg = AntiXrayConfig {
-            enabled: true,
-            mode: AntiXrayMode::Engine,
-            ..AntiXrayConfig::default()
-        };
-        let line = status_for(true, &cfg);
-        assert_eq!(
-            line,
-            format!(
-                "anti-xray  : engine (all worlds, hidden {} blocks)",
-                crate::config::default_hidden_blocks().len()
-            ),
-            "got {line:?}"
-        );
-
-        // Culling with an explicit world list and an explicit hidden list.
-        let cfg = AntiXrayConfig {
-            enabled: true,
-            mode: AntiXrayMode::Culling,
-            worlds: vec!["alpha".to_string(), "beta".to_string()],
-            hidden_blocks: vec!["minecraft:diamond_ore".to_string()],
-            ..AntiXrayConfig::default()
-        };
-        assert_eq!(
-            status_for(true, &cfg),
-            "anti-xray  : culling (worlds alpha, beta, hidden 1 blocks)"
-        );
-    }
-
-    #[test]
     fn write_invalidation_is_free_when_off_and_records_when_on() {
         // N1: with culling off (the default, and what every test here runs
         // under) a block write must not touch the cache or record a section.
@@ -1580,6 +1509,29 @@ mod tests {
     }
 
     #[test]
+    fn re_rendering_a_column_keeps_the_mask_the_client_holds() {
+        // A column is rendered many times over a session (join, streaming,
+        // reveal). Every render must compute the mask from the current
+        // reachable set and record it, so a re-send cannot drop or add
+        // masking. An empty reachable set hides everything.
+        let mut st = State::default();
+        let first = st.mask_for_render(0, 0, false);
+        assert_eq!(first, (1u32 << SECTION_COUNT) - 1, "all sections hidden");
+        let second = st.mask_for_render(0, 0, false);
+        assert_eq!(first, second, "a second render is identical");
+        assert_eq!(st.sent().get(&(0, 0)).copied(), Some(first));
+
+        // Once the sections become visible, the same column renders unmasked,
+        // and `sent` records that the client now holds the real column.
+        let all: HashSet<(i32, i32, i32)> = (0..SECTION_COUNT)
+            .map(|i| (0, SECTION_MIN_Y + i as i32, 0))
+            .collect();
+        st.set_visible_if((0, 0, 0), all, EDIT_EPOCH.load(Ordering::Relaxed));
+        assert_eq!(st.mask_for_render(0, 0, false), 0);
+        assert_eq!(st.sent().get(&(0, 0)).copied(), Some(0));
+    }
+
+    #[test]
     fn a_flat_world_below_the_surface_caches_a_sealed_graph() {
         let _guard = global_test_lock();
         invalidate_all();
@@ -1588,6 +1540,47 @@ mod tests {
         assert_eq!(g.open_faces(), 0);
         let g = graph(&world, (0, 2, 0)).unwrap();
         assert_eq!(g.open_faces(), aether_world::visibility::ALL_FACES);
+    }
+
+    #[test]
+    fn a_masked_column_is_whole_sections_stone_or_whole_sections_real() {
+        // The culling invariant: a hidden section is *entirely* the fill, a
+        // visible section is *entirely* its real blocks. No selective
+        // replacement of individual blocks inside a hidden section.
+        struct Distinct;
+        impl BlockSource for Distinct {
+            fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+                // Never AIR or STONE, and different in every cell, so a
+                // partial replacement would show up as a mismatch.
+                let h = (x as u32).wrapping_mul(2_654_435_761)
+                    ^ (y as u32).wrapping_mul(40_503)
+                    ^ (z as u32).wrapping_mul(22_682_429);
+                BlockStateId(h | 0x8000_0000)
+            }
+        }
+        let world = Distinct;
+        let hidden = (1 << 5) | (1 << 8); // two hidden sections, one visible between
+        let masked = MaskedColumn::new(&world, 0, 0, hidden, STONE);
+        let mut out = [BlockStateId::AIR; 4096];
+        for i in 0..SECTION_COUNT {
+            let cy = SECTION_MIN_Y + i as i32;
+            let is_hidden = hidden & (1u32 << i as u32) != 0;
+            masked.copy_section(0, cy, 0, &mut out);
+            if is_hidden {
+                assert!(
+                    out.iter().all(|b| *b == STONE),
+                    "hidden section {cy} must be entirely stone"
+                );
+            } else {
+                for (j, got) in out.iter().enumerate() {
+                    let x = (j & 15) as i32;
+                    let z = ((j >> 4) & 15) as i32;
+                    let y = (j >> 8) as i32;
+                    let want = world.block_at(x, cy * 16 + y, z);
+                    assert_eq!(*got, want, "visible section {cy} must be untouched");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1782,5 +1775,113 @@ mod tests {
 
         // Ordinary stone is never revealed.
         assert!(revealed_neighbours(&open, 9, -20, 9, &hidden).is_empty());
+    }
+
+    // ---- culling regressions (live bug AX2) -----------------------------
+
+    /// A deep, otherwise uniform stone world with air above y=0 and optional
+    /// ore and water/water-cave cells, for the culling regression tests.
+    struct DeepGround {
+        ore: BlockStateId,
+        ore_at: Option<(i32, i32, i32)>,
+    }
+
+    impl BlockSource for DeepGround {
+        fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+            if Some((x, y, z)) == self.ore_at {
+                return self.ore;
+            }
+            if y >= 0 {
+                return BlockStateId::AIR;
+            }
+            STONE
+        }
+    }
+
+    fn sy_bit(cy: i32) -> u32 {
+        1 << (cy - SECTION_MIN_Y) as u32
+    }
+
+    #[test]
+    fn a_far_buried_ore_behind_solid_stone_is_hidden() {
+        // The player is on the surface; a far column is solid stone with an
+        // ore one section under the surface (the "shell" beside open air) and
+        // another two sections down. Both must arrive as stone: a fully opaque
+        // section may not be marked visible just because its face touches the
+        // air — a whole section sent real leaks every ore in it.
+        let _guard = global_test_lock();
+        invalidate_all();
+        let world = DeepGround {
+            ore: ore("minecraft:coal_ore"),
+            ore_at: Some((40, -5, 0)),
+        };
+        let vis = visible_from(&world, (0.5, 5.5, 0.5), 8);
+        // x=40 is section 2, within the radius-8 view.
+        let hidden = desired_hidden(&vis, 2, 0);
+        assert_ne!(hidden & sy_bit(-1), 0, "the shell ore section is hidden");
+        assert_ne!(hidden & sy_bit(-2), 0, "the deep section is hidden");
+        // The air section above the surface is still sent real.
+        assert_eq!(hidden & sy_bit(0), 0, "open-air surface stays visible");
+    }
+
+    #[test]
+    fn an_unseen_water_cave_is_hidden() {
+        // A water shaft from the surface down into a flooded cave the player
+        // cannot see. Water is see-through, so the shaft is *visible*, but it
+        // must not let the search walk into the cave below.
+        struct WaterCave;
+        impl BlockSource for WaterCave {
+            fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+                if y >= 0 {
+                    return BlockStateId::AIR;
+                }
+                let shaft = x == 4 && z == 0 && y <= -1;
+                let cave =
+                    (3..=5).contains(&x) && (-1..=1).contains(&z) && (-40..=-38).contains(&y);
+                if shaft || cave {
+                    blocks::default_state("minecraft:water").unwrap()
+                } else {
+                    STONE
+                }
+            }
+        }
+        let _guard = global_test_lock();
+        invalidate_all();
+        let vis = visible_from(&WaterCave, (0.5, 5.5, 0.5), 8);
+        let hidden = desired_hidden(&vis, 0, 0);
+        // The flooded cave at y=-40..-38 is section sy=-3.
+        assert_ne!(hidden & sy_bit(-3), 0, "the unseen water cave is hidden");
+        assert_ne!(
+            hidden & sy_bit(-2),
+            0,
+            "the shaft below the surface is hidden"
+        );
+    }
+
+    #[test]
+    fn a_one_block_move_does_not_change_the_visible_set() {
+        // Moving within a section must not reveal a hidden ore: the search is
+        // seeded by section, so two positions in the same section answer the
+        // same, and the reveal planner then has nothing to re-send.
+        let _guard = global_test_lock();
+        invalidate_all();
+        let world = DeepGround {
+            ore: ore("minecraft:diamond_ore"),
+            ore_at: Some((40, -20, 0)),
+        };
+        let before = visible_from(&world, (0.5, 5.5, 0.5), 8);
+        let after = visible_from(&world, (1.4, 5.5, 0.5), 8);
+        assert_eq!(before, after, "a sub-block move must not change the view");
+
+        // The masked column is identical, so the reveal plan is empty.
+        let mut sent = HashMap::new();
+        for cx in -8..=8 {
+            for cz in -8..=8 {
+                sent.insert((cx, cz), desired_hidden(&before, cx, cz));
+            }
+        }
+        assert!(plan_reveals(&after, &sent, (0, 0, 0), 32).is_empty());
+        // The far ore section stays hidden in both.
+        assert_ne!(desired_hidden(&after, 2, 0) & sy_bit(-2), 0);
     }
 }

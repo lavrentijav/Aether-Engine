@@ -85,12 +85,36 @@ the core. See [`docs/design/staff.md`](../design/staff.md) (EN) and
 - `docs/design/staff.md` (§3, §4, §5) and `KNOWN_ISSUES.md` A.21 updated to
   match (mob targeting wired; override reverts; no relog window); RU docs too.
 
+## Review 1 non-blocking fix + main integration
+
+- **Vanish no longer stops item pickup.** `PlayerView` carries both `survival`
+  (survival + alive, ignoring vanish) and `huntable` (also not vanished); arrow
+  pickup reads `survival`, mob targeting and arrow hits read `huntable`. Test
+  asserts a vanished player stays `survival`. Noted in `KNOWN_ISSUES` A.21.
+- **Merged main `24c5d5b` (CMD-01 permission core, CMD-03 command tree,
+  AX2 anti-xray culling fix, CH1 chat logging).** Conflicts resolved keeping
+  both sides: `game/commands.rs` now uses CMD-03's tree/`nodes()` (our
+  `/visibility status` folded into its `visibility()` body), `players.rs`
+  carries both `staff` and `chat_log`, `lib.rs` carries CMD-01's permission
+  `check`/`permitted` plus our explicit-bypass `anti_xray_bypass`, and
+  `plugins.rs` (history helpers + staff hooks) and `session.rs` (chat logging +
+  vanish join order) auto-merged.
+- **Startup anti-xray line reconciled:** main's richer `anti_xray_summary` is
+  the single line; its wording was corrected to SP1's explicit bypass ("no
+  automatic bypass", never "operators bypass"). Our duplicate
+  `visibility::status_line` was dropped.
+- After CMD-01, `/vanish` and `/spectate` are gated by the permission core
+  (op-0 + `aether.staff.*`, undeclared node defaults to `op`); `vanish.see`
+  remains advisory.
+
 ## Checks
 
 - `cargo fmt --all -- --check` — clean.
 - `cargo clippy --workspace --all-targets -j4 -- -D warnings` — clean.
+- `cargo-locked test --workspace` — all suites pass (aether-server lib 1157,
+  staff e2e 9, plugin suites incl. historian, doc-tests).
 - `cargo-locked test -p aether-staff-plugin` — 9/9 pass.
-- `cargo-locked test -p aether-server --lib` — 1089/1089 pass.
+- `cargo-locked test -p aether-server --lib` — 1157/1157 pass.
 - `cargo-locked test -p aether-server --test anti_xray_e2e` — 2/2 pass.
 - `cargo-locked test -p aether-plugin` — all suites pass (lib 10, plugin_host
   22, sdk_bridge 2, sidebar_bridge 2, placeholders_bridge 2, wit_world 3).
