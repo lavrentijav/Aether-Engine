@@ -26,7 +26,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use aether_world::registry::blocks;
 use aether_world::visibility::{
-    compute_section_graph, default_is_air, default_is_opaque, reachable_sections, SectionGraph,
+    compute_section_graph, default_is_air, default_is_opaque, reachable_sections, BoxDims,
+    SectionGraph, SECTION_SIZE,
 };
 use aether_world::BlockStateId;
 
@@ -491,6 +492,40 @@ pub fn desired_hidden(visible: &HashSet<(i32, i32, i32)>, cx: i32, cz: i32) -> u
         }
     }
     mask
+}
+
+/// Which `4×4×2` cells of column `(cx, cz)` are hidden for this visible set.
+///
+/// `dims` is the cell size ([`BoxDims::CELL`]); the cells of the column are
+/// `(cx * 16 / dims.x + i, cy, cz * 16 / dims.z + j)` for local `i`/`j` and
+/// every world `cy` in the vertical cell range, and a cell not in `visible` is
+/// hidden. This is the pure helper the wiring step (AX3c) uses to turn a
+/// player's reachable cell set into a per-column mask; for a column that is
+/// wholly visible it returns an empty set.
+pub fn desired_hidden_cells(
+    visible: &HashSet<(i32, i32, i32)>,
+    dims: BoxDims,
+    cx: i32,
+    cz: i32,
+) -> HashSet<(i32, i32, i32)> {
+    let nx = SECTION_SIZE as usize / dims.x;
+    let nz = SECTION_SIZE as usize / dims.z;
+    let y_min = (SECTION_MIN_Y * SECTION_SIZE).div_euclid(dims.y as i32);
+    let y_max = (SECTION_MAX_Y * SECTION_SIZE + SECTION_SIZE - 1).div_euclid(dims.y as i32);
+    let base_x = cx * nx as i32;
+    let base_z = cz * nz as i32;
+    let mut hidden = HashSet::new();
+    for cy in y_min..=y_max {
+        for i in 0..nx {
+            for j in 0..nz {
+                let cell = (base_x + i as i32, cy, base_z + j as i32);
+                if !visible.contains(&cell) {
+                    hidden.insert(cell);
+                }
+            }
+        }
+    }
+    hidden
 }
 
 /// The fill block for this player.
@@ -1042,22 +1077,52 @@ fn surrounding_block<S: BlockSource + ?Sized>(
         .unwrap_or(STONE)
 }
 
-/// A [`BlockSource`] that reports a hidden section as a single repeated block.
+/// `(nx, ny, nz)`: how many `dims`-sized cells fit along each axis of a `16³`
+/// section.
+#[inline]
+fn cell_grid(dims: BoxDims) -> (usize, usize, usize) {
+    (
+        SECTION_SIZE as usize / dims.x,
+        SECTION_SIZE as usize / dims.y,
+        SECTION_SIZE as usize / dims.z,
+    )
+}
+
+/// The world `4×4×2` cell holding block `(x, y, z)`.
+#[inline]
+fn cell_of(x: i32, y: i32, z: i32) -> (i32, i32, i32) {
+    (x >> 2, y >> 1, z >> 2)
+}
+
+/// A [`BlockSource`] that reports a hidden `4×4×2` cell as a single repeated
+/// block.
 ///
 /// The wrapper is what makes the anti-xray encoding codec-agnostic: every
-/// version's chunk writer already turns 4096 identical blocks into its own
-/// cheapest section form, so nothing downstream has to know about visibility.
+/// version's chunk writer already turns repeated blocks into its own cheapest
+/// section form, so nothing downstream has to know about visibility. The
+/// atomic unit is the AVX-cell (`4×4×2`): a cell is either wholly its real
+/// blocks or wholly `fill`, never split, so a partially-visible `16³` section
+/// no longer leaks the ores in its hidden cells.
+///
+/// The mask is a per-column set of hidden cells ([`desired_hidden_cells`]),
+/// which the wiring step will build from the player's reachable cell set. The
+/// legacy section bitmask constructor is kept until then.
 pub struct MaskedColumn<'a> {
     inner: &'a dyn BlockSource,
     cx: i32,
     cz: i32,
-    hidden: u32,
+    hidden_cells: HashSet<(i32, i32, i32)>,
     fill: BlockStateId,
 }
 
 impl<'a> MaskedColumn<'a> {
     /// Mask `hidden` (bit `i` is section `SECTION_MIN_Y + i`) of column
     /// `(cx, cz)` with `fill`.
+    ///
+    /// The legacy whole-section mask: each hidden section is expanded to its
+    /// `4×4×2` cells so the encoder sees the same per-cell mask as
+    /// [`Self::from_cells`]. Kept while the wiring step still hands over
+    /// section masks.
     pub fn new(
         inner: &'a dyn BlockSource,
         cx: i32,
@@ -1065,41 +1130,133 @@ impl<'a> MaskedColumn<'a> {
         hidden: u32,
         fill: BlockStateId,
     ) -> Self {
+        let (nx, ny, nz) = cell_grid(BoxDims::CELL);
+        let mut hidden_cells = HashSet::new();
+        for i in 0..SECTION_COUNT {
+            if hidden & (1 << i) == 0 {
+                continue;
+            }
+            let cy = SECTION_MIN_Y + i as i32;
+            let base_x = cx * nx as i32;
+            let base_y = cy * ny as i32;
+            let base_z = cz * nz as i32;
+            for iy in 0..ny {
+                for ix in 0..nx {
+                    for iz in 0..nz {
+                        hidden_cells.insert((
+                            base_x + ix as i32,
+                            base_y + iy as i32,
+                            base_z + iz as i32,
+                        ));
+                    }
+                }
+            }
+        }
         Self {
             inner,
             cx,
             cz,
-            hidden,
+            hidden_cells,
             fill,
         }
     }
 
-    fn hides(&self, cx: i32, cy: i32, cz: i32) -> bool {
-        if cx != self.cx || cz != self.cz {
+    /// Mask exactly the given world `4×4×2` cells of column `(cx, cz)` with
+    /// `fill`. Cells of other columns are ignored, so only the column's mask
+    /// matters.
+    pub fn from_cells(
+        inner: &'a dyn BlockSource,
+        cx: i32,
+        cz: i32,
+        hidden_cells: HashSet<(i32, i32, i32)>,
+        fill: BlockStateId,
+    ) -> Self {
+        Self {
+            inner,
+            cx,
+            cz,
+            hidden_cells,
+            fill,
+        }
+    }
+
+    /// Whether the `4×4×2` cell holding `(x, y, z)` is hidden.
+    #[inline]
+    fn hides(&self, x: i32, y: i32, z: i32) -> bool {
+        if x >> 4 != self.cx || z >> 4 != self.cz {
             return false;
         }
-        if !(SECTION_MIN_Y..=SECTION_MAX_Y).contains(&cy) {
-            return false;
-        }
-        let i = (cy - SECTION_MIN_Y) as u32;
-        self.hidden & (1 << i) != 0
+        self.hidden_cells.contains(&cell_of(x, y, z))
     }
 }
 
 impl BlockSource for MaskedColumn<'_> {
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
-        if self.hides(x >> 4, y >> 4, z >> 4) {
+        if self.hides(x, y, z) {
             return self.fill;
         }
         self.inner.block_at(x, y, z)
     }
 
     fn copy_section(&self, cx: i32, cy: i32, cz: i32, out: &mut [BlockStateId; 4096]) {
-        if self.hides(cx, cy, cz) {
+        if cx != self.cx || cz != self.cz || self.hidden_cells.is_empty() {
+            self.inner.copy_section(cx, cy, cz, out);
+            return;
+        }
+        let dims = BoxDims::CELL;
+        let (nx, ny, nz) = cell_grid(dims);
+        let base_x = cx * nx as i32;
+        let base_y = cy * ny as i32;
+        let base_z = cz * nz as i32;
+        // Count the hidden cells of this section first: a wholly-hidden
+        // section is filled without reading the world at all, and a wholly-
+        // visible one is just the world copy.
+        let mut hidden = 0usize;
+        for iy in 0..ny {
+            for ix in 0..nx {
+                for iz in 0..nz {
+                    if self.hidden_cells.contains(&(
+                        base_x + ix as i32,
+                        base_y + iy as i32,
+                        base_z + iz as i32,
+                    )) {
+                        hidden += 1;
+                    }
+                }
+            }
+        }
+        if hidden == nx * ny * nz {
             out.fill(self.fill);
             return;
         }
         self.inner.copy_section(cx, cy, cz, out);
+        if hidden == 0 {
+            return;
+        }
+        // Overwrite each hidden cell's blocks; a hidden cell is never split.
+        for iy in 0..ny {
+            for ix in 0..nx {
+                for iz in 0..nz {
+                    if !self.hidden_cells.contains(&(
+                        base_x + ix as i32,
+                        base_y + iy as i32,
+                        base_z + iz as i32,
+                    )) {
+                        continue;
+                    }
+                    for by in 0..dims.y {
+                        let y = iy * dims.y + by;
+                        for bz in 0..dims.z {
+                            let z = iz * dims.z + bz;
+                            for bx in 0..dims.x {
+                                let x = ix * dims.x + bx;
+                                out[x | (z << 4) | (y << 8)] = self.fill;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn column_biomes(&self, cx: i32, cz: i32) -> Option<Arc<aether_worldgen::ColumnBiomes>> {
@@ -1581,6 +1738,200 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- AX3b: per-cell (4×4×2) mask --------------------------------
+
+    /// A world where every block is unique, so a partial replacement of a
+    /// cell shows up as a mismatch.
+    struct UniqueWorld;
+    impl BlockSource for UniqueWorld {
+        fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+            let h = (x as u32).wrapping_mul(2_654_435_761)
+                ^ (y as u32).wrapping_mul(40_503)
+                ^ (z as u32).wrapping_mul(22_682_429);
+            BlockStateId(h | 0x8000_0000)
+        }
+    }
+
+    /// The `(nx, ny, nz)` cells along each axis of a `16³` section.
+    fn test_grid() -> (i32, i32, i32) {
+        (
+            (SECTION_SIZE as usize / BoxDims::CELL.x) as i32,
+            (SECTION_SIZE as usize / BoxDims::CELL.y) as i32,
+            (SECTION_SIZE as usize / BoxDims::CELL.z) as i32,
+        )
+    }
+
+    #[test]
+    fn masked_column_hides_exactly_the_requested_cells() {
+        // Pass-after: a per-cell mask hides the requested 4×4×2 cells and
+        // leaves every other block byte-identical to the source. Fail-before
+        // (`from_cells`/cell mask absent) the section-only wrapper could not
+        // express a partly-hidden section at all.
+        let world = UniqueWorld;
+        let hidden: HashSet<(i32, i32, i32)> = [(0, 0, 1), (3, 7, 2), (1, -25, 3), (2, 8, 0)]
+            .into_iter()
+            .collect();
+        let masked = MaskedColumn::from_cells(&world, 0, 0, hidden.clone(), STONE);
+        let mut out = [BlockStateId::AIR; 4096];
+        let mut hidden_hits = 0usize;
+        for cy in SECTION_MIN_Y..=SECTION_MAX_Y {
+            masked.copy_section(0, cy, 0, &mut out);
+            for (i, &got) in out.iter().enumerate() {
+                let x = (i & 15) as i32;
+                let z = ((i >> 4) & 15) as i32;
+                let y = cy * 16 + (i >> 8) as i32;
+                let want = if hidden.contains(&cell_of(x, y, z)) {
+                    hidden_hits += 1;
+                    STONE
+                } else {
+                    world.block_at(x, y, z)
+                };
+                assert_eq!(got, want, "copy_section block ({x},{y},{z})");
+                assert_eq!(masked.block_at(x, y, z), want, "block_at ({x},{y},{z})");
+            }
+        }
+        // Every requested cell really was exercised.
+        assert_eq!(
+            hidden_hits,
+            hidden.len() * 32,
+            "each hidden cell is 32 blocks"
+        );
+    }
+
+    #[test]
+    fn a_hidden_cell_is_whole_fill_and_a_visible_cell_is_whole_real() {
+        // Pass-after: the whole-cell invariant — a hidden cell is entirely
+        // `fill`, a visible cell entirely its real blocks, on `copy_section`
+        // and `block_at` alike, and a re-encoding is byte-for-byte identical.
+        let world = UniqueWorld;
+        let hidden: HashSet<(i32, i32, i32)> = [(1, 0, 1), (2, 1, 3)].into_iter().collect();
+        let masked = MaskedColumn::from_cells(&world, 0, 0, hidden.clone(), STONE);
+        let mut first = [BlockStateId::AIR; 4096];
+        let mut second = [BlockStateId::AIR; 4096];
+        masked.copy_section(0, 0, 0, &mut first);
+        masked.copy_section(0, 0, 0, &mut second);
+        assert_eq!(first, second, "re-encoding the same column is stable");
+        for (i, &got) in first.iter().enumerate() {
+            let x = (i & 15) as i32;
+            let z = ((i >> 4) & 15) as i32;
+            let y = (i >> 8) as i32;
+            let cell = cell_of(x, y, z);
+            if hidden.contains(&cell) {
+                assert_eq!(got, STONE, "hidden cell {cell:?} must be wholly fill");
+                assert_eq!(masked.block_at(x, y, z), STONE);
+            } else {
+                assert_eq!(
+                    got,
+                    world.block_at(x, y, z),
+                    "visible cell {cell:?} must be wholly real"
+                );
+                assert_eq!(masked.block_at(x, y, z), world.block_at(x, y, z));
+            }
+        }
+    }
+
+    #[test]
+    fn a_partly_visible_section_sends_the_ore_in_a_hidden_cell_as_fill() {
+        // The owner's leak (fail-before/pass-after): a 16³ section with one
+        // visible 4×4×2 cell and the rest hidden. The visible cell is real,
+        // every hidden cell is `fill`, so the ore in a hidden cell never
+        // reaches the client.
+        struct PartialOre;
+        impl BlockSource for PartialOre {
+            fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+                match cell_of(x, y, z) {
+                    (0, 0, 0) => BlockStateId(1234), // the ore, in a hidden cell
+                    (1, 0, 0) => BlockStateId(5678), // the one visible cell
+                    _ => STONE,
+                }
+            }
+        }
+        let world = PartialOre;
+        let (nx, ny, nz) = test_grid();
+        let visible_cell = (1, 0, 0);
+        let mut hidden = HashSet::new();
+        for iy in 0..ny {
+            for ix in 0..nx {
+                for iz in 0..nz {
+                    let cell = (ix, iy, iz);
+                    if cell != visible_cell {
+                        hidden.insert(cell);
+                    }
+                }
+            }
+        }
+        let masked = MaskedColumn::from_cells(&world, 0, 0, hidden, STONE);
+        // The ore sits in the hidden cell (0,0,0): both paths must send fill.
+        assert_eq!(masked.block_at(0, 0, 0), STONE, "the hidden ore is stone");
+        assert_eq!(masked.block_at(1, 1, 1), STONE);
+        // The one visible cell stays real.
+        assert_eq!(masked.block_at(4, 0, 0), BlockStateId(5678));
+        let mut out = [BlockStateId::AIR; 4096];
+        masked.copy_section(0, 0, 0, &mut out);
+        assert_eq!(out[0], STONE, "copy_section hides the ore cell");
+        assert_eq!(
+            out[4],
+            BlockStateId(5678),
+            "copy_section keeps the visible cell"
+        );
+        // Every other cell of the section is wholly fill too.
+        for (i, &got) in out.iter().enumerate() {
+            let x = (i & 15) as i32;
+            let z = ((i >> 4) & 15) as i32;
+            let y = (i >> 8) as i32;
+            if cell_of(x, y, z) == visible_cell {
+                continue;
+            }
+            assert_eq!(got, STONE, "hidden block ({x},{y},{z}) must be fill");
+        }
+    }
+
+    #[test]
+    fn desired_hidden_cells_lists_exactly_the_missing_cells_of_a_column() {
+        let dims = BoxDims::CELL;
+        let (nx, _, nz) = test_grid();
+        let y_min = (SECTION_MIN_Y * SECTION_SIZE).div_euclid(dims.y as i32);
+        let y_max = (SECTION_MAX_Y * SECTION_SIZE + SECTION_SIZE - 1).div_euclid(dims.y as i32);
+        // A hand-built visible set: the whole column except three cells.
+        let missing: HashSet<(i32, i32, i32)> = [(0, y_min, 0), (1, 0, 2), (3, y_max, 3)]
+            .into_iter()
+            .collect();
+        let mut visible = HashSet::new();
+        for cy in y_min..=y_max {
+            for ix in 0..nx {
+                for iz in 0..nz {
+                    let cell = (ix, cy, iz);
+                    if !missing.contains(&cell) {
+                        visible.insert(cell);
+                    }
+                }
+            }
+        }
+        assert_eq!(desired_hidden_cells(&visible, dims, 0, 0), missing);
+
+        // A wholly visible column hides nothing.
+        let all: HashSet<(i32, i32, i32)> = (y_min..=y_max)
+            .flat_map(|cy| (0..nx).flat_map(move |ix| (0..nz).map(move |iz| (ix, cy, iz))))
+            .collect();
+        assert!(desired_hidden_cells(&all, dims, 0, 0).is_empty());
+
+        // A different column shares no cells, so every cell is hidden.
+        let cells_per_column = (nx * nz * (y_max - y_min + 1)) as usize;
+        assert_eq!(
+            desired_hidden_cells(&all, dims, 1, 1).len(),
+            cells_per_column,
+            "another column's cells are all hidden"
+        );
+
+        // For `BoxDims::SECTION` the same helper reduces to the section mask.
+        let section_visible: HashSet<(i32, i32, i32)> =
+            [(0, 0, 0), (0, -1, 0)].into_iter().collect();
+        let hidden_sections = desired_hidden_cells(&section_visible, BoxDims::SECTION, 0, 0);
+        assert!(hidden_sections.contains(&(0, 5, 0)), "a missing section");
+        assert!(!hidden_sections.contains(&(0, 0, 0)), "a present section");
+        assert!(!hidden_sections.contains(&(0, -1, 0)));
     }
 
     #[test]
