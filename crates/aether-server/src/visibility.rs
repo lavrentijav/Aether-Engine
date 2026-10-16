@@ -1398,6 +1398,29 @@ mod tests {
     }
 
     #[test]
+    fn re_rendering_a_column_keeps_the_mask_the_client_holds() {
+        // A column is rendered many times over a session (join, streaming,
+        // reveal). Every render must compute the mask from the current
+        // reachable set and record it, so a re-send cannot drop or add
+        // masking. An empty reachable set hides everything.
+        let mut st = State::default();
+        let first = st.mask_for_render(0, 0, false);
+        assert_eq!(first, (1u32 << SECTION_COUNT) - 1, "all sections hidden");
+        let second = st.mask_for_render(0, 0, false);
+        assert_eq!(first, second, "a second render is identical");
+        assert_eq!(st.sent().get(&(0, 0)).copied(), Some(first));
+
+        // Once the sections become visible, the same column renders unmasked,
+        // and `sent` records that the client now holds the real column.
+        let all: HashSet<(i32, i32, i32)> = (0..SECTION_COUNT)
+            .map(|i| (0, SECTION_MIN_Y + i as i32, 0))
+            .collect();
+        st.set_visible_if((0, 0, 0), all, EDIT_EPOCH.load(Ordering::Relaxed));
+        assert_eq!(st.mask_for_render(0, 0, false), 0);
+        assert_eq!(st.sent().get(&(0, 0)).copied(), Some(0));
+    }
+
+    #[test]
     fn a_flat_world_below_the_surface_caches_a_sealed_graph() {
         let _guard = global_test_lock();
         invalidate_all();
@@ -1406,6 +1429,47 @@ mod tests {
         assert_eq!(g.open_faces(), 0);
         let g = graph(&world, (0, 2, 0)).unwrap();
         assert_eq!(g.open_faces(), aether_world::visibility::ALL_FACES);
+    }
+
+    #[test]
+    fn a_masked_column_is_whole_sections_stone_or_whole_sections_real() {
+        // The culling invariant: a hidden section is *entirely* the fill, a
+        // visible section is *entirely* its real blocks. No selective
+        // replacement of individual blocks inside a hidden section.
+        struct Distinct;
+        impl BlockSource for Distinct {
+            fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+                // Never AIR or STONE, and different in every cell, so a
+                // partial replacement would show up as a mismatch.
+                let h = (x as u32).wrapping_mul(2_654_435_761)
+                    ^ (y as u32).wrapping_mul(40_503)
+                    ^ (z as u32).wrapping_mul(22_682_429);
+                BlockStateId(h | 0x8000_0000)
+            }
+        }
+        let world = Distinct;
+        let hidden = (1 << 5) | (1 << 8); // two hidden sections, one visible between
+        let masked = MaskedColumn::new(&world, 0, 0, hidden, STONE);
+        let mut out = [BlockStateId::AIR; 4096];
+        for i in 0..SECTION_COUNT {
+            let cy = SECTION_MIN_Y + i as i32;
+            let is_hidden = hidden & (1u32 << i as u32) != 0;
+            masked.copy_section(0, cy, 0, &mut out);
+            if is_hidden {
+                assert!(
+                    out.iter().all(|b| *b == STONE),
+                    "hidden section {cy} must be entirely stone"
+                );
+            } else {
+                for (j, got) in out.iter().enumerate() {
+                    let x = (j & 15) as i32;
+                    let z = ((j >> 4) & 15) as i32;
+                    let y = (j >> 8) as i32;
+                    let want = world.block_at(x, cy * 16 + y, z);
+                    assert_eq!(*got, want, "visible section {cy} must be untouched");
+                }
+            }
+        }
     }
 
     #[test]

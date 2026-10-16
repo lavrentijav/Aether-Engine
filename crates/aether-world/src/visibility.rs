@@ -358,7 +358,9 @@ pub fn reachable_sections(
 ) -> HashSet<(i32, i32, i32)> {
     let floor_section = |v: f64| (v.floor() as i32) >> 4;
     let psx = floor_section(player.0);
+    let psy = floor_section(player.1);
     let psz = floor_section(player.2);
+    let player_section = (psx, psy, psz);
 
     // The seed box in section coordinates, derived from the block-space
     // margin so a player near a border seeds both sides.
@@ -387,6 +389,14 @@ pub fn reachable_sections(
                 let Some(g) = graph(sx, sy, sz) else {
                     continue;
                 };
+                // A fully opaque section cannot be seen into: sending it whole
+                // as real blocks leaks every ore it holds, so it must stay
+                // hidden. Only the section the player actually stands in is
+                // sent even when sealed. This is what made the margin reveal
+                // the solid shell around the player and its caves.
+                if g.open_faces() == 0 && key != player_section {
+                    continue;
+                }
                 let entry = g.air_faces();
                 visited.insert(key, entry);
                 queue.push_back((key, entry));
@@ -646,13 +656,59 @@ mod tests {
     }
 
     #[test]
-    fn the_margin_seeds_sections_even_through_a_wall() {
-        // Everything is sealed except the player's own section; the margin
-        // still marks the sections a few blocks away visible.
+    fn the_margin_never_reveals_a_sealed_section() {
+        // Everything is sealed. The section the player stands in is sent (he
+        // is inside it), but a sealed section a few blocks away — even inside
+        // the margin — must stay hidden, or sending it whole would leak every
+        // ore in it. This was the "shell around the player / its caves" leak.
         let open: HashSet<(i32, i32, i32)> = HashSet::new();
         let visible = reachable_sections((15.5, 0.5, 0.5), 5.0, 8, -4, 4, provider(&open, -4, 4));
+        assert!(visible.contains(&(0, 0, 0)), "the player's own section");
+        assert!(
+            !visible.contains(&(1, 0, 0)),
+            "a sealed section inside the margin stays hidden"
+        );
+        assert!(
+            !visible.contains(&(0, -1, 0)) && !visible.contains(&(0, 1, 0)),
+            "sealed sections above and below stay hidden"
+        );
+    }
+
+    #[test]
+    fn the_margin_keeps_air_sections_near_the_player_visible() {
+        // A section with air inside the margin is visible even if no air face
+        // connects it to the player's section, so turning or stepping does not
+        // pop it in.
+        let mut open = HashSet::new();
+        open.insert((0, 0, 0));
+        open.insert((0, 1, 0)); // directly above, within margin
+        let visible = reachable_sections((15.5, 0.5, 0.5), 5.0, 8, -4, 4, provider(&open, -4, 4));
         assert!(visible.contains(&(0, 0, 0)));
-        assert!(visible.contains(&(0, 0, 0)) && visible.contains(&(1, 0, 0)));
+        assert!(visible.contains(&(0, 1, 0)));
+    }
+
+    #[test]
+    fn a_player_sealed_in_stone_sends_only_its_own_section() {
+        // The player is in a one-cell air pocket; only his own section may be
+        // visible. Everything around it is solid rock and must be stone.
+        let graph = |x: i32, y: i32, z: i32| -> Option<SectionGraph> {
+            if !(-4..=4).contains(&y) {
+                return None;
+            }
+            Some(if (x, y, z) == (0, 0, 0) {
+                let mut blocks = [STONE; SECTION_VOLUME];
+                blocks[idx(0, 0, 0)] = AIR;
+                compute_section_graph(&blocks, is_opaque, is_air)
+            } else {
+                SectionGraph::sealed()
+            })
+        };
+        let visible = reachable_sections((0.5, 0.5, 0.5), 5.0, 8, -4, 4, graph);
+        assert!(visible.contains(&(0, 0, 0)), "the pocket the player is in");
+        assert!(
+            !visible.contains(&(0, -1, 0)) && !visible.contains(&(1, 0, 0)),
+            "surrounding sealed sections stay hidden: {visible:?}"
+        );
     }
 
     #[test]

@@ -61,7 +61,10 @@ this section". The rules the BFS follows now, after the live leak report:
 
 - **A fully opaque section is never visible**, even when its face touches open space. Marking it
   visible sends the whole section real, leaking every ore in it. The player sees only the opaque
-  surface, and a stone fill looks the same.
+  surface, and a stone fill looks the same. This includes the **margin**: a sealed section within
+  `margin_blocks` is *not* seeded visible — only the section the player physically stands in is
+  sent even when sealed. The margin only keeps sections that actually hold air visible, so it cannot
+  reveal the solid shell around the player or a neighbouring cave.
 - **Only air lets the search continue.** A face with a non-opaque cell (stone, water, glass) is
   *visible*, but the search enters the section only through an air face. A pool the player looks at
   therefore cannot reveal the flooded caves it drains into; a window is visible but opaque to the
@@ -71,6 +74,14 @@ this section". The rules the BFS follows now, after the live leak report:
   stone walls of a flooded cave stop the wave.
 - **A sub-block move does not change the answer**: the search is seeded by section, so two positions
   in the same section give the same set and the reveal planner has nothing to re-send.
+
+**Whole-section invariant.** The send layer never replaces individual blocks inside a hidden
+section. For every column, a section is either sent **entirely** as its real blocks (it is in the
+reachable set) or **entirely** as `hidden_fill` (stone by default — ores, cave air, water, lava,
+everything). `MaskedColumn` enforces this per section, on every send: the first burst, streaming,
+and every reveal re-send all go through the same mask, so a re-sent column cannot drop or add
+masking. See `a_masked_column_is_whole_sections_stone_or_whole_sections_real` and
+`re_rendering_a_column_keeps_the_mask_the_client_holds`.
 
 4. **Optional ray refinement.** For sections the BFS marks visible only through long thin paths,
    cast a few rays from the eye (+ margin points) to the section's corners; if every ray is blocked

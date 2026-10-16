@@ -52,3 +52,38 @@ Branch `oc/AX2` from `main` (`decfe1d`). Fixes the live report on `fi2` with
 - `culling` is section-level: an ore in a section the player can see part of (a surface section) is
   still sent. That is `engine` mode's job. See KNOWN_ISSUES A.16 (EN+RU).
 - A fully-water flooded cave connected by fully-water sections is still visible (no ores).
+
+## Follow-up (owner clarification): whole-section fill, no selective masking
+
+The owner confirmed the rule: in `culling`, a hidden section is replaced **entirely** by
+`hidden_fill` (stone) — ores, cave air, water, lava, all of it — and there is no selective
+block-by-block replacement. Also: verify every sent section is either wholly visible or wholly
+stone, and that this holds on re-sends.
+
+### What was found
+
+- The fill was already whole-section (`MaskedColumn`), and every `ChunkColumn` send (join burst,
+  streaming, reveal) goes through `mask_for_render`, so no column went out unmasked and no
+  selective fill existed. The remaining leak was **classification**: the margin seeded *every*
+  section within `margin_blocks` visible, including fully opaque ones. So the solid shell next to
+  the player (and its sealed caves) was sent whole and leaked, and — because the seed box shifts by
+  a whole section as the player crosses a border — it flickered in and out on a small move.
+
+### Fix
+
+- `reachable_sections` no longer seeds a fully opaque section; only the section the player actually
+  stands in may be sent sealed. Sections that hold air are still seeded by the margin (so turning
+  does not pop them in), but a sealed section anywhere else stays stone.
+- Tests: `the_margin_never_reveals_a_sealed_section`,
+  `the_margin_keeps_air_sections_near_the_player_visible`,
+  `a_player_sealed_in_stone_sends_only_its_own_section` (aether-world);
+  `a_masked_column_is_whole_sections_stone_or_whole_sections_real`,
+  `re_rendering_a_column_keeps_the_mask_the_client_holds` (aether-server).
+- INFO line `anti-xray : <mode> …` was already added (mode, worlds, bypass list).
+
+### Invariant now guaranteed and tested
+
+For every sent column, each section is either entirely its real blocks (it is in the reachable set)
+or entirely `hidden_fill`. Verified per cell in `a_masked_column_is_whole_sections_stone_or_whole_sections_real`
+and made stable across re-renders by `re_rendering_a_column_keeps_the_mask_the_client_holds`.
+
