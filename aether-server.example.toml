@@ -90,6 +90,16 @@ batch_size = 500        # write as soon as this many events are waiting
 batch_delay_ms = 1000   # ...or this long after the first one arrived
 queue_depth = 100000    # events that may wait before submissions are dropped
 
+[chat]
+# Log every chat line, private message and command players type. Each is
+# written to the server log ([chat] name text, [pm] a -> b: text,
+# [cmd] name: /line) and journalled as an event the history API can show.
+log = true           # public chat and private messages
+log_commands = true  # commands players type
+# Command names whose arguments are masked as **** in the log and the journal,
+# so a password can never leak through it. Case-insensitive, without the slash.
+redact = ["login", "register", "l", "reg"]
+
 [plugins]
 # WebAssembly plugins (a build with the `plugins` feature, the default). Each
 # plugin is a directory under `dir` holding plugin.toml and its .wasm

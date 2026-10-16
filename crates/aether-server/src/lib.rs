@@ -14,6 +14,7 @@
 //! logic every version shares.
 
 pub mod auth;
+pub mod chatlog;
 pub mod commands;
 pub mod config;
 pub mod connections;
@@ -530,6 +531,13 @@ pub fn anti_xray_config() -> config::AntiXrayConfig {
         .get()
         .map(|c| c.anti_xray.clone())
         .unwrap_or_default()
+}
+
+/// The `[chat]` settings, or the defaults before startup installs the config.
+/// The defaults log everything with the built-in redact list, so chat logging
+/// works even in a test that never installed a config.
+pub fn chat_config() -> config::ChatConfig {
+    CONFIG.get().map(|c| c.chat.clone()).unwrap_or_default()
 }
 
 /// Whether anti-xray is active for the running world, resolved once.

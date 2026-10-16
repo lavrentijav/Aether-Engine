@@ -58,8 +58,8 @@ pub mod sink;
 mod tests;
 
 pub use event::{
-    ActorId, DecodeError, DestroyReason, Event, EventBody, ItemUid, Place, DESTROY_REASONS,
-    EVENT_KINDS, EVENT_KIND_UNKNOWN,
+    ActorId, ChatKind, DecodeError, DestroyReason, Event, EventBody, ItemUid, Place,
+    DESTROY_REASONS, EVENT_KINDS, EVENT_KIND_UNKNOWN,
 };
 pub use ledger::{install_allocator, Anomaly, Balance, Ledger, UidAllocator};
 pub use sink::{BatchConfig, BatchingSink, EventSink, SinkStats};

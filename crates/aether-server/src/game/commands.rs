@@ -151,6 +151,34 @@ pub fn dispatch(
             teleport(handle, registry, world, s.0, s.1, s.2);
             vec!["Teleported to spawn".into()]
         }
+        // `/msg` and its aliases: a private message to exactly one player.
+        // The sender and the recipient each see their own side of it, and the
+        // line is logged and journalled (CH1). A target that is not a player
+        // is refused, as in vanilla; targeting yourself is allowed.
+        "msg" | "tell" | "w" => {
+            let Some(name) = args.first().copied() else {
+                return Some(vec!["/msg <player> <message>".into()]);
+            };
+            let message = args[1..].join(" ");
+            if message.is_empty() {
+                return Some(vec!["/msg <player> <message>".into()]);
+            }
+            match registry
+                .snapshot()
+                .into_iter()
+                .find(|p| p.name.eq_ignore_ascii_case(name))
+            {
+                Some(target) => {
+                    crate::chatlog::log_private(handle, &target, &message, world);
+                    target.emit(
+                        &ServerEvent::Chat(format!("{} whispers to you: {message}", handle.name)),
+                        world,
+                    );
+                    vec![format!("You whisper to {}: {message}", target.name)]
+                }
+                None => vec![format!("{name} is not online")],
+            }
+        }
         "tp" => {
             if !op {
                 return deny();
