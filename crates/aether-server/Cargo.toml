@@ -67,6 +67,11 @@ name = "visibility"
 harness = false
 test = false
 
+[[bench]]
+name = "anti_xray"
+harness = false
+test = false
+
 [lints]
 workspace = true
 

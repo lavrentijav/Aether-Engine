@@ -74,9 +74,10 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
     super::blockticks::tick(world, registry, rng);
 
     let players = registry.snapshot();
-    // Anti-xray: recompute a player's reachable sections where needed and
-    // re-send (reveal) newly visible columns, capped per tick. A no-op unless
-    // `[visibility] enabled`.
+    // Anti-xray: engine mode reveals ores exposed by a block write; culling
+    // recomputes a player's reachable sections where needed and re-sends
+    // (reveal) newly visible columns, capped per tick. A no-op unless
+    // `[anti_xray] enabled`.
     crate::visibility::tick(&players, world);
     for p in &players {
         // Eating finishes here, in the tick: journal what it used up. Only

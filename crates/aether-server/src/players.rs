@@ -291,17 +291,26 @@ impl PlayerHandle {
                     None => world,
                 };
                 let view = crate::protocol::ColumnView::new(base, *cx, *cz);
-                // Anti-xray: mask the sections this player cannot see before
-                // the codec ever reads them, so every version's cheapest
-                // single-valued stone form falls out of the existing encoder.
-                let hidden = crate::visibility::hidden_mask_for_render(self, world, *cx, *cz);
-                if hidden != 0 {
-                    let fill = crate::visibility::fill_for(self);
-                    let masked =
-                        crate::visibility::MaskedColumn::new(&view, *cx, *cz, hidden, fill);
-                    self.codec.encode(ev, &masked)
-                } else {
-                    self.codec.encode(ev, &view)
+                // Anti-xray: mask what this player cannot see before the codec
+                // ever reads it. Culling hides whole sections; engine hides
+                // individual buried ores. Both go through the existing per-
+                // version encoder, so no codec knows about either.
+                match crate::visibility::mask_for_render(self, world, *cx, *cz) {
+                    crate::visibility::ColumnMask::None => self.codec.encode(ev, &view),
+                    crate::visibility::ColumnMask::Sections { hidden, fill } => {
+                        let masked =
+                            crate::visibility::MaskedColumn::new(&view, *cx, *cz, hidden, fill);
+                        self.codec.encode(ev, &masked)
+                    }
+                    crate::visibility::ColumnMask::Engine => {
+                        let masked = crate::visibility::EngineColumn::new(
+                            &view,
+                            crate::visibility::hidden_states(),
+                        );
+                        let packets = self.codec.encode(ev, &masked);
+                        crate::visibility::record_engine(self, *cx, *cz, masked.masked_any());
+                        packets
+                    }
                 }
             }
             ServerEvent::UnloadColumn { cx, cz } => {
@@ -309,16 +318,31 @@ impl PlayerHandle {
                 self.codec.encode(ev, world)
             }
             // A single block change must be a carrier state too, or a placed
-            // or mined block would flip back to the stand-in.
-            ServerEvent::BlockChange { x, y, z, block } if table.is_some() => {
-                let t = table.expect("guarded by the match arm");
-                let remapped = ServerEvent::BlockChange {
-                    x: *x,
-                    y: *y,
-                    z: *z,
-                    block: t.display(*block),
-                };
-                self.codec.encode(&remapped, world)
+            // or mined block would flip back to the stand-in — and it must be
+            // masked, or a server-side write of a hidden block (`/setblock`,
+            // creative, `/rollback`) would leak it.
+            ServerEvent::BlockChange { x, y, z, block } => {
+                let block = crate::visibility::mask_block(self, world, *x, *y, *z, *block);
+                match table {
+                    Some(t) => {
+                        let remapped = ServerEvent::BlockChange {
+                            x: *x,
+                            y: *y,
+                            z: *z,
+                            block: t.display(block),
+                        };
+                        self.codec.encode(&remapped, world)
+                    }
+                    None => {
+                        let masked = ServerEvent::BlockChange {
+                            x: *x,
+                            y: *y,
+                            z: *z,
+                            block,
+                        };
+                        self.codec.encode(&masked, world)
+                    }
+                }
             }
             // The scoreboard path is the same on every codec — its ids and
             // field shapes come from the version table — so it is rendered
