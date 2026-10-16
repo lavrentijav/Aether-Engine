@@ -1,0 +1,1570 @@
+//! The one command catalogue.
+//!
+//! Every command Aether knows about — the ones that run today **and** the ones
+//! that are only specified — is listed here exactly once, with its category,
+//! permission node, op level and status. This is the single source of truth
+//! the generated docs (`docs/COMMANDS.md`, `docs/COMMANDS.ru.md`) are rendered
+//! from. The command tree, the Declare Commands packet and `/help` are meant
+//! to be built from this same list; that wiring is a separate step while
+//! CMD-05 rewrites `/help`, so for now the tests at the bottom of this file
+//! pin the list to [`super::registry::CORE`] (the pending half) and to the
+//! command tree (the implemented half).
+//!
+//! ## One edit, one place
+//!
+//! * To **add a command**, add one entry to [`CATALOGUE`]. If it is planned
+//!   but not written, give it [`Status::Pending`] and the `CMD-nn` task that
+//!   will implement it; the tree declares it as a stub that replies
+//!   `not implemented yet (CMD-nn)`, so it still completes and colours.
+//! * To **flip a command to working**, change its entry's `status` to
+//!   [`Status::Implemented`], set `task` to `-`, and wire the executor in the
+//!   owning module's `nodes()` ([`crate::game::commands`],
+//!   [`crate::economy::commands`] or [`super::core_nodes`]). The catalogue
+//!   *lists* commands; it does not run them.
+//!
+//! A command must never appear twice: a name that is both implemented and
+//! listed pending fails [`tests::no_name_is_both_implemented_and_pending`].
+
+use std::fmt::Write as _;
+
+/// Whether a command runs today.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Status {
+    /// A real executor is wired into the command tree.
+    Implemented,
+    /// Specified in `docs/design/commands.md`; the tree answers
+    /// `not implemented yet (CMD-nn)`.
+    Pending,
+}
+
+/// A command's category: the small fixed set used for `/help` grouping and the
+/// generated docs. Every catalogue entry has exactly one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Category {
+    /// Player and access management (op, ban, whitelist, kick, help).
+    Admin,
+    /// Server control and information (stop, save, list, seed, version).
+    Server,
+    /// Player verbs: inventory, movement, effects, item and entity actions.
+    Player,
+    /// Blocks, environment and world rules (setblock, fill, weather, time).
+    World,
+    /// Data, scoreboard, teams and chat (data, scoreboard, say, tellraw).
+    Data,
+    /// Server diagnostics and lifecycle (tps, gc, plugins, aether, debug).
+    Ops,
+    /// World history and protection (inspect, lookup, rollback, restore).
+    History,
+    /// The economy (balance, pay, market, econ).
+    Economy,
+}
+
+impl Category {
+    /// Every category, in the order the docs list them.
+    pub const ALL: &'static [Category] = &[
+        Category::Admin,
+        Category::Server,
+        Category::Player,
+        Category::World,
+        Category::Data,
+        Category::Ops,
+        Category::History,
+        Category::Economy,
+    ];
+
+    /// The short key (`admin`) — also the value [`super::registry::Entry::group`]
+    /// uses, so the two lists agree.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Category::Admin => "admin",
+            Category::Server => "server",
+            Category::Player => "player",
+            Category::World => "world",
+            Category::Data => "data",
+            Category::Ops => "ops",
+            Category::History => "history",
+            Category::Economy => "economy",
+        }
+    }
+
+    /// The category's one-line English description for the docs.
+    pub const fn blurb_en(self) -> &'static str {
+        match self {
+            Category::Admin => "Player and access management.",
+            Category::Server => "Server control and information.",
+            Category::Player => "Player verbs: inventory, movement, effects and items.",
+            Category::World => "Blocks, environment and world rules.",
+            Category::Data => "Data, scoreboard, teams and chat.",
+            Category::Ops => "Server diagnostics and lifecycle.",
+            Category::History => "World history and protection.",
+            Category::Economy => "The economy.",
+        }
+    }
+
+    /// The category's one-line Russian description for the docs.
+    pub const fn blurb_ru(self) -> &'static str {
+        match self {
+            Category::Admin => "Управление игроками и доступом.",
+            Category::Server => "Управление сервером и информация о нём.",
+            Category::Player => "Игрок: инвентарь, перемещение, эффекты и предметы.",
+            Category::World => "Блоки, окружение и правила мира.",
+            Category::Data => "Данные, счётная доска, команды и чат.",
+            Category::Ops => "Диагностика и жизненный цикл сервера.",
+            Category::History => "История мира и защита.",
+            Category::Economy => "Экономика.",
+        }
+    }
+}
+
+/// One command in the catalogue, working or not.
+pub struct Command {
+    /// Canonical command name, without the leading slash.
+    pub name: &'static str,
+    /// Alternative names the command answers to.
+    pub aliases: &'static [&'static str],
+    /// Permission node checked before the command runs.
+    pub node: &'static str,
+    /// Vanilla op level required (0 everyone … 4 owner).
+    pub op: u8,
+    /// The `CMD-nn` task that implements it, or `-` when it is implemented.
+    pub task: &'static str,
+    /// The category it belongs to.
+    pub category: Category,
+    /// Implemented or pending.
+    pub status: Status,
+    /// A one-line usage/description, without a leading slash.
+    pub usage: &'static str,
+}
+
+const fn imp(
+    name: &'static str,
+    aliases: &'static [&'static str],
+    node: &'static str,
+    op: u8,
+    category: Category,
+    usage: &'static str,
+) -> Command {
+    Command {
+        name,
+        aliases,
+        node,
+        op,
+        task: "-",
+        category,
+        status: Status::Implemented,
+        usage,
+    }
+}
+
+const fn pend(
+    name: &'static str,
+    aliases: &'static [&'static str],
+    node: &'static str,
+    op: u8,
+    task: &'static str,
+    category: Category,
+    usage: &'static str,
+) -> Command {
+    Command {
+        name,
+        aliases,
+        node,
+        op,
+        task,
+        category,
+        status: Status::Pending,
+        usage,
+    }
+}
+
+/// Every command Aether knows, implemented and pending, grouped as the docs
+/// list them (per category, in the order [`Category::ALL`] gives).
+pub const CATALOGUE: &[Command] = &[
+    // -- admin -------------------------------------------------------------
+    imp(
+        "help",
+        &["?"],
+        "minecraft.command.help",
+        0,
+        Category::Admin,
+        "/help [command]",
+    ),
+    pend(
+        "op",
+        &[],
+        "minecraft.command.op",
+        3,
+        "CMD-08",
+        Category::Admin,
+        "/op <targets>",
+    ),
+    pend(
+        "deop",
+        &[],
+        "minecraft.command.deop",
+        3,
+        "CMD-08",
+        Category::Admin,
+        "/deop <targets>",
+    ),
+    pend(
+        "ban",
+        &[],
+        "minecraft.command.ban",
+        3,
+        "CMD-08",
+        Category::Admin,
+        "/ban <targets> [reason]",
+    ),
+    pend(
+        "ban-ip",
+        &[],
+        "minecraft.command.ban-ip",
+        3,
+        "CMD-08",
+        Category::Admin,
+        "/ban-ip <targets> [reason]",
+    ),
+    pend(
+        "banlist",
+        &[],
+        "minecraft.command.banlist",
+        3,
+        "CMD-08",
+        Category::Admin,
+        "/banlist [ips]",
+    ),
+    pend(
+        "pardon",
+        &[],
+        "minecraft.command.pardon",
+        3,
+        "CMD-08",
+        Category::Admin,
+        "/pardon <targets>",
+    ),
+    pend(
+        "pardon-ip",
+        &[],
+        "minecraft.command.pardon-ip",
+        3,
+        "CMD-08",
+        Category::Admin,
+        "/pardon-ip <targets>",
+    ),
+    pend(
+        "kick",
+        &[],
+        "minecraft.command.kick",
+        3,
+        "CMD-08",
+        Category::Admin,
+        "/kick <targets> [reason]",
+    ),
+    pend(
+        "whitelist",
+        &[],
+        "minecraft.command.whitelist",
+        3,
+        "CMD-08",
+        Category::Admin,
+        "/whitelist <add,remove,list,on,off,reload> [name]",
+    ),
+    // -- server ------------------------------------------------------------
+    pend(
+        "stop",
+        &[],
+        "minecraft.command.stop",
+        4,
+        "CMD-09",
+        Category::Server,
+        "/stop",
+    ),
+    pend(
+        "save-all",
+        &[],
+        "minecraft.command.save-all",
+        4,
+        "CMD-09",
+        Category::Server,
+        "/save-all [flush]",
+    ),
+    pend(
+        "save-on",
+        &[],
+        "minecraft.command.save-on",
+        4,
+        "CMD-09",
+        Category::Server,
+        "/save-on",
+    ),
+    pend(
+        "save-off",
+        &[],
+        "minecraft.command.save-off",
+        4,
+        "CMD-09",
+        Category::Server,
+        "/save-off",
+    ),
+    pend(
+        "list",
+        &[],
+        "minecraft.command.list",
+        0,
+        "CMD-09",
+        Category::Server,
+        "/list [uuids]",
+    ),
+    pend(
+        "seed",
+        &[],
+        "minecraft.command.seed",
+        2,
+        "CMD-09",
+        Category::Server,
+        "/seed",
+    ),
+    pend(
+        "version",
+        &[],
+        "minecraft.command.version",
+        2,
+        "CMD-09",
+        Category::Server,
+        "/version",
+    ),
+    pend(
+        "setidletimeout",
+        &[],
+        "minecraft.command.setidletimeout",
+        3,
+        "CMD-09",
+        Category::Server,
+        "/setidletimeout <minutes>",
+    ),
+    pend(
+        "transfer",
+        &[],
+        "minecraft.command.transfer",
+        3,
+        "CMD-09",
+        Category::Server,
+        "/transfer <hostname> [port] [players]",
+    ),
+    pend(
+        "publish",
+        &[],
+        "minecraft.command.publish",
+        4,
+        "CMD-09",
+        Category::Server,
+        "/publish [allow-commands] [gamemode] [port]",
+    ),
+    // -- player ------------------------------------------------------------
+    imp(
+        "gamemode",
+        &["gm"],
+        "minecraft.command.gamemode",
+        2,
+        Category::Player,
+        "/gamemode <mode> [player]",
+    ),
+    imp(
+        "give",
+        &[],
+        "minecraft.command.give",
+        2,
+        Category::Player,
+        "/give <item> [count]",
+    ),
+    imp(
+        "summon",
+        &[],
+        "minecraft.command.summon",
+        2,
+        Category::Player,
+        "/summon <entity> [pos]",
+    ),
+    imp(
+        "killall",
+        &[],
+        "aether.command.killall",
+        2,
+        Category::Player,
+        "/killall",
+    ),
+    imp(
+        "kill",
+        &[],
+        "minecraft.command.kill",
+        2,
+        Category::Player,
+        "/kill [targets]",
+    ),
+    imp(
+        "spawn",
+        &[],
+        "aether.command.spawn",
+        0,
+        Category::Player,
+        "/spawn",
+    ),
+    imp(
+        "tp",
+        &[],
+        "minecraft.command.tp",
+        2,
+        Category::Player,
+        "/tp <target>",
+    ),
+    imp(
+        "block",
+        &[],
+        "aether.command.block",
+        0,
+        Category::Player,
+        "/block <x> <y> <z>",
+    ),
+    imp(
+        "food",
+        &[],
+        "aether.command.food",
+        2,
+        Category::Player,
+        "/food [level]",
+    ),
+    imp(
+        "heal",
+        &[],
+        "aether.command.heal",
+        2,
+        Category::Player,
+        "/heal",
+    ),
+    imp(
+        "inv",
+        &["inventory"],
+        "aether.command.inventory",
+        0,
+        Category::Player,
+        "/inv",
+    ),
+    pend(
+        "clear",
+        &[],
+        "minecraft.command.clear",
+        2,
+        "CMD-10",
+        Category::Player,
+        "/clear [targets] [item] [max-count]",
+    ),
+    pend(
+        "effect",
+        &[],
+        "minecraft.command.effect",
+        2,
+        "CMD-10",
+        Category::Player,
+        "/effect <targets> <effect> [seconds] [amplifier]",
+    ),
+    pend(
+        "enchant",
+        &[],
+        "minecraft.command.enchant",
+        2,
+        "CMD-10",
+        Category::Player,
+        "/enchant <targets> <enchantment> [level]",
+    ),
+    pend(
+        "experience",
+        &["xp"],
+        "minecraft.command.experience",
+        2,
+        "CMD-10",
+        Category::Player,
+        "/experience <targets> <amount> [points,levels]",
+    ),
+    pend(
+        "attribute",
+        &[],
+        "minecraft.command.attribute",
+        2,
+        "CMD-10",
+        Category::Player,
+        "/attribute <target> <attribute> <get,base> [value]",
+    ),
+    pend(
+        "damage",
+        &[],
+        "minecraft.command.damage",
+        2,
+        "CMD-10",
+        Category::Player,
+        "/damage <target> <amount> [type]",
+    ),
+    pend(
+        "teleport",
+        &[],
+        "minecraft.command.teleport",
+        2,
+        "CMD-11",
+        Category::Player,
+        "/teleport <target>",
+    ),
+    pend(
+        "spreadplayers",
+        &[],
+        "minecraft.command.spreadplayers",
+        2,
+        "CMD-11",
+        Category::Player,
+        "/spreadplayers <center> <spread> <max-range> [teams]",
+    ),
+    pend(
+        "spawnpoint",
+        &[],
+        "minecraft.command.spawnpoint",
+        2,
+        "CMD-11",
+        Category::Player,
+        "/spawnpoint [target] [pos]",
+    ),
+    pend(
+        "ride",
+        &[],
+        "minecraft.command.ride",
+        2,
+        "CMD-11",
+        Category::Player,
+        "/ride <target> <vehicle>",
+    ),
+    pend(
+        "item",
+        &[],
+        "minecraft.command.item",
+        2,
+        "CMD-11",
+        Category::Player,
+        "/item <target> <slot> <replace,modify> [...]",
+    ),
+    pend(
+        "rotate",
+        &[],
+        "aether.command.rotate",
+        2,
+        "CMD-11",
+        Category::Player,
+        "/rotate <target> <yaw> <pitch>",
+    ),
+    // -- world -------------------------------------------------------------
+    imp(
+        "time",
+        &[],
+        "minecraft.command.time",
+        2,
+        Category::World,
+        "/time [set] <day,noon,night,midnight,ticks>",
+    ),
+    pend(
+        "setblock",
+        &[],
+        "minecraft.command.setblock",
+        2,
+        "CMD-12",
+        Category::World,
+        "/setblock <pos> <block> [mode]",
+    ),
+    pend(
+        "fill",
+        &[],
+        "minecraft.command.fill",
+        2,
+        "CMD-12",
+        Category::World,
+        "/fill <from> <to> <block> [mode]",
+    ),
+    pend(
+        "clone",
+        &[],
+        "minecraft.command.clone",
+        2,
+        "CMD-12",
+        Category::World,
+        "/clone <from> <to> <dest> [mask] [mode]",
+    ),
+    pend(
+        "fillbiome",
+        &[],
+        "minecraft.command.fillbiome",
+        2,
+        "CMD-12",
+        Category::World,
+        "/fillbiome <from> <to> <biome>",
+    ),
+    pend(
+        "place",
+        &[],
+        "minecraft.command.place",
+        2,
+        "CMD-12",
+        Category::World,
+        "/place <feature,template> <pos> [...]",
+    ),
+    pend(
+        "forceload",
+        &[],
+        "minecraft.command.forceload",
+        2,
+        "CMD-12",
+        Category::World,
+        "/forceload <add,remove,query> <from> [to]",
+    ),
+    pend(
+        "locate",
+        &[],
+        "minecraft.command.locate",
+        2,
+        "CMD-13",
+        Category::World,
+        "/locate <structure,biome,poi> [...]",
+    ),
+    pend(
+        "setworldspawn",
+        &[],
+        "minecraft.command.setworldspawn",
+        2,
+        "CMD-13",
+        Category::World,
+        "/setworldspawn [pos] [angle]",
+    ),
+    pend(
+        "worldborder",
+        &[],
+        "minecraft.command.worldborder",
+        2,
+        "CMD-13",
+        Category::World,
+        "/worldborder <set,center,damage,get,warning> [...]",
+    ),
+    pend(
+        "weather",
+        &[],
+        "minecraft.command.weather",
+        2,
+        "CMD-13",
+        Category::World,
+        "/weather <clear,rain,thunder> [duration]",
+    ),
+    pend(
+        "gamerule",
+        &[],
+        "minecraft.command.gamerule",
+        2,
+        "CMD-13",
+        Category::World,
+        "/gamerule <rule> [value]",
+    ),
+    pend(
+        "difficulty",
+        &[],
+        "minecraft.command.difficulty",
+        2,
+        "CMD-13",
+        Category::World,
+        "/difficulty <peaceful,easy,normal,hard>",
+    ),
+    pend(
+        "tick",
+        &[],
+        "minecraft.command.tick",
+        3,
+        "CMD-13",
+        Category::World,
+        "/tick <rate,freeze,step,sprint,unfreeze,query> [...]",
+    ),
+    pend(
+        "defaultgamemode",
+        &[],
+        "minecraft.command.defaultgamemode",
+        2,
+        "CMD-13",
+        Category::World,
+        "/defaultgamemode <mode>",
+    ),
+    pend(
+        "waypoint",
+        &[],
+        "minecraft.command.waypoint",
+        2,
+        "CMD-13",
+        Category::World,
+        "/waypoint <list,modify>",
+    ),
+    // -- data --------------------------------------------------------------
+    imp(
+        "msg",
+        &["tell", "w"],
+        "minecraft.command.msg",
+        0,
+        Category::Data,
+        "/msg <player> <message>",
+    ),
+    pend(
+        "data",
+        &[],
+        "minecraft.command.data",
+        2,
+        "CMD-14",
+        Category::Data,
+        "/data <get,merge,modify,remove> <target> <path> [...]",
+    ),
+    pend(
+        "scoreboard",
+        &[],
+        "minecraft.command.scoreboard",
+        2,
+        "CMD-15",
+        Category::Data,
+        "/scoreboard <objectives,players> [...]",
+    ),
+    pend(
+        "tag",
+        &[],
+        "minecraft.command.tag",
+        2,
+        "CMD-16",
+        Category::Data,
+        "/tag <targets> <add,remove,list> <name>",
+    ),
+    pend(
+        "team",
+        &[],
+        "minecraft.command.team",
+        2,
+        "CMD-16",
+        Category::Data,
+        "/team <add,list,modify,join,leave,remove> [...]",
+    ),
+    pend(
+        "teammsg",
+        &["tm"],
+        "minecraft.command.teammsg",
+        0,
+        "CMD-16",
+        Category::Data,
+        "/teammsg <message>",
+    ),
+    pend(
+        "say",
+        &[],
+        "minecraft.command.say",
+        2,
+        "CMD-17",
+        Category::Data,
+        "/say <message>",
+    ),
+    pend(
+        "me",
+        &[],
+        "minecraft.command.me",
+        0,
+        "CMD-17",
+        Category::Data,
+        "/me <action>",
+    ),
+    pend(
+        "tellraw",
+        &[],
+        "minecraft.command.tellraw",
+        2,
+        "CMD-17",
+        Category::Data,
+        "/tellraw <targets> <message>",
+    ),
+    pend(
+        "title",
+        &[],
+        "minecraft.command.title",
+        2,
+        "CMD-17",
+        Category::Data,
+        "/title <targets> <title,subtitle,actionbar,times,reset> [...]",
+    ),
+    pend(
+        "bossbar",
+        &[],
+        "minecraft.command.bossbar",
+        2,
+        "CMD-17",
+        Category::Data,
+        "/bossbar <add,get,list,remove,set> [...]",
+    ),
+    pend(
+        "dialog",
+        &[],
+        "minecraft.command.dialog",
+        2,
+        "CMD-17",
+        Category::Data,
+        "/dialog show <targets> <dialog>",
+    ),
+    pend(
+        "trigger",
+        &[],
+        "minecraft.command.trigger",
+        0,
+        "CMD-18",
+        Category::Data,
+        "/trigger <objective> [add,set] [value]",
+    ),
+    pend(
+        "particle",
+        &[],
+        "minecraft.command.particle",
+        2,
+        "CMD-19",
+        Category::Data,
+        "/particle <name> <pos> [delta] [speed] [count]",
+    ),
+    pend(
+        "playsound",
+        &[],
+        "minecraft.command.playsound",
+        2,
+        "CMD-19",
+        Category::Data,
+        "/playsound <sound> <source> <targets> [pos]",
+    ),
+    pend(
+        "stopsound",
+        &[],
+        "minecraft.command.stopsound",
+        2,
+        "CMD-19",
+        Category::Data,
+        "/stopsound <targets> [source] [sound]",
+    ),
+    pend(
+        "loot",
+        &[],
+        "minecraft.command.loot",
+        2,
+        "CMD-20",
+        Category::Data,
+        "/loot <give,insert,spawn,replace> [...]",
+    ),
+    pend(
+        "recipe",
+        &[],
+        "minecraft.command.recipe",
+        2,
+        "CMD-20",
+        Category::Data,
+        "/recipe <give,take> <targets> <recipe>",
+    ),
+    pend(
+        "advancement",
+        &[],
+        "minecraft.command.advancement",
+        2,
+        "CMD-20",
+        Category::Data,
+        "/advancement <grant,revoke> <targets> <advancement>",
+    ),
+    pend(
+        "random",
+        &[],
+        "minecraft.command.random",
+        2,
+        "CMD-20",
+        Category::Data,
+        "/random <value,roll> [...]",
+    ),
+    pend(
+        "schedule",
+        &[],
+        "minecraft.command.schedule",
+        2,
+        "CMD-20",
+        Category::Data,
+        "/schedule <function> <clear,replace> <time>",
+    ),
+    pend(
+        "function",
+        &[],
+        "minecraft.command.function",
+        2,
+        "CMD-21",
+        Category::Data,
+        "/function <name> [arguments]",
+    ),
+    pend(
+        "datapack",
+        &[],
+        "minecraft.command.datapack",
+        2,
+        "CMD-21",
+        Category::Data,
+        "/datapack <enable,disable,list> [name]",
+    ),
+    pend(
+        "reload",
+        &[],
+        "minecraft.command.reload",
+        4,
+        "CMD-21",
+        Category::Data,
+        "/reload",
+    ),
+    pend(
+        "return",
+        &[],
+        "minecraft.command.return",
+        2,
+        "CMD-21",
+        Category::Data,
+        "/return <value>",
+    ),
+    pend(
+        "test",
+        &[],
+        "minecraft.command.test",
+        2,
+        "CMD-21",
+        Category::Data,
+        "/test <run,create,clear,list> [...]",
+    ),
+    pend(
+        "execute",
+        &[],
+        "minecraft.command.execute",
+        2,
+        "CMD-22",
+        Category::Data,
+        "/execute <...> run <command>",
+    ),
+    // -- ops ---------------------------------------------------------------
+    imp(
+        "cache",
+        &[],
+        "aether.command.cache",
+        3,
+        Category::Ops,
+        "/cache",
+    ),
+    imp(
+        "aether",
+        &[],
+        "aether.command.aether",
+        4,
+        Category::Ops,
+        "/aether <subcommand>",
+    ),
+    imp(
+        "visibility",
+        &[],
+        "aether.command.visibility",
+        3,
+        Category::Ops,
+        "/visibility [on,off,status]",
+    ),
+    pend(
+        "tps",
+        &[],
+        "aether.command.tps",
+        3,
+        "CMD-23",
+        Category::Ops,
+        "/tps",
+    ),
+    pend(
+        "mspt",
+        &[],
+        "aether.command.mspt",
+        3,
+        "CMD-23",
+        Category::Ops,
+        "/mspt",
+    ),
+    pend(
+        "gc",
+        &[],
+        "aether.command.gc",
+        3,
+        "CMD-23",
+        Category::Ops,
+        "/gc",
+    ),
+    pend(
+        "plugins",
+        &["pl"],
+        "aether.command.plugins",
+        3,
+        "CMD-23",
+        Category::Ops,
+        "/plugins",
+    ),
+    pend(
+        "restart",
+        &[],
+        "aether.command.restart",
+        4,
+        "CMD-23",
+        Category::Ops,
+        "/restart",
+    ),
+    pend(
+        "debug",
+        &[],
+        "minecraft.command.debug",
+        3,
+        "CMD-23",
+        Category::Ops,
+        "/debug <start,stop,function> [...]",
+    ),
+    pend(
+        "perf",
+        &[],
+        "minecraft.command.perf",
+        4,
+        "CMD-23",
+        Category::Ops,
+        "/perf <start,stop>",
+    ),
+    pend(
+        "jfr",
+        &[],
+        "minecraft.command.jfr",
+        4,
+        "CMD-23",
+        Category::Ops,
+        "/jfr <start,stop,dump> [...]",
+    ),
+    // -- history -----------------------------------------------------------
+    imp(
+        "inspect",
+        &["i"],
+        "aether.command.inspect",
+        2,
+        Category::History,
+        "/inspect",
+    ),
+    imp(
+        "lookup",
+        &["l"],
+        "aether.command.lookup",
+        2,
+        Category::History,
+        "/lookup <filters>",
+    ),
+    imp(
+        "rollback",
+        &["rb"],
+        "aether.command.rollback",
+        3,
+        Category::History,
+        "/rollback <filters>",
+    ),
+    imp(
+        "page",
+        &["pg"],
+        "aether.command.page",
+        2,
+        Category::History,
+        "/page next,prev,number",
+    ),
+    imp(
+        "stash",
+        &[],
+        "aether.command.stash",
+        2,
+        Category::History,
+        "/stash",
+    ),
+    imp(
+        "audit",
+        &[],
+        "aether.command.audit",
+        2,
+        Category::History,
+        "/audit",
+    ),
+    pend(
+        "co",
+        &[],
+        "aether.command.lookup",
+        2,
+        "CMD-27",
+        Category::History,
+        "/co <l,u:<player> t:<time> r:<radius> a:<action>>",
+    ),
+    pend(
+        "restore",
+        &[],
+        "aether.command.restore",
+        3,
+        "CMD-28",
+        Category::History,
+        "/restore <filters>",
+    ),
+    pend(
+        "purge",
+        &[],
+        "aether.command.purge",
+        4,
+        "CMD-28",
+        Category::History,
+        "/purge <filters>",
+    ),
+    // -- economy -----------------------------------------------------------
+    imp(
+        "balance",
+        &["bal", "money"],
+        "aether.command.balance",
+        0,
+        Category::Economy,
+        "/balance [player]",
+    ),
+    imp(
+        "pay",
+        &[],
+        "aether.command.pay",
+        0,
+        Category::Economy,
+        "/pay <player> <amount>",
+    ),
+    imp(
+        "sell",
+        &[],
+        "aether.command.sell",
+        0,
+        Category::Economy,
+        "/sell <count> <price> [duration]",
+    ),
+    imp(
+        "market",
+        &[],
+        "aether.command.market",
+        0,
+        Category::Economy,
+        "/market [filters]",
+    ),
+    imp(
+        "buy",
+        &[],
+        "aether.command.buy",
+        0,
+        Category::Economy,
+        "/buy <id> [count]",
+    ),
+    imp(
+        "listings",
+        &[],
+        "aether.command.listings",
+        0,
+        Category::Economy,
+        "/listings",
+    ),
+    imp(
+        "unlist",
+        &[],
+        "aether.command.unlist",
+        0,
+        Category::Economy,
+        "/unlist <id>",
+    ),
+    imp(
+        "econ",
+        &[],
+        "aether.command.econ",
+        3,
+        Category::Economy,
+        "/econ give <player> <amount> [reason]",
+    ),
+];
+
+/// The catalogue entry for `name`, canonical or alias.
+pub fn find(name: &str) -> Option<&'static Command> {
+    CATALOGUE
+        .iter()
+        .find(|c| c.name == name || c.aliases.contains(&name))
+}
+
+/// Whether the catalogue owns `name`, implemented or pending.
+pub fn owns(name: &str) -> bool {
+    find(name).is_some()
+}
+
+/// The documentation language.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lang {
+    /// English (`docs/COMMANDS.md`).
+    En,
+    /// Russian (`docs/COMMANDS.ru.md`).
+    Ru,
+}
+
+/// Render the whole catalogue as the generated markdown catalogue.
+///
+/// [`tests::the_generated_docs_are_in_sync`] byte-compares the result with the
+/// checked-in `docs/COMMANDS.md` and `docs/COMMANDS.ru.md`, so the two cannot
+/// drift. Regenerate with
+/// `cargo-locked run -p aether-server --example gen_commands_md`.
+pub fn render_markdown(lang: Lang) -> String {
+    let ru = lang == Lang::Ru;
+    let t = |en: &'static str, ru_s: &'static str| if ru { ru_s } else { en };
+    let total = CATALOGUE.len();
+    let working = CATALOGUE
+        .iter()
+        .filter(|c| c.status == Status::Implemented)
+        .count();
+    let pending = total - working;
+
+    let mut s = String::new();
+    s.push_str(t(
+        "<!-- GENERATED FILE — do not edit by hand.\n     \
+         Source:     crates/aether-server/src/commands/catalogue.rs\n     \
+         Regenerate: cargo-locked run -p aether-server --example gen_commands_md -->\n\n",
+        "<!-- СГЕНЕРИРОВАННЫЙ ФАЙЛ — не редактируйте вручную.\n     \
+         Источник:    crates/aether-server/src/commands/catalogue.rs\n     \
+         Пересобрать: cargo-locked run -p aether-server --example gen_commands_md -->\n\n",
+    ));
+    writeln!(
+        s,
+        "# {}",
+        t(
+            "Aether Engine — Command Catalogue",
+            "Aether Engine — Каталог команд"
+        )
+    )
+    .unwrap();
+    writeln!(s).unwrap();
+    if ru {
+        writeln!(s, "> **English version:** [COMMANDS.md](COMMANDS.md)").unwrap();
+    } else {
+        writeln!(s, "> **Русская версия:** [COMMANDS.ru.md](COMMANDS.ru.md)").unwrap();
+    }
+    writeln!(s).unwrap();
+    writeln!(
+        s,
+        "{}",
+        t(
+            "Every command Aether knows, grouped by category: the ones that run today and the \
+             ones that are only specified. It is generated from one list in the server \
+             (`crates/aether-server/src/commands/catalogue.rs`), so nothing is listed twice and a \
+             planned command cannot quietly disappear.",
+            "Каждая известная Aether команда, сгруппированная по категориям: и те, что работают \
+             сейчас, и те, что пока лишь запланированы. Файл сгенерирован из одного списка в \
+             сервере (`crates/aether-server/src/commands/catalogue.rs`), поэтому ни одна команда \
+             не указана дважды и запланированная не может незаметно исчезнуть.",
+        )
+    )
+    .unwrap();
+    writeln!(s).unwrap();
+    writeln!(
+        s,
+        "{}",
+        t(
+            "*This file is generated — do not edit it by hand. Regenerate with \
+             `cargo-locked run -p aether-server --example gen_commands_md`.*",
+            "*Файл сгенерирован — не редактируйте его вручную. Пересобрать: \
+             `cargo-locked run -p aether-server --example gen_commands_md`.*",
+        )
+    )
+    .unwrap();
+    writeln!(s).unwrap();
+    writeln!(
+        s,
+        "{}",
+        t(
+            "**Legend:** ✅ working · 🚧 pending (`CMD-nn` is the task that will implement it). \
+             **Node** is the permission node checked before the command runs; **Op** is the \
+             vanilla operator level required (0 everyone … 4 owner).",
+            "**Легенда:** ✅ работает · 🚧 ожидает (`CMD-nn` — задача, которая её реализует). \
+             **Узел** — правомочие, проверяемое перед запуском команды; **Op** — требуемый \
+             ванильный уровень оператора (0 — всем … 4 — владельцу).",
+        )
+    )
+    .unwrap();
+    writeln!(s).unwrap();
+    if ru {
+        writeln!(
+            s,
+            "**Итого:** {total} команд — {working} работают, {pending} ожидают."
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            s,
+            "**Totals:** {total} commands — {working} working, {pending} pending."
+        )
+        .unwrap();
+    }
+    writeln!(s).unwrap();
+
+    // Table of contents, one line per category with its count.
+    writeln!(s, "## {}", t("Contents", "Содержание")).unwrap();
+    writeln!(s).unwrap();
+    for cat in Category::ALL {
+        let n = CATALOGUE.iter().filter(|c| c.category == *cat).count();
+        writeln!(s, "- [{0}](#{0}) — {1} ({n})", cat.key(), cat.blurb(lang)).unwrap();
+    }
+    writeln!(s).unwrap();
+
+    for cat in Category::ALL {
+        writeln!(s, "## {}", cat.key()).unwrap();
+        writeln!(s).unwrap();
+        writeln!(s, "{}", cat.blurb(lang)).unwrap();
+        writeln!(s).unwrap();
+        writeln!(
+            s,
+            "| {} | {} | {} | {} | {} | {} |",
+            t("Command", "Команда"),
+            t("Aliases", "Синонимы"),
+            t("Status", "Статус"),
+            t("Node", "Узел"),
+            t("Op", "Op"),
+            t("Usage", "Использование"),
+        )
+        .unwrap();
+        writeln!(s, "| --- | --- | --- | --- | --- | --- |").unwrap();
+        for c in CATALOGUE.iter().filter(|c| c.category == *cat) {
+            let aliases = if c.aliases.is_empty() {
+                "–".to_string()
+            } else {
+                c.aliases
+                    .iter()
+                    .map(|a| format!("`{a}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let status = match (c.status, ru) {
+                (Status::Implemented, false) => "✅ working".to_string(),
+                (Status::Implemented, true) => "✅ работает".to_string(),
+                (Status::Pending, false) => format!("🚧 pending {}", c.task),
+                (Status::Pending, true) => format!("🚧 ожидает {}", c.task),
+            };
+            writeln!(
+                s,
+                "| `/{name}` | {aliases} | {status} | `{node}` | {op} | `{usage}` |",
+                name = c.name,
+                node = c.node,
+                op = c.op,
+                usage = c.usage,
+            )
+            .unwrap();
+        }
+        writeln!(s).unwrap();
+    }
+
+    s
+}
+
+impl Category {
+    /// The localized one-line description.
+    fn blurb(self, lang: Lang) -> &'static str {
+        match lang {
+            Lang::En => self.blurb_en(),
+            Lang::Ru => self.blurb_ru(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{registry, tree};
+
+    /// Every name and alias in the catalogue, in order.
+    fn catalogue_names() -> Vec<&'static str> {
+        CATALOGUE
+            .iter()
+            .flat_map(|c| std::iter::once(c.name).chain(c.aliases.iter().copied()))
+            .collect()
+    }
+
+    #[test]
+    fn no_name_is_declared_twice() {
+        let mut seen: Vec<&str> = Vec::new();
+        for name in catalogue_names() {
+            assert!(!name.is_empty(), "an empty command name");
+            assert!(!name.contains('/'), "{name} must not contain a slash");
+            assert!(!seen.contains(&name), "{name} is declared twice");
+            seen.push(name);
+        }
+    }
+
+    #[test]
+    fn every_entry_is_well_formed() {
+        for c in CATALOGUE {
+            assert!(
+                c.node.starts_with("minecraft.command.") || c.node.starts_with("aether.command."),
+                "{}: unexpected permission node {}",
+                c.name,
+                c.node
+            );
+            assert!(c.op <= 4, "{}: op level {} out of range", c.name, c.op);
+            assert!(!c.usage.is_empty(), "{}: no usage", c.name);
+            assert!(
+                !c.usage.contains('|'),
+                "{}: usage `{}` contains a pipe, which breaks the markdown table",
+                c.name,
+                c.usage
+            );
+            match c.status {
+                Status::Implemented => assert_eq!(
+                    c.task, "-",
+                    "{}: an implemented command must have task `-`",
+                    c.name
+                ),
+                Status::Pending => assert!(
+                    c.task.starts_with("CMD-"),
+                    "{}: a pending command needs a CMD-nn task, got {}",
+                    c.name,
+                    c.task
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn no_name_is_both_implemented_and_pending() {
+        for c in CATALOGUE {
+            let names = std::iter::once(c.name).chain(c.aliases.iter().copied());
+            for name in names {
+                for other in CATALOGUE {
+                    if other.name == c.name {
+                        continue;
+                    }
+                    if other.aliases.contains(&name) || other.name == name {
+                        panic!(
+                            "`{name}` is listed under both `{}` and `{}`",
+                            c.name, other.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_pending_half_matches_the_registry() {
+        // The drift guard: `registry::CORE` is the pending list the tree and
+        // the stub reply read, so a catalogue entry that disagrees with it (or
+        // is missing from it) fails here rather than shipping a stale doc.
+        for c in CATALOGUE.iter().filter(|c| c.status == Status::Pending) {
+            let e = registry::find(c.name)
+                .unwrap_or_else(|| panic!("pending `{}` is missing from registry::CORE", c.name));
+            assert_eq!(e.name, c.name);
+            assert_eq!(e.aliases, c.aliases, "{}: aliases", c.name);
+            assert_eq!(e.node, c.node, "{}: node", c.name);
+            assert_eq!(e.op, c.op, "{}: op", c.name);
+            assert_eq!(e.task, c.task, "{}: task", c.name);
+            assert_eq!(e.group, c.category.key(), "{}: category", c.name);
+        }
+        for e in registry::CORE {
+            let c = CATALOGUE
+                .iter()
+                .find(|c| c.name == e.name)
+                .unwrap_or_else(|| panic!("registry::CORE entry `{}` is missing", e.name));
+            assert_eq!(
+                c.status,
+                Status::Pending,
+                "`{}` is in registry::CORE but the catalogue calls it implemented",
+                e.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_implemented_entry_has_a_real_executor() {
+        let tree = tree::tree();
+        for c in CATALOGUE.iter().filter(|c| c.status == Status::Implemented) {
+            let node = tree
+                .commands()
+                .iter()
+                .find(|n| n.name == c.name)
+                .unwrap_or_else(|| panic!("implemented `{}` has no tree node", c.name));
+            assert!(node.executable, "`{}` is not executable", c.name);
+            assert!(node.executor.is_some(), "`{}` has no executor", c.name);
+        }
+    }
+
+    #[test]
+    fn every_pending_entry_is_not_implemented() {
+        let implemented: Vec<&str> = CATALOGUE
+            .iter()
+            .filter(|c| c.status == Status::Implemented)
+            .flat_map(|c| std::iter::once(c.name).chain(c.aliases.iter().copied()))
+            .collect();
+        for c in CATALOGUE.iter().filter(|c| c.status == Status::Pending) {
+            for name in std::iter::once(c.name).chain(c.aliases.iter().copied()) {
+                assert!(
+                    !implemented.contains(&name),
+                    "pending `{name}` collides with an implemented command"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_tree_declares_exactly_the_catalogue() {
+        // Every catalogue name and alias is declared exactly once in the wire
+        // tree, and the tree declares nothing the catalogue does not list.
+        let mut tree_names: Vec<&str> = tree::tree()
+            .commands()
+            .iter()
+            .flat_map(|n| std::iter::once(n.name).chain(n.aliases.iter().copied()))
+            .collect();
+        tree_names.sort_unstable();
+        let mut cat_names = catalogue_names();
+        cat_names.sort_unstable();
+        assert_eq!(tree_names, cat_names, "the tree and the catalogue disagree");
+    }
+
+    #[test]
+    fn every_category_is_used() {
+        for cat in Category::ALL {
+            assert!(
+                CATALOGUE.iter().any(|c| c.category == *cat),
+                "category `{}` has no commands",
+                cat.key()
+            );
+        }
+    }
+
+    #[test]
+    fn the_generated_docs_are_in_sync() {
+        let en = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/COMMANDS.md"
+        ));
+        let ru = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/COMMANDS.ru.md"
+        ));
+        assert_eq!(
+            render_markdown(Lang::En),
+            en,
+            "docs/COMMANDS.md is stale — regenerate with \
+             `cargo-locked run -p aether-server --example gen_commands_md`"
+        );
+        assert_eq!(
+            render_markdown(Lang::Ru),
+            ru,
+            "docs/COMMANDS.ru.md is stale — regenerate with \
+             `cargo-locked run -p aether-server --example gen_commands_md`"
+        );
+    }
+
+    #[test]
+    fn lookup_answers_canonical_names_and_aliases() {
+        assert_eq!(find("gamemode").map(|c| c.name), Some("gamemode"));
+        assert_eq!(find("gm").map(|c| c.name), Some("gamemode"));
+        assert_eq!(find("xp").map(|c| c.task), Some("CMD-10"));
+        assert_eq!(find("tell").map(|c| c.status), Some(Status::Implemented));
+        assert!(find("definitely-not-a-command").is_none());
+    }
+}

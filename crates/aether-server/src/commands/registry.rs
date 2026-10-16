@@ -376,14 +376,9 @@ pub const CORE: &[Entry] = &[
     ),
     e("say", &[], "minecraft.command.say", 2, "CMD-17", "data"),
     e("me", &[], "minecraft.command.me", 0, "CMD-17", "data"),
-    e(
-        "msg",
-        &["tell", "w"],
-        "minecraft.command.msg",
-        0,
-        "CMD-17",
-        "data",
-    ),
+    // `/msg` (`tell`, `w`) is implemented in `game::commands` and lives in the
+    // catalogue as an implemented entry, so it is deliberately not listed as a
+    // stub here.
     e(
         "tellraw",
         &[],
@@ -531,8 +526,10 @@ pub const CORE: &[Entry] = &[
     e("debug", &[], "minecraft.command.debug", 3, "CMD-23", "ops"),
     e("perf", &[], "minecraft.command.perf", 4, "CMD-23", "ops"),
     e("jfr", &[], "minecraft.command.jfr", 4, "CMD-23", "ops"),
-    // `/aether` root: reload/backup (CMD-24), profile (CMD-25), world (CMD-26).
-    e("aether", &[], "aether.command.aether", 4, "CMD-24", "ops"),
+    // `/aether` is implemented in `commands::core_nodes` and lives in the
+    // catalogue as an implemented entry; its planned subcommands (reload/backup
+    // CMD-24, profile CMD-25, world CMD-26) extend that node rather than the
+    // stub list, so no pending `/aether` entry is kept here.
     // History extensions (CMD-27, CMD-28).
     e("co", &[], "aether.command.lookup", 2, "CMD-27", "history"),
     e(
@@ -554,10 +551,12 @@ pub fn find(name: &str) -> Option<&'static Entry> {
 
 /// Whether the **core** owns `name`, implemented or merely specified.
 ///
-/// Implemented names live in `super::RESERVED_COMMANDS`; specified-but-unimplemented ones in
-/// [`CORE`]. A plugin may register neither.
+/// The catalogue (`super::catalogue`) is the full list of core names, so it is
+/// checked first; [`RESERVED_COMMANDS`](super::RESERVED_COMMANDS) is kept as a
+/// belt-and-braces floor for the names the tree owns but the catalogue might
+/// momentarily miss. A plugin may register none of them.
 pub fn core_owns(name: &str) -> bool {
-    find(name).is_some() || super::RESERVED_COMMANDS.contains(&name)
+    find(name).is_some() || super::catalogue::owns(name) || super::RESERVED_COMMANDS.contains(&name)
 }
 
 /// A command a plugin registered.

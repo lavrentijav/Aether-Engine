@@ -19,6 +19,7 @@
 //! which is why the mode has to be per-player state and cannot be inferred
 //! from the packet.
 
+pub mod catalogue;
 pub mod pager;
 pub mod query;
 pub mod registry;
