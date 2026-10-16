@@ -823,6 +823,38 @@ fn is_buried<S: BlockSource + ?Sized>(world: &S, x: i32, y: i32, z: i32) -> bool
         .all(|&(dx, dy, dz)| default_is_opaque(world.block_at(x + dx, y + dy, z + dz)))
 }
 
+/// The startup log line for the effective anti-xray configuration:
+/// `anti-xray  : off`, or
+/// `anti-xray  : <mode> (<worlds>, hidden N blocks)`.
+///
+/// Reads the globals, so it must be called after startup installs the config
+/// (where the log line is emitted). `off` is the *effective* answer for the
+/// running world — the module is disabled or `[anti_xray] worlds` does not
+/// name this world directory — so the line never claims it is on when
+/// [`crate::anti_xray_enabled`] says no.
+pub fn status_line() -> String {
+    status_for(crate::anti_xray_enabled(), &crate::anti_xray_config())
+}
+
+/// The pure formatter behind [`status_line`], so the wording is testable
+/// without the process-wide config and the cached-enabled flag.
+fn status_for(enabled: bool, cfg: &crate::config::AntiXrayConfig) -> String {
+    if !enabled {
+        return "anti-xray  : off".to_string();
+    }
+    let mode = match cfg.mode {
+        AntiXrayMode::Engine => "engine",
+        AntiXrayMode::Culling => "culling",
+    };
+    let worlds = if cfg.worlds.is_empty() {
+        "all worlds".to_string()
+    } else {
+        format!("worlds {}", cfg.worlds.join(", "))
+    };
+    let hidden = cfg.hidden_block_names().len();
+    format!("anti-xray  : {mode} ({worlds}, hidden {hidden} blocks)")
+}
+
 /// The process-wide set of block states that engine mode hides, resolved from
 /// `[anti_xray] hidden_blocks` on first use.
 static HIDDEN_STATES: OnceLock<HiddenSet> = OnceLock::new();
@@ -1362,6 +1394,45 @@ mod tests {
     fn global_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn the_startup_line_names_the_mode_worlds_and_hidden_count() {
+        use crate::config::{AntiXrayConfig, AntiXrayMode};
+        // Disabled (or not applicable to this world): a plain "off", never a
+        // mode that would overstate what the server does.
+        let cfg = AntiXrayConfig::default();
+        assert_eq!(status_for(false, &cfg), "anti-xray  : off");
+
+        // Enabled: the mode, the worlds and the hidden-block count. The
+        // default config's hidden list is the built-in ore set.
+        let cfg = AntiXrayConfig {
+            enabled: true,
+            mode: AntiXrayMode::Engine,
+            ..AntiXrayConfig::default()
+        };
+        let line = status_for(true, &cfg);
+        assert_eq!(
+            line,
+            format!(
+                "anti-xray  : engine (all worlds, hidden {} blocks)",
+                crate::config::default_hidden_blocks().len()
+            ),
+            "got {line:?}"
+        );
+
+        // Culling with an explicit world list and an explicit hidden list.
+        let cfg = AntiXrayConfig {
+            enabled: true,
+            mode: AntiXrayMode::Culling,
+            worlds: vec!["alpha".to_string(), "beta".to_string()],
+            hidden_blocks: vec!["minecraft:diamond_ore".to_string()],
+            ..AntiXrayConfig::default()
+        };
+        assert_eq!(
+            status_for(true, &cfg),
+            "anti-xray  : culling (worlds alpha, beta, hidden 1 blocks)"
+        );
     }
 
     #[test]

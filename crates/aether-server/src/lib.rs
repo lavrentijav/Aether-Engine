@@ -280,6 +280,7 @@ pub fn run() -> std::process::ExitCode {
         "world      : {described}, {:?}",
         cfg.server.game_mode
     ));
+    log::info(&visibility::status_line());
     log::info(&format!(
         "saved to   : {} (autosave every {}s)",
         cfg.server.world_dir, cfg.server.autosave_secs
