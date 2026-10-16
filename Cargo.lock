@@ -76,6 +76,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-hello-native-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-plugin",
+]
+
+[[package]]
 name = "aether-menus-plugin"
 version = "0.1.0"
 dependencies = [

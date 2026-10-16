@@ -1,0 +1,26 @@
+# Declarative description of the reference native plugin, in the same shape a
+# WASM plugin.toml uses.
+#
+# A native plugin is compiled into the server, so the host reads its manifest
+# from Rust (`manifest()` in src/lib.rs), not from this file. This copy exists
+# so the two tiers are spelled the same way and an author can see the whole
+# declaration in one place; keep it in step with `manifest()`.
+#
+# Unlike a WASM manifest there is no `entry`: the crate is linked in, not
+# loaded from a component file.
+id = "hello-native"
+name = "Hello (native)"
+version = "0.1.0"
+api = "0.1"
+tier = "native"
+priority = 10
+
+capabilities = []
+
+subscribe = [
+    "before-block-break",
+    "after-player-join",
+    "after-player-leave",
+    "on-command",
+]
+commands = ["hello-native"]
