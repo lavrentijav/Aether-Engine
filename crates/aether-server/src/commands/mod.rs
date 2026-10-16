@@ -20,6 +20,7 @@
 //! from the packet.
 
 pub mod catalogue;
+pub mod console;
 pub mod feedback;
 pub mod pager;
 pub mod query;
@@ -36,7 +37,9 @@ use crate::protocol::ServerEvent;
 use crate::session::DemoWorld;
 use pager::Pager;
 use query::{Context, Query};
-use tree::{Ctx, Deny, Node, Requirement};
+use tree::{Ctx, Deny, Node, Requirement, Source};
+
+pub use tree::ServerKind;
 
 /// Per-player command state: inspect mode, and the last answer to page
 /// through.
@@ -71,6 +74,17 @@ pub fn dispatch(
     tree::execute_feedback(text, handle, registry, world)
 }
 
+/// Like [`dispatch`], but for any command source. This is how the console and
+/// RCON run a typed line through the same tree as a player.
+pub fn dispatch_source(
+    text: &str,
+    source: Source,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+) -> Reply {
+    tree::run_command(text, source, registry, world)
+}
+
 /// The history, `/help` and `/aether` commands — the ones that live in this
 /// module — as tree nodes.
 pub(crate) fn core_nodes() -> Vec<Node> {
@@ -103,12 +117,33 @@ pub(crate) fn core_nodes() -> Vec<Node> {
             tree::greedy("aether", &[], Requirement::Fn(require_admin), exec_aether),
             "auth migrate <name>",
         ),
+        // The server-lifecycle commands the console and RCON need. CMD-09
+        // expands this group (`/list`, `/seed`, `/version`, save-on/off); the
+        // save/stop path here is the same one the shutdown watcher uses.
+        tree::simple(
+            "stop",
+            &[],
+            Requirement::Level {
+                op: 4,
+                node: "minecraft.command.stop",
+            },
+            exec_stop,
+        ),
+        tree::simple(
+            "save-all",
+            &[],
+            Requirement::Level {
+                op: 4,
+                node: "minecraft.command.save-all",
+            },
+            exec_save_all,
+        ),
     ]
 }
 
 /// The `/aether` permission gate, enforced by the tree.
-pub fn require_admin(handle: &PlayerHandle) -> Result<(), Deny> {
-    if crate::is_operator(handle) {
+pub fn require_admin(source: &Source) -> Result<(), Deny> {
+    if source.is_operator() {
         Ok(())
     } else {
         Err(Deny::Message(
@@ -117,31 +152,70 @@ pub fn require_admin(handle: &PlayerHandle) -> Result<(), Deny> {
     }
 }
 
+/// `/stop` — ask the server to stop cleanly.
+///
+/// It only requests the stop; the shutdown watcher ([`crate::ops`]) performs
+/// the save and exit, so the console, RCON and a signal all leave the same
+/// way. No reply is required by vanilla, but one is sent so an RCON client is
+/// not left waiting for a response that will never come as the socket closes.
+fn exec_stop(_ctx: &mut Ctx) -> Reply {
+    crate::ops::request_stop();
+    Reply::one("Stopping the server")
+}
+
+/// `/save-all` — flush every dirty chunk and pending queue to disk.
+fn exec_save_all(ctx: &mut Ctx) -> Reply {
+    crate::game::blockticks::save(ctx.world);
+    crate::game::fluids::save(ctx.world);
+    match ctx.world.flush() {
+        Ok(()) => Reply::one("Saved the game"),
+        Err(e) => Reply::one(format!("Saving failed: {e}")),
+    }
+}
+
 fn exec_inspect(ctx: &mut Ctx) -> Reply {
-    toggle_inspect(ctx.handle)
+    match ctx.player() {
+        Some(handle) => toggle_inspect(handle),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_lookup(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    lookup(&args, ctx.handle, ctx.registry, ctx.world)
+    match ctx.player() {
+        Some(handle) => lookup(&args, handle, ctx.registry, ctx.world),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_rollback(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    rollback(&args, ctx.handle, ctx.registry, ctx.world)
+    match ctx.player() {
+        Some(handle) => rollback(&args, handle, ctx.registry, ctx.world),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_page(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    page(&args, ctx.handle)
+    match ctx.player() {
+        Some(handle) => page(&args, handle),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_inventory(ctx: &mut Ctx) -> Reply {
-    inventory(ctx.handle, ctx.world)
+    match ctx.player() {
+        Some(handle) => inventory(handle, ctx.world),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_stash(ctx: &mut Ctx) -> Reply {
-    crate::stash::open_command(ctx.handle, ctx.world)
+    match ctx.player() {
+        Some(handle) => crate::stash::open_command(handle, ctx.world),
+        None => ctx.needs_player(),
+    }
 }
 
 fn exec_audit(ctx: &mut Ctx) -> Reply {
@@ -154,12 +228,12 @@ fn exec_cache(ctx: &mut Ctx) -> Reply {
 
 fn exec_help(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    help(&args, ctx.handle)
+    help(&args, ctx.source)
 }
 
 fn exec_aether(ctx: &mut Ctx) -> Reply {
     let args = ctx.refs();
-    aether_admin(&args, ctx.handle, ctx.world)
+    aether_admin(&args, ctx.world)
 }
 
 /// The one place a plugin command is reached from: the tree found no core
@@ -196,7 +270,7 @@ pub(crate) fn plugin_command(text: &str, handle: &PlayerHandle) -> Option<Reply>
 /// the Mojang uuid they now own. Migration is deliberately manual — the
 /// server cannot know a fresh online login is the same person as an old
 /// offline one.
-fn aether_admin(args: &[&str], _handle: &PlayerHandle, world: &DemoWorld) -> Reply {
+fn aether_admin(args: &[&str], world: &DemoWorld) -> Reply {
     match args {
         ["auth", "migrate", name] => migrate_offline_player(name, world),
         _ => Reply::one("Usage: /aether auth migrate <name>"),
@@ -273,7 +347,7 @@ pub fn permitted_level(level: u8, node: &str, op: u8) -> bool {
     crate::permissions::check(crate::permissions::Level::new(level), node, op)
 }
 
-/// `/help [command|category]` — every command the caller may run, grouped by
+/// `/help [command|category]` — every command the source may run, grouped by
 /// category; one command's usage; or one category.
 ///
 /// The listing is generated from the command catalogue (CMD-48), so pending
@@ -281,41 +355,46 @@ pub fn permitted_level(level: u8, node: &str, op: u8) -> bool {
 /// line's usage and stub note come from its tree node (CMD-05). Nothing here
 /// is a hand-kept list.
 ///
-/// * no argument: every command the caller's permission level allows, grouped
-///   by category, paged through [`pager::Pager`] so `/page next` works as for
-///   any other answer.
+/// * no argument: every command the source's permission level allows, grouped
+///   by category. A player's answer is paged through [`pager::Pager`] so
+///   `/page next` works as for any other answer; a server source
+///   (console/RCON) gets the whole list.
 /// * a category (`/help admin`): just that category.
 /// * a command or alias: its usage, built from the tree (or the node's
 ///   explicit usage), with its aliases spelled out.
 ///
-/// A command the caller may not run reads exactly like a name no command
+/// A command the source may not run reads exactly like a name no command
 /// owns — the permission-filtering guarantee: `/help` must not let a non-op
-/// enumerate the op-only catalogue.
-fn help(args: &[&str], handle: &PlayerHandle) -> Reply {
+/// (or the console, for a player-only verb) enumerate commands it cannot run.
+fn help(args: &[&str], source: Source) -> Reply {
     let cmd_tree = tree::tree();
     let Some(word) = args.first() else {
-        return help_list(cmd_tree, handle, None);
+        return help_list(cmd_tree, source, None);
     };
     // A category word lists that category from the catalogue (CMD-48).
     if let Some(cat) = catalogue::Category::ALL.iter().find(|c| c.key() == *word) {
-        return help_list(cmd_tree, handle, Some(*cat));
+        return help_list(cmd_tree, source, Some(*cat));
     }
-    // Either no such command, or one this caller cannot see: the same answer
+    // Either no such command, or one this source cannot see: the same answer
     // keeps the second case indistinguishable from the first.
     if let Some(node) = cmd_tree
         .find_command(word)
-        .filter(|node| tree::check(&node.requirement, handle).is_ok())
+        .filter(|node| tree::check(&node.requirement, &source).is_ok())
     {
         return Reply::one(help_line(node, true));
     }
     Reply::one(feedback::lang::UNKNOWN_COMMAND)
 }
 
-/// The paged list of every command `handle` may run, grouped by category — or
+/// The list of every command `source` may run, grouped by category — or
 /// restricted to one category when `only` is set.
+///
+/// A player gets the answer parked in their pager (`/page next` works); a
+/// server source (console/RCON) has no per-player pager, so the list is
+/// returned whole.
 fn help_list(
     cmd_tree: &tree::CommandTree,
-    handle: &PlayerHandle,
+    source: Source,
     only: Option<catalogue::Category>,
 ) -> Reply {
     let all = only.is_none();
@@ -328,13 +407,14 @@ fn help_list(
         if only.is_some_and(|o| o != *cat) {
             continue;
         }
-        // Only commands this caller may run are listed, as in vanilla (no leak
-        // of op-only names to a non-op).
+        // Only commands this source may run are listed, as in vanilla (no leak
+        // of op-only names to a non-op, nor of player-only verbs to the
+        // console).
         let in_cat: Vec<String> = catalogue::CATALOGUE
             .iter()
             .filter(|c| c.category == *cat)
             .filter_map(|c| cmd_tree.find_command(c.name))
-            .filter(|node| tree::check(&node.requirement, handle).is_ok())
+            .filter(|node| tree::check(&node.requirement, &source).is_ok())
             .map(|node| help_line(node, false))
             .collect();
         if in_cat.is_empty() {
@@ -345,9 +425,14 @@ fn help_list(
         }
         lines.extend(in_cat);
     }
-    let mut s = handle.session();
-    s.pager.set("Commands", lines);
-    Reply(s.pager.render())
+    match source.player() {
+        Some(handle) => {
+            let mut s = handle.session();
+            s.pager.set("Commands", lines);
+            Reply(s.pager.render())
+        }
+        None => Reply(lines),
+    }
 }
 
 /// One `/help` line: `/name (aliases) usage`, marked if it is a stub.

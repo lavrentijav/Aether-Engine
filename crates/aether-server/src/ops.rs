@@ -18,6 +18,35 @@ use crate::session::DemoWorld;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
+/// Ask the server to stop cleanly.
+///
+/// The console, `/stop` and a signal all share this one switch; the shutdown
+/// watcher ([`spawn_shutdown`]) does the save and exit. This is why `/stop`
+/// behaves the same from a player, the console and RCON.
+pub fn request_stop() {
+    STOP.store(true, Ordering::SeqCst);
+}
+
+/// Whether a stop has been requested.
+pub fn stopping() -> bool {
+    STOP.load(Ordering::SeqCst)
+}
+
+/// Clear a stop request. Only tests use this: nothing in the server clears the
+/// flag, because the process is on its way out once it is set.
+#[cfg(test)]
+pub fn clear_stop() {
+    STOP.store(false, Ordering::SeqCst);
+}
+
+/// Serialises tests that drive `/stop` and then clear the flag, so two of them
+/// cannot observe each other's request.
+#[cfg(test)]
+pub(crate) fn stop_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Ask for SIGINT and SIGTERM to stop the server cleanly. A second signal,
 /// once the first is being handled, kills the process the default way.
 pub fn install_signal_handlers() {

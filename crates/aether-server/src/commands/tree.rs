@@ -18,11 +18,109 @@ use super::catalogue::{self, Status};
 use super::feedback::Feedback;
 use super::Reply;
 use crate::economy::Economy;
-use crate::players::{PlayerHandle, SharedRegistry};
+use crate::players::{PlayerHandle, PosLook, SharedRegistry};
 use crate::session::DemoWorld;
 
 pub mod suggest;
 pub use suggest::{suggest, suggest_in, SuggestCtx};
+
+/// A server-side command source: the console or an RCON connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerKind {
+    /// The server's own console (stdin).
+    Console,
+    /// A remote RCON connection.
+    Rcon,
+}
+
+impl ServerKind {
+    /// The name the source runs under, for feedback and logs.
+    pub const fn name(self) -> &'static str {
+        match self {
+            ServerKind::Console => "Server",
+            ServerKind::Rcon => "RCON",
+        }
+    }
+}
+
+/// Where a command came from.
+///
+/// The tree, its requirements and its executors are written against this so a
+/// connected player and the server console share one dispatch. A server source
+/// has op level 4 (an owner), but **no entity and no position**: a command that
+/// needs a player's body or coordinates fails the way vanilla's console does.
+#[derive(Clone, Copy)]
+pub enum Source<'a> {
+    /// A connected player.
+    Player(&'a PlayerHandle),
+    /// The server console or an RCON client.
+    Server(ServerKind),
+}
+
+impl<'a> Source<'a> {
+    /// The player, when the command came from one.
+    pub fn player(self) -> Option<&'a PlayerHandle> {
+        match self {
+            Source::Player(p) => Some(p),
+            Source::Server(_) => None,
+        }
+    }
+
+    /// The name the source runs under.
+    pub fn name(self) -> &'a str {
+        match self {
+            Source::Player(p) => &p.name,
+            Source::Server(k) => k.name(),
+        }
+    }
+
+    /// Whether this is a server-side source (console or RCON).
+    pub fn is_server(self) -> bool {
+        matches!(self, Source::Server(_))
+    }
+
+    /// The source's effective permission level: a player's from the store, the
+    /// owner level for the console and RCON.
+    pub fn level(self) -> crate::permissions::Level {
+        match self {
+            Source::Player(p) => crate::permissions::level(&p.name, p.ip),
+            Source::Server(_) => crate::permissions::Level::OWNER,
+        }
+    }
+
+    /// Whether the source is an operator. The console and RCON always are.
+    pub fn is_operator(self) -> bool {
+        match self {
+            Source::Player(p) => crate::is_operator(p),
+            Source::Server(_) => true,
+        }
+    }
+
+    /// The source's entity id, or `None` for a server source.
+    pub fn entity_id(self) -> Option<i32> {
+        self.player().map(|p| p.entity_id)
+    }
+
+    /// The source's position, or `None` for a server source. A command that
+    /// needs coordinates fails rather than inventing an origin at `0 0 0`.
+    pub fn position(self) -> Option<PosLook> {
+        self.player().map(|p| p.pos())
+    }
+
+    /// This source as the feedback layer's [`CommandSource`], so a reply can
+    /// be styled and gated by the vanilla per-source/per-kind rule
+    /// ([`crate::commands::feedback`]).
+    ///
+    /// [`CommandSource`]: crate::commands::source::CommandSource
+    pub fn feedback_source(self) -> crate::commands::source::CommandSource<'a> {
+        use crate::commands::source::CommandSource;
+        match self {
+            Source::Player(handle) => CommandSource::Player(handle),
+            Source::Server(ServerKind::Console) => CommandSource::Console,
+            Source::Server(ServerKind::Rcon) => CommandSource::Rcon,
+        }
+    }
+}
 
 /// A closure that runs a command. Boxed (not a bare `fn`) so a node can carry
 /// a value derived from a registry entry — the stubs capture their task id.
@@ -31,8 +129,8 @@ pub type ExecFn = dyn for<'a, 'b> Fn(&mut Ctx<'a, 'b>) -> Reply + Send + Sync;
 /// A command source: who typed it, the live world and registry, the economy,
 /// and the already-parsed arguments of the matched command.
 pub struct Ctx<'a, 'e> {
-    /// The player who typed the command.
-    pub handle: &'a PlayerHandle,
+    /// Who typed the command: a player, or the console/RCON.
+    pub source: Source<'a>,
     /// Online players, for name lookups and broadcasts.
     pub registry: &'a SharedRegistry,
     /// The world the command acts on.
@@ -43,7 +141,7 @@ pub struct Ctx<'a, 'e> {
     pub args: Vec<ParsedArg>,
 }
 
-impl Ctx<'_, '_> {
+impl<'a> Ctx<'a, '_> {
     /// The raw text of every parsed argument, split on whitespace, for the
     /// bodies that still parse their own filters (`/lookup`, `/tp`, …). A
     /// greedy argument holds the whole remainder as one piece; the ported
@@ -53,6 +151,20 @@ impl Ctx<'_, '_> {
             .iter()
             .flat_map(|a| a.text.split_whitespace())
             .collect()
+    }
+
+    /// The player running the command, when it came from one.
+    pub fn player(&self) -> Option<&'a PlayerHandle> {
+        self.source.player()
+    }
+
+    /// The reply a player-only command gives a server source: there is no
+    /// entity to act on, so it names the source rather than guessing one.
+    pub fn needs_player(&self) -> Reply {
+        Reply::one(format!(
+            "{} cannot run this command: it needs a player.",
+            self.source.name()
+        ))
     }
 }
 
@@ -364,7 +476,7 @@ pub enum Requirement {
     /// No requirement.
     None,
     /// A named check, e.g. "is an operator", with its own denial message.
-    Fn(fn(&PlayerHandle) -> Result<(), Deny>),
+    Fn(fn(&Source) -> Result<(), Deny>),
     /// An op-level gate from the core registry (CMD-01/CMD0b), with the
     /// generic permission message.
     Level {
@@ -375,19 +487,19 @@ pub enum Requirement {
     },
 }
 
-/// Whether `req` lets `handle` see and run the node.
-pub fn check(req: &Requirement, handle: &PlayerHandle) -> Result<(), Deny> {
+/// Whether `req` lets `source` see and run the node.
+pub fn check(req: &Requirement, source: &Source) -> Result<(), Deny> {
     match req {
         Requirement::None => Ok(()),
-        Requirement::Fn(f) => f(handle),
+        Requirement::Fn(f) => f(source),
         Requirement::Level { op, node } => {
-            // The CMD-01 core: the player's level comes from the persisted
-            // store (seeded from `config.operators`), the node's default
-            // resolves from the store, and the command's `op` level is the
-            // floor. This is the same gate `commands::permitted` exposes; the
-            // tree calls the core directly so a `Level` node is unambiguous.
-            let level = crate::permissions::level(&handle.name, handle.ip);
-            if crate::permissions::check(level, node, *op) {
+            // The CMD-01 core: a player's level comes from the persisted store
+            // (seeded from `config.operators`), the console and RCON are
+            // owners, the node's default resolves from the store, and the
+            // command's `op` level is the floor. This is the same gate
+            // `commands::permitted` exposes; the tree calls the core directly
+            // so a `Level` node is unambiguous.
+            if crate::permissions::check(source.level(), node, *op) {
                 Ok(())
             } else {
                 Err(Deny::Message(
@@ -492,13 +604,24 @@ impl CommandTree {
         None
     }
 
-    /// Parse `text` and return the matched executable node plus its arguments.
+    /// Parse `text` for a player and return the matched executable node plus
+    /// its arguments.
     pub fn parse<'s>(&'s self, text: &str, handle: &PlayerHandle) -> Result<Match<'s>, ParseError> {
+        self.parse_source(text, &Source::Player(handle))
+    }
+
+    /// Parse `text` for any command source, returning the matched executable
+    /// node plus its arguments.
+    pub fn parse_source<'s>(
+        &'s self,
+        text: &str,
+        source: &Source,
+    ) -> Result<Match<'s>, ParseError> {
         let text = text.trim();
         let text = text.strip_prefix('/').unwrap_or(text);
         let mut r = StringReader::new(text);
         let mut args = Vec::new();
-        let node = parse_node(&self.root, &mut r, handle, &mut args)?;
+        let node = parse_node(&self.root, &mut r, source, &mut args)?;
         Ok(Match { node, args })
     }
 }
@@ -867,7 +990,7 @@ impl ParseError {
 fn parse_node<'s>(
     node: &'s Node,
     r: &mut StringReader,
-    handle: &PlayerHandle,
+    source: &Source,
     args: &mut Vec<ParsedArg>,
 ) -> Result<&'s Node, ParseError> {
     r.skip_whitespace();
@@ -884,10 +1007,10 @@ fn parse_node<'s>(
         r.cursor = start;
         let args_len = args.len();
         match consume(child, r, args) {
-            Ok(()) => match check(&child.requirement, handle) {
+            Ok(()) => match check(&child.requirement, source) {
                 Err(Deny::Hidden) => {}
                 Err(Deny::Message(m)) => return Err(ParseError::Denied(m)),
-                Ok(()) => match parse_node(child, r, handle, args) {
+                Ok(()) => match parse_node(child, r, source, args) {
                     Ok(found) => return Ok(found),
                     Err(ParseError::Denied(m)) => return Err(ParseError::Denied(m)),
                     Err(e) => best = best.or(Some(e)),
@@ -968,12 +1091,68 @@ pub fn execute_feedback(
     registry: &SharedRegistry,
     world: &DemoWorld,
 ) -> Option<Feedback> {
+    execute_feedback_from(text, Source::Player(handle), registry, world)
+}
+
+/// Run `text` against the tree for any source, as a lines-only reply. `None`
+/// means ordinary chat (no leading `/`) — which only a player can produce.
+pub fn execute_from(
+    text: &str,
+    source: Source,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+) -> Option<Reply> {
+    execute_feedback_from(text, source, registry, world).map(|f| Reply(f.lines))
+}
+
+/// Run `text` against the tree for any source, keeping success/error.
+///
+/// This is the source-generic form of [`execute_feedback`]: the console and
+/// RCON reach it with a [`Source::Server`], and their feedback is always shown
+/// ([`crate::commands::feedback::accepts`]).
+pub fn execute_feedback_from(
+    text: &str,
+    source: Source,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+) -> Option<Feedback> {
     let trimmed = text.trim();
     let body = trimmed.strip_prefix('/')?;
-    match tree().parse(body, handle) {
+    run_body(body, source, registry, world)
+}
+
+/// Run one console/RCON line as a command, with or without a leading slash.
+///
+/// The vanilla console types commands without `/`, so everything here is a
+/// command; an empty line produces nothing.
+pub fn run_command(
+    text: &str,
+    source: Source,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+) -> Reply {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Reply(Vec::new());
+    }
+    let body = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    match run_body(body, source, registry, world) {
+        Some(feedback) => Reply(feedback.lines),
+        None => Reply(Vec::new()),
+    }
+}
+
+/// Parse and run one command body (no leading slash), for any source.
+fn run_body(
+    body: &str,
+    source: Source,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+) -> Option<Feedback> {
+    match tree().parse_source(body, &source) {
         Ok(m) => {
             let mut ctx = Ctx {
-                handle,
+                source,
                 registry,
                 world,
                 econ: crate::economy::get(),
@@ -987,8 +1166,12 @@ pub fn execute_feedback(
             // A name the tree does not own might belong to a plugin; the
             // plugin path is the only other place a verb can be answered, and
             // it refuses every core name, so the core gate is never bypassed.
-            if let Some(reply) = super::plugin_command(body, handle) {
-                return Some(Feedback::success(reply.0));
+            // Plugins are player-facing, so a server source does not reach
+            // them.
+            if let Source::Player(handle) = source {
+                if let Some(reply) = super::plugin_command(body, handle) {
+                    return Some(Feedback::success(reply.0));
+                }
             }
             Some(Feedback::error(vec![e.message()]))
         }

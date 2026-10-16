@@ -12,7 +12,7 @@ Every command Aether knows, grouped by category: the ones that run today and the
 
 **Legend:** ✅ working · 🚧 pending (`CMD-nn` is the task that will implement it). **Node** is the permission node and **Op** the vanilla operator level (0 everyone … 4 owner); for a pending command the stub enforces exactly them. **Gate** is what the server checks *today*: `node` (enforced node/op), `operator` (the legacy operator-only check — Node/Op are the intended target, not yet enforced), or `everyone` (no requirement; Node/Op are the intended target).
 
-**Totals:** 113 commands — 31 working, 82 pending.
+**Totals:** 113 commands — 33 working, 80 pending.
 
 ## Contents
 
@@ -48,8 +48,8 @@ Server control and information.
 
 | Command | Aliases | Status | Gate | Node | Op | Usage |
 | --- | --- | --- | --- | --- | --- | --- |
-| `/stop` | – | 🚧 pending CMD-09 | `node` | `minecraft.command.stop` | 4 | `/stop` |
-| `/save-all` | – | 🚧 pending CMD-09 | `node` | `minecraft.command.save-all` | 4 | `/save-all [flush]` |
+| `/stop` | – | ✅ working | `node` | `minecraft.command.stop` | 4 | `/stop` |
+| `/save-all` | – | ✅ working | `node` | `minecraft.command.save-all` | 4 | `/save-all` |
 | `/save-on` | – | 🚧 pending CMD-09 | `node` | `minecraft.command.save-on` | 4 | `/save-on` |
 | `/save-off` | – | 🚧 pending CMD-09 | `node` | `minecraft.command.save-off` | 4 | `/save-off` |
 | `/list` | – | 🚧 pending CMD-09 | `node` | `minecraft.command.list` | 0 | `/list [uuids]` |

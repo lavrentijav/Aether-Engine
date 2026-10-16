@@ -199,6 +199,29 @@ const fn imp(
     }
 }
 
+/// An implemented command gated by its permission node/op
+/// ([`Gate::Node`]).
+const fn imp_node(
+    name: &'static str,
+    aliases: &'static [&'static str],
+    node: &'static str,
+    op: u8,
+    category: Category,
+    usage: &'static str,
+) -> Command {
+    Command {
+        name,
+        aliases,
+        node,
+        op,
+        task: "-",
+        category,
+        status: Status::Implemented,
+        gate: Gate::Node,
+        usage,
+    }
+}
+
 /// An implemented command held by the legacy operator check
 /// ([`Gate::Operator`]) until its node/op is wired (CMD-05/CMD-01).
 const fn imp_op(
@@ -339,23 +362,25 @@ pub const CATALOGUE: &[Command] = &[
         "/whitelist <add,remove,list,on,off,reload> [name]",
     ),
     // -- server ------------------------------------------------------------
-    pend(
+    // `/stop` and `/save-all` are implemented by CMD-07: the console and RCON
+    // sources need a lifecycle, and `/stop` shares `ops::request_stop` with the
+    // signal handler's clean shutdown path. `/stop` needs the server source,
+    // but a player at op 4 may run it too.
+    imp_node(
         "stop",
         &[],
         "minecraft.command.stop",
         4,
-        "CMD-09",
         Category::Server,
         "/stop",
     ),
-    pend(
+    imp_node(
         "save-all",
         &[],
         "minecraft.command.save-all",
         4,
-        "CMD-09",
         Category::Server,
-        "/save-all [flush]",
+        "/save-all",
     ),
     pend(
         "save-on",
