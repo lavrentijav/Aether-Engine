@@ -45,8 +45,16 @@ fn bare_handle(name: &str) -> Arc<PlayerHandle> {
     join(&Arc::new(Registry::default()), name, 1)
 }
 
-/// Install the operator list once per test process. `is_operator` reads a
-/// process-wide `OnceLock`, so this has to be a single, shared install.
+/// Install the operator list.
+///
+/// Since CMD-01 the operator bit is not read from `config.operators` at check
+/// time: the permission store is seeded from it and is authoritative
+/// afterwards. So this sets `CONFIG` *and* seeds the store the way the server
+/// does at startup ([`crate::permissions::seed_operators`]), or `tester` would
+/// stay level 0 and every `Requirement::Level` would deny them. The seed is
+/// repeated on every call because another test (`permissions::install`) can
+/// replace the whole process-wide store; the caller holds
+/// [`crate::permissions::test_lock`] so that replacement cannot race this.
 fn install_config() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -54,6 +62,7 @@ fn install_config() {
         let cfg: crate::config::Config = toml::from_str("operators = [\"tester\"]\n").unwrap();
         let _ = crate::CONFIG.set(Arc::new(cfg));
     });
+    crate::permissions::seed_operators(&["tester".to_string()]);
 }
 
 /// A throwaway world on a temp store, unique per call so tests can run in
@@ -76,6 +85,9 @@ fn test_world() -> DemoWorld {
 }
 
 struct Env {
+    // Held for the whole test so no other test can replace the permission
+    // store while this one depends on `tester` being an operator.
+    _guard: std::sync::MutexGuard<'static, ()>,
     world: DemoWorld,
     registry: SharedRegistry,
     tester: Arc<PlayerHandle>,
@@ -83,6 +95,7 @@ struct Env {
 }
 
 fn env() -> Env {
+    let _guard = crate::permissions::test_lock();
     install_config();
     static IDS: AtomicI32 = AtomicI32::new(10);
     let world = test_world();
@@ -90,6 +103,7 @@ fn env() -> Env {
     let tester = join(&registry, "tester", IDS.fetch_add(2, Ordering::Relaxed));
     let bob = join(&registry, "bob", IDS.fetch_add(2, Ordering::Relaxed));
     Env {
+        _guard,
         world,
         registry,
         tester,
@@ -397,6 +411,7 @@ fn a_denied_node_carries_its_message() {
 
 #[test]
 fn the_level_requirement_matches_ops_against_the_registry() {
+    let _guard = crate::permissions::test_lock();
     install_config();
     let tree = requirement_tree(Requirement::Level {
         op: 1,
@@ -466,6 +481,7 @@ fn suggestions_filter_literals_by_prefix_and_never_run_a_command() {
 
 #[test]
 fn the_public_suggest_uses_the_global_tree() {
+    let _guard = crate::permissions::test_lock();
     install_config();
     let registry: SharedRegistry = Arc::new(Registry::default());
     // An operator, so the permission-gated gameplay names complete.

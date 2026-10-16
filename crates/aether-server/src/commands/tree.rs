@@ -317,7 +317,13 @@ pub fn check(req: &Requirement, handle: &PlayerHandle) -> Result<(), Deny> {
         Requirement::None => Ok(()),
         Requirement::Fn(f) => f(handle),
         Requirement::Level { op, node } => {
-            if super::permitted(handle, node, *op) {
+            // The CMD-01 core: the player's level comes from the persisted
+            // store (seeded from `config.operators`), the node's default
+            // resolves from the store, and the command's `op` level is the
+            // floor. This is the same gate `commands::permitted` exposes; the
+            // tree calls the core directly so a `Level` node is unambiguous.
+            let level = crate::permissions::level(&handle.name, handle.ip);
+            if crate::permissions::check(level, node, *op) {
                 Ok(())
             } else {
                 Err(Deny::Message(

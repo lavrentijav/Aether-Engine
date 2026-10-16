@@ -798,6 +798,9 @@ mod tests {
 
     #[test]
     fn the_permission_gate_is_level_against_op() {
+        // Hold the store lock: another test's `permissions::install` replaces
+        // the whole store, which would drop the node declared just below.
+        let _guard = crate::permissions::test_lock();
         // A declared public node: the op level is the only remaining gate, so
         // a non-op (level 0) may run op-0 commands and an op (level 4) any.
         crate::permissions::declare_node("test.gate.allow", crate::permissions::NodeDefault::Allow)
@@ -814,6 +817,8 @@ mod tests {
 
     #[test]
     fn a_public_plugin_command_is_available_to_a_non_op() {
+        // Hold the store lock: an `install` test elsewhere replaces the store.
+        let _guard = crate::permissions::test_lock();
         // The historian fixture declares `/hist` plainly (`commands = ["hist"]`),
         // i.e. op level 0. Registered through the core registry the way the
         // server does at plugin load, its node must resolve so that an ordinary
