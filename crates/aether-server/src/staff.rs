@@ -426,13 +426,18 @@ mod tests {
         // Survival and alive: normally huntable.
         h.game().mode = crate::protocol::GameMode::Survival;
         assert!(player_view(&h).huntable);
+        assert!(player_view(&h).survival);
         assert!(!player_view(&h).vanished);
-        // Vanished: no longer a mob target and dropped as a spawn anchor.
+        // Vanished: no longer a mob target and dropped as a spawn anchor, but
+        // still `survival` so it collects drops (arrows) as before.
         h.staff().set_vanished(true);
         let view = player_view(&h);
         assert!(view.vanished);
         assert!(!view.huntable, "mobs must not target a vanished player");
-        // The `spawn_round` pass skips exactly the `alive && vanished` rows.
+        assert!(
+            view.survival,
+            "a vanished player still picks items up (survival, not huntable)"
+        );
         assert!(view.alive, "still alive for proximity, just not a target");
     }
 

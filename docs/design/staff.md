@@ -40,9 +40,12 @@ by the same gate as a core command.
 
 `/spectate` is deliberately not a core stub any more: it is the admin feature
 this task adds, with the `aether.staff.spectate` node, not vanilla's
-entity-following `/spectate`. Until the permission store (CMD-01) lands the gate
-is the operator flag, the same stand-in the core's own commands use; the nodes
-are declared now so the resolver can take over unchanged.
+entity-following `/spectate`. Both commands register through the core command
+registry with op level 0 and their `aether.staff.*` nodes, so CMD-01's gate
+(`commands::permitted`) resolves and checks them like any other command; the
+plugin body additionally reads the player's operator level for its own replies,
+and `aether.staff.vanish.see` is declared but not yet resolved (a native plugin
+has no per-node check hook).
 
 ## 3. Vanish
 
