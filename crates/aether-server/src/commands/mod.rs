@@ -19,12 +19,15 @@
 //! which is why the mode has to be per-player state and cannot be inferred
 //! from the packet.
 
+pub mod args;
 pub mod catalogue;
 pub mod console;
+pub mod coordinates;
 pub mod feedback;
 pub mod pager;
 pub mod query;
 pub mod registry;
+mod snbt;
 pub mod source;
 pub mod tree;
 
