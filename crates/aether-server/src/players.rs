@@ -92,6 +92,8 @@ pub struct PlayerHandle {
     /// The last measured keep-alive round trip, in milliseconds. Read by the
     /// `%ping%` placeholder; `0` until the first reply arrives.
     ping_ms: std::sync::atomic::AtomicU32,
+    /// Per-player rate limit on chat/command logging. See [`crate::chatlog`].
+    chat_log: Mutex<crate::chatlog::LogLimiter>,
 }
 
 impl PlayerHandle {
@@ -114,6 +116,12 @@ impl PlayerHandle {
     /// first reply).
     pub fn ping(&self) -> u32 {
         self.ping_ms.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Borrow this player's chat/command logging rate limiter. See
+    /// [`crate::chatlog`].
+    pub fn chat_limiter(&self) -> std::sync::MutexGuard<'_, crate::chatlog::LogLimiter> {
+        self.chat_log.lock().unwrap()
     }
 
     /// Borrow this player's command session (inspect mode, current pager).
@@ -482,6 +490,7 @@ impl Registry {
             sidebar: Mutex::new(None),
             tab: Mutex::new(None),
             ping_ms: std::sync::atomic::AtomicU32::new(0),
+            chat_log: Mutex::new(crate::chatlog::LogLimiter::new()),
         });
         self.players
             .write()

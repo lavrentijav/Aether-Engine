@@ -1345,3 +1345,85 @@ fn a_bounded_query_over_100k_events_reads_only_what_it_returns() {
         store.get_calls()
     );
 }
+
+#[test]
+fn player_text_round_trips_with_its_kind_position_peer_and_utf8() {
+    // Public chat, a private message and a command share one body shape but
+    // three tags, so the mirror's kind column tells them apart. The text is
+    // UTF-8 and the position is where the speaker stood.
+    for (kind, name) in [
+        (ChatKind::Public, "chat"),
+        (ChatKind::Private, "pm"),
+        (ChatKind::Command, "command"),
+    ] {
+        let tag = EVENT_KINDS
+            .iter()
+            .find(|(_, n)| *n == name)
+            .unwrap_or_else(|| panic!("no event kind named {name}"))
+            .0;
+        let e = Event {
+            seq: 11,
+            at_ms: 12,
+            actor: alice(),
+            cause: None,
+            body: EventBody::ChatMessage {
+                kind,
+                x: -5,
+                y: 70,
+                z: 300,
+                peer: if kind == ChatKind::Private {
+                    bob()
+                } else {
+                    ActorId::SERVER
+                },
+                text: "привет, мир 😀".to_string(),
+            },
+        };
+        let blob = e.encode();
+        assert_eq!(blob[0], event::FORMAT_VERSION);
+        assert_eq!(Event::decode(&blob), Ok(e.clone()));
+        assert_eq!(e.body.tag(), tag, "kind {kind:?} must use tag {tag}");
+        assert_eq!(
+            e.position(),
+            Some((-5, 70, 300)),
+            "text carries the speaker's position"
+        );
+    }
+}
+
+#[test]
+fn a_version_4_blob_still_decodes_after_the_chat_bump() {
+    // The chat bodies are new in v5; a blob written by v4 must keep decoding,
+    // so an upgrade does not turn old history into errors.
+    let e = Event {
+        seq: 9,
+        at_ms: 10,
+        actor: bob(),
+        cause: None,
+        body: EventBody::ItemMerge {
+            into: ItemUid(1),
+            from: ItemUid(2),
+            count: 3,
+        },
+    };
+    let mut blob = e.encode();
+    blob[0] = 4;
+    assert_eq!(Event::decode(&blob), Ok(e), "a v4 merge still reads");
+}
+
+#[test]
+fn a_chat_body_is_not_a_plugin_custom_tag() {
+    // The chat kinds are core tags, below the custom range, so a chat event is
+    // not mistaken for an opaque plugin payload.
+    for name in ["chat", "pm", "command"] {
+        let tag = EVENT_KINDS
+            .iter()
+            .find(|(_, n)| *n == name)
+            .unwrap_or_else(|| panic!("no event kind named {name}"))
+            .0;
+        assert!(
+            !event::is_custom_tag(tag),
+            "chat tag {tag} must stay in the core range"
+        );
+    }
+}

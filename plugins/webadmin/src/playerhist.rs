@@ -6,7 +6,7 @@
 //! This module is the read side of it: a filter, a bounded query, and a
 //! human-readable summary for the web page.
 
-use aether_world::journal::{ActorId, Event, EventBody, Place};
+use aether_world::journal::{ActorId, ChatKind, Event, EventBody, Place};
 use aether_world::registry::items::ItemTypeId;
 use aether_world::StorageError;
 
@@ -118,6 +118,11 @@ pub fn action(e: &Event) -> &'static str {
         EventBody::ItemDestroy { .. } => "destroy",
         EventBody::ItemMerge { .. } => "merge",
         EventBody::ItemDerive { .. } => "craft",
+        EventBody::ChatMessage { kind, .. } => match kind {
+            ChatKind::Public => "chat",
+            ChatKind::Private => "message",
+            ChatKind::Command => "command",
+        },
         EventBody::Custom { .. } => "custom",
     }
 }

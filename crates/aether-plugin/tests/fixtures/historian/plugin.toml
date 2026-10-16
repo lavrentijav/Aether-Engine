@@ -1,0 +1,17 @@
+# Manifest for the history-probe test fixture. See crates/aether-plugin/src/manifest.rs.
+id = "historian"
+name = "Historian"
+version = "0.1.0"
+api = "0.1"
+entry = "historian.wasm"
+priority = 10
+
+# The test grants `history.read` (or not); `log` is needed for the guest to
+# report the answer it saw.
+capabilities = ["log"]
+
+# The SDK `history` service must be present or the host refuses the load.
+requires = ["sdk.history@0.1"]
+
+subscribe = ["on-command"]
+commands = ["hist"]

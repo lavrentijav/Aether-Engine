@@ -128,6 +128,7 @@ const SDK_SERVICE_INTERFACES: &[&str] = &[
     "scheduler",
     "cooldowns",
     "confirm",
+    "history",
     "placeholders",
 ];
 
