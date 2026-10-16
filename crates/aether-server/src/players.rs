@@ -309,14 +309,15 @@ impl PlayerHandle {
                 };
                 let view = crate::protocol::ColumnView::new(base, *cx, *cz);
                 // Anti-xray: mask what this player cannot see before the codec
-                // ever reads it. Culling hides whole sections; engine hides
+                // ever reads it. Culling hides whole `4×4×2` cells; engine hides
                 // individual buried ores. Both go through the existing per-
                 // version encoder, so no codec knows about either.
                 match crate::visibility::mask_for_render(self, world, *cx, *cz) {
                     crate::visibility::ColumnMask::None => self.codec.encode(ev, &view),
-                    crate::visibility::ColumnMask::Sections { hidden, fill } => {
-                        let masked =
-                            crate::visibility::MaskedColumn::new(&view, *cx, *cz, hidden, fill);
+                    crate::visibility::ColumnMask::Cells { hidden, fill } => {
+                        let masked = crate::visibility::MaskedColumn::from_cells(
+                            &view, *cx, *cz, hidden, fill,
+                        );
                         self.codec.encode(ev, &masked)
                     }
                     crate::visibility::ColumnMask::Engine => {

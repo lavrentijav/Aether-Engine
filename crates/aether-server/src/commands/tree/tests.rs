@@ -728,7 +728,7 @@ fn self_and_world_commands_route_through_the_tree() {
     assert_eq!(one(&env, who, "/visibility"), "Visibility culling is on");
     assert_eq!(
         one(&env, who, "/visibility off"),
-        "Visibility culling off: you are sent every section"
+        "Visibility culling off: you are sent every cell"
     );
     assert_eq!(one(&env, who, "/visibility on"), "Visibility culling on");
     // `/visibility status` reports the effective anti-xray state for the

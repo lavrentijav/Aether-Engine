@@ -391,7 +391,7 @@ pub fn visibility(args: &[&str], handle: &PlayerHandle, world: &DemoWorld) -> Ve
     // per-player bypass flag, which the server-level enable sits apart from.
     vec![match action {
         Some("on") => "Visibility culling on".to_string(),
-        Some("off") => "Visibility culling off: you are sent every section".to_string(),
+        Some("off") => "Visibility culling off: you are sent every cell".to_string(),
         // Bare `/visibility`.
         _ => format!(
             "Visibility culling is {}",
