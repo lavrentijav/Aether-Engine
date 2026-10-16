@@ -24,52 +24,116 @@ use aether_world::journal::{now_ms, ActorId, EventBody, Place};
 
 use super::model::{Money, TradeError};
 use super::{Economy, MarketFilter};
-use crate::commands::{query::parse_duration_ms, Reply};
+use crate::commands::query::parse_duration_ms;
+use crate::commands::tree::{self, Ctx, Deny, Node, Requirement};
+use crate::commands::Reply;
 use crate::players::{PlayerHandle, SharedRegistry};
 use crate::session::DemoWorld;
 
-/// Dispatch an economy command, or `None` if `cmd` is not one.
-pub fn dispatch(
-    cmd: &str,
-    args: &[&str],
-    handle: &PlayerHandle,
-    registry: &SharedRegistry,
-    world: &DemoWorld,
-    econ: Option<&dyn Economy>,
-) -> Option<Reply> {
-    let known = matches!(
-        cmd,
-        "balance"
-            | "bal"
-            | "money"
-            | "pay"
-            | "sell"
-            | "market"
-            | "buy"
-            | "listings"
-            | "unlist"
-            | "econ"
-    );
-    if !known {
-        return None;
+/// Register every economy command on the tree. A command on a server with no
+/// economy still routes; it answers that the economy is off, exactly as
+/// before.
+pub fn nodes() -> Vec<Node> {
+    vec![
+        tree::greedy(
+            "balance",
+            &["bal", "money"],
+            Requirement::None,
+            exec_balance,
+        ),
+        tree::greedy("pay", &[], Requirement::None, exec_pay),
+        tree::greedy("sell", &[], Requirement::None, exec_sell),
+        tree::greedy("market", &[], Requirement::None, exec_market),
+        tree::greedy("buy", &[], Requirement::None, exec_buy),
+        tree::simple("listings", &[], Requirement::None, exec_listings),
+        tree::greedy("unlist", &[], Requirement::None, exec_unlist),
+        tree::greedy("econ", &[], Requirement::Fn(require_econ_op), exec_econ),
+    ]
+}
+
+/// The reply every economy command gives when no economy is installed.
+fn disabled() -> Reply {
+    Reply(vec![
+        "the economy is not enabled on this server.".into(),
+        "it needs a [database] url and a build with --features postgres.".into(),
+    ])
+}
+
+/// The `/econ` gate, enforced by the tree. With no economy installed the
+/// disabled reply is what the caller must see, so the gate lets the executor
+/// deliver it — the check only bites once an economy exists.
+pub fn require_econ_op(handle: &PlayerHandle) -> Result<(), Deny> {
+    if crate::economy::get().is_none() {
+        return Ok(());
     }
-    let Some(econ) = econ else {
-        return Some(Reply(vec![
-            "the economy is not enabled on this server.".into(),
-            "it needs a [database] url and a build with --features postgres.".into(),
-        ]));
+    if crate::is_operator(handle) {
+        Ok(())
+    } else {
+        Err(Deny::Message("that command is for operators".into()))
+    }
+}
+
+fn exec_balance(ctx: &mut Ctx) -> Reply {
+    let Some(econ) = ctx.econ else {
+        return disabled();
     };
-    Some(match cmd {
-        "balance" | "bal" | "money" => balance(args, handle, registry, econ),
-        "pay" => pay(args, handle, registry, econ),
-        "sell" => sell(args, handle, world, econ),
-        "market" => market(args, handle, registry, world, econ),
-        "buy" => buy(args, handle, registry, world, econ),
-        "listings" => listings(handle, econ),
-        "unlist" => unlist(args, handle, registry, world, econ),
-        "econ" => admin(args, handle, registry, econ),
-        _ => unreachable!("filtered above"),
-    })
+    let args = ctx.refs();
+    balance(&args, ctx.handle, ctx.registry, econ)
+}
+
+fn exec_pay(ctx: &mut Ctx) -> Reply {
+    let Some(econ) = ctx.econ else {
+        return disabled();
+    };
+    let args = ctx.refs();
+    pay(&args, ctx.handle, ctx.registry, econ)
+}
+
+fn exec_sell(ctx: &mut Ctx) -> Reply {
+    let Some(econ) = ctx.econ else {
+        return disabled();
+    };
+    let args = ctx.refs();
+    sell(&args, ctx.handle, ctx.world, econ)
+}
+
+fn exec_market(ctx: &mut Ctx) -> Reply {
+    let Some(econ) = ctx.econ else {
+        return disabled();
+    };
+    let args = ctx.refs();
+    market(&args, ctx.handle, ctx.registry, ctx.world, econ)
+}
+
+fn exec_buy(ctx: &mut Ctx) -> Reply {
+    let Some(econ) = ctx.econ else {
+        return disabled();
+    };
+    let args = ctx.refs();
+    buy(&args, ctx.handle, ctx.registry, ctx.world, econ)
+}
+
+fn exec_listings(ctx: &mut Ctx) -> Reply {
+    let Some(econ) = ctx.econ else {
+        return disabled();
+    };
+    listings(ctx.handle, econ)
+}
+
+fn exec_unlist(ctx: &mut Ctx) -> Reply {
+    let Some(econ) = ctx.econ else {
+        return disabled();
+    };
+    let args = ctx.refs();
+    unlist(&args, ctx.handle, ctx.registry, ctx.world, econ)
+}
+
+fn exec_econ(ctx: &mut Ctx) -> Reply {
+    let Some(econ) = ctx.econ else {
+        return disabled();
+    };
+    let args = ctx.refs();
+    admin(&args, ctx.handle, ctx.registry, econ)
 }
 
 /// `/econ give <player> <amount> [reason]` — the only way money enters the
@@ -85,9 +149,6 @@ fn admin(
     registry: &SharedRegistry,
     econ: &dyn Economy,
 ) -> Reply {
-    if !crate::is_operator(handle) {
-        return Reply(vec!["that command is for operators".into()]);
-    }
     match args {
         ["give", name, amount, rest @ ..] => {
             let Some(to) = registry.uuid_of(name) else {
