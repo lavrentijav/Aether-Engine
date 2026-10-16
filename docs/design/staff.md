@@ -48,8 +48,9 @@ are declared now so the resolver can take over unchanged.
 
 A vanished player is removed from other players' **tab list** and **entity
 tracking** (despawned, and never spawned for a viewer who may not see them),
-from **join/quit messages** and from **mob targeting**. Those are the paths this
-engine has, and each consults [`staff::visible_to`], the one predicate:
+from **join/quit messages**, and from **mob targeting** and mob spawning
+anchors. The player-visibility paths consult [`staff::visible_to`], the one
+predicate:
 
 ```rust
 !target.vanished || viewer.sees_vanished || (viewer.vanished && target.vanished)
@@ -57,9 +58,12 @@ engine has, and each consults [`staff::visible_to`], the one predicate:
 
 So vanished staff see each other (the stand-in for
 `aether.staff.vanish.see`, set for operators on join), and a vanished viewer
-still sees everyone. A vanished player is never spawned for a viewer who may
-not see them, so movement broadcasts to an untracked entity are ignored by the
-client.
+still sees everyone. The entity tick marks a vanished player `huntable = false`
+and drops them as a mob-spawn anchor, so monsters do not chase or appear around
+them. A vanished player is never spawned for a viewer who may not see them, so
+movement broadcasts to an untracked entity are ignored by the client (the
+movement/teleport/sound broadcasts themselves are not filtered; the client
+ignores packets for an entity it does not hold).
 
 The remaining items in the brief's list are **not wired because the core feature
 does not exist yet**, and so are absent by construction until it lands: `/list`
@@ -80,18 +84,19 @@ so it shows in every protocol.
 **Persistence.** The plugin keeps the vanished *names* in its KV
 (`vanished`, newline-separated) and re-applies the vanish in
 `after-player-join`. `[plugins.staff] persist = false` drops a vanish on logout.
-There is a one-tick window on relog (the join burst runs before the plugin's
-join callback); the re-apply despawns the player immediately after, so the leak
-is at most one tick of a player's own spawn burst.
+`after_player_join` runs **before** the join burst (the tab entries, spawns and
+join message), so a returning vanished player is neither spawned to others nor
+announced: there is no window, not even a tick.
 
 ## 4. Spectate
 
 `/spectate` saves the exact previous state — position/look, game mode,
-inventory, health/hunger/saturation, experience, effects, absorption and whether
-the admin was already vanished — then switches to spectator (`GameMode::Spectator`,
-added across every codec) and auto-vanishes. `/spectate off` restores the
-snapshot and pushes it back through the normal `after_spawn` path (position,
-mode, effects, health, experience, whole inventory).
+inventory, health/hunger/saturation, experience, effects, absorption, whether
+the admin was already vanished and their anti-xray override — then switches to
+spectator (`GameMode::Spectator`, added across every codec) and auto-vanishes.
+`/spectate off` restores the snapshot and pushes it back through the normal
+`after_spawn` path (position, mode, effects, health, experience, whole
+inventory), reverts the anti-xray override and re-sends the columns it masked.
 
 The **camera is not attached**: this protocol layer has no Set Camera packet, so
 `/spectate <player>` moves the spectator onto the target's position instead of
@@ -115,9 +120,12 @@ splits its passes by each player's effective mode:
 An override also *turns anti-xray on* for an admin who holds an explicit bypass
 grant (operators are not bypassed automatically; see
 [Known Issues A.16](../KNOWN_ISSUES.md)), which is the point: a spectating admin
-can lower the level and see exactly what a normal player would see. On change the columns the admin holds are
-re-sent (the reachable set is invalidated first, so a margin change is
-recomputed) and the override is dropped with the spectate snapshot.
+can lower the level and see exactly what a normal player would see. On change the
+columns the admin holds are re-sent (the reachable set is invalidated first, so
+a margin change is recomputed), and `/spectate off` reverts the override to what
+it was before spectating — storing it in the snapshot and re-sending the columns
+again, so a `off` bypass or a forced `engine`/`culling` level does not stick
+until the next relog.
 
 ## 6. Journal
 

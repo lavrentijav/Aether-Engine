@@ -497,6 +497,12 @@ fn login_and_play(
     // anything the player might type at.
     handle.emit(&ServerEvent::CommandTree, world);
 
+    // Join events run **before** anything is broadcast about this player, so a
+    // plugin can restore per-player state the join burst must respect — the
+    // staff plugin re-applies a persisted vanish here, so a returning vanished
+    // player is neither spawned to others nor announced in the join message.
+    crate::plugins::after_player_join(&handle);
+
     // Tab list first, spawns second: a 1.8 client drops a spawn for a UUID it
     // has no list entry for, which made players invisible to each other even
     // though they always shared one world.
@@ -525,7 +531,6 @@ fn login_and_play(
             world,
         );
     }
-    crate::plugins::after_player_join(&handle);
 
     // Now fill out the rest of the view radius. The player is placed and
     // playable by this point, so the remaining columns arrive as scenery

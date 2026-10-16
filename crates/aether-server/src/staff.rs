@@ -92,6 +92,10 @@ pub struct SpectateSnapshot {
     pub vanished: bool,
     /// Whether the admin could see the vanished before spectating.
     pub sees_vanished: bool,
+    /// The anti-xray override in force before spectating, so `/spectate off`
+    /// reverts it (the brief's "reverts when leaving spectate") instead of
+    /// leaving it stuck until the next relog.
+    pub xray: AntiXrayLevel,
 }
 
 /// Per-player staff state, stored on the [`PlayerHandle`].
@@ -269,6 +273,7 @@ pub fn enter_spectate(
             absorption: st.absorption,
             vanished: handle.staff().vanished(),
             sees_vanished: handle.staff().sees_vanished(),
+            xray: handle.staff().xray(),
         }
     };
     handle.staff().put_snapshot(snapshot);
@@ -327,6 +332,11 @@ pub fn leave_spectate(
     // Restore the vanish and "see" flags the admin had before spectating.
     set_vanished(handle, snapshot.vanished, registry, world);
     set_sees_vanished(handle, snapshot.sees_vanished, registry, world);
+    // Revert the per-admin anti-xray override and re-send the columns it had
+    // masked, so leaving spectate restores the server's normal masking for
+    // this admin rather than leaving them bypassing (or stuck under a forced
+    // level) until the next relog.
+    set_xray_level(handle, snapshot.xray, world);
     Ok(())
 }
 
@@ -340,6 +350,91 @@ pub fn set_xray_level(handle: &PlayerHandle, level: AntiXrayLevel, world: &dyn B
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::players::Registry;
+    use crate::protocol::codec_for;
+    use std::net::{TcpListener, TcpStream};
+
+    /// A throwaway world on a temp store, as the entity tests use.
+    fn test_world(seed: u64) -> DemoWorld {
+        use aether_api::{FjallStore, World};
+        let dir =
+            std::env::temp_dir().join(format!("aether-sp1-staff-{}-{seed}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FjallStore::open(&dir).expect("temp store");
+        let generator = crate::worldgen::Generator::load("", "", seed).expect("noise generator");
+        let revision = generator.revision();
+        let cfg = crate::gencache::CacheConfig {
+            root: String::new(),
+            ..Default::default()
+        };
+        let generator = crate::gencache::Cached::with_revision(generator, seed, revision, &cfg);
+        World::new(store, generator)
+    }
+
+    /// Register one player on a throwaway socket.
+    fn handle(registry: &Registry, eid: i32, name: &str) -> std::sync::Arc<PlayerHandle> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client =
+            crate::proto::Conn::new(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        let _peer = listener.accept().unwrap();
+        registry
+            .join(
+                eid,
+                0,
+                name.into(),
+                None,
+                Vec::new(),
+                codec_for(763).unwrap(),
+                &client,
+                PosLook {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    on_ground: true,
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn leaving_spectate_reverts_the_anti_xray_override() {
+        let world = test_world(31);
+        let registry = std::sync::Arc::new(Registry::default());
+        let h = handle(&registry, 1, "Steve");
+        // Both a bypass and a forced level must revert, not stick until relog.
+        for level in [AntiXrayLevel::Off, AntiXrayLevel::Engine] {
+            enter_spectate(&h, &registry, &world, None).expect("enter spectate");
+            set_xray_level(&h, level, &world);
+            assert_eq!(h.staff().xray(), level);
+            leave_spectate(&h, &registry, &world).expect("leave spectate");
+            assert_eq!(
+                h.staff().xray(),
+                AntiXrayLevel::Default,
+                "the override reverted on leave"
+            );
+            assert!(!h.staff().spectating());
+        }
+    }
+
+    #[test]
+    fn a_vanished_player_is_not_huntable_and_is_no_spawn_anchor() {
+        use crate::game::entities::player_view;
+        let registry = std::sync::Arc::new(Registry::default());
+        let h = handle(&registry, 1, "Steve");
+        // Survival and alive: normally huntable.
+        h.game().mode = crate::protocol::GameMode::Survival;
+        assert!(player_view(&h).huntable);
+        assert!(!player_view(&h).vanished);
+        // Vanished: no longer a mob target and dropped as a spawn anchor.
+        h.staff().set_vanished(true);
+        let view = player_view(&h);
+        assert!(view.vanished);
+        assert!(!view.huntable, "mobs must not target a vanished player");
+        // The `spawn_round` pass skips exactly the `alive && vanished` rows.
+        assert!(view.alive, "still alive for proximity, just not a target");
+    }
 
     #[test]
     fn a_vanished_player_is_hidden_unless_seen_or_also_vanished() {

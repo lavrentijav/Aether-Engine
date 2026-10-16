@@ -68,6 +68,23 @@ the core. See [`docs/design/staff.md`](../design/staff.md) (EN) and
   toggle alias.
 - The startup INFO line (`anti-xray  : <mode> (...)`) is unchanged.
 
+## Review 1 fixes (CHANGES)
+
+- **xray override now reverts on `/spectate off`.** `SpectateSnapshot` stores the
+  pre-spectate `AntiXrayLevel`; `leave_spectate` calls `set_xray_level(handle,
+  snapshot.xray, world)`, which reverts and re-sends the columns. Test
+  `leaving_spectate_reverts_the_anti_xray_override` covers both `off` and a
+  forced `engine`.
+- **Mob targeting respects vanish.** `PlayerView` gained `vanished`;
+  `entities::player_view` sets `huntable = survival && !dead && !vanished`, and
+  `mobs::spawn_round` skips vanished players as spawn anchors. Test
+  `a_vanished_player_is_not_huntable_and_is_no_spawn_anchor`.
+- **Relog vanish re-applies before the join burst.** `after_player_join` moved
+  ahead of the tab/spawn/join-message block in `session.rs`, so a returning
+  vanished player is neither spawned to others nor announced.
+- `docs/design/staff.md` (§3, §4, §5) and `KNOWN_ISSUES.md` A.21 updated to
+  match (mob targeting wired; override reverts; no relog window); RU docs too.
+
 ## Checks
 
 - `cargo fmt --all -- --check` — clean.
