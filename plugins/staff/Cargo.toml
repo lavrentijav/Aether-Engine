@@ -1,0 +1,21 @@
+[package]
+name = "aether-staff-plugin"
+description = "The Aether staff plugin, provided as a native plugin: vanish, admin spectate and per-admin anti-xray control, with a journal audit trail."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "aether_staff_plugin"
+
+[dependencies]
+# The host trait a native plugin implements, plus the shared `Player` and
+# `CommandResult` types and the command declaration the manifest carries.
+aether-plugin = { workspace = true }
+
+[lints]
+workspace = true

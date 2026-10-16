@@ -597,6 +597,7 @@ fn game_mode_name(mode: crate::protocol::GameMode) -> String {
     match mode {
         crate::protocol::GameMode::Survival => "survival",
         crate::protocol::GameMode::Creative => "creative",
+        crate::protocol::GameMode::Spectator => "spectator",
     }
     .to_string()
 }

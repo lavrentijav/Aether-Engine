@@ -731,6 +731,12 @@ fn self_and_world_commands_route_through_the_tree() {
         "Visibility culling off: you are sent every section"
     );
     assert_eq!(one(&env, who, "/visibility on"), "Visibility culling on");
+    // `/visibility status` reports the effective anti-xray state for the
+    // player (SP1); the wording depends on the server config, so assert only
+    // that it is about anti-xray and never a toggle acknowledgement.
+    let status = one(&env, who, "/visibility status");
+    assert!(status.contains("anti-xray"), "{status}");
+    assert!(!status.starts_with("Visibility culling"), "{status}");
 }
 
 #[test]

@@ -7,8 +7,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use aether_api::Vector3;
-
 use super::effects::{self, Effect, TickEvent};
 use super::entities::{self, Action, PlayerView};
 use super::{combat, containers, mobs, tables, window};
@@ -120,20 +118,7 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
     }
 
     if now % 40 == 0 && !players.is_empty() {
-        let views: Vec<PlayerView> = players
-            .iter()
-            .map(|p| {
-                let pos = p.pos();
-                let st = p.game();
-                PlayerView {
-                    eid: p.entity_id,
-                    uuid: p.uuid,
-                    pos: Vector3::new(pos.x, pos.y, pos.z),
-                    huntable: st.survival() && !st.dead,
-                    alive: !st.dead,
-                }
-            })
-            .collect();
+        let views: Vec<PlayerView> = players.iter().map(|p| entities::player_view(p)).collect();
         for (def, at) in mobs::spawn_round(world, &views, night, rng) {
             let yaw = rng.f32() * 360.0;
             entities::spawn_mob(def, at, yaw);

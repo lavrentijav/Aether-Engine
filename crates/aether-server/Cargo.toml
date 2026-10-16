@@ -3,6 +3,7 @@ name = "aether-server"
 description = "Aether Engine minimal join server: a Minecraft 1.8.9 (protocol 47) listener that lets a vanilla client connect and spawn in a full-bright flat world."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -50,6 +51,9 @@ aether-webadmin-plugin = { path = "../../plugins/webadmin", optional = true }
 # The sidebar native plugin. Loaded after the SDK, so its optional permission
 # checks resolve the SDK's service.
 aether-sidebar-plugin = { path = "../../plugins/sidebar", optional = true }
+# The staff native plugin: vanish, admin spectate and per-admin anti-xray
+# control, driven through the core's `staff_*` host hooks.
+aether-staff-plugin = { path = "../../plugins/staff", optional = true }
 postgres = { version = "0.19.10", optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -93,5 +97,5 @@ workspace = true
 # build that does not need Wasmtime (tests, a minimal deployment) can drop it
 # with `--no-default-features`.
 default = ["plugins"]
-plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-menus-plugin", "dep:aether-webadmin-plugin", "dep:aether-sidebar-plugin"]
+plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-menus-plugin", "dep:aether-webadmin-plugin", "dep:aether-sidebar-plugin", "dep:aether-staff-plugin"]
 postgres = ["dep:postgres"]

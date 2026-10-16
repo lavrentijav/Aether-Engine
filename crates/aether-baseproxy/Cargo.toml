@@ -3,6 +3,7 @@ name = "aether-baseproxy"
 description = "Aether BaseProxy: translate live vanilla Minecraft data (network chunk sections, block states) into the engine core format."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true

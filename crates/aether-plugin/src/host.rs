@@ -322,6 +322,65 @@ pub trait HostBackend: Send + Sync {
     fn world_time(&self, _plugin: &str) -> i64 {
         0
     }
+
+    // --- Staff accountability (the native `staff` plugin) ------------------
+    //
+    // The core owns the *mechanism* — who is hidden from whom, the spectate
+    // snapshot, the anti-xray override — because another player's client and
+    // the render path need the answer without a plugin call. These hooks are
+    // how the plugin sets it and reads it back. Every default is neutral, so a
+    // host without the mechanism satisfies the trait.
+
+    /// Hide or reveal `player` from other players (vanish).
+    fn staff_set_vanished(&self, _plugin: &str, _player: u64, _vanished: bool) {}
+
+    /// Whether `player` is currently vanished.
+    fn staff_is_vanished(&self, _plugin: &str, _player: u64) -> bool {
+        false
+    }
+
+    /// Grant or revoke `player`'s ability to see vanished players
+    /// (`aether.staff.vanish.see`).
+    fn staff_set_sees_vanished(&self, _plugin: &str, _player: u64, _see: bool) {}
+
+    /// Whether `player` is in spectate mode.
+    fn staff_is_spectating(&self, _plugin: &str, _player: u64) -> bool {
+        false
+    }
+
+    /// Enter spectate for `player`, optionally moving onto `target`'s camera.
+    /// `Err` explains why it could not (already spectating, no snapshot, …).
+    fn staff_enter_spectate(
+        &self,
+        _plugin: &str,
+        _player: u64,
+        _target: Option<u64>,
+    ) -> std::result::Result<(), String> {
+        Err("spectate is not available on this host".into())
+    }
+
+    /// Leave spectate, restoring the saved location, mode, inventory, health,
+    /// hunger, effects and flight.
+    fn staff_leave_spectate(&self, _plugin: &str, _player: u64) -> std::result::Result<(), String> {
+        Err("spectate is not available on this host".into())
+    }
+
+    /// Set `player`'s anti-xray level (`off`, `engine`, `culling`, or a margin
+    /// in blocks), re-sending the columns they hold.
+    fn staff_set_xray_level(
+        &self,
+        _plugin: &str,
+        _player: u64,
+        _level: &str,
+    ) -> std::result::Result<(), String> {
+        Err("anti-xray control is not available on this host".into())
+    }
+
+    /// Show a line above `player`'s hotbar.
+    fn staff_actionbar(&self, _plugin: &str, _player: u64, _text: &str) {}
+
+    /// Append a staff-accountability event to the world journal: who did what.
+    fn staff_journal(&self, _plugin: &str, _actor: u64, _action: &str, _detail: &str) {}
 }
 
 /// Sandbox and scheduling limits for the whole host.

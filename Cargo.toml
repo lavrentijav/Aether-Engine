@@ -30,6 +30,9 @@ members = [
     # The sidebar, as a native plugin: it composes a per-player scoreboard from
     # config and placeholders and asks the core to draw it.
     "plugins/sidebar",
+    # The staff, as a native plugin: vanish, admin spectate and per-admin
+    # anti-xray control, with a journal audit trail.
+    "plugins/staff",
 ]
 
 # The example plugins are separate WebAssembly components: they target
@@ -44,6 +47,10 @@ rust-version = "1.80"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/lavrentijav/Aether-Engine"
 authors = ["Aether Engine contributors"]
+# Every crate in this tree is an internal, unpublished component. Marking the
+# workspace unpublished lets cargo-deny treat path-only dependencies as private
+# (allow-wildcard-paths only applies to non-publishable crates).
+publish = false
 
 [workspace.lints.clippy]
 # Keep the SIMD / unsafe surface honest, but do not block the build on pedantic noise.

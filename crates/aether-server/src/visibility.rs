@@ -92,6 +92,12 @@ impl State {
         self.center == Some(section) && !self.dirty
     }
 
+    /// Force the next search to recompute, even at the same section. Used when
+    /// a `/spectate xray` margin change makes the old reachable set wrong.
+    pub fn invalidate(&mut self) {
+        self.center = None;
+    }
+
     /// Adopt a freshly computed reachable set.
     ///
     /// `epoch_at_start` is the global edit epoch when the search began. The
@@ -377,7 +383,23 @@ pub fn visible_from(
     pos: (f64, f64, f64),
     view_distance: i32,
 ) -> HashSet<(i32, i32, i32)> {
-    let margin = crate::anti_xray_config().margin_blocks as f64;
+    visible_from_margin(
+        world,
+        pos,
+        view_distance,
+        crate::anti_xray_config().margin_blocks,
+    )
+}
+
+/// The reachable section set with an explicit margin, for the per-player
+/// anti-xray override (`/spectate xray <level>`).
+pub fn visible_from_margin(
+    world: &dyn BlockSource,
+    pos: (f64, f64, f64),
+    view_distance: i32,
+    margin_blocks: i32,
+) -> HashSet<(i32, i32, i32)> {
+    let margin = margin_blocks as f64;
     reachable_sections(
         pos,
         margin,
@@ -397,8 +419,64 @@ fn ensure_visible(handle: &PlayerHandle, world: &dyn BlockSource) {
         return;
     }
     let epoch = EDIT_EPOCH.load(Ordering::Relaxed);
-    let visible = visible_from(world, (pos.x, pos.y, pos.z), crate::server_view_radius());
+    let visible = visible_from_margin(
+        world,
+        (pos.x, pos.y, pos.z),
+        crate::server_view_radius(),
+        effective_margin(handle),
+    );
     handle.visibility().set_visible_if(section, visible, epoch);
+}
+
+/// The anti-xray mode in force for this player: their `/spectate xray`
+/// override, else the server config.
+pub fn effective_mode(handle: &PlayerHandle) -> AntiXrayMode {
+    match handle.staff().xray() {
+        crate::staff::AntiXrayLevel::Engine => AntiXrayMode::Engine,
+        crate::staff::AntiXrayLevel::Culling | crate::staff::AntiXrayLevel::Margin(_) => {
+            AntiXrayMode::Culling
+        }
+        _ => crate::anti_xray_config().mode,
+    }
+}
+
+/// The culling margin in force for this player.
+pub fn effective_margin(handle: &PlayerHandle) -> i32 {
+    match handle.staff().xray() {
+        crate::staff::AntiXrayLevel::Margin(n) => n,
+        _ => crate::anti_xray_config().margin_blocks,
+    }
+}
+
+/// Whether anti-xray is in force for this player: on globally, or turned on for
+/// them by a `/spectate xray` override.
+pub fn effective_enabled(handle: &PlayerHandle) -> bool {
+    handle.staff().xray() != crate::staff::AntiXrayLevel::Default || crate::anti_xray_enabled()
+}
+
+/// A human-readable summary of the anti-xray state **for this player**, for
+/// `/visibility status`: whether they bypass it (and why) or what mode they
+/// are under.
+pub fn player_status(handle: &PlayerHandle) -> String {
+    if !effective_enabled(handle) {
+        return "anti-xray is off (server config)".to_string();
+    }
+    if crate::anti_xray_bypass(handle) {
+        let reason = match handle.staff().xray() {
+            crate::staff::AntiXrayLevel::Off => "/spectate xray off",
+            _ if handle.visibility().bypass => "/visibility off",
+            _ => "an explicit bypass grant",
+        };
+        return format!("you bypass anti-xray ({reason})");
+    }
+    let hidden = crate::anti_xray_config().hidden_block_names().len();
+    match effective_mode(handle) {
+        AntiXrayMode::Engine => format!("anti-xray: engine, {hidden} hidden block(s)"),
+        AntiXrayMode::Culling => format!(
+            "anti-xray: culling, margin {} blocks, {hidden} hidden block(s)",
+            effective_margin(handle)
+        ),
+    }
 }
 
 /// Which sections of column `(cx, cz)` are hidden for this visible set.
@@ -452,11 +530,11 @@ pub fn mask_for_render(
     cx: i32,
     cz: i32,
 ) -> ColumnMask {
-    if !crate::anti_xray_enabled() {
+    if !effective_enabled(handle) {
         return ColumnMask::None;
     }
     let bypass = crate::anti_xray_bypass(handle);
-    match crate::anti_xray_config().mode {
+    match effective_mode(handle) {
         AntiXrayMode::Culling => {
             if !bypass {
                 ensure_visible(handle, world);
@@ -505,13 +583,13 @@ pub fn mask_block(
     z: i32,
     block: BlockStateId,
 ) -> BlockStateId {
-    if !crate::anti_xray_enabled() {
+    if !effective_enabled(handle) {
         return block;
     }
     if crate::anti_xray_bypass(handle) {
         return block;
     }
-    match crate::anti_xray_config().mode {
+    match effective_mode(handle) {
         AntiXrayMode::Engine => {
             let hidden = hidden_states();
             if hidden.contains(block) && is_buried(world, x, y, z) {
@@ -568,6 +646,21 @@ pub fn reveal_all(handle: &PlayerHandle, world: &dyn BlockSource) {
     }
 }
 
+/// Re-send every column this client currently holds, so a `/spectate xray`
+/// level change takes effect at once.
+///
+/// Unlike [`reveal_all`], this re-sends even columns that were sent real: when
+/// the level is *lowered* (turned on, or the margin raised) those columns must
+/// come back masked. The reachable set is invalidated first so a margin change
+/// is recomputed rather than reused.
+pub fn resend_held_columns(handle: &PlayerHandle, world: &dyn BlockSource) {
+    handle.visibility().invalidate();
+    let columns: Vec<(i32, i32)> = handle.visibility().sent().keys().copied().collect();
+    for (cx, cz) in columns {
+        handle.emit(&ServerEvent::ChunkColumn { cx, cz }, world);
+    }
+}
+
 /// Drop the columns a respawned client no longer holds, so the reveal planner
 /// stops walking them (finding 7).
 pub fn reset_columns(handle: &PlayerHandle) {
@@ -610,12 +703,30 @@ pub fn plan_reveals(
 /// `engine`: a block written since the last tick may expose the ore next to
 /// it, so the players whose view covers it are sent that ore for real.
 pub fn tick(players: &[Arc<PlayerHandle>], world: &dyn BlockSource) {
-    if !crate::anti_xray_enabled() {
+    if !crate::anti_xray_enabled()
+        && players
+            .iter()
+            .all(|p| p.staff().xray() == crate::staff::AntiXrayLevel::Default)
+    {
         return;
     }
-    match crate::anti_xray_config().mode {
-        AntiXrayMode::Culling => culling_tick(players, world),
-        AntiXrayMode::Engine => engine_tick(players, world),
+    // A per-player `/spectate xray` override can differ from the config mode,
+    // so the passes are split by each player's effective mode rather than by
+    // the global one. A bypassed player and one for whom anti-xray is not in
+    // force are left out entirely.
+    let active: Vec<Arc<PlayerHandle>> = players
+        .iter()
+        .filter(|p| effective_enabled(p) && !crate::anti_xray_bypass(p))
+        .cloned()
+        .collect();
+    let (culling, engine): (Vec<Arc<PlayerHandle>>, Vec<Arc<PlayerHandle>>) = active
+        .into_iter()
+        .partition(|p| effective_mode(p) == AntiXrayMode::Culling);
+    if !engine.is_empty() {
+        engine_tick(&engine, world);
+    }
+    if !culling.is_empty() {
+        culling_tick(&culling, world);
     }
 }
 

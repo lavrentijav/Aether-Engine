@@ -774,28 +774,44 @@ pub struct PlayerView {
     pub eid: i32,
     pub uuid: u128,
     pub pos: Vector3,
-    /// Survival and alive: something a mob may hunt.
+    /// Survival and alive, **ignoring vanish**: the player can pick items up.
+    /// This is the old "huntable" meaning, kept separate so a vanished player
+    /// still collects drops.
+    pub survival: bool,
+    /// Survival and alive and **not** vanished: something a mob may hunt. A
+    /// vanished (staff-hidden) player is never huntable — mobs ignore them, as
+    /// vanilla's ignore a spectator — nor is an arrow fired at them.
     pub huntable: bool,
     pub alive: bool,
+    /// Staff vanish: hidden from other players. Kept apart from `survival`
+    /// so the spawn pass can skip a vanished player, without making them
+    /// "dead" for the proximity checks.
+    pub vanished: bool,
+}
+
+/// The entity-tick view of one player: their position, whether a mob may hunt
+/// them, and whether they are vanished. A vanished player is not huntable, so
+/// the single place this mapping lives is here.
+pub fn player_view(p: &PlayerHandle) -> PlayerView {
+    let pos = p.pos();
+    let st = p.game();
+    let vanished = p.staff().vanished();
+    let survival = st.survival() && !st.dead;
+    PlayerView {
+        eid: p.entity_id,
+        uuid: p.uuid,
+        pos: Vector3::new(pos.x, pos.y, pos.z),
+        survival,
+        huntable: survival && !vanished,
+        alive: !st.dead,
+        vanished,
+    }
 }
 
 /// Step every entity one tick.
 pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -> Vec<Action> {
     let players: Vec<std::sync::Arc<PlayerHandle>> = registry.snapshot();
-    let views: Vec<PlayerView> = players
-        .iter()
-        .map(|p| {
-            let pos = p.pos();
-            let st = p.game();
-            PlayerView {
-                eid: p.entity_id,
-                uuid: p.uuid,
-                pos: Vector3::new(pos.x, pos.y, pos.z),
-                huntable: st.survival() && !st.dead,
-                alive: !st.dead,
-            }
-        })
-        .collect();
+    let views: Vec<PlayerView> = players.iter().map(|p| player_view(p)).collect();
 
     let mut actions = Vec::new();
     let mut gone: Vec<i32> = Vec::new();
@@ -1091,7 +1107,9 @@ pub fn tick(world: &DemoWorld, registry: &SharedRegistry, now: u64, day: bool) -
                 }
                 Kind::Arrow(a) if a.stuck && a.from_player => {
                     for (view, handle) in views.iter().zip(players.iter()) {
-                        if !(view.alive && view.huntable && near_player(view.pos, ib, 1.0, 0.5)) {
+                        // Pickup is survival-and-alive, **not** huntable: a
+                        // vanished staff member still collects their arrows.
+                        if !(view.survival && near_player(view.pos, ib, 1.0, 0.5)) {
                             continue;
                         }
                         // A picked-up arrow is a fresh item instance: mint it

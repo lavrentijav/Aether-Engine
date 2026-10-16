@@ -3,6 +3,7 @@ name = "aether-worldgen"
 description = "Aether Engine chunk generation: flat and value-noise terrain generators producing engine sub-chunks."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -259,6 +259,7 @@ impl ProtocolCodec for Codec {
         // reported. Let the player choose to fly instead.
         let flags = match p.game_mode {
             super::GameMode::Creative => 0x01 | 0x04 | 0x08, // invulnerable | allow flying | creative
+            super::GameMode::Spectator => 0x01 | 0x04,       // invulnerable | allow flying
             super::GameMode::Survival => 0,
         };
         PacketOut::new(self.0.packets.cb_player_abilities)
@@ -479,6 +480,13 @@ impl ProtocolCodec for Codec {
                 p.bytes(&super::nbt::string(text).to_network()).bool(false); // not an action-bar overlay
                 vec![p]
             }
+            ServerEvent::ActionBar(text) => {
+                // The same System Chat packet with the overlay flag set: the
+                // client draws it above the hotbar.
+                let mut p = PacketOut::new(self.0.packets.cb_system_chat);
+                p.bytes(&super::nbt::string(text).to_network()).bool(true); // action-bar overlay
+                vec![p]
+            }
             other => play::encode(self.0, other).unwrap_or_default(),
         }
     }
@@ -640,6 +648,7 @@ impl ProtocolCodec for Codec {
             id if id == p.sb_change_game_mode => match pin.var_int() {
                 Ok(0) => ClientEvent::ChangeGameMode(super::GameMode::Survival),
                 Ok(1) => ClientEvent::ChangeGameMode(super::GameMode::Creative),
+                Ok(3) => ClientEvent::ChangeGameMode(super::GameMode::Spectator),
                 _ => ClientEvent::Ignored,
             },
             id if id == p.sb_client_command => match pin.var_int() {

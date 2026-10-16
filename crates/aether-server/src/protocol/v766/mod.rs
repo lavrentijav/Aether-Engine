@@ -227,6 +227,7 @@ impl ProtocolCodec for Codec {
         let v = version();
         let flags = match p.game_mode {
             super::GameMode::Creative => 0x01 | 0x04 | 0x08,
+            super::GameMode::Spectator => 0x01 | 0x04,
             super::GameMode::Survival => 0,
         };
         let mut abilities = PacketOut::new(v.packets.cb_player_abilities);
