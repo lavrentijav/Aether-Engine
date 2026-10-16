@@ -269,19 +269,18 @@ fn migrate_offline_player(name: &str, world: &DemoWorld) -> Reply {
 
 /// Whether `handle` may run a command needing `op`.
 ///
-/// Until the permission store (CMD-01) lands, a player's only levels are 4
-/// (an operator) and 0 (everyone else), exactly what [`crate::is_operator`]
-/// says; `node` is carried for when the store can resolve it. This is the
-/// single gate the core stubs and plugin commands both use.
+/// The check goes through the permission core ([`crate::permissions`]): the
+/// player's level comes from the store (seeded from `config.operators`), the
+/// node's default resolves from the store, and the command's `op` level is the
+/// floor. This is the single gate the core stubs and plugin commands both use.
 pub fn permitted(handle: &PlayerHandle, node: &str, op: u8) -> bool {
-    let level = if crate::is_operator(handle) { 4 } else { 0 };
-    permitted_level(level, node, op)
+    crate::permissions::check(crate::permissions::level(&handle.name, handle.ip), node, op)
 }
 
 /// The level half of [`permitted`], without a handle: the decision itself, so
-/// it can be tested and reused by the permission core (CMD-01) later.
-pub fn permitted_level(level: u8, _node: &str, op: u8) -> bool {
-    level >= op
+/// it can be tested directly.
+pub fn permitted_level(level: u8, node: &str, op: u8) -> bool {
+    crate::permissions::check(crate::permissions::Level::new(level), node, op)
 }
 
 /// `/help [command]` — list the commands that are specified but not implemented yet, or explain one.
@@ -792,12 +791,43 @@ mod tests {
 
     #[test]
     fn the_permission_gate_is_level_against_op() {
-        // A non-op (level 0) may run only op-0 commands; an op (level 4) any.
-        assert!(super::permitted_level(0, "n", 0));
-        assert!(!super::permitted_level(0, "n", 1));
-        assert!(!super::permitted_level(0, "n", 4));
-        assert!(super::permitted_level(4, "n", 4));
-        assert!(super::permitted_level(4, "n", 0));
+        // A declared public node: the op level is the only remaining gate, so
+        // a non-op (level 0) may run op-0 commands and an op (level 4) any.
+        crate::permissions::declare_node("test.gate.allow", crate::permissions::NodeDefault::Allow)
+            .unwrap();
+        assert!(super::permitted_level(0, "test.gate.allow", 0));
+        assert!(!super::permitted_level(0, "test.gate.allow", 1));
+        assert!(!super::permitted_level(0, "test.gate.allow", 4));
+        assert!(super::permitted_level(4, "test.gate.allow", 4));
+        assert!(super::permitted_level(4, "test.gate.allow", 0));
+        // An undeclared node fails closed for a non-op, even at op level 0.
+        assert!(!super::permitted_level(0, "test.gate.unset", 0));
+        assert!(super::permitted_level(4, "test.gate.unset", 0));
+    }
+
+    #[test]
+    fn a_public_plugin_command_is_available_to_a_non_op() {
+        // The historian fixture declares `/hist` plainly (`commands = ["hist"]`),
+        // i.e. op level 0. Registered through the core registry the way the
+        // server does at plugin load, its node must resolve so that an ordinary
+        // player — no operator rights — may run it. This is the property the
+        // SDK `history` e2e relies on: that test is about the `history.read`
+        // capability, not about command rights.
+        crate::commands::registry::register_plugin(
+            "hist_fixture_test",
+            "historian",
+            "plugin.historian.hist",
+            0,
+        )
+        .unwrap();
+        assert!(
+            super::permitted_level(0, "plugin.historian.hist", 0),
+            "an op-0 plugin command must be available to a non-op"
+        );
+        assert!(super::permitted_level(4, "plugin.historian.hist", 0));
+        // The CMD-01 gate is not weakened: a node nobody declared still fails
+        // closed for a non-op.
+        assert!(!super::permitted_level(0, "plugin.historian.unset", 0));
     }
 
     #[test]
