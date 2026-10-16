@@ -69,6 +69,10 @@ pub struct Packets {
     pub cb_remove_mob_effect: i32,
     pub cb_system_chat: i32,
     pub cb_commands: i32,
+    /// The clientbound plugin-channel (custom payload) packet, used by the
+    /// voice plugin to carry the Simple Voice Chat and Plasmo Voice handshake.
+    /// `-1` on a release whose id this table does not carry.
+    pub cb_custom_payload: i32,
     pub sb_accept_teleportation: i32,
     pub sb_chat_command: i32,
     pub sb_chat_command_signed: i32,
@@ -94,6 +98,8 @@ pub struct Packets {
     pub sb_move_player_status_only: i32,
     pub sb_change_game_mode: i32,
     pub sb_keep_alive: i32,
+    /// The serverbound plugin-channel (custom payload) packet.
+    pub sb_custom_payload: i32,
     pub cfg_cb_finish_configuration: i32,
     pub cfg_cb_registry_data: i32,
     pub cfg_cb_resource_pack_push: i32,

@@ -45,6 +45,10 @@ pub const EVENT_AFTER_CRAFT: &str = "after-craft";
 pub const EVENT_AFTER_ENCHANT: &str = "after-enchant";
 pub const EVENT_ON_TICK: &str = "on-tick";
 pub const EVENT_ON_COMMAND: &str = "on-command";
+/// A native-only event: a plugin-channel (custom payload) message from a
+/// player. The frozen WIT world has no such callback, so only native plugins
+/// can subscribe.
+pub const EVENT_ON_PLUGIN_MESSAGE: &str = "on-plugin-message";
 
 /// A parsed, validated `plugin.toml`.
 #[derive(Debug, Clone, Deserialize)]

@@ -393,6 +393,25 @@ impl<'a> PacketIn<'a> {
         Ok(self.u8()? != 0)
     }
 
+    /// Read the rest of the packet, up to `max` bytes.
+    ///
+    /// A vanilla `custom_payload` carries its data as the remaining bytes
+    /// (`restBuffer`), with no length prefix, so this is the reader for a
+    /// plugin-channel body. `max` bounds the accepted size so a hostile
+    /// packet cannot make the server allocate more than a real one could.
+    pub fn rest(&mut self, max: usize) -> io::Result<Vec<u8>> {
+        let len = self.remaining();
+        if len > max {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "plugin payload above the limit",
+            ));
+        }
+        let v = self.buf[self.pos..].to_vec();
+        self.pos = self.buf.len();
+        Ok(v)
+    }
+
     /// Read a big-endian `f32`.
     pub fn f32(&mut self) -> io::Result<f32> {
         let end = self.pos + 4;

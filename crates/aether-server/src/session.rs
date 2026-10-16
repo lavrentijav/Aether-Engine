@@ -628,6 +628,7 @@ fn may_move_items(event: &ClientEvent) -> bool {
             | ClientEvent::Input { .. }
             | ClientEvent::Swing { .. }
             | ClientEvent::KeepAlive(_)
+            | ClientEvent::PluginMessage { .. }
             | ClientEvent::Ignored
     )
 }
@@ -1119,6 +1120,12 @@ fn play_loop(
             // whether the compat pack's carriers may be shown, and re-sends
             // the view when they may.
             ClientEvent::ResourcePackStatus(_) => {}
+            // A plugin-channel message: hand it to the plugin host, which
+            // forwards it to any native plugin subscribed to the event. The
+            // voice plugin's handshake arrives here.
+            ClientEvent::PluginMessage { channel, data } => {
+                crate::plugins::on_plugin_message(handle, &channel, &data);
+            }
             ClientEvent::Ignored => {}
         }
     }
