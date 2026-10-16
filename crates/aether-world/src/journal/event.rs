@@ -58,6 +58,21 @@ impl ActorId {
     pub const SERVER: ActorId = ActorId(0);
 }
 
+/// What kind of player text an [`EventBody::ChatMessage`] carries.
+///
+/// The kind is part of the event's tag (`TAG_CHAT`, `TAG_PM`, `TAG_CMD`), so
+/// the history mirror's `kind` column already tells the three apart without
+/// reading the body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatKind {
+    /// A public chat line, seen by the server.
+    Public,
+    /// A private message to one other player (the body's `peer`).
+    Private,
+    /// A command line the player typed, leading slash included.
+    Command,
+}
+
 /// A single item *instance*.
 ///
 /// Not an item type: two stacks of 64 stone are two different uids, and
@@ -203,6 +218,9 @@ pub const EVENT_KINDS: &[(u8, &str)] = &[
     (TAG_ITEM_DESTROY, "item_destroy"),
     (TAG_ITEM_DERIVE, "item_derive"),
     (TAG_ITEM_MERGE, "item_merge"),
+    (TAG_CHAT, "chat"),
+    (TAG_PM, "pm"),
+    (TAG_CMD, "command"),
 ];
 
 /// The `aether_event_kinds` row name used while migrating old text rows whose
@@ -290,6 +308,23 @@ pub enum EventBody {
         /// in the same action.
         from: Vec<ItemUid>,
     },
+    /// Player text: a public chat line, a private message or a command.
+    ///
+    /// The journal otherwise carries only compact codes, but chat *is* text,
+    /// so the bytes are kept UTF-8 with a length prefix. `x`/`y`/`z` is where
+    /// the speaker stood, so "everything said near here" is answerable;
+    /// `peer` is the recipient of a private message and [`ActorId::SERVER`]
+    /// for public chat and commands. A command records the line as typed,
+    /// after a secret argument has been redacted. None of these change the
+    /// world, so a rollback ignores them.
+    ChatMessage {
+        kind: ChatKind,
+        x: i32,
+        y: i32,
+        z: i32,
+        peer: ActorId,
+        text: String,
+    },
     /// An event a plugin defined, under a tag in the custom range
     /// (`>= TAG_CUSTOM_MIN`). Its payload is opaque to the core and stored
     /// length-prefixed, so a journal written with plugins still decodes on a
@@ -315,7 +350,109 @@ impl EventBody {
             EventBody::ItemDestroy { .. } => TAG_ITEM_DESTROY,
             EventBody::ItemDerive { .. } => TAG_ITEM_DERIVE,
             EventBody::ItemMerge { .. } => TAG_ITEM_MERGE,
+            EventBody::ChatMessage { kind, .. } => match kind {
+                ChatKind::Public => TAG_CHAT,
+                ChatKind::Private => TAG_PM,
+                ChatKind::Command => TAG_CMD,
+            },
             EventBody::Custom { tag, .. } => *tag,
+        }
+    }
+
+    /// The stable kind name, the same spelling [`EVENT_KINDS`] records. A
+    /// custom body has no core name and reads as [`EVENT_KIND_UNKNOWN`]'s.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            EventBody::BlockSet { .. } => "block_set",
+            EventBody::ItemMint { .. } => "item_mint",
+            EventBody::ItemMove { .. } => "item_move",
+            EventBody::ItemDestroy { .. } => "item_destroy",
+            EventBody::ItemDerive { .. } => "item_derive",
+            EventBody::ItemMerge { .. } => "item_merge",
+            EventBody::ChatMessage { kind, .. } => match kind {
+                ChatKind::Public => "chat",
+                ChatKind::Private => "pm",
+                ChatKind::Command => "command",
+            },
+            EventBody::Custom { .. } => EVENT_KIND_UNKNOWN.1,
+        }
+    }
+
+    /// Every item instance this body refers to, for the journal's item index.
+    ///
+    /// The index is what turns "the whole history of item #51" from a scan of
+    /// the journal into a prefix read: one entry per (uid, seq). A merge names
+    /// both stacks so both timelines show it; a derive names its output and
+    /// every source it consumed, so provenance follows backwards.
+    pub fn item_uids(&self) -> Vec<ItemUid> {
+        match self {
+            EventBody::ItemMint { uid, .. }
+            | EventBody::ItemMove { uid, .. }
+            | EventBody::ItemDestroy { uid, .. } => vec![*uid],
+            EventBody::ItemMerge { into, from, .. } => vec![*into, *from],
+            EventBody::ItemDerive { uid, from, .. } => {
+                let mut v = Vec::with_capacity(from.len() + 1);
+                v.push(*uid);
+                v.extend_from_slice(from);
+                v
+            }
+            EventBody::BlockSet { .. }
+            | EventBody::ChatMessage { .. }
+            | EventBody::Custom { .. } => Vec::new(),
+        }
+    }
+
+    /// Whether this event touches the container at `(x, y, z)`.
+    ///
+    /// An item event names the container as a [`Place::Container`] on either
+    /// side (a move out has it as `from`, a deposit has it as `to`), so a
+    /// container's access log is the item events whose container place is that
+    /// block. A merge carries no place and so is not attributed to a container.
+    pub fn touches_container(&self, x: i32, y: i32, z: i32) -> bool {
+        match self {
+            EventBody::ItemMint { to, .. } => to.is_container_at(x, y, z),
+            EventBody::ItemMove { from, to, .. } => {
+                from.is_container_at(x, y, z) || to.is_container_at(x, y, z)
+            }
+            EventBody::ItemDestroy { from, .. } => from.is_container_at(x, y, z),
+            EventBody::ItemDerive { to, .. } => to.is_container_at(x, y, z),
+            EventBody::ItemMerge { .. }
+            | EventBody::BlockSet { .. }
+            | EventBody::ChatMessage { .. }
+            | EventBody::Custom { .. } => false,
+        }
+    }
+
+    /// Every block position this event should be recorded under in the
+    /// journal's **column** index.
+    ///
+    /// A block change touches exactly its own block. An item event touches
+    /// **both** ends of its movement when they differ: a chest-to-chest or
+    /// chest-to-ground move must be findable from either end, or a container's
+    /// access log would miss every transfer whose other end lay in a different
+    /// chunk. A merge carries no place and indexes nothing.
+    pub fn indexed_positions(&self) -> Vec<(i32, i32, i32)> {
+        match self {
+            EventBody::BlockSet { x, y, z, .. } => vec![(*x, *y, *z)],
+            EventBody::ItemMint { to, .. } => to.position().into_iter().collect(),
+            EventBody::ItemMove { from, to, .. } => {
+                let mut out = Vec::with_capacity(2);
+                if let Some(p) = from.position() {
+                    out.push(p);
+                }
+                if let Some(p) = to.position() {
+                    if !out.contains(&p) {
+                        out.push(p);
+                    }
+                }
+                out
+            }
+            EventBody::ItemDestroy { from, .. } => from.position().into_iter().collect(),
+            EventBody::ItemDerive { to, .. } => to.position().into_iter().collect(),
+            // Where the speaker stood, so a radius filter can find nearby chat
+            // in a column's index rather than scanning the whole journal.
+            EventBody::ChatMessage { x, y, z, .. } => vec![(*x, *y, *z)],
+            EventBody::ItemMerge { .. } | EventBody::Custom { .. } => Vec::new(),
         }
     }
 }
@@ -349,6 +486,9 @@ impl Event {
             EventBody::ItemDestroy { from, .. } => from.position(),
             EventBody::ItemMerge { .. } => None,
             EventBody::ItemDerive { to, .. } => to.position(),
+            // Where the speaker stood, so a radius filter can find what was
+            // said nearby.
+            EventBody::ChatMessage { x, y, z, .. } => Some((*x, *y, *z)),
             // A plugin event carries no position the core understands.
             EventBody::Custom { .. } => None,
         }
@@ -362,6 +502,14 @@ impl Place {
             Place::Ground { x, y, z } | Place::Container { x, y, z, .. } => Some((*x, *y, *z)),
             Place::Inventory { .. } | Place::Nowhere => None,
         }
+    }
+
+    /// Whether this is the container block at `(x, y, z)`.
+    pub fn is_container_at(&self, x: i32, y: i32, z: i32) -> bool {
+        matches!(
+            self,
+            Place::Container { x: cx, y: cy, z: cz, .. } if *cx == x && *cy == y && *cz == z
+        )
     }
 }
 
@@ -380,7 +528,10 @@ impl Place {
 /// range: a tag this release does not know but that lies in
 /// `TAG_CUSTOM_MIN..=TAG_CUSTOM_MAX` decodes as [`EventBody::Custom`] with a
 /// length-prefixed payload, so a plugin's events are skipped, not fatal.
-pub const FORMAT_VERSION: u8 = 4;
+/// Version 5 added the player-text bodies ([`EventBody::ChatMessage`]: public
+/// chat, private message and command, tags 7–9), each carrying a position, an
+/// optional peer, and UTF-8 text.
+pub const FORMAT_VERSION: u8 = 5;
 
 /// Errors from [`Event::decode`].
 #[derive(Debug, PartialEq)]
@@ -411,6 +562,11 @@ const TAG_ITEM_MOVE: u8 = 3;
 const TAG_ITEM_DESTROY: u8 = 4;
 const TAG_ITEM_DERIVE: u8 = 5;
 const TAG_ITEM_MERGE: u8 = 6;
+/// Player text: public chat, private message and command. Three tags so the
+/// history mirror's `kind` column tells them apart on its own.
+const TAG_CHAT: u8 = 7;
+const TAG_PM: u8 = 8;
+const TAG_CMD: u8 = 9;
 /// Optional trailer after the body: the cause. Absent in entries written
 /// before causes existed, which therefore decode with none.
 const TRAILER_CAUSE: u8 = 1;
@@ -501,6 +657,16 @@ impl<'a> Cur<'a> {
         let len = self.u32()? as usize;
         let name = std::str::from_utf8(self.take(len)?).map_err(|_| DecodeError::Truncated)?;
         Ok(ItemTypeId::vanilla(name).unwrap_or(ItemTypeId::AIR))
+    }
+    /// Length-prefixed UTF-8 player text. Bad UTF-8 is refused as a truncation:
+    /// a blob this release wrote is always valid, and guessing at a damaged
+    /// one would put mojibake in the history rather than dropping the event.
+    fn text(&mut self) -> Result<String, DecodeError> {
+        let len = self.u32()? as usize;
+        let bytes = self.take(len)?;
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| DecodeError::Truncated)
     }
     fn place(&mut self) -> Result<Place, DecodeError> {
         match self.u8()? {
@@ -594,6 +760,26 @@ impl Event {
                 for f in from {
                     out.extend_from_slice(&f.0.to_be_bytes());
                 }
+            }
+            EventBody::ChatMessage {
+                kind,
+                x,
+                y,
+                z,
+                peer,
+                text,
+            } => {
+                out.push(match kind {
+                    ChatKind::Public => TAG_CHAT,
+                    ChatKind::Private => TAG_PM,
+                    ChatKind::Command => TAG_CMD,
+                });
+                out.extend_from_slice(&x.to_be_bytes());
+                out.extend_from_slice(&y.to_be_bytes());
+                out.extend_from_slice(&z.to_be_bytes());
+                out.extend_from_slice(&peer.0.to_be_bytes());
+                out.extend_from_slice(&(text.len() as u32).to_be_bytes());
+                out.extend_from_slice(text.as_bytes());
             }
             EventBody::Custom { tag, bytes } => {
                 debug_assert!(
@@ -689,6 +875,19 @@ impl Event {
                 let bytes = c.take(len)?.to_vec();
                 EventBody::Custom { tag: t, bytes }
             }
+            // Player text: public chat, private message, command. New in v5.
+            t @ (TAG_CHAT | TAG_PM | TAG_CMD) if v >= 5 => EventBody::ChatMessage {
+                kind: match t {
+                    TAG_PM => ChatKind::Private,
+                    TAG_CMD => ChatKind::Command,
+                    _ => ChatKind::Public,
+                },
+                x: c.i32()?,
+                y: c.i32()?,
+                z: c.i32()?,
+                peer: ActorId(c.u128()?),
+                text: c.text()?,
+            },
             t => return Err(DecodeError::UnknownTag(t)),
         };
         let cause = if c.at < c.b.len() {

@@ -238,7 +238,7 @@ fn login_and_play(
     // would refuse someone whose own seat it is. Operators get in regardless,
     // so an admin can still reach a server nobody else can.
     let online = registry.snapshot().len();
-    if online >= cfg.server.max_players as usize && !cfg.is_operator(&name, ip) {
+    if online >= cfg.server.max_players as usize && !crate::permissions::is_operator(&name, ip) {
         crate::log::info(&format!(
             "[x] {name} refused: server full ({online}/{}) ({})",
             cfg.server.max_players,
@@ -959,6 +959,12 @@ fn play_loop(
                 }
             }
             ClientEvent::Chat(text) => {
+                // Every command is logged before it runs, so a plugin command
+                // and a core command are treated the same; secret arguments
+                // are masked inside `log_command`.
+                if text.trim_start().starts_with('/') {
+                    crate::chatlog::log_command(handle, &text, world);
+                }
                 if let Some(reply) = crate::commands::dispatch(&text, handle, registry, world) {
                     // Command output goes only to whoever typed it: a
                     // rollback report names players and sequence numbers
@@ -974,8 +980,10 @@ fn play_loop(
                     }
                     continue;
                 }
+                // Log and journal only the chat that was actually delivered
+                // (a plugin veto above returns before this point).
+                crate::chatlog::log_chat(handle, &text, world);
                 let line = format!("<{}> {}", handle.name, text);
-                crate::log::info(&format!("[chat] {line}"));
                 let ev = ServerEvent::Chat(line);
                 handle.emit(&ev, world);
                 registry.broadcast_except(handle.entity_id, &ev, world);
@@ -1294,12 +1302,14 @@ fn after_spawn(
     handle.emit(&crate::game::time_event(), world);
     // Permission level, as an entity event on the player's own entity: 24
     // is level 0, 28 level 4. Without it the client treats an operator as
-    // anyone else — the F3+F4 switcher and F3+N refuse to open.
-    let level = if crate::is_operator(handle) { 4 } else { 0 };
+    // anyone else — the F3+F4 switcher and F3+N refuse to open. The level is
+    // the store's, not "4 if an operator", so a future group (CMD-02) at 2 or
+    // 3 is told to the client correctly.
+    let level = crate::permissions::level(&handle.name, handle.ip).get();
     handle.emit(
         &ServerEvent::EntityStatus {
             entity_id: handle.entity_id,
-            status: 24 + level,
+            status: 24 + level as i8,
         },
         world,
     );

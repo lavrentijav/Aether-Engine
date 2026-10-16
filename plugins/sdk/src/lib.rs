@@ -10,10 +10,12 @@
 //! The SDK is deliberately **thin**: it holds state the helpers genuinely need
 //! (the command registry, the message tables) and otherwise fronts core
 //! mechanisms through the [`HostBackend`] the host hands it. It never
-//! implements the game itself. Two core mechanisms are not on this branch, so
-//! their services report the gap rather than guessing: the permission model
-//! (CMD-01/02) fails closed, and teleport/give (CMD-31/32) return the neutral
-//! answer. That is the approved design: facades, not a second implementation.
+//! implements the game itself. Permission **reads** front the core store
+//! (CMD-01) through the backend and fail closed when there is none; the
+//! permission **write** model (CMD-02) and teleport/give (CMD-31/32) are not
+//! on this branch, so those calls return the neutral answer rather than
+//! guessing. That is the approved design: facades, not a second
+//! implementation.
 //!
 //! It is a plugin like any other: the server adds it through the build-time
 //! native registry, its manifest can disable it, and a dependent that
@@ -29,9 +31,9 @@ use aether_plugin::placeholders::{
     register_placeholders, PlaceholderFn, PlaceholderQuery, PlaceholdersService,
 };
 use aether_plugin::sdk::{
-    self, ArgKind, CommandSpec, CommandsService, ConfirmService, CooldownsService, MessagesService,
-    PermissionsService, PlayersService, Pos, Resolution, SchedulerService, TeleportCause,
-    TitleTimes,
+    self, ArgKind, CommandSpec, CommandsService, ConfirmService, CooldownsService, HistoryPage,
+    HistoryService, HistoryWindow, MessagesService, PermissionsService, PlayersService, Pos,
+    Resolution, SchedulerService, TeleportCause, TitleTimes,
 };
 use aether_plugin::{
     HostBackend, LogLevel, NativeContext, NativePlugin, NativeRegistration, Player,
@@ -77,6 +79,10 @@ pub fn registration() -> NativeRegistration {
 const CAP_PERMISSIONS_ADMIN: &str = "permissions.admin";
 const CAP_MESSAGES_SEND: &str = "messages.send";
 const CAP_MESSAGES_BROADCAST: &str = "messages.broadcast";
+/// Read access to the world's history (PA2). A plugin asks for it in
+/// `plugin.toml`; the operator grants it; the gate reads the caller's
+/// effective grant by id.
+const CAP_HISTORY_READ: &str = "history.read";
 
 /// The SDK service host.
 pub struct SdkPlugin {
@@ -144,13 +150,18 @@ impl NativePlugin for SdkPlugin {
         sdk::register_cooldowns(ctx.services, cooldowns)?;
         let confirm: Arc<dyn ConfirmService> = self.confirm.clone();
         sdk::register_confirm(ctx.services, confirm)?;
+        // History is a facade over the host's journal: every query is
+        // capability-gated on the caller's `history.read` grant here, so native
+        // and WASM dependents are checked alike.
+        let history: Arc<dyn HistoryService> = Arc::new(History::new(Arc::clone(ctx.backend)));
+        sdk::register_history(ctx.services, history)?;
         let placeholders: Arc<dyn PlaceholdersService> = self.placeholders.clone();
         register_placeholders(ctx.services, placeholders)?;
 
         ctx.log(
             LogLevel::Info,
             "SDK services registered (permissions, commands, messages, players, \
-             scheduler, cooldowns, confirm, placeholders)",
+             scheduler, cooldowns, confirm, history, placeholders)",
         );
         Ok(())
     }
@@ -344,11 +355,14 @@ fn value_is_valid(kind: ArgKind, value: &str) -> bool {
 
 /// Permission checks, fronting the core resolver.
 ///
-/// The core permission model (CMD-01/02) is not available on this branch, so
-/// every check denies and every write refuses with a clear message. This is the
-/// approved "fail closed until the core lands" behaviour. The admin write path
-/// is gated on `permissions.admin` here — the one gate, applied by caller id,
-/// so a native dependent is checked too.
+/// Read-only checks go through the host backend to the core permission store
+/// (CMD-01): `check`/`require`/`level`/`groups` resolve against the player's
+/// real groups and node defaults, and a host without a core fails closed (the
+/// [`HostBackend`] defaults deny). The per-player **write** model (explicit
+/// grants/denies, per-world context, meta) is CMD-02, so `grant`/`revoke`
+/// refuse with a clear message rather than pretend the write happened — but
+/// only after the `permissions.admin` gate, applied here by caller id, so a
+/// native dependent is checked too.
 struct Permissions {
     backend: Arc<dyn HostBackend>,
 }
@@ -367,36 +381,159 @@ impl Permissions {
 }
 
 impl PermissionsService for Permissions {
-    fn check(&self, _caller: &str, _p: &Player, _node: &str) -> bool {
-        false
+    fn check(&self, _caller: &str, p: &Player, node: &str) -> bool {
+        // No command op level here: the node's own default decides. A plugin
+        // command's op level was already enforced by the core before
+        // `on-command` is entered.
+        self.backend.permission_check("sdk", p.id, node, 0)
     }
-    fn require(&self, _caller: &str, _p: &Player, _node: &str) -> bool {
-        false
+    fn require(&self, caller: &str, p: &Player, node: &str) -> bool {
+        self.check(caller, p, node)
     }
-    fn level(&self, _caller: &str, _p: &Player) -> u8 {
-        0
+    fn level(&self, _caller: &str, p: &Player) -> u8 {
+        self.backend.permission_level("sdk", p.id)
     }
-    fn groups(&self, _caller: &str, _p: &Player) -> Vec<String> {
-        Vec::new()
+    fn groups(&self, _caller: &str, p: &Player) -> Vec<String> {
+        self.backend.permission_groups("sdk", p.id)
     }
-    fn meta(&self, _caller: &str, _p: &Player, _key: &str) -> Option<String> {
-        None
+    fn meta(&self, _caller: &str, p: &Player, key: &str) -> Option<String> {
+        self.backend.permission_meta("sdk", p.id, key)
     }
-    fn grant(&self, caller: &str, _s: &str, _n: &str, _v: bool) -> Result<(), String> {
+    fn grant(&self, caller: &str, subject: &str, node: &str, value: bool) -> Result<(), String> {
         if !self.may(caller, CAP_PERMISSIONS_ADMIN) {
             return Err(format!(
                 "caller `{caller}` lacks the `{CAP_PERMISSIONS_ADMIN}` capability"
             ));
         }
-        Err("the permission model (CMD-01/02) is not available yet".to_string())
+        self.backend.permission_grant(caller, subject, node, value)
     }
-    fn revoke(&self, caller: &str, _s: &str, _n: &str) -> Result<(), String> {
+    fn revoke(&self, caller: &str, subject: &str, node: &str) -> Result<(), String> {
         if !self.may(caller, CAP_PERMISSIONS_ADMIN) {
             return Err(format!(
                 "caller `{caller}` lacks the `{CAP_PERMISSIONS_ADMIN}` capability"
             ));
         }
-        Err("the permission model (CMD-01/02) is not available yet".to_string())
+        self.backend.permission_revoke(caller, subject, node)
+    }
+}
+
+// --- history -----------------------------------------------------------
+
+/// Read-only history queries, gated on the caller's `history.read`
+/// capability. The journal lives in the host backend; this service only
+/// fronts it, and applies the capability gate in one place so a native
+/// dependent and a WASM one are checked alike.
+struct History {
+    backend: Arc<dyn HostBackend>,
+}
+
+impl History {
+    fn new(backend: Arc<dyn HostBackend>) -> History {
+        History { backend }
+    }
+
+    /// Whether `caller` was granted `history.read`.
+    fn may(&self, caller: &str) -> bool {
+        self.backend
+            .capabilities(caller)
+            .iter()
+            .any(|c| c == CAP_HISTORY_READ)
+    }
+
+    /// Refuse a query from an unprivileged caller, logging it once.
+    fn deny(&self, caller: &str, what: &str) -> bool {
+        if self.may(caller) {
+            return false;
+        }
+        self.backend.log(
+            caller,
+            LogLevel::Warn,
+            &format!("lacks `{CAP_HISTORY_READ}`; refused history {what}"),
+        );
+        true
+    }
+}
+
+impl HistoryService for History {
+    fn block_history(
+        &self,
+        caller: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage {
+        if self.deny(caller, "block-history") {
+            return sdk::empty_history_page();
+        }
+        self.backend.history_block(caller, x, y, z, before, limit)
+    }
+
+    fn worldgen_original(&self, caller: &str, x: i32, y: i32, z: i32) -> bool {
+        if self.deny(caller, "worldgen-original") {
+            return false;
+        }
+        self.backend.history_worldgen_original(caller, x, y, z)
+    }
+
+    fn events(
+        &self,
+        caller: &str,
+        window: HistoryWindow,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage {
+        if self.deny(caller, "events") {
+            return sdk::empty_history_page();
+        }
+        self.backend.history_events(caller, window, before, limit)
+    }
+
+    fn item_chain(
+        &self,
+        caller: &str,
+        uid: u64,
+        depth: u32,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage {
+        if self.deny(caller, "item-chain") {
+            return sdk::empty_history_page();
+        }
+        self.backend
+            .history_item_chain(caller, uid, depth, before, limit)
+    }
+
+    fn container_log(
+        &self,
+        caller: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage {
+        if self.deny(caller, "container-log") {
+            return sdk::empty_history_page();
+        }
+        self.backend
+            .history_container_log(caller, x, y, z, before, limit)
+    }
+
+    fn player_events(
+        &self,
+        caller: &str,
+        actor_low: u64,
+        actor_high: u64,
+        before: Option<u64>,
+        limit: u32,
+    ) -> HistoryPage {
+        if self.deny(caller, "player-events") {
+            return sdk::empty_history_page();
+        }
+        self.backend
+            .history_player_events(caller, actor_low, actor_high, before, limit)
     }
 }
 
@@ -1603,8 +1740,9 @@ mod tests {
     }
 
     #[test]
-    fn the_permission_service_fails_closed() {
-        // Even an admin-capable caller is refused while the model is absent.
+    fn the_permission_service_fails_closed_without_a_core() {
+        // A backend with no permission core (the `HostBackend` defaults) must
+        // answer deny/zero/empty, never guess, even for an operator player.
         let p = Permissions::new(caps_backend("greet", &[CAP_PERMISSIONS_ADMIN]));
         let player = Player {
             id: 1,
@@ -1617,8 +1755,8 @@ mod tests {
         assert!(!p.has_level("greet", &player, 2));
         assert!(p.groups("greet", &player).is_empty());
         assert!(p.meta("greet", &player, "prefix").is_none());
-        // The admin write path is gated on the capability, and fails closed on
-        // the missing model even when it is granted.
+        // The write model is CMD-02, so a write refuses even when the
+        // capability is granted.
         assert!(p.grant("greet", "Steve", "n", true).is_err());
         assert!(p.revoke("greet", "Steve", "n").is_err());
     }
@@ -1626,14 +1764,14 @@ mod tests {
     #[test]
     fn the_permission_admin_gate_is_applied_in_the_service_layer() {
         // A caller lacking `permissions.admin` is refused with a capability
-        // reason, before the missing-model reason.
+        // reason, before the write-model reason.
         let p = Permissions::new(caps_backend("greet", &[]));
         let err = p.grant("greet", "Steve", "n", true).unwrap_err();
         assert!(err.contains("permissions.admin"), "{err}");
-        // A caller that has it gets the missing-model reason instead.
+        // A caller that has it gets the missing-write-model reason instead.
         let p = Permissions::new(caps_backend("greet", &[CAP_PERMISSIONS_ADMIN]));
         let err = p.grant("greet", "Steve", "n", true).unwrap_err();
-        assert!(err.contains("CMD-01/02"), "{err}");
+        assert!(err.contains("CMD-02"), "{err}");
     }
 
     #[test]
@@ -1782,6 +1920,7 @@ mod tests {
         sdk::register_scheduler(&registry, Arc::new(Scheduler::new(Arc::clone(&clock)))).unwrap();
         sdk::register_cooldowns(&registry, Arc::new(Cooldowns::new(Arc::clone(&clock)))).unwrap();
         sdk::register_confirm(&registry, Arc::new(Confirm::new(clock, messages))).unwrap();
+        sdk::register_history(&registry, Arc::new(History::new(caps_backend("x", &[])))).unwrap();
         assert!(sdk::commands(&registry).is_some());
         assert!(sdk::permissions(&registry).is_some());
         assert!(sdk::messages(&registry).is_some());
@@ -1789,6 +1928,41 @@ mod tests {
         assert!(sdk::scheduler(&registry).is_some());
         assert!(sdk::cooldowns(&registry).is_some());
         assert!(sdk::confirm(&registry).is_some());
+        assert!(sdk::history(&registry).is_some());
+    }
+
+    #[test]
+    fn history_reads_are_gated_on_the_capability() {
+        // A caller without `history.read` gets the neutral answer, never a
+        // backend call: the gate is checked before forwarding.
+        let denied = History::new(caps_backend("outsider", &[]));
+        assert!(!denied.may("outsider"));
+        assert!(denied
+            .block_history("outsider", 1, 2, 3, None, 10)
+            .events
+            .is_empty());
+        assert!(!denied.worldgen_original("outsider", 1, 2, 3));
+        assert!(denied
+            .item_chain("outsider", 1, 1, None, 10)
+            .events
+            .is_empty());
+        assert!(denied
+            .container_log("outsider", 1, 2, 3, None, 10)
+            .events
+            .is_empty());
+        assert!(denied
+            .player_events("outsider", 0, 0, None, 10)
+            .events
+            .is_empty());
+
+        // A granted caller is forwarded; the test backend has no journal, so
+        // the neutral answer comes from the backend, not from the gate.
+        let allowed = History::new(caps_backend("reader", &[CAP_HISTORY_READ]));
+        assert!(allowed.may("reader"));
+        assert!(allowed
+            .block_history("reader", 1, 2, 3, None, 10)
+            .events
+            .is_empty());
     }
 
     #[test]

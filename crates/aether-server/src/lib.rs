@@ -14,6 +14,7 @@
 //! logic every version shares.
 
 pub mod auth;
+pub mod chatlog;
 pub mod commands;
 pub mod config;
 pub mod connections;
@@ -26,6 +27,7 @@ pub mod inventory;
 pub mod log;
 pub mod ops;
 pub mod outbox;
+pub mod permissions;
 pub mod placement;
 pub mod players;
 pub mod plugins;
@@ -223,6 +225,9 @@ pub fn run() -> std::process::ExitCode {
         Err(e) => return fail(&format!("cannot open the item uid allocator: {e}")),
     }
     economy::install(open_economy(&cfg.database));
+    // The permission store is the source of truth for every level and node
+    // check; seed it from `config.operators` before anyone can connect.
+    permissions::install(&cfg);
     let _ = GAME_MODE.set(cfg.server.game_mode);
     let cfg = Arc::new(cfg);
     let _ = CONFIG.set(Arc::clone(&cfg));
@@ -279,6 +284,7 @@ pub fn run() -> std::process::ExitCode {
         "world      : {described}, {:?}",
         cfg.server.game_mode
     ));
+    log::info(&format!("anti-xray  : {}", anti_xray_summary(&cfg)));
     log::info(&format!(
         "saved to   : {} (autosave every {}s)",
         cfg.server.world_dir, cfg.server.autosave_secs
@@ -468,14 +474,15 @@ fn open_economy(cfg: &config::DatabaseConfig) -> Option<Box<dyn economy::Economy
 /// The configuration, installed at startup.
 static CONFIG: std::sync::OnceLock<Arc<Config>> = std::sync::OnceLock::new();
 
-/// Whether this player may run administrative commands: their name is an
-/// operator entry, and if the entry names an address, they connected from it.
-/// False for everyone when the list is empty — the safe default for an
+/// Whether this player may run administrative commands: their effective
+/// permission level is at least 1.
+///
+/// The level comes from the permission store ([`permissions`]), seeded at
+/// startup from `config.operators` — a member of the built-in `op` group is
+/// level 4. False for everyone the store does not know, the safe default for an
 /// offline-mode server, where a username is a claim rather than an identity.
 pub fn is_operator(handle: &players::PlayerHandle) -> bool {
-    CONFIG
-        .get()
-        .is_some_and(|c| c.is_operator(&handle.name, handle.ip))
+    permissions::is_operator(&handle.name, handle.ip)
 }
 
 /// The operator's `worldgen_data` path, for the parts of the game that read
@@ -532,6 +539,13 @@ pub fn anti_xray_config() -> config::AntiXrayConfig {
         .unwrap_or_default()
 }
 
+/// The `[chat]` settings, or the defaults before startup installs the config.
+/// The defaults log everything with the built-in redact list, so chat logging
+/// works even in a test that never installed a config.
+pub fn chat_config() -> config::ChatConfig {
+    CONFIG.get().map(|c| c.chat.clone()).unwrap_or_default()
+}
+
 /// Whether anti-xray is active for the running world, resolved once.
 ///
 /// The block-write path calls this for every write, so the per-world test
@@ -561,6 +575,44 @@ pub fn anti_xray_enabled() -> bool {
             }
             on
         }
+    }
+}
+
+/// A one-line description of the active anti-xray configuration, for the
+/// startup log — so an operator can see at a glance which mode is live and for
+/// which worlds, rather than inferring it from a silent config.
+pub fn anti_xray_summary(cfg: &config::Config) -> String {
+    use config::AntiXrayMode;
+    let a = &cfg.anti_xray;
+    let worlds = if a.worlds.is_empty() {
+        "all worlds".to_string()
+    } else {
+        format!("worlds: {}", a.worlds.join(", "))
+    };
+    let applies = a.applies_to_world(&cfg.server.world_dir);
+    if !a.enabled {
+        return "off".to_string();
+    }
+    if !applies {
+        return format!(
+            "off for this world (`{}` not in {})",
+            cfg.server.world_dir, worlds
+        );
+    }
+    let bypass = if a.bypass_players.is_empty() {
+        "operators bypass".to_string()
+    } else {
+        format!("operators + {} bypass", a.bypass_players.join(", "))
+    };
+    match a.mode {
+        AntiXrayMode::Engine => format!(
+            "engine — {} hidden block(s), {worlds}, {bypass}",
+            a.hidden_block_names().len()
+        ),
+        AntiXrayMode::Culling => format!(
+            "culling — margin {} blocks, fill {:?}, reveal budget {}/tick, {worlds}, {bypass}",
+            a.margin_blocks, a.hidden_fill, a.reveal_budget_per_tick
+        ),
     }
 }
 
@@ -602,4 +654,29 @@ static GAME_MODE: std::sync::OnceLock<protocol::GameMode> = std::sync::OnceLock:
 /// every version of this server did before the setting existed.
 pub fn server_game_mode() -> protocol::GameMode {
     GAME_MODE.get().copied().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_anti_xray_summary_reports_the_live_mode() {
+        let mut cfg = config::Config::default();
+        assert_eq!(anti_xray_summary(&cfg), "off");
+
+        cfg.anti_xray.enabled = true;
+        cfg.anti_xray.mode = config::AntiXrayMode::Culling;
+        let s = anti_xray_summary(&cfg);
+        assert!(s.starts_with("culling"), "{s}");
+        assert!(s.contains("margin 5"), "{s}");
+        assert!(s.contains("all worlds"), "{s}");
+
+        // A world the config does not list is reported off for that world.
+        cfg.anti_xray.mode = config::AntiXrayMode::Engine;
+        cfg.anti_xray.worlds = vec!["alpha".to_string()];
+        cfg.server.world_dir = "beta".to_string();
+        let s = anti_xray_summary(&cfg);
+        assert!(s.contains("off for this world"), "{s}");
+    }
 }

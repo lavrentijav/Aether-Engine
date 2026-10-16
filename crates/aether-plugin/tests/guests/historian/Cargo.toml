@@ -1,0 +1,24 @@
+[package]
+name = "historian-plugin"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Its own workspace: this is a test-only fixture component, not a host crate.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+name = "historian"
+
+[dependencies]
+# The SDK client ships the canonical `dependent` world; the guest bindings are
+# generated in-crate.
+aether-plugin-sdk = { path = "../../../../aether-plugin-sdk" }
+wit-bindgen = "0.57"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"
