@@ -233,6 +233,17 @@ pub fn destroy_reason_upsert() -> String {
     code_table_upsert("aether_destroy_reasons", &destroy_reason_rows())
 }
 
+/// The statement that removes the named view so it can be built afresh.
+///
+/// `CREATE OR REPLACE VIEW` can only *append* columns: it refuses to rename or
+/// reorder an existing view's columns with `ERROR: cannot change name of view
+/// column … to …`. The view is generated from [`COLUMNS`] in order, and CH1
+/// inserted `text`/`peer` in the middle of that list, so a live mirror built
+/// before CH1 cannot be replaced in place — every reconnect would abort the
+/// schema step. Dropping first and creating unconditionally sidesteps the
+/// restriction entirely.
+pub const DROP_NAMED_VIEW: &str = "DROP VIEW IF EXISTS aether_events_named";
+
 /// The `aether_events_named` view: the raw mirror joined to both code tables
 /// for `kind_name`/`reason_name` and with the item name resolved from the
 /// uid's mint row, so a human `SELECT * FROM aether_events_named` reads like
@@ -241,6 +252,12 @@ pub fn destroy_reason_upsert() -> String {
 /// Built from [`COLUMNS`] so it cannot drift from the table. The item name is
 /// a scalar subquery rather than a join: a uid has exactly one mint row with a
 /// name, and a join would multiply a row were that ever untrue.
+///
+/// Returns the **drop, then the create**, as one script: a plain `CREATE VIEW`
+/// (not `OR REPLACE`, which cannot reorder columns — see
+/// [`DROP_NAMED_VIEW`]) that is unconditional because the view was just
+/// dropped. Running both in one `batch_execute` makes the pair atomic, so a
+/// failed create rolls the drop back rather than leaving the view missing.
 pub fn named_view_sql() -> String {
     let mut cols = vec!["e.at".to_string()];
     for (name, _) in COLUMNS.iter() {
@@ -257,7 +274,8 @@ pub fn named_view_sql() -> String {
     cols.push("k.name AS kind_name".to_string());
     cols.push("r.name AS reason_name".to_string());
     format!(
-        "CREATE OR REPLACE VIEW aether_events_named AS SELECT {} \
+        "{DROP_NAMED_VIEW}; \
+         CREATE VIEW aether_events_named AS SELECT {} \
          FROM aether_events e \
          LEFT JOIN aether_event_kinds k ON k.code = e.kind \
          LEFT JOIN aether_destroy_reasons r ON r.code = e.reason",
@@ -495,9 +513,11 @@ mod live {
             c.batch_execute(SCHEMA).map_err(|e| e.to_string())?;
             migrate(&mut c)?;
             // The code tables are seeded from the Rust consts and the view is
-            // (re)built *after* the migration: on an old text-`kind` mirror
-            // the view's `k.code = e.kind` join only type-checks once `kind`
-            // is a smallint.
+            // dropped and rebuilt *after* the migration: on an old text-`kind`
+            // mirror the view's `k.code = e.kind` join only type-checks once
+            // `kind` is a smallint. The drop is what lets the view's column
+            // order change (a `CREATE OR REPLACE VIEW` cannot reorder), and
+            // both statements go in one batch so the pair is atomic.
             seed_code_tables(&mut c)?;
             c.batch_execute(&named_view_sql())
                 .map_err(|e| e.to_string())?;
@@ -1051,7 +1071,7 @@ mod tests {
     #[test]
     fn the_named_view_joins_both_code_tables_and_resolves_the_item_name() {
         let sql = named_view_sql();
-        assert!(sql.starts_with("CREATE OR REPLACE VIEW aether_events_named AS SELECT"));
+        assert!(sql.contains("CREATE VIEW aether_events_named AS SELECT"));
         assert!(sql.contains("kind_name"));
         assert!(sql.contains("reason_name"));
         assert!(sql.contains("LEFT JOIN aether_event_kinds k ON k.code = e.kind"));
@@ -1067,6 +1087,101 @@ mod tests {
                 sql.contains(&format!("e.{name}")) || sql.contains("*"),
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn the_named_view_is_dropped_before_it_is_created_and_is_not_or_replace() {
+        // `CREATE OR REPLACE VIEW` refuses to reorder an existing view's
+        // columns, which is exactly what a `COLUMNS` change in the middle
+        // (CH1's `text`/`peer`) needs. The fix drops the view first, so the
+        // create is a plain one that may lay the columns out afresh.
+        let sql = named_view_sql();
+        assert!(
+            sql.starts_with(&format!("{DROP_NAMED_VIEW}; ")),
+            "the drop must lead the script: {sql}"
+        );
+        let create = sql.find("CREATE VIEW aether_events_named").expect("create");
+        let drop = sql.find(DROP_NAMED_VIEW).expect("drop");
+        assert!(drop < create, "the drop must precede the create");
+        assert!(
+            !sql.contains("CREATE OR REPLACE VIEW"),
+            "OR REPLACE cannot reorder columns: {sql}"
+        );
+    }
+
+    #[test]
+    fn the_view_script_survives_the_column_reorder_that_broke_or_replace() {
+        // Parse the SELECT list out of the real generated view SQL, so this
+        // test tracks `COLUMNS` rather than a copy of it.
+        fn view_columns(script: &str) -> Vec<String> {
+            let after = script.split_once("SELECT ").unwrap().1;
+            let list = after.split_once(" FROM aether_events e").unwrap().0;
+            list.split(", ").map(str::to_string).collect()
+        }
+        let new_cols = view_columns(&named_view_sql());
+
+        // The pre-CH1 layout: the same columns without `text`/`peer`, which
+        // CH1 inserted mid-list. That shifted `kind_name`/`reason_name` two
+        // slots later — the exact reorder `CREATE OR REPLACE` refuses.
+        let old_cols: Vec<String> = new_cols
+            .iter()
+            .filter(|c| c.as_str() != "e.text" && c.as_str() != "e.peer")
+            .cloned()
+            .collect();
+        assert_ne!(old_cols, new_cols, "CH1 reordered the view columns");
+        let text_at = new_cols.iter().position(|c| c == "e.text").unwrap();
+        assert_eq!(
+            old_cols[text_at], "k.name AS kind_name",
+            "the reorder moved kind_name's slot to text"
+        );
+
+        // A tiny model of the one Postgres rule that failed: an existing
+        // view's column names are fixed, and `CREATE OR REPLACE` may only
+        // append. `DROP IF EXISTS` + plain `CREATE` sidesteps it entirely.
+        #[derive(Default)]
+        struct View {
+            columns: Option<Vec<String>>,
+        }
+        impl View {
+            fn drop_if_exists(&mut self) {
+                self.columns = None;
+            }
+            fn create(&mut self, cols: Vec<String>) {
+                self.columns = Some(cols);
+            }
+            fn create_or_replace(&mut self, cols: Vec<String>) -> bool {
+                match &self.columns {
+                    None => {
+                        self.columns = Some(cols);
+                        true
+                    }
+                    Some(old) => {
+                        // Append-only: the previous prefix must be unchanged.
+                        if cols.len() >= old.len() && cols[..old.len()] == old[..] {
+                            self.columns = Some(cols);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+            }
+        }
+
+        // Replacing the old layout with the new one is refused ...
+        let mut view = View {
+            columns: Some(old_cols),
+        };
+        assert!(
+            !view.create_or_replace(new_cols.clone()),
+            "OR REPLACE would have errored on the reorder"
+        );
+        // ... while the real script — drop, then create — applies twice over.
+        for _ in 0..2 {
+            view.drop_if_exists();
+            view.create(new_cols.clone());
+            assert_eq!(view.columns.as_deref(), Some(new_cols.as_slice()));
         }
     }
 
