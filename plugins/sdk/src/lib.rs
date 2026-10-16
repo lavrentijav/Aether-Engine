@@ -739,12 +739,15 @@ impl PlayersService for Players {
 
     fn teleport(
         &self,
-        _caller: &str,
-        _p: &Player,
-        _to: Pos,
-        _cause: TeleportCause,
+        caller: &str,
+        p: &Player,
+        to: Pos,
+        cause: TeleportCause,
     ) -> Result<(), String> {
-        Err("teleport (CMD-31) is not available yet".to_string())
+        match self.backend.get() {
+            Some(b) => b.teleport_player(caller, p.id, to.x, to.y, to.z, cause),
+            None => Err("player service unavailable".to_string()),
+        }
     }
 
     fn give(&self, _caller: &str, _p: &Player, _item: &str, count: u32) -> u64 {

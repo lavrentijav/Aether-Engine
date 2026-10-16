@@ -15,7 +15,7 @@ mod imp {
     use std::path::Path;
     use std::sync::{Arc, Mutex, OnceLock};
 
-    use aether_plugin::sdk::{HistoryEvent, HistoryPage, HistoryPos, HistoryWindow};
+    use aether_plugin::sdk::{HistoryEvent, HistoryPage, HistoryPos, HistoryWindow, TeleportCause};
     use aether_plugin::{
         discover, Decision, HostBackend, HostConfig, LogLevel, ManifestFile, Player, PluginHost,
     };
@@ -205,6 +205,41 @@ mod imp {
             let handle = self.registry.by_entity(player as i32)?;
             let pos = handle.pos();
             Some(("minecraft:overworld".to_string(), pos.x, pos.y, pos.z))
+        }
+
+        /// A plugin asked to move a player: front the core teleport service so
+        /// the region `entry` check and the after-teleport observer still run.
+        fn teleport_player(
+            &self,
+            _plugin: &str,
+            player: u64,
+            x: f64,
+            y: f64,
+            z: f64,
+            cause: TeleportCause,
+        ) -> Result<(), String> {
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return Err("no such player".to_string());
+            };
+            let cause = match cause {
+                TeleportCause::Command => crate::teleport::TeleportCause::Command,
+                TeleportCause::Plugin => crate::teleport::TeleportCause::Plugin,
+                TeleportCause::Portal => crate::teleport::TeleportCause::Portal,
+            };
+            let pos = handle.pos();
+            crate::teleport::teleport(
+                &handle,
+                &self.registry,
+                &*self.world,
+                crate::teleport::TeleportTarget::Exact(
+                    aether_api::Vector3::new(x, y, z),
+                    pos.yaw,
+                    pos.pitch,
+                ),
+                cause,
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
         }
 
         fn disconnect_player(&self, _plugin: &str, player: u64, reason: &str) {
