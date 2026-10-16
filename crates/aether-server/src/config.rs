@@ -151,6 +151,62 @@ impl ResourcePackConfig {
     }
 }
 
+/// `[rcon]` settings: the remote-console protocol.
+///
+/// Off by default. RCON is a password-authenticated admin channel that runs
+/// commands with the console's authority (op level 4), so it is opt-in and
+/// bound to loopback unless the operator names another address. Enabling it
+/// with an empty password is a startup error rather than an open admin port.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RconConfig {
+    /// Whether the RCON listener runs at all.
+    pub enabled: bool,
+    /// Bind address. Loopback by default, matching [`ServerConfig::host`]; a
+    /// non-loopback address is warned about at startup.
+    pub address: String,
+    /// The shared password every client must present. Never logged.
+    pub password: String,
+    /// Listen port (vanilla default 25575).
+    pub port: u16,
+}
+
+impl Default for RconConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            address: "127.0.0.1".to_string(),
+            password: String::new(),
+            port: 25575,
+        }
+    }
+}
+
+impl RconConfig {
+    /// The `address:port` the listener binds.
+    pub fn address(&self) -> String {
+        format!("{}:{}", self.address, self.port)
+    }
+
+    /// Whether the listener is reachable off this machine.
+    pub fn is_public(&self) -> bool {
+        !matches!(self.address.as_str(), "127.0.0.1" | "localhost" | "::1")
+    }
+
+    /// Whether the configuration is usable. Enabled with an empty password is
+    /// refused at startup.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.enabled && self.password.is_empty() {
+            return Err(
+                "[rcon] is enabled but has an empty password: set `password` (or \
+                 AETHER_RCON_PASSWORD), or set `enabled = false`"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
 /// `[compat.pack]` settings: the per-version resource packs that re-skin only
 /// the block stand-ins. See `docs/design/compat-resource-pack.md`.
 ///
@@ -594,6 +650,8 @@ pub struct Config {
     legacy_visibility: Option<LegacyVisibilityConfig>,
     /// Authentication policy.
     pub auth: AuthConfig,
+    /// The optional RCON remote-console listener. See [`RconConfig`].
+    pub rcon: RconConfig,
     /// Optional history mirror.
     pub database: DatabaseConfig,
     /// Chat and command logging. See [`ChatConfig`].
@@ -771,6 +829,24 @@ impl Config {
         if let Some(v) = get("AETHER_WHITELIST") {
             self.whitelist = list(v);
         }
+        if let Some(v) = get("AETHER_RCON_ENABLED") {
+            self.rcon.enabled = match v.to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                other => return Err(format!("AETHER_RCON_ENABLED: not a boolean: {other}")),
+            };
+        }
+        if let Some(v) = get("AETHER_RCON_ADDRESS") {
+            self.rcon.address = v;
+        }
+        if let Some(v) = get("AETHER_RCON_PASSWORD") {
+            self.rcon.password = v;
+        }
+        if let Some(v) = get("AETHER_RCON_PORT") {
+            self.rcon.port = v
+                .parse()
+                .map_err(|_| format!("AETHER_RCON_PORT: not a port: {v}"))?;
+        }
         Ok(())
     }
 }
@@ -946,7 +1022,8 @@ pub const SAMPLE: &str = r#"# Aether Engine server configuration.
 #
 # Most settings can also come from the environment, which wins over this file:
 # AETHER_HOST, AETHER_PORT, AETHER_WORLD_DIR, AETHER_WORLDGEN_DATA,
-# AETHER_CACHE_DIR, AETHER_OPERATORS, AETHER_WHITELIST, AETHER_DATABASE_URL.
+# AETHER_CACHE_DIR, AETHER_OPERATORS, AETHER_WHITELIST, AETHER_DATABASE_URL,
+# AETHER_RCON_ENABLED, AETHER_RCON_ADDRESS, AETHER_RCON_PASSWORD, AETHER_RCON_PORT.
 
 # Who may run administrative commands: "name", or "name@1.2.3.4" to also
 # require that address. This server is offline-mode, so a bare name is a claim
@@ -990,6 +1067,16 @@ world_dir = "world"   # persistent world directory, created on first run
 autosave_secs = 30    # how often block edits are flushed to disk
 watchdog_secs = 60    # exit (for a supervisor to restart) if the tick stalls this long; 0 only warns
 status_secs = 300     # a status line in the log this often; 0 disables
+
+[rcon]
+# The RCON remote-console protocol, off by default. It runs commands with the
+# console's authority (op level 4), so it needs a password: enabling it with an
+# empty password is a startup error. Bound to loopback unless you name another
+# address, and warned about when it is reachable off this machine.
+enabled = false
+address = "127.0.0.1"   # loopback by default, like [server] host
+password = ""           # required when enabled; AETHER_RCON_PASSWORD overrides
+port = 25575            # vanilla RCON port
 
 [resource_pack]
 # Offered on join so older clients can render blocks their version lacks.
@@ -1534,6 +1621,55 @@ mod tests {
         // SAFETY: single-threaded test, and the variable is read only here.
         unsafe { std::env::remove_var(DATABASE_URL_ENV) };
         assert!(DatabaseConfig::default().connection_url().is_empty());
+    }
+
+    #[test]
+    fn rcon_is_off_by_default_and_refuses_an_empty_password() {
+        let cfg = Config::default();
+        assert!(!cfg.rcon.enabled, "RCON is opt-in");
+        assert_eq!(cfg.rcon.address(), "127.0.0.1:25575");
+        assert!(cfg.rcon.validate().is_ok(), "off is always valid");
+        assert!(!cfg.rcon.is_public(), "loopback is the default");
+
+        let cfg: Config = toml::from_str(
+            "[rcon]\nenabled = true\npassword = \"secret\"\naddress = \"0.0.0.0\"\nport = 25576\n",
+        )
+        .unwrap();
+        assert!(cfg.rcon.enabled);
+        assert!(cfg.rcon.validate().is_ok());
+        assert!(cfg.rcon.is_public());
+        assert_eq!(cfg.rcon.address(), "0.0.0.0:25576");
+
+        // Enabled with no password is a startup error, not an open admin port.
+        let mut bad = Config::default();
+        bad.rcon.enabled = true;
+        assert!(bad.rcon.validate().is_err());
+    }
+
+    #[test]
+    fn the_rcon_environment_overrides_are_applied() {
+        let mut cfg = Config::default();
+        let env = |k: &str| match k {
+            "AETHER_RCON_ENABLED" => Some("true".to_string()),
+            "AETHER_RCON_ADDRESS" => Some("0.0.0.0".to_string()),
+            "AETHER_RCON_PASSWORD" => Some("hunter2".to_string()),
+            "AETHER_RCON_PORT" => Some("25580".to_string()),
+            _ => None,
+        };
+        cfg.apply_env(env).unwrap();
+        assert!(cfg.rcon.enabled);
+        assert_eq!(cfg.rcon.address, "0.0.0.0");
+        assert_eq!(cfg.rcon.password, "hunter2");
+        assert_eq!(cfg.rcon.port, 25580);
+        assert!(cfg.rcon.validate().is_ok());
+
+        // A bad port or a non-boolean is an error, not a silent default.
+        assert!(Config::default()
+            .apply_env(|k| (k == "AETHER_RCON_PORT").then(|| "x".to_string()))
+            .is_err());
+        assert!(Config::default()
+            .apply_env(|k| (k == "AETHER_RCON_ENABLED").then(|| "maybe".to_string()))
+            .is_err());
     }
 
     #[test]
