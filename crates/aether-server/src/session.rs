@@ -2176,6 +2176,127 @@ mod placement_tests {
         assert_ne!(world.get_block(2, 101, 0), block_ids::AIR);
     }
 
+    /// The owner's exact bug, end to end through `place_block`: grass on sand
+    /// is refused, on dirt it places. On a pre-change tree (no rule check)
+    /// this test fails on the sand half.
+    #[test]
+    fn place_block_refuses_grass_on_sand() {
+        let world = test_world(8);
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(1, "Steve");
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+
+        let grass = aether_world::registry::blocks::default_state("minecraft:short_grass").unwrap();
+        world.set_block(0, 100, 0, "minecraft:sand");
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            0,
+            101,
+            0,
+            grass,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(!placed, "grass on sand must be refused");
+        assert_eq!(world.get_block(0, 101, 0), block_ids::AIR);
+
+        world.set_block(2, 100, 0, "minecraft:dirt");
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            2,
+            101,
+            0,
+            grass,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(placed, "grass on dirt must place");
+        assert_ne!(world.get_block(2, 101, 0), block_ids::AIR);
+    }
+
+    /// `leaf_litter`'s first trigger through `place_block`: on the floor it
+    /// places; with nothing below (a wall) it is refused. On a pre-change tree
+    /// the refusal half fails.
+    #[test]
+    fn place_block_refuses_leaf_litter_on_a_wall() {
+        let world = test_world(9);
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(1, "Steve");
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+
+        let litter =
+            aether_world::registry::blocks::default_state("minecraft:leaf_litter").unwrap();
+        // A wall: nothing below the target cell.
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            0,
+            120,
+            0,
+            litter,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(!placed, "leaf litter on a wall must be refused");
+        assert_eq!(world.get_block(0, 120, 0), block_ids::AIR);
+
+        // The floor: a full block below.
+        world.set_block(2, 100, 0, "minecraft:stone");
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            2,
+            101,
+            0,
+            litter,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(placed, "leaf litter on the floor must place");
+        assert_ne!(world.get_block(2, 101, 0), block_ids::AIR);
+    }
+
+    /// `leaf_litter`'s second, independent trigger: on the floor but under
+    /// water it is refused. On a pre-change tree this fails.
+    #[test]
+    fn place_block_refuses_leaf_litter_under_water() {
+        let world = test_world(10);
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(1, "Steve");
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+
+        let litter =
+            aether_world::registry::blocks::default_state("minecraft:leaf_litter").unwrap();
+        world.set_block(0, 100, 0, "minecraft:stone");
+        world.set_block(0, 101, 0, "minecraft:water");
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            0,
+            101,
+            0,
+            litter,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(
+            !placed,
+            "leaf litter on the floor under water must be refused"
+        );
+        assert_eq!(
+            world.get_block(0, 101, 0),
+            block_ids::WATER,
+            "the water must be left untouched"
+        );
+    }
+
     /// The ack is not a function of the placement outcome: a refused place
     /// packet is acked too, or the client holds its prediction forever.
     #[test]

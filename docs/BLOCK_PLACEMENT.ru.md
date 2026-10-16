@@ -101,25 +101,25 @@ Replaceable list source: **the compiled-in fallback** (29 blocks).
 
 ### Водные растения и кораллы
 
-Морская трава, ламинария и кораллы стоят на полном блоке; высокую морскую траву и подводную форму малого диплефа требует также источник воды в клетке; кувшинка плавает на воде или льду.
+Морской траве, ламинарии и высокой морской траве нужен **источник** воды в клетке (`getStateForPlacement` без него возвращает null) и полный блок (не магма) снизу; кораллы стоят на полном блоке; кувшинка плавает на воде или льду; морскому огурцу нужна грань коллизии снизу.
 
 | Блок(и) | Ограничение | Допустимая опора | Источник |
 |---|---|---|---|
-| `seagrass` | на блок снизу | any full block | curated |
+| `seagrass` | на блок снизу, в источнике воды | any full block | curated |
 | `tall_seagrass` | на блок снизу, в источнике воды | any full block | curated |
-| `kelp`, `kelp_plant` | на блок снизу или такой же блок | any full block | curated |
+| `kelp`, `kelp_plant` | на блок снизу или такой же блок, в источнике воды | any full block | curated |
 | `lily_pad` | на воду или лёд, не в жидкости | вода или #minecraft:ice | curated |
-| `sea_pickle` | на блок снизу | any non-air block | curated |
+| `sea_pickle` | на блок снизу | any collidable block | curated |
 | `tube_coral`, `brain_coral`, `bubble_coral`, `fire_coral`, `horn_coral`, `tube_coral_fan`, `brain_coral_fan`, `bubble_coral_fan`, `fire_coral_fan`, `horn_coral_fan`, `dead_tube_coral`, `dead_brain_coral`, `dead_bubble_coral`, `dead_fire_coral`, `dead_horn_coral` | на блок снизу | any full block | curated |
 | `big_dripleaf`, `big_dripleaf_stem` | на блок снизу или такой же блок | minecraft:clay, minecraft:coarse_dirt, minecraft:dirt, minecraft:farmland, minecraft:grass_block, minecraft:moss_block, minecraft:mud, minecraft:muddy_mangrove_roots, minecraft:mycelium, minecraft:podzol, minecraft:rooted_dirt | data |
 
 ### Малый диплеф
 
-`SmallDripleafBlock.canSurvive`: снизу `#minecraft:small_dripleaf_placeable` (глина или мох), либо источник воды в клетке над полным блоком.
+`SmallDripleafBlock.mayPlaceOn`: снизу `#minecraft:small_dripleaf_placeable` (глина или мох), либо источник воды в клетке над `#minecraft:dirt` или грядкой.
 
 | Блок(и) | Ограничение | Допустимая опора | Источник |
 |---|---|---|---|
-| `small_dripleaf` | на тег снизу или в источнике воды | minecraft:clay, minecraft:moss_block | data |
+| `small_dripleaf` | на тег снизу или в источнике воды над почвой | minecraft:clay, minecraft:moss_block | data |
 
 ### Потолочные растения
 
@@ -202,7 +202,8 @@ Replaceable list source: **the compiled-in fallback** (29 blocks).
 - **снизу #minecraft:sand или другой кактус** — cactus
 - **снизу #minecraft:small_dripleaf_placeable** — small_dripleaf
 - **снизу a full block** — activator_rail, brain_coral, brain_coral_fan, bubble_coral, bubble_coral_fan, cactus_flower, dead_brain_coral, dead_bubble_coral, dead_fire_coral, dead_horn_coral, dead_tube_coral, detector_rail, fire_coral, fire_coral_fan, horn_coral, horn_coral_fan, kelp, kelp_plant, lantern, leaf_litter, powered_rail, rail, seagrass, soul_lantern, tall_seagrass, tube_coral, tube_coral_fan
-- **снизу any non-air block** — moss_carpet, pale_moss_carpet, sea_pickle
+- **снизу any collidable block** — sea_pickle
+- **снизу any non-air block** — moss_carpet, pale_moss_carpet
 - **снизу вода или #minecraft:ice** — lily_pad
 - **снизу полный блок или стена, куда кликнули** — copper_torch, redstone_torch, soul_torch, torch
 - **снизу полный блок, мёд, душевный песок или грязь** — snow

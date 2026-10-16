@@ -101,25 +101,25 @@ The lower half follows the soil rule; the upper half is placed with it and needs
 
 ### Water plants and corals
 
-Sea grass, kelp and corals stand on a full block; tall sea grass and small dripleaf's submerged form also require a water source in the cell; lily pads float on water or ice.
+Sea grass, kelp and tall sea grass need a water **source** in the cell (`getStateForPlacement` returns null without one) and a full block (not magma) below; corals stand on a full block; lily pads float on water or ice; sea pickles need a collision face below.
 
 | Block(s) | Constraint | Valid support | Source |
 |---|---|---|---|
-| `seagrass` | on the block below | any full block | curated |
+| `seagrass` | on the block below, in a water source | any full block | curated |
 | `tall_seagrass` | on the block below, in a water source | any full block | curated |
-| `kelp`, `kelp_plant` | on the block below, or the same block | any full block | curated |
+| `kelp`, `kelp_plant` | on the block below or the same block, in a water source | any full block | curated |
 | `lily_pad` | on water or ice, not in a fluid | water or #minecraft:ice | curated |
-| `sea_pickle` | on the block below | any non-air block | curated |
+| `sea_pickle` | on the block below | any collidable block | curated |
 | `tube_coral`, `brain_coral`, `bubble_coral`, `fire_coral`, `horn_coral`, `tube_coral_fan`, `brain_coral_fan`, `bubble_coral_fan`, `fire_coral_fan`, `horn_coral_fan`, `dead_tube_coral`, `dead_brain_coral`, `dead_bubble_coral`, `dead_fire_coral`, `dead_horn_coral` | on the block below | any full block | curated |
 | `big_dripleaf`, `big_dripleaf_stem` | on the block below, or the same block | minecraft:clay, minecraft:coarse_dirt, minecraft:dirt, minecraft:farmland, minecraft:grass_block, minecraft:moss_block, minecraft:mud, minecraft:muddy_mangrove_roots, minecraft:mycelium, minecraft:podzol, minecraft:rooted_dirt | data |
 
 ### Small dripleaf
 
-`SmallDripleafBlock.canSurvive`: `#minecraft:small_dripleaf_placeable` (clay or moss) below, or a water source in the cell over a full block.
+`SmallDripleafBlock.mayPlaceOn`: `#minecraft:small_dripleaf_placeable` (clay or moss) below, or a water source in the cell over `#minecraft:dirt` or farmland.
 
 | Block(s) | Constraint | Valid support | Source |
 |---|---|---|---|
-| `small_dripleaf` | on the tag below, or in a water source | minecraft:clay, minecraft:moss_block | data |
+| `small_dripleaf` | on the tag below, or in a water source over soil | minecraft:clay, minecraft:moss_block | data |
 
 ### Ceiling plants
 
@@ -204,7 +204,8 @@ Every rail needs a full block below.
 - **below a full block** — activator_rail, brain_coral, brain_coral_fan, bubble_coral, bubble_coral_fan, cactus_flower, dead_brain_coral, dead_bubble_coral, dead_fire_coral, dead_horn_coral, dead_tube_coral, detector_rail, fire_coral, fire_coral_fan, horn_coral, horn_coral_fan, kelp, kelp_plant, lantern, leaf_litter, powered_rail, rail, seagrass, soul_lantern, tall_seagrass, tube_coral, tube_coral_fan
 - **below a full block or the clicked wall** — copper_torch, redstone_torch, soul_torch, torch
 - **below a full block, honey, soul sand or mud** — snow
-- **below any non-air block** — moss_carpet, pale_moss_carpet, sea_pickle
+- **below any collidable block** — sea_pickle
+- **below any non-air block** — moss_carpet, pale_moss_carpet
 - **below water or #minecraft:ice** — lily_pad
 - **above a full block** — cave_vines, cave_vines_plant, hanging_roots, pale_hanging_moss, spore_blossom
 - **behind a full block** — *_wall_banner, *_wall_sign, *wall_torch, ladder

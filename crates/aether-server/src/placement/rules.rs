@@ -22,16 +22,34 @@
 //!   code in vanilla's block classes, not data. The rules here are ported
 //!   from the 1.21.11 server's own classes: `VegetationBlock.canSurvive`
 //!   (`#minecraft:dirt` or farmland), `LeafLitterBlock.canSurvive` (a sturdy
-//!   face below, and — see below — never under water), `BaseTorchBlock`
-//!   (a support centre below), `WallTorchBlock`/`LadderBlock` (a sturdy face
-//!   behind the block's `facing`), `MultifaceBlock`/`VineBlock` (a full face
-//!   on any side), `CactusBlock`, `SugarCaneBlock`, `BambooSaplingBlock`,
-//!   `SnowLayerBlock`, and the water plants.
+//!   face below), `BaseTorchBlock` (a support centre below),
+//!   `WallTorchBlock`/`LadderBlock` (a sturdy face behind the block's
+//!   `facing`), `MultifaceBlock`/`VineBlock` (a full face on any side),
+//!   `CactusBlock`, `SugarCaneBlock`, `BambooSaplingBlock`, `SnowLayerBlock`,
+//!   `SeagrassBlock`/`KelpBlock`/`SeaPickleBlock` (water source in the cell,
+//!   and the block below), and the rest.
 //!
-//! Nothing here is invented: where vanilla only checks a block's own state
-//! (a double plant's upper half needs its lower half) that is handled by
-//! `placement::upper_half_of`, not duplicated. A rule that was uncertain is
-//! named in `docs/KNOWN_ISSUES.md`.
+//! # What is ours, not vanilla's
+//!
+//! Two rules go **beyond** 1.21.11 and are additions this engine makes, not
+//! ports — both were asked for by the owner, and both are flagged as curated
+//! in the markdown rather than claimed as vanilla:
+//!
+//! * `leaf_litter` is refused when the target cell holds water. Vanilla's
+//!   `LeafLitterBlock.canSurvive` only checks a sturdy face below; the "not
+//!   under water" half is our own (the owner's second trigger).
+//! * A torch (or lantern) clicked on a wall is accepted against that wall,
+//!   because this engine cannot turn a torch *item* into a wall torch; vanilla
+//!   would place a `wall_torch`.
+//!
+//! Elsewhere the aim is faithfulness, and where a rule is uncertain or narrower
+//! than vanilla the deviation errs towards *refusing* (see [`sturdy`]); the
+//! one place it errs towards *allowing* is the torch wall-cling above. Every
+//! such departure is named in `docs/KNOWN_ISSUES.md`.
+//!
+//! Where vanilla only checks a block's own state (a double plant's upper half
+//! needs its lower half) that is handled by `placement::upper_half_of`, not
+//! duplicated.
 //!
 //! # The one approximation
 //!
@@ -287,6 +305,10 @@ pub enum Supports {
     FullCube,
     /// Any block that is not air (moss and pale moss carpet sit on anything).
     NotAir,
+    /// A block with a non-empty collision shape below (`SeaPickleBlock`'s
+    /// `!getCollisionShape().getFaceShape(UP).isEmpty()`); nearly every
+    /// collidable block, but not air, water or a plant.
+    Collision,
     /// A pack tag's blocks.
     Tag(Tag),
     /// `#minecraft:dirt` or farmland, plus any extra names.
@@ -303,6 +325,7 @@ impl Supports {
         match self {
             Supports::FullCube => "a full block".into(),
             Supports::NotAir => "any non-air block".into(),
+            Supports::Collision => "any collidable block".into(),
             Supports::Tag(t) => format!("#{}", t.id()),
             Supports::DirtFarmland(_) => "#minecraft:dirt or farmland".into(),
             Supports::WaterOrIce => "water or ice".into(),
@@ -323,6 +346,7 @@ impl Supports {
         match self {
             Supports::FullCube => "any full block".into(),
             Supports::NotAir => "any non-air block".into(),
+            Supports::Collision => "any collidable block".into(),
             Supports::Tag(t) => cat.tag_members(t).join(", "),
             Supports::DirtFarmland(extra) => {
                 let mut v = cat.tag_members(Tag::Dirt);
@@ -374,8 +398,11 @@ pub enum Need {
     /// Below `Supports`, and the cell itself must be a water source (sea
     /// grass, the lower half of tall sea grass).
     Submerged(Supports),
-    /// A tag below, or a water source in the cell with a full block below
-    /// (small dripleaf).
+    /// As [`Need::OnOrNames`], but the cell itself must be a water source
+    /// (kelp, whose `getStateForPlacement` returns null without one).
+    SubmergedOnNames(Supports, &'static [&'static str]),
+    /// A tag below, or a water source in the cell over `#minecraft:dirt` or
+    /// farmland (small dripleaf's submerged form).
     Dripleaf(Tag),
     /// Water or ice below, and the cell itself is not a fluid (lily pad).
     LilyPad,
@@ -433,6 +460,7 @@ impl Rule {
             | Need::OnNotWater(s) => s.is_data(),
             Need::OnOrNames(s, _) | Need::UnderOrNames(s, _) => s.is_data(),
             Need::Submerged(s) => s.is_data(),
+            Need::SubmergedOnNames(s, _) => s.is_data(),
             Need::Dripleaf(t) => !t.builtin().is_empty(),
             Need::SugarCane => true,
             Need::Snow => true,
@@ -457,6 +485,7 @@ impl Rule {
             Need::Facing(s) => Some((Role::Behind, s)),
             Need::FacingAhead(s) => Some((Role::Ahead, s)),
             Need::Submerged(s) => Some((Role::Below, s)),
+            Need::SubmergedOnNames(s, _) => Some((Role::Below, s)),
             Need::Dripleaf(t) => Some((Role::Below, Supports::Tag(t))),
             _ => None,
         }
@@ -602,21 +631,25 @@ pub static GROUPS: [Group; 17] = [
     Group {
         title_en: "Water plants and corals",
         title_ru: "Водные растения и кораллы",
-        note_en: "Sea grass, kelp and corals stand on a full block; tall sea grass \
-                  and small dripleaf's submerged form also require a water source in \
-                  the cell; lily pads float on water or ice.",
-        note_ru: "Морская трава, ламинария и кораллы стоят на полном блоке; высокую \
-                  морскую траву и подводную форму малого диплефа требует также источник \
-                  воды в клетке; кувшинка плавает на воде или льду.",
+        note_en: "Sea grass, kelp and tall sea grass need a water **source** in the \
+                  cell (`getStateForPlacement` returns null without one) and a full \
+                  block (not magma) below; corals stand on a full block; lily pads \
+                  float on water or ice; sea pickles need a collision face below.",
+        note_ru: "Морской траве, ламинарии и высокой морской траве нужен **источник** \
+                  воды в клетке (`getStateForPlacement` без него возвращает null) и \
+                  полный блок (не магма) снизу; кораллы стоят на полном блоке; \
+                  кувшинка плавает на воде или льду; морскому огурцу нужна грань \
+                  коллизии снизу.",
     },
     Group {
         title_en: "Small dripleaf",
         title_ru: "Малый диплеф",
-        note_en: "`SmallDripleafBlock.canSurvive`: `#minecraft:small_dripleaf_placeable` \
-                  (clay or moss) below, or a water source in the cell over a full block.",
-        note_ru: "`SmallDripleafBlock.canSurvive`: снизу \
+        note_en: "`SmallDripleafBlock.mayPlaceOn`: `#minecraft:small_dripleaf_placeable` \
+                  (clay or moss) below, or a water source in the cell over \
+                  `#minecraft:dirt` or farmland.",
+        note_ru: "`SmallDripleafBlock.mayPlaceOn`: снизу \
                   `#minecraft:small_dripleaf_placeable` (глина или мох), либо источник \
-                  воды в клетке над полным блоком.",
+                  воды в клетке над `#minecraft:dirt` или грядкой.",
     },
     Group {
         title_en: "Ceiling plants",
@@ -785,7 +818,7 @@ pub static RULES: &[Rule] = &[
         key: "seagrass",
         group: G_WATER,
         matcher: Matcher::Names(&["seagrass"]),
-        need: Need::On(Supports::FullCube),
+        need: Need::Submerged(Supports::FullCube),
     },
     Rule {
         key: "tall_seagrass",
@@ -797,7 +830,7 @@ pub static RULES: &[Rule] = &[
         key: "kelp",
         group: G_WATER,
         matcher: Matcher::Names(&["kelp", "kelp_plant"]),
-        need: Need::OnOrNames(
+        need: Need::SubmergedOnNames(
             Supports::FullCube,
             &["minecraft:kelp", "minecraft:kelp_plant"],
         ),
@@ -812,7 +845,7 @@ pub static RULES: &[Rule] = &[
         key: "sea_pickle",
         group: G_WATER,
         matcher: Matcher::Names(&["sea_pickle"]),
-        need: Need::On(Supports::NotAir),
+        need: Need::On(Supports::Collision),
     },
     Rule {
         key: "corals",
@@ -980,6 +1013,24 @@ fn holds_water(state: BlockStateId) -> bool {
     }
 }
 
+/// Whether the state is a full **water source** — vanilla's
+/// `fluidState.is(WATER) && fluidState.getAmount() == 8`. A water block counts
+/// only at `level=0` (a flowing stream does not); a waterlogged block and a
+/// bubble column are sources.
+fn water_source(state: BlockStateId) -> bool {
+    match full_name(state) {
+        "minecraft:water" => matches!(prop_of(state, "level"), None | Some("0")),
+        "minecraft:bubble_column" => true,
+        _ => prop_of(state, "waterlogged") == Some("true"),
+    }
+}
+
+/// Whether the state is a magma block (`SeagrassBlock`/`TallSeagrassBlock`
+/// refuse to sit on one even underwater).
+fn is_magma(state: BlockStateId) -> bool {
+    full_name(state) == "minecraft:magma_block"
+}
+
 fn is_lava(state: BlockStateId) -> bool {
     full_name(state) == "minecraft:lava"
 }
@@ -1073,6 +1124,7 @@ fn satisfies(cat: &Catalog, support: Supports, state: BlockStateId) -> bool {
     match support {
         Supports::FullCube => sturdy(state),
         Supports::NotAir => name != "minecraft:air",
+        Supports::Collision => aether_world::registry::shapes::collides(state.raw()),
         Supports::Tag(t) => cat.tag_contains(t, name),
         Supports::DirtFarmland(extra) => {
             cat.tag_contains(Tag::Dirt, name)
@@ -1169,12 +1221,22 @@ fn evaluate(
             }
             !is_fluid(above)
         }
-        Need::Submerged(s) => satisfies(cat, s, below) && holds_water(get(x, y, z)),
+        Need::Submerged(s) => {
+            water_source(get(x, y, z)) && !is_magma(below) && satisfies(cat, s, below)
+        }
+        Need::SubmergedOnNames(s, names) => {
+            water_source(get(x, y, z))
+                && !is_magma(below)
+                && (satisfies(cat, s, below) || names.contains(&full_name(below)))
+        }
         Need::Dripleaf(t) => {
             if cat.tag_contains(t, full_name(below)) {
                 return true;
             }
-            holds_water(get(x, y, z)) && sturdy(below)
+            // Submerged: a water source in the cell over dirt or farmland
+            // (`SmallDripleafBlock.mayPlaceOn`, where `super` is
+            // `VegetationBlock`).
+            water_source(get(x, y, z)) && satisfies(cat, Supports::DirtFarmland(&[]), below)
         }
         Need::LilyPad => {
             (holds_water(below) || cat.tag_contains(Tag::Ice, full_name(below)))
@@ -1425,7 +1487,10 @@ fn constraint_text(need: Need, lang: Lang) -> &'static str {
         (Lang::En, Need::SugarCane) => "on dirt/sand with water beside",
         (Lang::En, Need::Cactus) => "on sand, clear sides, no fluid above",
         (Lang::En, Need::Submerged(_)) => "on the block below, in a water source",
-        (Lang::En, Need::Dripleaf(_)) => "on the tag below, or in a water source",
+        (Lang::En, Need::SubmergedOnNames(..)) => {
+            "on the block below or the same block, in a water source"
+        }
+        (Lang::En, Need::Dripleaf(_)) => "on the tag below, or in a water source over soil",
         (Lang::En, Need::LilyPad) => "on water or ice, not in a fluid",
         (Lang::En, Need::MultiFace) => "a full face on any neighbour",
         (Lang::En, Need::Snow) => "as the snow-layer rule allows",
@@ -1440,7 +1505,10 @@ fn constraint_text(need: Need, lang: Lang) -> &'static str {
         (Lang::Ru, Need::SugarCane) => "на землю/песок с водой рядом",
         (Lang::Ru, Need::Cactus) => "на песок, свободные бока, без жидкости сверху",
         (Lang::Ru, Need::Submerged(_)) => "на блок снизу, в источнике воды",
-        (Lang::Ru, Need::Dripleaf(_)) => "на тег снизу или в источнике воды",
+        (Lang::Ru, Need::SubmergedOnNames(..)) => {
+            "на блок снизу или такой же блок, в источнике воды"
+        }
+        (Lang::Ru, Need::Dripleaf(_)) => "на тег снизу или в источнике воды над почвой",
         (Lang::Ru, Need::LilyPad) => "на воду или лёд, не в жидкости",
         (Lang::Ru, Need::MultiFace) => "полная грань любого соседа",
         (Lang::Ru, Need::Snow) => "как допускает правило слоя снега",
@@ -1480,6 +1548,11 @@ mod tests {
                 m.insert(*p, blocks::default_state(name).unwrap());
             }
             W(m)
+        }
+        /// As [`W::new`], but with explicit states (a flowing water, a
+        /// waterlogged slab).
+        fn states(entries: &[((i32, i32, i32), BlockStateId)]) -> Self {
+            W(entries.iter().copied().collect())
         }
         fn get(&self) -> impl Fn(i32, i32, i32) -> BlockStateId + '_ {
             move |x, y, z| {
@@ -1612,6 +1685,117 @@ mod tests {
             !allowed_in(&water, "minecraft:leaf_litter", (0, 1, 0)),
             "leaf litter must not be placed under water"
         );
+    }
+
+    // --- Water plants: a source in the cell -----------------------------------
+
+    /// A water block at `level=0` is a source; any other level is flowing.
+    fn water(level: Option<&str>) -> BlockStateId {
+        let id = blocks::block_id_of("minecraft:water").unwrap();
+        match level {
+            None => state("minecraft:water"),
+            Some(l) => BlockStateId(props::state_with(id, &[("level", l)]).unwrap()),
+        }
+    }
+
+    #[test]
+    fn seagrass_and_kelp_need_a_water_source_in_the_cell() {
+        // Dry land: refused (the reviewer's first point).
+        let dry = W::new(&[((0, 0, 0), "minecraft:stone")]);
+        assert!(!allowed_in(&dry, "minecraft:seagrass", (0, 1, 0)));
+        assert!(!allowed_in(&dry, "minecraft:kelp", (0, 1, 0)));
+
+        // A water source: placed.
+        let source = W::states(&[
+            ((0, 0, 0), state("minecraft:stone")),
+            ((0, 1, 0), water(None)),
+        ]);
+        assert!(allowed_in(&source, "minecraft:seagrass", (0, 1, 0)));
+        assert!(allowed_in(&source, "minecraft:kelp", (0, 1, 0)));
+
+        // Flowing water is not a source: refused.
+        let flowing = W::states(&[
+            ((0, 0, 0), state("minecraft:stone")),
+            ((0, 1, 0), water(Some("3"))),
+        ]);
+        assert!(
+            !allowed_in(&flowing, "minecraft:seagrass", (0, 1, 0)),
+            "flowing water is not a source"
+        );
+    }
+
+    #[test]
+    fn seagrass_refuses_magma_even_underwater() {
+        let magma = W::states(&[
+            ((0, 0, 0), state("minecraft:magma_block")),
+            ((0, 1, 0), water(None)),
+        ]);
+        assert!(!allowed_in(&magma, "minecraft:seagrass", (0, 1, 0)));
+    }
+
+    #[test]
+    fn sea_pickle_needs_a_collision_face_below() {
+        let on_stone = W::new(&[((0, 0, 0), "minecraft:stone")]);
+        assert!(allowed_in(&on_stone, "minecraft:sea_pickle", (0, 1, 0)));
+        // A plant below has no collision face; a leaf-litter/air cell does not.
+        let on_grass = W::new(&[((0, 0, 0), "minecraft:short_grass")]);
+        assert!(
+            !allowed_in(&on_grass, "minecraft:sea_pickle", (0, 1, 0)),
+            "a plant below is not a face"
+        );
+        // Water below has no collision shape either.
+        let on_water = W::states(&[((0, 0, 0), water(None))]);
+        assert!(!allowed_in(&on_water, "minecraft:sea_pickle", (0, 1, 0)));
+    }
+
+    #[test]
+    fn small_dripleaf_underwater_wants_dirt_not_stone() {
+        // Clay/moss below: fine on dry land.
+        let clay = W::new(&[((0, 0, 0), "minecraft:clay")]);
+        assert!(allowed_in(&clay, "minecraft:small_dripleaf", (0, 1, 0)));
+
+        // Submerged: dirt is accepted, stone is not (the reviewer's point 2).
+        let dirt_water = W::states(&[
+            ((0, 0, 0), state("minecraft:dirt")),
+            ((0, 1, 0), water(None)),
+        ]);
+        assert!(allowed_in(
+            &dirt_water,
+            "minecraft:small_dripleaf",
+            (0, 1, 0)
+        ));
+        let stone_water = W::states(&[
+            ((0, 0, 0), state("minecraft:stone")),
+            ((0, 1, 0), water(None)),
+        ]);
+        assert!(
+            !allowed_in(&stone_water, "minecraft:small_dripleaf", (0, 1, 0)),
+            "stone under water must not carry a small dripleaf"
+        );
+    }
+
+    // --- The pack path is exercised too ---------------------------------------
+
+    #[test]
+    fn a_catalog_can_be_read_from_a_pack() {
+        // The built-in catalog is always available as the fallback; the pack
+        // loader is what a served world uses. Point it at the unpacked pack if
+        // the environment names one, else the fallback stands.
+        let Some(root) = std::env::var("AETHER_VANILLA_PACK").ok() else {
+            eprintln!("skipping: AETHER_VANILLA_PACK not set");
+            return;
+        };
+        let cats = Catalog::from_pack(&root).expect("the pack's block tags must load");
+        assert_eq!(cats.source(), CatalogSource::Pack);
+        // The two must agree on the authoritative replaceable list.
+        let builtin = Catalog::builtin();
+        assert_eq!(
+            cats.replaceable_sorted(),
+            builtin.replaceable_sorted(),
+            "the pack and the compiled-in replaceable list must agree"
+        );
+        assert!(cats.is_replaceable_name("minecraft:leaf_litter"));
+        assert!(!cats.is_replaceable_name("minecraft:stone"));
     }
 
     // --- Torches and ladders --------------------------------------------------
