@@ -83,6 +83,13 @@ mod imp {
         }
     }
 
+    impl ServerBackend {
+        /// The online player with `id`, for the SDK `permissions` service.
+        fn by_session(&self, id: u64) -> Option<Arc<PlayerHandle>> {
+            self.registry.by_entity(id as i32)
+        }
+    }
+
     impl HostBackend for ServerBackend {
         fn kv_get(&self, plugin: &str, key: &str) -> Option<Vec<u8>> {
             self.world
@@ -190,6 +197,50 @@ mod imp {
                 .get(plugin)
                 .cloned()
                 .unwrap_or_default()
+        }
+
+        /// The permission core, fronted for the SDK's `permissions` service.
+        /// The player is looked up by session id, so address-bound operators
+        /// are judged from the address they are really connected from; a
+        /// player the registry does not know fails closed.
+        fn permission_check(&self, _plugin: &str, id: u64, node: &str, op: u8) -> bool {
+            match self.by_session(id) {
+                Some(h) => {
+                    crate::permissions::check(crate::permissions::level(&h.name, h.ip), node, op)
+                }
+                None => false,
+            }
+        }
+
+        fn permission_level(&self, _plugin: &str, id: u64) -> u8 {
+            self.by_session(id)
+                .map(|h| crate::permissions::level(&h.name, h.ip).get())
+                .unwrap_or(0)
+        }
+
+        fn permission_groups(&self, _plugin: &str, id: u64) -> Vec<String> {
+            self.by_session(id)
+                .map(|h| crate::permissions::groups_of(&h.name, h.ip))
+                .unwrap_or_default()
+        }
+
+        fn permission_grant(
+            &self,
+            _plugin: &str,
+            _subject: &str,
+            _node: &str,
+            _value: bool,
+        ) -> Result<(), String> {
+            Err("the permission write model (CMD-02) is not available yet".to_string())
+        }
+
+        fn permission_revoke(
+            &self,
+            _plugin: &str,
+            _subject: &str,
+            _node: &str,
+        ) -> Result<(), String> {
+            Err("the permission write model (CMD-02) is not available yet".to_string())
         }
 
         // --- History API (PA2) ------------------------------------------

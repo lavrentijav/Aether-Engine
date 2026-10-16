@@ -10,10 +10,12 @@
 //! The SDK is deliberately **thin**: it holds state the helpers genuinely need
 //! (the command registry, the message tables) and otherwise fronts core
 //! mechanisms through the [`HostBackend`] the host hands it. It never
-//! implements the game itself. Two core mechanisms are not on this branch, so
-//! their services report the gap rather than guessing: the permission model
-//! (CMD-01/02) fails closed, and teleport/give (CMD-31/32) return the neutral
-//! answer. That is the approved design: facades, not a second implementation.
+//! implements the game itself. Permission **reads** front the core store
+//! (CMD-01) through the backend and fail closed when there is none; the
+//! permission **write** model (CMD-02) and teleport/give (CMD-31/32) are not
+//! on this branch, so those calls return the neutral answer rather than
+//! guessing. That is the approved design: facades, not a second
+//! implementation.
 //!
 //! It is a plugin like any other: the server adds it through the build-time
 //! native registry, its manifest can disable it, and a dependent that
@@ -353,11 +355,14 @@ fn value_is_valid(kind: ArgKind, value: &str) -> bool {
 
 /// Permission checks, fronting the core resolver.
 ///
-/// The core permission model (CMD-01/02) is not available on this branch, so
-/// every check denies and every write refuses with a clear message. This is the
-/// approved "fail closed until the core lands" behaviour. The admin write path
-/// is gated on `permissions.admin` here — the one gate, applied by caller id,
-/// so a native dependent is checked too.
+/// Read-only checks go through the host backend to the core permission store
+/// (CMD-01): `check`/`require`/`level`/`groups` resolve against the player's
+/// real groups and node defaults, and a host without a core fails closed (the
+/// [`HostBackend`] defaults deny). The per-player **write** model (explicit
+/// grants/denies, per-world context, meta) is CMD-02, so `grant`/`revoke`
+/// refuse with a clear message rather than pretend the write happened — but
+/// only after the `permissions.admin` gate, applied here by caller id, so a
+/// native dependent is checked too.
 struct Permissions {
     backend: Arc<dyn HostBackend>,
 }
@@ -376,36 +381,39 @@ impl Permissions {
 }
 
 impl PermissionsService for Permissions {
-    fn check(&self, _caller: &str, _p: &Player, _node: &str) -> bool {
-        false
+    fn check(&self, _caller: &str, p: &Player, node: &str) -> bool {
+        // No command op level here: the node's own default decides. A plugin
+        // command's op level was already enforced by the core before
+        // `on-command` is entered.
+        self.backend.permission_check("sdk", p.id, node, 0)
     }
-    fn require(&self, _caller: &str, _p: &Player, _node: &str) -> bool {
-        false
+    fn require(&self, caller: &str, p: &Player, node: &str) -> bool {
+        self.check(caller, p, node)
     }
-    fn level(&self, _caller: &str, _p: &Player) -> u8 {
-        0
+    fn level(&self, _caller: &str, p: &Player) -> u8 {
+        self.backend.permission_level("sdk", p.id)
     }
-    fn groups(&self, _caller: &str, _p: &Player) -> Vec<String> {
-        Vec::new()
+    fn groups(&self, _caller: &str, p: &Player) -> Vec<String> {
+        self.backend.permission_groups("sdk", p.id)
     }
-    fn meta(&self, _caller: &str, _p: &Player, _key: &str) -> Option<String> {
-        None
+    fn meta(&self, _caller: &str, p: &Player, key: &str) -> Option<String> {
+        self.backend.permission_meta("sdk", p.id, key)
     }
-    fn grant(&self, caller: &str, _s: &str, _n: &str, _v: bool) -> Result<(), String> {
+    fn grant(&self, caller: &str, subject: &str, node: &str, value: bool) -> Result<(), String> {
         if !self.may(caller, CAP_PERMISSIONS_ADMIN) {
             return Err(format!(
                 "caller `{caller}` lacks the `{CAP_PERMISSIONS_ADMIN}` capability"
             ));
         }
-        Err("the permission model (CMD-01/02) is not available yet".to_string())
+        self.backend.permission_grant(caller, subject, node, value)
     }
-    fn revoke(&self, caller: &str, _s: &str, _n: &str) -> Result<(), String> {
+    fn revoke(&self, caller: &str, subject: &str, node: &str) -> Result<(), String> {
         if !self.may(caller, CAP_PERMISSIONS_ADMIN) {
             return Err(format!(
                 "caller `{caller}` lacks the `{CAP_PERMISSIONS_ADMIN}` capability"
             ));
         }
-        Err("the permission model (CMD-01/02) is not available yet".to_string())
+        self.backend.permission_revoke(caller, subject, node)
     }
 }
 
@@ -1732,8 +1740,9 @@ mod tests {
     }
 
     #[test]
-    fn the_permission_service_fails_closed() {
-        // Even an admin-capable caller is refused while the model is absent.
+    fn the_permission_service_fails_closed_without_a_core() {
+        // A backend with no permission core (the `HostBackend` defaults) must
+        // answer deny/zero/empty, never guess, even for an operator player.
         let p = Permissions::new(caps_backend("greet", &[CAP_PERMISSIONS_ADMIN]));
         let player = Player {
             id: 1,
@@ -1746,8 +1755,8 @@ mod tests {
         assert!(!p.has_level("greet", &player, 2));
         assert!(p.groups("greet", &player).is_empty());
         assert!(p.meta("greet", &player, "prefix").is_none());
-        // The admin write path is gated on the capability, and fails closed on
-        // the missing model even when it is granted.
+        // The write model is CMD-02, so a write refuses even when the
+        // capability is granted.
         assert!(p.grant("greet", "Steve", "n", true).is_err());
         assert!(p.revoke("greet", "Steve", "n").is_err());
     }
@@ -1755,14 +1764,14 @@ mod tests {
     #[test]
     fn the_permission_admin_gate_is_applied_in_the_service_layer() {
         // A caller lacking `permissions.admin` is refused with a capability
-        // reason, before the missing-model reason.
+        // reason, before the write-model reason.
         let p = Permissions::new(caps_backend("greet", &[]));
         let err = p.grant("greet", "Steve", "n", true).unwrap_err();
         assert!(err.contains("permissions.admin"), "{err}");
-        // A caller that has it gets the missing-model reason instead.
+        // A caller that has it gets the missing-write-model reason instead.
         let p = Permissions::new(caps_backend("greet", &[CAP_PERMISSIONS_ADMIN]));
         let err = p.grant("greet", "Steve", "n", true).unwrap_err();
-        assert!(err.contains("CMD-01/02"), "{err}");
+        assert!(err.contains("CMD-02"), "{err}");
     }
 
     #[test]
