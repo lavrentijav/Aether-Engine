@@ -57,7 +57,7 @@ pub fn nodes() -> Vec<Node> {
             "<player> <message>",
         ),
         tree::with_usage(
-            tree::greedy("tp", &[], Requirement::Fn(require_op), exec_tp),
+            tree::greedy("teleport", &["tp"], Requirement::Fn(require_op), exec_tp),
             "<x> <y> <z> | <player>",
         ),
         tree::with_usage(
