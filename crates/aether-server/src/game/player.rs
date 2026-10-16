@@ -39,6 +39,90 @@ pub enum WindowKind {
     Dispenser { pos: (i32, i32, i32) },
     /// A brewing stand at a position.
     BrewingStand { pos: (i32, i32, i32) },
+    /// A **server-invented** menu a plugin opened. Its slots are virtual:
+    /// every click is intercepted and routed to the plugin, and none of them
+    /// ever moves a stack into or out of the player's real inventory. The
+    /// `menu` id is the plugin's handle for it; `slots` is what the client is
+    /// shown.
+    Menu {
+        /// The plugin that opened it, so a click is delivered only to that
+        /// plugin and not broadcast to every native plugin.
+        owner: String,
+        /// The plugin-assigned menu instance id, for routing clicks.
+        menu: u64,
+        /// The window shape, which decides the menu registry id and slot count.
+        shape: MenuShape,
+        /// The window's own slots (never the player's), `shape.slot_count()` of
+        /// them.
+        slots: Vec<Option<Stack>>,
+    },
+}
+
+/// The protocol window a virtual menu draws as. Only the shapes whose menu
+/// registry id the generated tables carry are offered; a menu that wants a
+/// different size picks the nearest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuShape {
+    /// A generic container of 9 slots (1 row).
+    Chest1,
+    /// A generic container of 18 slots (2 rows).
+    Chest2,
+    /// A single chest, 27 slots (3 rows).
+    Chest3,
+    /// A generic container of 36 slots (4 rows).
+    Chest4,
+    /// A generic container of 45 slots (5 rows).
+    Chest5,
+    /// A double chest, 54 slots (6 rows).
+    Chest6,
+    /// A dispenser/dropper, 9 slots (a 3×3 grid).
+    Dispenser,
+    /// A hopper, 5 slots.
+    Hopper,
+}
+
+impl MenuShape {
+    /// How many menu slots the window has.
+    pub fn slot_count(self) -> usize {
+        match self {
+            MenuShape::Chest1 => 9,
+            MenuShape::Chest2 => 18,
+            MenuShape::Chest3 => 27,
+            MenuShape::Chest4 => 36,
+            MenuShape::Chest5 => 45,
+            MenuShape::Chest6 => 54,
+            MenuShape::Dispenser => 9,
+            MenuShape::Hopper => 5,
+        }
+    }
+
+    /// The protocol menu registry entry to open it with.
+    pub fn menu(self) -> crate::protocol::Menu {
+        match self {
+            MenuShape::Chest1 => crate::protocol::Menu::Chest1,
+            MenuShape::Chest2 => crate::protocol::Menu::Chest2,
+            MenuShape::Chest3 => crate::protocol::Menu::Chest,
+            MenuShape::Chest4 => crate::protocol::Menu::Chest4,
+            MenuShape::Chest5 => crate::protocol::Menu::Chest5,
+            MenuShape::Chest6 => crate::protocol::Menu::LargeChest,
+            MenuShape::Dispenser => crate::protocol::Menu::Dispenser,
+            MenuShape::Hopper => crate::protocol::Menu::Hopper,
+        }
+    }
+
+    /// The default title, for a menu that gives none.
+    pub fn default_title(self) -> &'static str {
+        match self {
+            MenuShape::Chest1
+            | MenuShape::Chest2
+            | MenuShape::Chest3
+            | MenuShape::Chest4
+            | MenuShape::Chest5
+            | MenuShape::Chest6 => "Menu",
+            MenuShape::Dispenser => "Dispenser",
+            MenuShape::Hopper => "Hopper",
+        }
+    }
 }
 
 /// A drag in progress (click mode 5).
@@ -98,6 +182,16 @@ pub struct PlayerState {
     pub env_timer: u32,
     /// Health, food and saturation as last sent, so changes are noticed.
     pub sent_health: (f32, i32, f32),
+    /// Menu clicks accepted so far in the tick named by [`Self::menu_click_tick`].
+    /// A client that floods menu clicks is rate-limited per tick (see
+    /// `game::window`), so plugin callbacks and resyncs are bounded.
+    pub menu_clicks: u32,
+    /// The tick [`Self::menu_clicks`] counts against.
+    pub menu_click_tick: u64,
+    /// A menu was clicked and the client may have predicted a change; the tick
+    /// loop resyncs the window once, coalescing every click in the tick into
+    /// one full-window send instead of one per click.
+    pub menu_resync: bool,
 }
 
 impl PlayerState {
@@ -131,6 +225,9 @@ impl PlayerState {
             spawn: (8.5, 80.0, 8.5),
             env_timer: 0,
             sent_health: (-1.0, -1, -1.0),
+            menu_clicks: 0,
+            menu_click_tick: 0,
+            menu_resync: false,
         }
     }
 

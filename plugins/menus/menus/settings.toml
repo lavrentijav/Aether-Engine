@@ -1,0 +1,33 @@
+# Example declarative menu: per-player settings.
+#
+# Demonstrates view conditions, a filler border and a nested menu (`[open]`).
+
+name = "settings"
+title = "&9&lSettings"
+layout = "chest3"
+open_commands = ["settings"]
+
+[[item]]
+slot = 0
+material = "minecraft:gray_stained_glass_pane"
+name = " "
+
+[[item]]
+slot = 8
+material = "minecraft:gray_stained_glass_pane"
+name = " "
+
+[[item]]
+slot = 11
+material = "minecraft:compass"
+name = "&eTeleport settings"
+lore = ["&7Opens the teleport menu"]
+actions = ["[open] teleport"]
+
+[[item]]
+slot = 15
+material = "minecraft:redstone_torch"
+name = "&aStaff tools"
+lore = ["&7Only for staff"]
+view_condition = "permission:staff.tools"
+actions = ["[message] &aStaff tool opened", "[close]"]

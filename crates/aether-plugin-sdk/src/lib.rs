@@ -35,6 +35,7 @@ pub mod bindings {
             "../aether-plugin/wit",
             "../aether-plugin/wit-sidebar",
             "../aether-plugin/wit-sdk",
+            "../aether-plugin/wit-menus",
             "wit",
         ],
     });
@@ -61,6 +62,7 @@ macro_rules! requires {
 /// Ergonomic re-exports: the SDK service modules, the host import, the shared
 /// event types, the frozen `Guest` trait and the `export!` macro.
 pub mod prelude {
+    pub use crate::bindings::aether::menus::menus;
     pub use crate::bindings::aether::plugin::host;
     pub use crate::bindings::aether::plugin::types::{
         CommandResult, Decision, LogLevel, ManifestAck, Player,

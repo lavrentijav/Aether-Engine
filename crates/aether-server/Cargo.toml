@@ -43,6 +43,9 @@ aether-plugin = { workspace = true, optional = true }
 # it registers its services at load, and dependents that require them refuse to
 # load when it is disabled. Core code never names it.
 aether-sdk-plugin = { path = "../../plugins/sdk", optional = true }
+# The menus native plugin (tier N): the shared chest-menu host every other
+# plugin opens menus through, and the provider of the `menus` service.
+aether-menus-plugin = { path = "../../plugins/menus", optional = true }
 aether-webadmin-plugin = { path = "../../plugins/webadmin", optional = true }
 # The sidebar native plugin. Loaded after the SDK, so its optional permission
 # checks resolve the SDK's service.
@@ -90,5 +93,5 @@ workspace = true
 # build that does not need Wasmtime (tests, a minimal deployment) can drop it
 # with `--no-default-features`.
 default = ["plugins"]
-plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-webadmin-plugin", "dep:aether-sidebar-plugin"]
+plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-menus-plugin", "dep:aether-webadmin-plugin", "dep:aether-sidebar-plugin"]
 postgres = ["dep:postgres"]
