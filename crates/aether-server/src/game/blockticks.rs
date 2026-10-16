@@ -85,6 +85,13 @@ fn queue() -> &'static Mutex<Scheduler<Pos>> {
     Q.get_or_init(|| Mutex::new(Scheduler::new()))
 }
 
+/// Call `f` for every pending block-tick position, without the `Vec` copy.
+pub fn for_each_pending(f: &mut dyn FnMut(Pos)) {
+    for (_, p) in queue().lock().unwrap().entries() {
+        f(p);
+    }
+}
+
 fn schedule(pos: Pos, delay: u64) {
     queue().lock().unwrap().schedule(pos, super::now() + delay);
 }

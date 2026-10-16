@@ -472,6 +472,36 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             .unwrap_or(BlockStateId::AIR)
     }
 
+    /// A whole column's block ids from `y_min` to `y_max` (inclusive), as one
+    /// `Vec`, having materialised the column **once** and taken the cache
+    /// **read** lock **once**.
+    ///
+    /// This is the batch form of [`World::get_block`] for a read-only caller
+    /// that scans a column top-down (the web map's surface pass): doing that
+    /// with `get_block` would take the column latch's write lock per block and
+    /// a cache lock per block, and contend with the tick thread on a large
+    /// tile. Out-of-range Y reads as air. `y_min > y_max` is an empty column.
+    pub fn column_snapshot(&self, x: i32, z: i32, y_min: i32, y_max: i32) -> Vec<BlockStateId> {
+        if y_min > y_max {
+            return Vec::new();
+        }
+        let (cx, cz) = (x >> 4, z >> 4);
+        self.ensure_column(cx, cz);
+        let cache = self.cache.read().unwrap();
+        let mut out = Vec::with_capacity((y_max - y_min + 1) as usize);
+        for y in y_min..=y_max {
+            let id = match Self::key_of(x, y, z) {
+                Some((key, lx, ly, lz)) => cache
+                    .get(&key)
+                    .map(|sc| sc.get(lx, ly, lz))
+                    .unwrap_or(BlockStateId::AIR),
+                None => BlockStateId::AIR,
+            };
+            out.push(id);
+        }
+        out
+    }
+
     /// Copy a whole section's block ids into `out`, indexed `x | z << 4 |
     /// y << 8`, under a single lock — what a chunk encoder wants instead of
     /// 4096 separate [`World::get_block`] calls, each taking it again.
@@ -787,6 +817,22 @@ impl<B: KvBackend, G: ChunkGenerator> BlockView for World<B, G> {
 mod tests {
     use super::*;
     use aether_worldgen::{FlatGenerator, NoiseGenerator};
+
+    #[test]
+    fn column_snapshot_matches_per_block_reads() {
+        // The batch read the web map uses must agree with `get_block`, cell
+        // for cell, including the out-of-range ends (air).
+        let world = World::new(MemStore::new(), FlatGenerator::classic());
+        world.set_block(3, 5, 7, "minecraft:stone").unwrap();
+        world.set_block(3, 2, 7, "minecraft:dirt").unwrap();
+        let col = world.column_snapshot(3, 7, 0, 8);
+        assert_eq!(col.len(), 9);
+        for (i, id) in col.iter().enumerate() {
+            assert_eq!(*id, world.get_block(3, i as i32, 7), "y={i}");
+        }
+        // Empty range and an inverted range.
+        assert!(world.column_snapshot(3, 7, 5, 4).is_empty());
+    }
 
     /// A scratch directory unique to this test binary and `tag`.
     #[cfg(feature = "fjall")]

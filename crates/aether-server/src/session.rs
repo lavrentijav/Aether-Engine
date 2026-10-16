@@ -407,6 +407,7 @@ fn login_and_play(
             for pkt in packets {
                 pkt.send(s)?;
             }
+            crate::web::note_chunk_send(cx, cz);
             loaded.insert((cx, cz));
         }
     }
@@ -516,6 +517,7 @@ fn login_and_play(
         world,
     );
     crate::plugins::after_player_join(&handle);
+    crate::web::on_join(&handle, world);
 
     // Now fill out the rest of the view radius. The player is placed and
     // playable by this point, so the remaining columns arrive as scenery
@@ -546,6 +548,7 @@ fn login_and_play(
         world,
     );
     crate::plugins::after_player_leave(&handle);
+    crate::web::on_leave(&handle, world);
     result
 }
 

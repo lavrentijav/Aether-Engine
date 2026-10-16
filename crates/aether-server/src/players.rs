@@ -290,6 +290,7 @@ impl PlayerHandle {
             // Every codec reads a column block by block; give it a view that
             // copies each section once instead of locking per block.
             ServerEvent::ChunkColumn { cx, cz } => {
+                crate::web::note_chunk_send(*cx, *cz);
                 let carrier_view;
                 let base: &dyn BlockSource = match table {
                     Some(t) => {
