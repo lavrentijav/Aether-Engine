@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use aether_world::registry::blocks;
 use aether_world::visibility::{
-    compute_section_graph, default_is_opaque, reachable_sections, SectionGraph,
+    compute_section_graph, default_is_air, default_is_opaque, reachable_sections, SectionGraph,
 };
 use aether_world::BlockStateId;
 
@@ -356,7 +356,7 @@ fn graph(world: &dyn BlockSource, c: (i32, i32, i32)) -> Option<SectionGraph> {
     };
     let mut blocks = [BlockStateId::AIR; 4096];
     world.copy_section(c.0, c.1, c.2, &mut blocks);
-    let g = compute_section_graph(&blocks, default_is_opaque);
+    let g = compute_section_graph(&blocks, default_is_opaque, default_is_air);
     store_graph(&mut cache().lock().unwrap(), c, g, computed_at);
     Some(g)
 }
@@ -1600,5 +1600,113 @@ mod tests {
 
         // Ordinary stone is never revealed.
         assert!(revealed_neighbours(&open, 9, -20, 9, &hidden).is_empty());
+    }
+
+    // ---- culling regressions (live bug AX2) -----------------------------
+
+    /// A deep, otherwise uniform stone world with air above y=0 and optional
+    /// ore and water/water-cave cells, for the culling regression tests.
+    struct DeepGround {
+        ore: BlockStateId,
+        ore_at: Option<(i32, i32, i32)>,
+    }
+
+    impl BlockSource for DeepGround {
+        fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+            if Some((x, y, z)) == self.ore_at {
+                return self.ore;
+            }
+            if y >= 0 {
+                return BlockStateId::AIR;
+            }
+            STONE
+        }
+    }
+
+    fn sy_bit(cy: i32) -> u32 {
+        1 << (cy - SECTION_MIN_Y) as u32
+    }
+
+    #[test]
+    fn a_far_buried_ore_behind_solid_stone_is_hidden() {
+        // The player is on the surface; a far column is solid stone with an
+        // ore one section under the surface (the "shell" beside open air) and
+        // another two sections down. Both must arrive as stone: a fully opaque
+        // section may not be marked visible just because its face touches the
+        // air — a whole section sent real leaks every ore in it.
+        let _guard = global_test_lock();
+        invalidate_all();
+        let world = DeepGround {
+            ore: ore("minecraft:coal_ore"),
+            ore_at: Some((40, -5, 0)),
+        };
+        let vis = visible_from(&world, (0.5, 5.5, 0.5), 8);
+        // x=40 is section 2, within the radius-8 view.
+        let hidden = desired_hidden(&vis, 2, 0);
+        assert_ne!(hidden & sy_bit(-1), 0, "the shell ore section is hidden");
+        assert_ne!(hidden & sy_bit(-2), 0, "the deep section is hidden");
+        // The air section above the surface is still sent real.
+        assert_eq!(hidden & sy_bit(0), 0, "open-air surface stays visible");
+    }
+
+    #[test]
+    fn an_unseen_water_cave_is_hidden() {
+        // A water shaft from the surface down into a flooded cave the player
+        // cannot see. Water is see-through, so the shaft is *visible*, but it
+        // must not let the search walk into the cave below.
+        struct WaterCave;
+        impl BlockSource for WaterCave {
+            fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+                if y >= 0 {
+                    return BlockStateId::AIR;
+                }
+                let shaft = x == 4 && z == 0 && y <= -1;
+                let cave =
+                    (3..=5).contains(&x) && (-1..=1).contains(&z) && (-40..=-38).contains(&y);
+                if shaft || cave {
+                    blocks::default_state("minecraft:water").unwrap()
+                } else {
+                    STONE
+                }
+            }
+        }
+        let _guard = global_test_lock();
+        invalidate_all();
+        let vis = visible_from(&WaterCave, (0.5, 5.5, 0.5), 8);
+        let hidden = desired_hidden(&vis, 0, 0);
+        // The flooded cave at y=-40..-38 is section sy=-3.
+        assert_ne!(hidden & sy_bit(-3), 0, "the unseen water cave is hidden");
+        assert_ne!(
+            hidden & sy_bit(-2),
+            0,
+            "the shaft below the surface is hidden"
+        );
+    }
+
+    #[test]
+    fn a_one_block_move_does_not_change_the_visible_set() {
+        // Moving within a section must not reveal a hidden ore: the search is
+        // seeded by section, so two positions in the same section answer the
+        // same, and the reveal planner then has nothing to re-send.
+        let _guard = global_test_lock();
+        invalidate_all();
+        let world = DeepGround {
+            ore: ore("minecraft:diamond_ore"),
+            ore_at: Some((40, -20, 0)),
+        };
+        let before = visible_from(&world, (0.5, 5.5, 0.5), 8);
+        let after = visible_from(&world, (1.4, 5.5, 0.5), 8);
+        assert_eq!(before, after, "a sub-block move must not change the view");
+
+        // The masked column is identical, so the reveal plan is empty.
+        let mut sent = HashMap::new();
+        for cx in -8..=8 {
+            for cz in -8..=8 {
+                sent.insert((cx, cz), desired_hidden(&before, cx, cz));
+            }
+        }
+        assert!(plan_reveals(&after, &sent, (0, 0, 0), 32).is_empty());
+        // The far ore section stays hidden in both.
+        assert_ne!(desired_hidden(&after, 2, 0) & sy_bit(-2), 0);
     }
 }

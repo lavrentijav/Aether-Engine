@@ -57,17 +57,25 @@ pub const fn face_offset(face: u8) -> (i32, i32, i32) {
     }
 }
 
-/// Which faces of one section see each other through non-opaque blocks.
+/// Which faces of one section see each other through passable blocks.
 ///
-/// `open` is the set of faces that have at least one non-opaque cell on them
-/// (a door into the section). `adj[f]` is the set of faces reachable from
-/// face `f` through the interior, so `adj[f]` always contains `f` when `f` is
-/// open. Together they are enough to walk a cave system without ever reading
-/// the blocks again.
+/// Two notions, deliberately separate:
+/// - `open` is the set of faces that have at least one **non-opaque** cell on
+///   them — you can see that face (stone/air/water/glass). It decides whether a
+///   neighbouring section is *visible* at all.
+/// - `air` is the set of faces with a **passable** (air-like) cell, and
+///   `adj[f]` is the set of faces reachable from `f` through passable cells.
+///   It decides whether the search may *continue* into a neighbour. A fluid or
+///   glass window is visible but does not let the search through, so a pool the
+///   player looks at cannot reveal the flooded caves it connects to.
+///
+/// `adj[f]` always contains `f` when `f` is an air face.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct SectionGraph {
     open: u8,
+    air: u8,
     adj: [u8; 6],
+    full_clear: bool,
 }
 
 impl SectionGraph {
@@ -75,29 +83,55 @@ impl SectionGraph {
     pub const fn sealed() -> Self {
         Self {
             open: 0,
+            air: 0,
             adj: [0; 6],
+            full_clear: false,
         }
     }
 
     /// A fully open section: every face is a way in and every face sees every
-    /// other — the answer for air, water and every transparent section.
+    /// other — the answer for pure air.
     pub const fn open() -> Self {
         Self {
             open: ALL_FACES,
+            air: ALL_FACES,
             adj: [ALL_FACES; 6],
+            full_clear: true,
         }
     }
 
-    /// The faces with at least one non-opaque cell.
+    /// The faces with at least one non-opaque cell — the faces you can see.
     #[inline]
     pub fn open_faces(&self) -> u8 {
         self.open
+    }
+
+    /// Whether the whole section has no opaque cell at all — an all-air or
+    /// fully-flooded section, which the visibility wave may pass through
+    /// without the air search (so an ocean stays water, but its stone floor
+    /// and any cave walls stop it).
+    #[inline]
+    pub fn is_full_clear(&self) -> bool {
+        self.full_clear
     }
 
     /// Whether `face` has any non-opaque cell.
     #[inline]
     pub fn is_open(&self, face: u8) -> bool {
         self.open & (1 << face) != 0
+    }
+
+    /// The faces with at least one passable (air-like) cell.
+    #[inline]
+    pub fn air_faces(&self) -> u8 {
+        self.air
+    }
+
+    /// Whether `face` has any passable (air-like) cell, so the search may
+    /// enter the section through it.
+    #[inline]
+    pub fn is_air(&self, face: u8) -> bool {
+        self.air & (1 << face) != 0
     }
 
     /// Whether standing at `from` one can see the opening at `to`.
@@ -131,11 +165,13 @@ impl SectionGraph {
 
 impl std::fmt::Debug for SectionGraph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut opens = Vec::new();
-        let mut links = Vec::new();
+        let (mut opens, mut airs, mut links) = (Vec::new(), Vec::new(), Vec::new());
         for a in 0..6u8 {
             if self.is_open(a) {
                 opens.push(a);
+            }
+            if self.is_air(a) {
+                airs.push(a);
             }
             for b in 0..6u8 {
                 if self.connects(a, b) {
@@ -143,7 +179,10 @@ impl std::fmt::Debug for SectionGraph {
                 }
             }
         }
-        write!(f, "SectionGraph(open={opens:?}, links={links:?})")
+        write!(
+            f,
+            "SectionGraph(open={opens:?}, air={airs:?}, links={links:?})"
+        )
     }
 }
 
@@ -151,29 +190,64 @@ impl std::fmt::Debug for SectionGraph {
 ///
 /// `blocks` is indexed `x | z << 4 | y << 8` (the layout
 /// [`BlockSource`](crate::registry) encoders use). `is_opaque` says whether a
-/// block stops sight; a section made only of opaque blocks is
-/// [`SectionGraph::sealed`].
+/// block stops sight (a face with a non-opaque cell is *visible*); `is_air`
+/// says whether a block is passable, so a section made only of opaque blocks is
+/// [`SectionGraph::sealed`] and one whose only non-opaque cells are fluid is
+/// visible but does not connect.
 pub fn compute_section_graph(
     blocks: &[BlockStateId; SECTION_VOLUME],
     is_opaque: impl Fn(BlockStateId) -> bool,
+    is_air: impl Fn(BlockStateId) -> bool,
 ) -> SectionGraph {
-    // Keep the opaque test out of the inner loop by precomputing it; the
-    // flood fill then only ever looks at a `bool`.
+    // Keep the tests out of the inner loop by precomputing them; the flood fill
+    // then only ever looks at a `bool`.
     let mut opaque = vec![false; SECTION_VOLUME];
+    let mut air = vec![false; SECTION_VOLUME];
     for (i, b) in blocks.iter().enumerate() {
         opaque[i] = is_opaque(*b);
+        air[i] = is_air(*b);
+    }
+
+    // Which faces have at least one non-opaque cell — the visible surface. A
+    // separate pass, because the air flood below never visits a fluid cell.
+    let mut open = 0u8;
+    for (i, &is_opaque) in opaque.iter().enumerate() {
+        if is_opaque {
+            continue;
+        }
+        let x = (i & 15) as i32;
+        let z = ((i >> 4) & 15) as i32;
+        let y = (i >> 8) as i32;
+        if x == 0 {
+            open |= 1 << FACE_NEG_X;
+        }
+        if x == 15 {
+            open |= 1 << FACE_POS_X;
+        }
+        if y == 0 {
+            open |= 1 << FACE_NEG_Y;
+        }
+        if y == 15 {
+            open |= 1 << FACE_POS_Y;
+        }
+        if z == 0 {
+            open |= 1 << FACE_NEG_Z;
+        }
+        if z == 15 {
+            open |= 1 << FACE_POS_Z;
+        }
     }
 
     let mut seen = [0u64; SECTION_VOLUME / 64];
     let mut adj = [0u8; 6];
-    let mut open = 0u8;
+    let mut airs = 0u8;
 
     for start in 0..SECTION_VOLUME {
-        if opaque[start] || seen[start >> 6] >> (start & 63) & 1 != 0 {
+        if !air[start] || seen[start >> 6] >> (start & 63) & 1 != 0 {
             continue;
         }
-        // Flood fill this pocket of non-opaque cells, collecting the faces it
-        // touches.
+        // Flood fill this pocket of passable (air-like) cells, collecting the
+        // faces it touches.
         let mut faces = 0u8;
         let mut queue = VecDeque::new();
         seen[start >> 6] |= 1u64 << (start & 63);
@@ -207,14 +281,14 @@ pub fn compute_section_graph(
                     continue;
                 }
                 let n = (nx | nz << 4 | ny << 8) as usize;
-                if opaque[n] || seen[n >> 6] >> (n & 63) & 1 != 0 {
+                if !air[n] || seen[n >> 6] >> (n & 63) & 1 != 0 {
                     continue;
                 }
                 seen[n >> 6] |= 1u64 << (n & 63);
                 queue.push_back(n);
             }
         }
-        open |= faces;
+        airs |= faces;
         for (f, row) in adj.iter_mut().enumerate() {
             if faces & (1 << f) != 0 {
                 *row |= faces;
@@ -222,7 +296,12 @@ pub fn compute_section_graph(
         }
     }
 
-    SectionGraph { open, adj }
+    SectionGraph {
+        open,
+        air: airs,
+        adj,
+        full_clear: opaque.iter().all(|o| !o),
+    }
 }
 
 /// Whether a block id is opaque for the purposes of the flood fill.
@@ -237,14 +316,34 @@ pub fn default_is_opaque(id: BlockStateId) -> bool {
         .unwrap_or(true)
 }
 
+/// Whether a block id is passable (air-like) for the reachability search.
+///
+/// Air, cave air and void air are; fluid is **not**, so the search cannot walk
+/// through a pool or an ocean into the caves it connects — the leak that let a
+/// player over water see flooded caves. Glass and leaves are not (they are not
+/// air), so a window is visible but opaque to the search. An unknown block is
+/// treated as not passable, the safe direction.
+pub fn default_is_air(id: BlockStateId) -> bool {
+    crate::registry::blocks::props_of_state(id)
+        .map(|p| !p.solid && !p.collision && p.light_opacity == 0)
+        .unwrap_or(false)
+}
+
 /// Run the per-player visibility BFS.
 ///
 /// Seeds are every section whose *blocks* lie within `margin_blocks` of the
 /// player (the "could see it if he turned or moved a little" sphere) and the
-/// search expands only through faces a section actually connects, bounded
-/// horizontally by `view_distance` sections and vertically by
-/// `[y_min, y_max]`. Direction is deliberately not an input: culling by where
-/// the player looks is what makes turning the head show a hole.
+/// search expands only through **air** faces a section actually connects,
+/// bounded horizontally by `view_distance` sections and vertically by
+/// `[y_min, y_max]`. A neighbour whose facing side is non-opaque is *visible*
+/// (you can see stone, water, glass) but only an air passage lets the search
+/// continue into it, so a pool the player looks at cannot reveal the flooded
+/// caves it drains into. A fully opaque face marks nothing — the whole
+/// hidden section stays hidden, or a whole section sent real would leak every
+/// ore in it. A wave then passes *visibility* through fully-clear sections
+/// (all air or all water) so an ocean stays water while its stone floor stops
+/// the wave. Direction is deliberately not an input: culling by where the
+/// player looks is what makes turning the head show a hole.
 ///
 /// `graph` returns the section graph for a section coordinate, or `None` when
 /// that section is outside the world. It should be cached by the caller — the
@@ -288,7 +387,7 @@ pub fn reachable_sections(
                 let Some(g) = graph(sx, sy, sz) else {
                     continue;
                 };
-                let entry = g.open_faces();
+                let entry = g.air_faces();
                 visited.insert(key, entry);
                 queue.push_back((key, entry));
             }
@@ -312,12 +411,18 @@ pub fn reachable_sections(
             let Some(ng) = graph(n.0, n.1, n.2) else {
                 continue;
             };
-            // The neighbour's face is geometry the player can see even when
-            // it is solid stone, so it becomes visible either way. Only an
-            // actual opening lets the search continue through it.
             let entry_face = opposite(f);
-            if !ng.is_open(entry_face) {
+            // The neighbour is visible only if it has a non-opaque cell on the
+            // facing side (you can see stone, water, a window). A fully opaque
+            // face is dark rock, so the whole section stays hidden — the shell
+            // leak that sent every ore one section away from open space.
+            if ng.is_open(entry_face) {
                 visited.entry(n).or_insert(0);
+            }
+            // Only an air passage lets the search continue into the neighbour;
+            // a fluid or glass surface is visible but does not connect, so a
+            // pool cannot reveal the caves it drains into.
+            if !ng.is_air(entry_face) {
                 continue;
             }
             let bit = 1u8 << entry_face;
@@ -327,6 +432,42 @@ pub fn reachable_sections(
             }
             *seen |= bit;
             queue.push_back((n, bit));
+        }
+    }
+
+    // Visibility wave: a fully clear section (all air, or all water — an ocean
+    // or a lake) that is visible lets you see the clear section beyond it too.
+    // It stops at any section with a single opaque cell, so the ocean stays
+    // water but its stone floor, and the stone walls of a flooded cave, are
+    // not revealed.
+    let mut surface: VecDeque<(i32, i32, i32)> = visited
+        .iter()
+        .filter(|(key, _)| graph(key.0, key.1, key.2).is_some_and(|g| g.is_full_clear()))
+        .map(|(key, _)| *key)
+        .collect();
+    while let Some(sec) = surface.pop_front() {
+        let Some(g) = graph(sec.0, sec.1, sec.2) else {
+            continue;
+        };
+        let mut faces = g.open_faces();
+        while faces != 0 {
+            let f = faces.trailing_zeros() as u8;
+            faces &= faces - 1;
+            let (dx, dy, dz) = face_offset(f);
+            let n = (sec.0 + dx, sec.1 + dy, sec.2 + dz);
+            if !in_view(n) || visited.contains_key(&n) {
+                continue;
+            }
+            let Some(ng) = graph(n.0, n.1, n.2) else {
+                continue;
+            };
+            if !ng.is_open(opposite(f)) {
+                continue;
+            }
+            visited.insert(n, 0);
+            if ng.is_full_clear() {
+                surface.push_back(n);
+            }
         }
     }
 
@@ -346,6 +487,10 @@ mod tests {
         id == STONE
     }
 
+    fn is_air(id: BlockStateId) -> bool {
+        id == AIR
+    }
+
     fn idx(x: i32, y: i32, z: i32) -> usize {
         (x | z << 4 | y << 8) as usize
     }
@@ -357,7 +502,7 @@ mod tests {
     #[test]
     fn a_sealed_box_has_no_open_face_and_connects_nothing() {
         let blocks = solid();
-        let g = compute_section_graph(&blocks, is_opaque);
+        let g = compute_section_graph(&blocks, is_opaque, is_air);
         assert_eq!(g.open_faces(), 0);
         assert_eq!(g.reach(g.open_faces()), 0);
         for a in 0..6 {
@@ -368,7 +513,7 @@ mod tests {
     #[test]
     fn all_air_is_fully_open() {
         let blocks = [AIR; SECTION_VOLUME];
-        let g = compute_section_graph(&blocks, is_opaque);
+        let g = compute_section_graph(&blocks, is_opaque, is_air);
         assert_eq!(g.open_faces(), ALL_FACES);
         assert_eq!(g.reach(1 << FACE_NEG_X), ALL_FACES);
     }
@@ -379,7 +524,7 @@ mod tests {
         for x in 0..16 {
             blocks[idx(x, 8, 8)] = AIR;
         }
-        let g = compute_section_graph(&blocks, is_opaque);
+        let g = compute_section_graph(&blocks, is_opaque, is_air);
         assert!(g.is_open(FACE_NEG_X) && g.is_open(FACE_POS_X));
         assert!(g.connects(FACE_NEG_X, FACE_POS_X));
         assert!(g.connects(FACE_POS_X, FACE_NEG_X));
@@ -402,7 +547,7 @@ mod tests {
         for z in 8..16 {
             blocks[idx(15, 8, z)] = AIR;
         }
-        let g = compute_section_graph(&blocks, is_opaque);
+        let g = compute_section_graph(&blocks, is_opaque, is_air);
         assert!(g.is_open(FACE_NEG_X) && g.is_open(FACE_POS_X) && g.is_open(FACE_POS_Z));
         assert!(g.connects(FACE_NEG_X, FACE_POS_Z));
         assert!(g.connects(FACE_POS_Z, FACE_NEG_X));
@@ -423,7 +568,7 @@ mod tests {
         for z in 0..16 {
             blocks[idx(8, 12, z)] = AIR;
         }
-        let g = compute_section_graph(&blocks, is_opaque);
+        let g = compute_section_graph(&blocks, is_opaque, is_air);
         assert!(g.connects(FACE_NEG_X, FACE_POS_X));
         assert!(g.connects(FACE_NEG_Z, FACE_POS_Z));
         assert!(!g.connects(FACE_NEG_X, FACE_NEG_Z));
@@ -439,7 +584,7 @@ mod tests {
         // A single non-opaque cell in the middle touches no boundary face.
         let mut blocks = solid();
         blocks[idx(8, 8, 8)] = AIR;
-        let g = compute_section_graph(&blocks, is_opaque);
+        let g = compute_section_graph(&blocks, is_opaque, is_air);
         assert_eq!(g.open_faces(), 0);
         assert_eq!(g.reach(g.open_faces()), 0);
     }
@@ -466,17 +611,17 @@ mod tests {
 
     #[test]
     fn a_sealed_neighbour_blocks_the_search() {
-        // (0,0,0) and (2,0,0) are open, (1,0,0) is sealed: the search can
-        // reach (1,0,0) (its face is open, so the stone is visible) but must
-        // not pass through it to the cave at (2,0,0).
+        // (0,0,0) and (2,0,0) are open, (1,0,0) is sealed: the search reaches
+        // (0,0,0) but must not mark the sealed wall visible — a whole section
+        // sent real would leak every ore in it — nor pass through to (2,0,0).
         let mut open = HashSet::new();
         open.insert((0, 0, 0));
         open.insert((2, 0, 0));
         let visible = reachable_sections((0.5, 0.5, 0.5), 0.0, 8, -4, 4, provider(&open, -4, 4));
         assert!(visible.contains(&(0, 0, 0)));
         assert!(
-            visible.contains(&(1, 0, 0)),
-            "the sealed section's face is visible"
+            !visible.contains(&(1, 0, 0)),
+            "a fully sealed section stays hidden"
         );
         assert!(
             !visible.contains(&(2, 0, 0)),
@@ -494,9 +639,9 @@ mod tests {
         for x in 0..6 {
             assert!(visible.contains(&(x, 0, 0)), "tunnel at x={x}");
         }
-        // (6,0,0) is the solid cap at the tunnel mouth: its face is visible
-        // (the player sees stone), but the search does not pass through it.
-        assert!(visible.contains(&(6, 0, 0)));
+        // (6,0,0) is the solid cap at the tunnel mouth: sealed, so it is not
+        // marked visible and not passed through.
+        assert!(!visible.contains(&(6, 0, 0)));
         assert!(!visible.contains(&(7, 0, 0)));
     }
 
@@ -543,5 +688,68 @@ mod tests {
         let a = reachable_sections((0.5, 0.5, 0.5), 2.0, 8, -4, 4, provider(&open, -4, 4));
         let b = reachable_sections((0.5, 0.5, 0.5), 2.0, 8, -4, 4, provider(&open, -4, 4));
         assert_eq!(a, b);
+    }
+
+    // ---- water / fluid visibility (live bug AX2) ------------------------
+
+    /// A block id that is neither opaque nor passable: a fluid.
+    const WATER: BlockStateId = BlockStateId(2);
+
+    fn water_is_opaque(id: BlockStateId) -> bool {
+        id == STONE
+    }
+
+    fn water_is_air(id: BlockStateId) -> bool {
+        id == AIR
+    }
+
+    fn section_of(id: BlockStateId) -> SectionGraph {
+        let blocks = [id; SECTION_VOLUME];
+        compute_section_graph(&blocks, water_is_opaque, water_is_air)
+    }
+
+    fn mixed_water_stone() -> SectionGraph {
+        let mut blocks = [WATER; SECTION_VOLUME];
+        blocks[idx(8, 8, 8)] = STONE;
+        compute_section_graph(&blocks, water_is_opaque, water_is_air)
+    }
+
+    #[test]
+    fn the_visibility_wave_passes_through_water_but_stops_at_stone() {
+        // A chain of all-water sections is visible (an ocean stays water), but
+        // a section holding even one stone cell stops the wave — so the stone
+        // walls of a flooded cave beyond are not revealed.
+        let water = section_of(WATER);
+        let stone = section_of(STONE);
+        let mixed = mixed_water_stone();
+        assert!(water.is_full_clear());
+        assert!(!mixed.is_full_clear());
+        assert!(water.air_faces() == 0, "water is not air");
+        assert!(water.is_open(FACE_POS_X), "water is see-through");
+
+        let graph = move |x: i32, y: i32, _z: i32| {
+            if y != 0 {
+                return None;
+            }
+            Some(match x {
+                0 | 1 => water,
+                2 => mixed,
+                _ => stone,
+            })
+        };
+        let visible = reachable_sections((8.0, 8.0, 8.0), 0.0, 8, -4, 4, graph);
+        assert!(visible.contains(&(0, 0, 0)), "the seed water section");
+        assert!(
+            visible.contains(&(1, 0, 0)),
+            "the wave reaches the next water"
+        );
+        assert!(
+            visible.contains(&(2, 0, 0)),
+            "the mixed section's water face is visible"
+        );
+        assert!(
+            !visible.contains(&(3, 0, 0)),
+            "the stone beyond the mixed section stays hidden"
+        );
     }
 }

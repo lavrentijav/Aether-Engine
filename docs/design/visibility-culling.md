@@ -53,6 +53,25 @@ Switchable: `[anti_xray] enabled = false` by default until it is proven; per wor
    section but from every section within `margin_blocks` (default 4–6) of the player, and ignore
    view direction entirely (direction culling is what makes turning the head show holes). So the
    whole sphere around the player that is reachable by sight is sent.
+
+### Reachability rules (AX2 — closed leaks)
+
+The reachable set must not mistake "the player can see this section's face" for "the player can see
+this section". The rules the BFS follows now, after the live leak report:
+
+- **A fully opaque section is never visible**, even when its face touches open space. Marking it
+  visible sends the whole section real, leaking every ore in it. The player sees only the opaque
+  surface, and a stone fill looks the same.
+- **Only air lets the search continue.** A face with a non-opaque cell (stone, water, glass) is
+  *visible*, but the search enters the section only through an air face. A pool the player looks at
+  therefore cannot reveal the flooded caves it drains into; a window is visible but opaque to the
+  search.
+- **Visibility (not reachability) passes through fully-clear sections** — an all-air or
+  fully-flooded section. So an ocean stays water section after section, while its stone floor and the
+  stone walls of a flooded cave stop the wave.
+- **A sub-block move does not change the answer**: the search is seeded by section, so two positions
+  in the same section give the same set and the reveal planner has nothing to re-send.
+
 4. **Optional ray refinement.** For sections the BFS marks visible only through long thin paths,
    cast a few rays from the eye (+ margin points) to the section's corners; if every ray is blocked
    by opaque blocks, keep it hidden. Off by default: rays are the expensive and leaky part
