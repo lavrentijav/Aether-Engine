@@ -487,7 +487,9 @@ impl ProtocolCodec for Codec {
                     Vec::new()
                 } else {
                     let mut p = PacketOut::new(self.0.packets.cb_custom_payload);
-                    p.string(channel).var_int(data.len() as i32).bytes(data);
+                    // Vanilla `custom_payload` is an Identifier followed by
+                    // the rest of the packet — there is no length prefix.
+                    p.string(channel).bytes(data);
                     vec![p]
                 }
             }
@@ -534,14 +536,16 @@ impl ProtocolCodec for Codec {
                 Ok(id) => ClientEvent::KeepAlive(id),
                 Err(_) => ClientEvent::Ignored,
             },
-            // A plugin-channel message: an identifier then a length-prefixed
-            // byte array. The voice plugin reads its handshake from here.
-            id if id == p.sb_custom_payload => {
-                match (pin.string(), pin.byte_array(MAX_PLUGIN_PAYLOAD)) {
-                    (Ok(channel), Ok(data)) => ClientEvent::PluginMessage { channel, data },
-                    _ => ClientEvent::Ignored,
-                }
-            }
+            // A plugin-channel message: an identifier then the rest of the
+            // packet, exactly as vanilla `custom_payload` frames it (no
+            // length prefix). The voice plugin reads its handshake here.
+            id if id == p.sb_custom_payload => match pin.string() {
+                Ok(channel) => match pin.rest(MAX_PLUGIN_PAYLOAD) {
+                    Ok(data) => ClientEvent::PluginMessage { channel, data },
+                    Err(_) => ClientEvent::Ignored,
+                },
+                Err(_) => ClientEvent::Ignored,
+            },
             id if id == p.sb_set_carried_item => match pin.u16() {
                 Ok(slot) => ClientEvent::HeldSlot(slot as u8),
                 Err(_) => ClientEvent::Ignored,
@@ -1255,6 +1259,62 @@ mod tests {
             pitch: 0.0,
             on_ground: true,
         }
+    }
+
+    /// A serverbound `custom_payload` is an Identifier followed by the rest of
+    /// the packet — there is **no** length prefix (vanilla `restBuffer`). A
+    /// stray VarInt here would shift the voice handshake by a byte.
+    #[test]
+    fn a_serverbound_plugin_message_reads_channel_then_the_rest() {
+        let channel = "voicechat:request_secret";
+        let mut body = Vec::new();
+        body.push(channel.len() as u8); // Identifier: VarInt length ...
+        body.extend_from_slice(channel.as_bytes()); // ... then the bytes.
+        body.extend_from_slice(&[0, 0, 0, 18]); // the request's body (compat ver)
+        let pkt = RawPacket {
+            id: C.0.packets.sb_custom_payload,
+            data: body,
+        };
+        match C.decode(&pkt, any_pos()) {
+            ClientEvent::PluginMessage { channel: ch, data } => {
+                assert_eq!(ch, "voicechat:request_secret");
+                assert_eq!(data, vec![0, 0, 0, 18]);
+            }
+            _ => panic!("a custom-payload packet must decode as a plugin message"),
+        }
+    }
+
+    /// A clientbound `custom_payload` writes the Identifier and then the raw
+    /// payload, with no length prefix in front of it.
+    #[test]
+    fn a_clientbound_plugin_message_has_no_length_prefix() {
+        struct Empty;
+        impl BlockSource for Empty {
+            fn block_at(&self, _x: i32, _y: i32, _z: i32) -> BlockStateId {
+                BlockStateId::AIR
+            }
+        }
+        let pkts = C.encode(
+            &ServerEvent::PluginMessage {
+                channel: "voicechat:secret".to_string(),
+                data: vec![0xAA, 0xBB, 0xCC],
+            },
+            &Empty,
+        );
+        assert_eq!(pkts.len(), 1);
+        let mut wire = Vec::new();
+        pkts[0].write_to(&mut wire, None).unwrap();
+        let mut r = PacketIn::new(&wire);
+        let _frame_len = r.var_int().unwrap();
+        assert_eq!(
+            r.var_int().unwrap(),
+            version::V1_21_11.packets.cb_custom_payload
+        );
+        assert_eq!(r.string().unwrap(), "voicechat:secret");
+        // The remaining bytes are the payload and nothing else: no VarInt
+        // length, and no trailing bytes.
+        assert_eq!(r.remaining(), 3, "the payload is not length-prefixed");
+        assert_eq!(r.rest(64).unwrap(), vec![0xAA, 0xBB, 0xCC]);
     }
 
     #[test]

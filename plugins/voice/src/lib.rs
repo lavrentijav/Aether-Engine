@@ -53,6 +53,9 @@ const AUDIO_BURST: f64 = 40.0;
 /// The most unrelayed audio frames kept between the UDP threads and the tick.
 /// A full queue drops its oldest frame, so a flood cannot grow memory.
 const INCOMING_CAP: usize = 512;
+/// The most datagrams kept for the UDP threads to send. A full queue drops its
+/// oldest packet, so a peer that cannot drain cannot grow memory.
+const OUT_CAP: usize = 1024;
 /// The recorder's job queue depth; a full queue drops the frame rather than
 /// blocking the tick.
 const RECORD_QUEUE: usize = 512;
@@ -235,8 +238,8 @@ struct Shared {
     incoming: Mutex<VecDeque<Incoming>>,
     /// Per-sender audio token buckets.
     rates: Mutex<HashMap<u128, Bucket>>,
-    svc_out: Mutex<Vec<(Vec<u8>, SocketAddr)>>,
-    pv_out: Mutex<Vec<(Vec<u8>, SocketAddr)>>,
+    svc_out: Mutex<VecDeque<(Vec<u8>, SocketAddr)>>,
+    pv_out: Mutex<VecDeque<(Vec<u8>, SocketAddr)>>,
     groups: Mutex<HashMap<u128, SvcGroup>>,
     recorder: Mutex<RecorderState>,
     /// Admin uuid -> what they are listening to.
@@ -261,8 +264,8 @@ impl Shared {
             pv_secrets: Mutex::new(HashMap::new()),
             incoming: Mutex::new(VecDeque::new()),
             rates: Mutex::new(HashMap::new()),
-            svc_out: Mutex::new(Vec::new()),
-            pv_out: Mutex::new(Vec::new()),
+            svc_out: Mutex::new(VecDeque::new()),
+            pv_out: Mutex::new(VecDeque::new()),
             groups: Mutex::new(HashMap::new()),
             recorder: Mutex::new(RecorderState::default()),
             spies: Mutex::new(HashMap::new()),
@@ -519,11 +522,7 @@ impl VoicePlugin {
                 }
             };
             let datagram = packet.encode_server_udp(&conn.secret);
-            self.shared
-                .svc_out
-                .lock()
-                .unwrap()
-                .push((datagram, conn.addr));
+            push_out(&self.shared.svc_out, (datagram, conn.addr));
         } else if let Some(conn) = &p.pv {
             let packet = plasmo::Udp::SourceAudio(plasmo::SourceAudio {
                 sequence: now_ms(),
@@ -533,11 +532,7 @@ impl VoicePlugin {
                 distance: f.distance as i16,
             });
             let datagram = packet.encode(conn.secret);
-            self.shared
-                .pv_out
-                .lock()
-                .unwrap()
-                .push((datagram, conn.addr));
+            push_out(&self.shared.pv_out, (datagram, conn.addr));
         }
     }
 
@@ -647,11 +642,7 @@ impl VoicePlugin {
             if let Some(conn) = &p.svc {
                 if conn.authenticated {
                     let datagram = svc::Packet::KeepAlive.encode_server_udp(&conn.secret);
-                    self.shared
-                        .svc_out
-                        .lock()
-                        .unwrap()
-                        .push((datagram, conn.addr));
+                    push_out(&self.shared.svc_out, (datagram, conn.addr));
                 }
             }
             if let Some(conn) = &p.pv {
@@ -662,11 +653,7 @@ impl VoicePlugin {
                         server_port: 0,
                     }
                     .encode(conn.secret);
-                    self.shared
-                        .pv_out
-                        .lock()
-                        .unwrap()
-                        .push((datagram, conn.addr));
+                    push_out(&self.shared.pv_out, (datagram, conn.addr));
                 }
             }
         }
@@ -674,39 +661,43 @@ impl VoicePlugin {
 
     /// Send the Plasmo Voice config packet over the plugin channel.
     fn send_pv_config(&self, uuid: u128, ctx: &mut NativeContext) {
-        let cfg = self.shared.config.read().unwrap();
         let Some(entity) = self.entity_of(uuid) else {
             return;
         };
-        let server_id = u128::from_be_bytes(*b"aether\0\0\0\0\0\0\0\0\0\0");
-        let config = plasmo::Config {
-            server_id,
-            default_distance: cfg.distance as i32,
-            max_distance: cfg.distance as i32,
-            ..Default::default()
+        let (config_bytes, list_bytes) = {
+            let cfg = self.shared.config.read().unwrap();
+            let server_id = u128::from_be_bytes(*b"aether\0\0\0\0\0\0\0\0\0\0");
+            let config = plasmo::Config {
+                server_id,
+                default_distance: cfg.distance as i32,
+                max_distance: cfg.distance as i32,
+                ..Default::default()
+            };
+            drop(cfg);
+            let mut data = Vec::with_capacity(1 + 256);
+            data.push(plasmo::tcp::CONFIG);
+            data.extend_from_slice(&config.encode());
+            // The player list, so the client can build sources for everyone
+            // else. Built (and the lock released) before any host call.
+            let players = self.shared.players.lock().unwrap();
+            let list: Vec<plasmo::PlayerInfo> = players
+                .iter()
+                .filter(|(_, p)| p.pv.is_some())
+                .map(|(uuid, p)| plasmo::PlayerInfo {
+                    id: *uuid,
+                    nick: p.name.clone(),
+                    muted: false,
+                    voice_disabled: p.disabled,
+                    microphone_muted: false,
+                })
+                .collect();
+            let packet = plasmo::Tcp::PlayerList { players: list };
+            (data, packet.encode())
         };
-        let mut data = Vec::with_capacity(1 + 256);
-        data.push(plasmo::tcp::CONFIG);
-        data.extend_from_slice(&config.encode());
         ctx.backend
-            .send_plugin_message(ctx.id, entity, plasmo::channel::TCP, &data);
-        drop(cfg);
-        // The player list, so the client can build sources for everyone else.
-        let players = self.shared.players.lock().unwrap();
-        let list: Vec<plasmo::PlayerInfo> = players
-            .iter()
-            .filter(|(_, p)| p.pv.is_some())
-            .map(|(uuid, p)| plasmo::PlayerInfo {
-                id: *uuid,
-                nick: p.name.clone(),
-                muted: false,
-                voice_disabled: p.disabled,
-                microphone_muted: false,
-            })
-            .collect();
-        let packet = plasmo::Tcp::PlayerList { players: list };
+            .send_plugin_message(ctx.id, entity, plasmo::channel::TCP, &config_bytes);
         ctx.backend
-            .send_plugin_message(ctx.id, entity, plasmo::channel::TCP, &packet.encode());
+            .send_plugin_message(ctx.id, entity, plasmo::channel::TCP, &list_bytes);
     }
 
     /// Broadcast a Plasmo `PlayerInfoUpdatePacket` to every PV client.
@@ -1190,8 +1181,12 @@ impl NativePlugin for VoicePlugin {
                     lines.push("&7/voice join <group>".to_string());
                     return Some(result(lines));
                 };
-                let id =
-                    lookup_group(&self.shared, group).unwrap_or_else(|| group_id(group.as_bytes()));
+                // Only an existing group can be joined; a typo must not
+                // report success.
+                let Some(id) = lookup_group(&self.shared, group) else {
+                    lines.push(format!("&cNo voice group `{group}`."));
+                    return Some(result(lines));
+                };
                 if let Ok(uuid) = self.uuid(ctx, p) {
                     // An operator joins without the password and silently.
                     self.join_svc_group(ctx, uuid, id, None, true);
@@ -1596,8 +1591,17 @@ fn pv_handle(shared: &Shared, datagram: &[u8], addr: SocketAddr) {
     }
 }
 
-fn drain_out(out: &Mutex<Vec<(Vec<u8>, SocketAddr)>>, sock: &UdpSocket) {
-    let queued: Vec<(Vec<u8>, SocketAddr)> = {
+/// Queue one outbound datagram, dropping the oldest if the queue is full.
+fn push_out(out: &Mutex<VecDeque<(Vec<u8>, SocketAddr)>>, item: (Vec<u8>, SocketAddr)) {
+    let mut q = out.lock().unwrap();
+    while q.len() >= OUT_CAP {
+        q.pop_front();
+    }
+    q.push_back(item);
+}
+
+fn drain_out(out: &Mutex<VecDeque<(Vec<u8>, SocketAddr)>>, sock: &UdpSocket) {
+    let queued: VecDeque<(Vec<u8>, SocketAddr)> = {
         let mut q = out.lock().unwrap();
         std::mem::take(&mut *q)
     };
@@ -2005,6 +2009,48 @@ mod proc_tests {
         assert_eq!(
             svc::Packet::decode_server_udp(&datagram, &secret),
             Some(svc::Packet::KeepAlive)
+        );
+    }
+
+    /// `/voice join` on a group that does not exist must report failure, not
+    /// claim success.
+    #[test]
+    fn joining_a_missing_group_reports_failure() {
+        let (mut plugin, backend, services, cfg) = harness();
+        let dynb: Arc<dyn HostBackend> = backend.clone();
+        let mut c = ctx(&dynb, &services, &cfg);
+        plugin
+            .shared
+            .players
+            .lock()
+            .unwrap()
+            .entry(PLAYER_UUID)
+            .or_default()
+            .entity = PLAYER_ID;
+        let r = plugin
+            .on_command(
+                &mut c,
+                &player(),
+                "voice",
+                &["join".to_string(), "nope".to_string()],
+            )
+            .unwrap();
+        assert!(
+            r.lines.iter().any(|l| l.contains("No voice group")),
+            "{:?}",
+            r.lines
+        );
+        assert!(
+            plugin
+                .shared
+                .players
+                .lock()
+                .unwrap()
+                .get(&PLAYER_UUID)
+                .unwrap()
+                .group
+                .is_none(),
+            "the player must not be in a group"
         );
     }
 }

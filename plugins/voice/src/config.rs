@@ -66,17 +66,25 @@ impl VoiceConfig {
         let b = |k: &str| map.get(k).map(|v| v.eq_ignore_ascii_case("true"));
         let u = |k: &str| map.get(k).and_then(|v| v.parse::<u64>().ok());
         let f = |k: &str| map.get(k).and_then(|v| v.parse::<f64>().ok());
+        // A port must be a real `u16`; a value outside 1..=65535 is ignored, so
+        // a mistyped value cannot silently wrap (`70000 as u16 == 4464`).
+        let port = |k: &str| {
+            map.get(k)
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|v| (1..=65_535).contains(v))
+                .map(|v| v as u16)
+        };
         if let Some(v) = b("svc_enabled") {
             c.svc_enabled = v;
         }
-        if let Some(v) = u("svc_port") {
-            c.svc_port = v as u16;
+        if let Some(v) = port("svc_port") {
+            c.svc_port = v;
         }
         if let Some(v) = b("pv_enabled") {
             c.pv_enabled = v;
         }
-        if let Some(v) = u("pv_port") {
-            c.pv_port = v as u16;
+        if let Some(v) = port("pv_port") {
+            c.pv_port = v;
         }
         if let Some(v) = f("distance") {
             c.distance = v;
@@ -128,6 +136,21 @@ mod tests {
         m.insert("pv_enabled".to_string(), "true".to_string());
         let c = VoiceConfig::from_map(&m);
         assert!(c.svc_enabled && c.pv_enabled);
+    }
+
+    #[test]
+    fn an_out_of_range_port_is_ignored() {
+        let mut m = BTreeMap::new();
+        // 70000 would wrap to 4464 with a bare `as u16`; it must be refused.
+        m.insert("svc_port".to_string(), "70000".to_string());
+        m.insert("pv_port".to_string(), "0".to_string());
+        let c = VoiceConfig::from_map(&m);
+        assert_eq!(c.svc_port, 24_454, "out-of-range port must be ignored");
+        assert_eq!(c.pv_port, 60_606, "0 is not a valid port");
+        // A real port still applies.
+        m.insert("svc_port".to_string(), "24455".to_string());
+        let c = VoiceConfig::from_map(&m);
+        assert_eq!(c.svc_port, 24455);
     }
 
     #[test]
