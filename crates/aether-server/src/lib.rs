@@ -33,6 +33,7 @@ pub mod players;
 pub mod plugins;
 pub mod proto;
 pub mod protocol;
+pub mod rcon;
 pub mod rewards;
 pub mod session;
 pub mod staff;
@@ -92,6 +93,11 @@ pub fn run() -> std::process::ExitCode {
         ));
     }
     if let Err(e) = cfg.apply_env(|k| std::env::var(k).ok()) {
+        return fail(&format!("config error: {e}"));
+    }
+    // RCON runs commands as the console, so an enabled listener with no
+    // password would be an open admin port. Refuse before the world opens.
+    if let Err(e) = cfg.rcon.validate() {
         return fail(&format!("config error: {e}"));
     }
     #[cfg(not(feature = "postgres"))]
@@ -321,6 +327,10 @@ pub fn run() -> std::process::ExitCode {
         cfg.server.watchdog_secs,
         cfg.server.status_secs,
     );
+    // The console and RCON share the tree with players; both are sources with
+    // op level 4 and no entity or position.
+    commands::console::spawn(Arc::clone(&registry), Arc::clone(&world));
+    spawn_rcon(&cfg, Arc::clone(&registry), Arc::clone(&world));
     log::info("ready (SIGINT or SIGTERM stops cleanly)");
 
     // One thread per connection is the whole cost model, so cap how many we
@@ -541,6 +551,43 @@ fn warn_if_exposed(cfg: &Config) {
         log::warn(&format!(
             "listening on {} in offline mode with no whitelist: anyone can join under any name",
             cfg.server.host
+        ));
+    }
+}
+
+/// Start the RCON listener when it is enabled and configured.
+///
+/// The password was validated before the world opened ([`Config::rcon`]); a
+/// bind failure is logged, not fatal, so a bad RCON port cannot take down a
+/// server whose game port is fine.
+fn spawn_rcon(cfg: &Config, registry: SharedRegistry, world: Arc<DemoWorld>) {
+    if !cfg.rcon.enabled {
+        return;
+    }
+    let rcon = cfg.rcon.clone();
+    let spawned = std::thread::Builder::new()
+        .name("rcon".into())
+        .spawn(move || {
+            if let Err(e) = rcon::listen(&rcon, registry, world) {
+                log::error(&format!("rcon: cannot listen on {}: {e}", rcon.address()));
+            }
+        });
+    if spawned.is_err() {
+        log::error("rcon: cannot start the listener thread");
+    }
+    warn_if_rcon_exposed(cfg);
+}
+
+/// Say so when the RCON port is reachable off this machine.
+///
+/// Mirrors [`warn_if_exposed`]: RCON is authenticated, but a reachable password
+/// port that runs commands as the owner is worth an explicit line.
+fn warn_if_rcon_exposed(cfg: &Config) {
+    if cfg.rcon.enabled && cfg.rcon.is_public() {
+        log::warn(&format!(
+            "rcon: listening on {} — anyone who reaches that port and knows the password runs \
+             commands as the console; bind 127.0.0.1, or firewall it",
+            cfg.rcon.address()
         ));
     }
 }

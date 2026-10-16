@@ -3,7 +3,7 @@
 //! own candidates. Cheap by construction — it reads the shared tree and the
 //! online-player list, and takes no lock on the world.
 
-use super::{check, tree, ArgKind, CommandTree, Kind, StringReader};
+use super::{check, tree, ArgKind, CommandTree, Kind, Source, StringReader};
 use crate::players::{PlayerHandle, SharedRegistry};
 use crate::session::DemoWorld;
 
@@ -42,7 +42,7 @@ pub fn suggest_in(
         let start = r.cursor;
         let word = r.read_token();
         if let Some(child) = node.children.iter().find(|c| c.matches_literal(&word)) {
-            if check(&child.requirement, handle).is_ok() {
+            if check(&child.requirement, &Source::Player(handle)).is_ok() {
                 node = child;
                 continue;
             }
@@ -62,7 +62,7 @@ fn children(
 ) -> Vec<String> {
     let mut out = Vec::new();
     for child in &node.children {
-        if check(&child.requirement, handle).is_err() {
+        if check(&child.requirement, &Source::Player(handle)).is_err() {
             continue;
         }
         match &child.kind {
