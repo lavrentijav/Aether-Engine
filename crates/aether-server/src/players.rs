@@ -20,6 +20,7 @@ use crate::outbox::Outbox;
 use crate::proto::Conn;
 use std::collections::HashMap;
 use std::io;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::protocol::{BlockSource, ProtocolCodec, ServerEvent};
@@ -34,6 +35,15 @@ pub struct PosLook {
     pub pitch: f32,
     pub on_ground: bool,
 }
+
+/// No resource-pack status has arrived yet (also set for a codec that cannot
+/// report one). The plain compat stand-in is used.
+const PACK_UNKNOWN: u8 = 0;
+/// The client reported the compat pack `successfully_loaded`; carrier states
+/// may be sent.
+const PACK_LOADED: u8 = 1;
+/// The client declined the pack, or its download failed. Stand-ins stay.
+const PACK_NOT_LOADED: u8 = 2;
 
 /// One connected player, as seen by every other connection thread.
 pub struct PlayerHandle {
@@ -63,6 +73,25 @@ pub struct PlayerHandle {
     /// Anti-xray / visibility-culling bookkeeping for this client. See
     /// [`crate::visibility`].
     visibility: Mutex<crate::visibility::State>,
+    /// Did this client load the resource pack? `0` unknown, `1` loaded, `2` not
+    /// loaded (declined or failed). Read on every chunk render, so a plain
+    /// atomic rather than a lock. See `compat::pack`.
+    pack: AtomicU8,
+    /// Whether the pack this client was offered was *the compat pack*. The
+    /// status reply says a pack loaded, not which one, and the operator's plain
+    /// `[resource_pack]` would otherwise satisfy the gate and turn carriers on
+    /// without the carrier textures — so carriers require both this and the
+    /// loaded status. Set once, at join, from the offer the codec was handed.
+    compat_pack: AtomicBool,
+    /// The sidebar this client currently shows, so an update can diff against
+    /// it and resend only the lines that changed. `None` means hidden.
+    sidebar: Mutex<Option<crate::protocol::scoreboard::SidebarBoard>>,
+    /// The tab-list header/footer last sent, so an unchanged pair is not
+    /// resent every tick.
+    tab: Mutex<Option<(String, String)>>,
+    /// The last measured keep-alive round trip, in milliseconds. Read by the
+    /// `%ping%` placeholder; `0` until the first reply arrives.
+    ping_ms: std::sync::atomic::AtomicU32,
 }
 
 impl PlayerHandle {
@@ -74,6 +103,17 @@ impl PlayerHandle {
     /// Record a new position/look (called by the owning connection thread).
     pub fn set_pos(&self, p: PosLook) {
         *self.pos.lock().unwrap() = p;
+    }
+
+    /// Record a measured keep-alive round trip, in milliseconds.
+    pub fn set_ping(&self, ms: u32) {
+        self.ping_ms.store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The last measured keep-alive round trip, in milliseconds (`0` until the
+    /// first reply).
+    pub fn ping(&self) -> u32 {
+        self.ping_ms.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Borrow this player's command session (inspect mode, current pager).
@@ -189,34 +229,192 @@ impl PlayerHandle {
         self.outbox.push_paced(frames);
     }
 
+    /// Replace this client's sidebar, writing only the packets that change it.
+    ///
+    /// The diff lives here — next to the per-player state it needs — rather
+    /// than in the plugin, so the plugin may hand over the whole board on
+    /// every tick and only the lines that actually changed reach the client.
+    /// `None` hides the sidebar.
+    pub fn update_sidebar(
+        &self,
+        board: Option<&crate::protocol::scoreboard::SidebarBoard>,
+        world: &dyn BlockSource,
+    ) {
+        let style = self.codec.sidebar_style();
+        let ops = {
+            let mut prev = self.sidebar.lock().unwrap();
+            let ops = crate::protocol::scoreboard::present(style, prev.as_ref(), board);
+            *prev = board.cloned();
+            ops
+        };
+        for op in ops {
+            self.emit(&ServerEvent::Scoreboard(op), world);
+        }
+    }
+
+    /// Set this client's tab-list header and footer, resending only when the
+    /// pair actually changes.
+    pub fn set_tab_header_footer(&self, header: &str, footer: &str, world: &dyn BlockSource) {
+        {
+            let mut last = self.tab.lock().unwrap();
+            if last.as_ref() == Some(&(header.to_string(), footer.to_string())) {
+                return;
+            }
+            *last = Some((header.to_string(), footer.to_string()));
+        }
+        self.emit(
+            &ServerEvent::TabHeaderFooter {
+                header: header.to_string(),
+                footer: footer.to_string(),
+            },
+            world,
+        );
+    }
+
     fn render(&self, ev: &ServerEvent, world: &dyn BlockSource) -> Vec<Vec<u8>> {
         let legacy = if self.full() { None } else { ev.legacy() };
+        let ev = legacy.as_ref().unwrap_or(ev);
+        // The compat pack's carrier remap, only for a client that loaded the
+        // pack. A disguised block renders as a carrier state the codec then
+        // translates to this release exactly as it would any other block.
+        let table = self.pack_table();
         let packets = match ev {
             // Every codec reads a column block by block; give it a view that
             // copies each section once instead of locking per block.
             ServerEvent::ChunkColumn { cx, cz } => {
-                let view = crate::protocol::ColumnView::new(world, *cx, *cz);
-                // Anti-xray: mask the sections this player cannot see before
-                // the codec ever reads them, so every version's cheapest
-                // single-valued stone form falls out of the existing encoder.
-                let hidden = crate::visibility::hidden_mask_for_render(self, world, *cx, *cz);
-                if hidden != 0 {
-                    let fill = crate::visibility::fill_for(self);
-                    let masked =
-                        crate::visibility::MaskedColumn::new(&view, *cx, *cz, hidden, fill);
-                    self.codec.encode(ev, &masked)
-                } else {
-                    self.codec.encode(ev, &view)
+                let carrier_view;
+                let base: &dyn BlockSource = match table {
+                    Some(t) => {
+                        carrier_view = crate::protocol::compat::pack::CarrierView::new(world, t);
+                        &carrier_view
+                    }
+                    None => world,
+                };
+                let view = crate::protocol::ColumnView::new(base, *cx, *cz);
+                // Anti-xray: mask what this player cannot see before the codec
+                // ever reads it. Culling hides whole sections; engine hides
+                // individual buried ores. Both go through the existing per-
+                // version encoder, so no codec knows about either.
+                match crate::visibility::mask_for_render(self, world, *cx, *cz) {
+                    crate::visibility::ColumnMask::None => self.codec.encode(ev, &view),
+                    crate::visibility::ColumnMask::Sections { hidden, fill } => {
+                        let masked =
+                            crate::visibility::MaskedColumn::new(&view, *cx, *cz, hidden, fill);
+                        self.codec.encode(ev, &masked)
+                    }
+                    crate::visibility::ColumnMask::Engine => {
+                        let masked = crate::visibility::EngineColumn::new(
+                            &view,
+                            crate::visibility::hidden_states(),
+                        );
+                        let packets = self.codec.encode(ev, &masked);
+                        crate::visibility::record_engine(self, *cx, *cz, masked.masked_any());
+                        packets
+                    }
                 }
             }
             ServerEvent::UnloadColumn { cx, cz } => {
                 crate::visibility::forget_column(self, *cx, *cz);
-                self.codec.encode(legacy.as_ref().unwrap_or(ev), world)
+                self.codec.encode(ev, world)
             }
-            _ => self.codec.encode(legacy.as_ref().unwrap_or(ev), world),
+            // A single block change must be a carrier state too, or a placed
+            // or mined block would flip back to the stand-in — and it must be
+            // masked, or a server-side write of a hidden block (`/setblock`,
+            // creative, `/rollback`) would leak it.
+            ServerEvent::BlockChange { x, y, z, block } => {
+                let block = crate::visibility::mask_block(self, world, *x, *y, *z, *block);
+                match table {
+                    Some(t) => {
+                        let remapped = ServerEvent::BlockChange {
+                            x: *x,
+                            y: *y,
+                            z: *z,
+                            block: t.display(block),
+                        };
+                        self.codec.encode(&remapped, world)
+                    }
+                    None => {
+                        let masked = ServerEvent::BlockChange {
+                            x: *x,
+                            y: *y,
+                            z: *z,
+                            block,
+                        };
+                        self.codec.encode(&masked, world)
+                    }
+                }
+            }
+            // The scoreboard path is the same on every codec — its ids and
+            // field shapes come from the version table — so it is rendered
+            // here rather than duplicated in twenty-four `encode`s.
+            ServerEvent::Scoreboard(op) => match self.codec.scoreboard_wire() {
+                Some(wire) => crate::protocol::scoreboard::encode(&wire, op),
+                None => Vec::new(),
+            },
+            ServerEvent::TabHeaderFooter { header, footer } => {
+                match crate::protocol::scoreboard::tab_for(self.codec.protocol_id()) {
+                    Some(wire) => vec![crate::protocol::scoreboard::encode_tab(
+                        &wire, header, footer,
+                    )],
+                    None => Vec::new(),
+                }
+            }
+            _ => self.codec.encode(ev, world),
         };
         let threshold = self.outbox.threshold();
         packets.iter().map(|p| p.frame(threshold)).collect()
+    }
+
+    /// Record that the pack this client was offered is the compat pack, so a
+    /// later `successfully_loaded` status may turn carriers on. Called once, at
+    /// join, from the offer the codec was handed.
+    pub fn set_compat_pack_offered(&self) {
+        self.compat_pack.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the compat pack was the pack offered to this client.
+    pub fn compat_pack_offered(&self) -> bool {
+        self.compat_pack.load(Ordering::Relaxed)
+    }
+
+    /// Record the client's resource-pack status and report whether this
+    /// *newly* turned carriers on (so the caller can re-send the view once).
+    ///
+    /// `status` is the protocol's own enum. Being `accepted`/`downloaded` is
+    /// not enough: only a `successfully_loaded` client can render a carrier
+    /// state, so anything but `Loaded` keeps — or marks — the player on the
+    /// plain stand-in.
+    pub fn set_pack_status(&self, status: crate::protocol::PackStatus) -> bool {
+        use crate::protocol::PackStatus;
+        match status {
+            PackStatus::Loaded => self.pack.swap(PACK_LOADED, Ordering::Relaxed) == PACK_UNKNOWN,
+            PackStatus::Declined | PackStatus::Failed | PackStatus::InvalidUrl => {
+                self.pack.store(PACK_NOT_LOADED, Ordering::Relaxed);
+                false
+            }
+            // Accepted/downloaded are in-progress; an unknown value changes
+            // nothing.
+            _ => false,
+        }
+    }
+
+    /// Whether this client has the compat pack loaded, so carrier block states
+    /// are safe to send.
+    pub fn pack_loaded(&self) -> bool {
+        self.pack.load(Ordering::Relaxed) == PACK_LOADED
+    }
+
+    /// This client's carrier table, if the **compat** pack was offered to it,
+    /// it loaded it, and its release has a table. `None` — the common case —
+    /// means "render the plain stand-in".
+    ///
+    /// Requiring [`Self::compat_pack_offered`] and not only [`Self::pack_loaded`]
+    /// is the point: the operator's plain `[resource_pack]` also reports loaded,
+    /// and its client has none of the carrier textures.
+    fn pack_table(&self) -> Option<&'static crate::protocol::compat::pack::PackTable> {
+        (self.compat_pack_offered() && self.pack_loaded())
+            .then(|| crate::protocol::compat::pack::table_for(self.codec.protocol_id()))
+            .flatten()
     }
 
     /// Disconnect this player: their socket is shut down and their own thread
@@ -281,6 +479,11 @@ impl PlayerHandle {
             )),
             tracked: Mutex::new(std::collections::HashSet::new()),
             visibility: Mutex::new(crate::visibility::State::default()),
+            pack: AtomicU8::new(PACK_UNKNOWN),
+            compat_pack: AtomicBool::new(false),
+            sidebar: Mutex::new(None),
+            tab: Mutex::new(None),
+            ping_ms: std::sync::atomic::AtomicU32::new(0),
         })
     }
 }
@@ -321,6 +524,11 @@ impl Registry {
             )),
             tracked: Mutex::new(std::collections::HashSet::new()),
             visibility: Mutex::new(crate::visibility::State::default()),
+            pack: AtomicU8::new(PACK_UNKNOWN),
+            compat_pack: AtomicBool::new(false),
+            sidebar: Mutex::new(None),
+            tab: Mutex::new(None),
+            ping_ms: std::sync::atomic::AtomicU32::new(0),
         });
         self.players
             .write()
@@ -416,5 +624,160 @@ impl Registry {
                 handle.emit(ev, world);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::read_packet_from;
+    use crate::protocol::{codec_for, BlockSource};
+    use aether_world::registry::blocks::default_state;
+    use aether_world::BlockStateId;
+    use std::net::{TcpListener, TcpStream};
+
+    /// A `BlockSource` with nothing in it; the render test only uses
+    /// `BlockChange`, which carries its own block.
+    struct Empty;
+    impl BlockSource for Empty {
+        fn block_at(&self, _: i32, _: i32, _: i32) -> BlockStateId {
+            aether_api::block_ids::AIR
+        }
+    }
+
+    fn handle(codec: &'static dyn ProtocolCodec) -> Arc<PlayerHandle> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = Conn::new(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        let _peer = listener.accept().unwrap();
+        Registry::default()
+            .join(
+                1,
+                0,
+                "tester".into(),
+                None,
+                Vec::new(),
+                codec,
+                &client,
+                PosLook {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    on_ground: true,
+                },
+            )
+            .unwrap()
+    }
+
+    /// The block-state VarInt of the first framed packet, which for a
+    /// `BlockChange` is `id` then `i64 position` then the state.
+    fn block_change_state(handle: &PlayerHandle) -> i32 {
+        let block = default_state("minecraft:pale_oak_planks").unwrap();
+        let ev = ServerEvent::BlockChange {
+            x: 0,
+            y: 0,
+            z: 0,
+            block,
+        };
+        let frames = handle.render(&ev, &Empty);
+        let mut cur = frames[0].as_slice();
+        let pkt = read_packet_from(&mut cur, None).unwrap().unwrap();
+        let mut pin = crate::proto::PacketIn::new(&pkt.data);
+        let _pos = pin.i64().unwrap();
+        pin.var_int().unwrap()
+    }
+
+    #[test]
+    fn a_pack_bearing_client_sees_the_carrier_and_others_the_stand_in() {
+        let codec = codec_for(763).unwrap();
+        let table = crate::protocol::compat::pack::table_for(763).unwrap();
+        let block = default_state("minecraft:pale_oak_planks").unwrap();
+        let carrier_wire = crate::protocol::compat::V1_20_1.state(table.carrier(block).unwrap());
+
+        // Before the pack is loaded: the plain stand-in, never the carrier.
+        let early = handle(codec);
+        assert!(!early.pack_loaded());
+        assert_ne!(block_change_state(&early), carrier_wire as i32);
+
+        // The compat pack was offered and loaded: the carrier state this
+        // release draws the real block on.
+        use crate::protocol::PackStatus;
+        let loaded = handle(codec);
+        loaded.set_compat_pack_offered();
+        assert!(
+            loaded.set_pack_status(PackStatus::Loaded),
+            "the first load is a transition"
+        );
+        assert!(
+            !loaded.set_pack_status(PackStatus::Loaded),
+            "a repeat load is not"
+        );
+        assert!(loaded.pack_loaded());
+        assert_eq!(block_change_state(&loaded), carrier_wire as i32);
+
+        // Accepted-but-not-loaded, and declined, both stay on the stand-in.
+        for status in [
+            PackStatus::Accepted,
+            PackStatus::Downloaded,
+            PackStatus::Declined,
+            PackStatus::Failed,
+            PackStatus::InvalidUrl,
+            PackStatus::Unknown,
+        ] {
+            let h = handle(codec);
+            h.set_pack_status(status);
+            assert!(!h.pack_loaded(), "{status:?} is not successfully_loaded");
+            assert_ne!(block_change_state(&h), carrier_wire as i32);
+        }
+    }
+
+    #[test]
+    fn a_client_that_loaded_a_different_pack_never_sees_carriers() {
+        // Review 1 blocker: the operator's plain `[resource_pack]` also reports
+        // loaded, but its client has none of the carrier textures. Only a
+        // client the *compat* pack was offered may be remapped, even when its
+        // status says a pack loaded.
+        let codec = codec_for(763).unwrap();
+        let table = crate::protocol::compat::pack::table_for(763).unwrap();
+        let block = default_state("minecraft:pale_oak_planks").unwrap();
+        let carrier_wire = crate::protocol::compat::V1_20_1.state(table.carrier(block).unwrap());
+
+        let h = handle(codec);
+        assert!(!h.compat_pack_offered(), "the plain pack was offered");
+        h.set_pack_status(crate::protocol::PackStatus::Loaded);
+        assert!(h.pack_loaded(), "the plain pack loaded");
+        assert!(h.pack_table().is_none(), "but carriers stay off");
+        assert_ne!(block_change_state(&h), carrier_wire as i32);
+    }
+
+    #[test]
+    fn a_codec_that_sends_no_hotbar_seeds_nothing() {
+        // Review 1 minor: 1.17–1.20.1 never send the hotbar, so seeding the
+        // server inventory would make `held_item` fictional and let the
+        // placement path prefer a block the client was never given. Their
+        // `initial_hotbar` is empty, so nothing is seeded and placement keeps
+        // its own fallback.
+        let codec = codec_for(763).unwrap();
+        let h = handle(codec);
+        h.seed_hotbar(&codec.initial_hotbar());
+        assert!(h.held_item().is_none(), "nothing was handed out");
+
+        // 1.8.9 does send it, so it is seeded.
+        let v47 = codec_for(47).unwrap();
+        let h = handle(v47);
+        h.seed_hotbar(&v47.initial_hotbar());
+        assert!(h.held_item().is_some());
+    }
+
+    #[test]
+    fn a_release_with_no_generated_pack_is_never_remapped() {
+        // 1.8.9 has no carrier table, so even a loaded compat pack changes
+        // nothing.
+        let h = handle(codec_for(47).unwrap());
+        h.set_compat_pack_offered();
+        h.set_pack_status(crate::protocol::PackStatus::Loaded);
+        assert!(h.pack_loaded() && h.compat_pack_offered());
+        assert!(h.pack_table().is_none());
     }
 }

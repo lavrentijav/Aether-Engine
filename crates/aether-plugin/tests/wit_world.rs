@@ -128,6 +128,8 @@ const SDK_SERVICE_INTERFACES: &[&str] = &[
     "scheduler",
     "cooldowns",
     "confirm",
+    "history",
+    "placeholders",
 ];
 
 #[test]
@@ -139,6 +141,10 @@ fn the_sdk_service_world_imports_every_service_interface() {
     resolve
         .push_dir(root.join("wit"))
         .expect("the plugin WIT must parse");
+    // The SDK world imports the sidebar package, so it must resolve first.
+    resolve
+        .push_dir(root.join("wit-sidebar"))
+        .expect("the sidebar WIT must parse");
     let (pkg, _) = resolve
         .push_dir(root.join("wit-sdk"))
         .expect("the SDK WIT must parse");
@@ -166,5 +172,42 @@ fn the_sdk_service_world_imports_every_service_interface() {
     assert!(
         imports.contains("host") && imports.contains("types"),
         "the plugin host interfaces must be imported once here: {imports:?}"
+    );
+    // The sidebar service is imported too (a separate, independently versioned
+    // package), so the host generates one linker covering it.
+    assert!(
+        imports.contains("sidebar"),
+        "the sidebar service must be imported by the combined world: {imports:?}"
+    );
+}
+
+#[test]
+fn the_sidebar_package_pins_its_interface_and_version() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut resolve = Resolve::default();
+    resolve
+        .push_dir(root.join("wit"))
+        .expect("the plugin WIT must parse");
+    let (pkg, _) = resolve
+        .push_dir(root.join("wit-sidebar"))
+        .expect("the sidebar WIT must parse");
+    let package = &resolve.packages[pkg];
+    assert_eq!(package.name.namespace, "aether");
+    assert_eq!(package.name.name, "sidebar");
+    assert_eq!(
+        package
+            .name
+            .version
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("0.1.0"),
+        "the sidebar service version is part of what a component is built against"
+    );
+    let interfaces: BTreeSet<&str> = package.interfaces.keys().map(String::as_str).collect();
+    assert_eq!(
+        interfaces,
+        BTreeSet::from(["sidebar"]),
+        "one interface; a second role gets its own package"
     );
 }

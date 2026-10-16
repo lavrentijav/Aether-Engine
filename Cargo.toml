@@ -22,6 +22,9 @@ members = [
     # The menus native plugin (tier N): the shared chest-menu host, exported as
     # a `menus` service for every other plugin.
     "plugins/menus",
+    # The sidebar, as a native plugin: it composes a per-player scoreboard from
+    # config and placeholders and asks the core to draw it.
+    "plugins/sidebar",
 ]
 
 # The example plugins are separate WebAssembly components: they target

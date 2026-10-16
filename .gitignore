@@ -34,5 +34,10 @@ logs/
 nohup.out
 .claude/
 
+# Generated compat resource packs: built from the operator's own client jar, so
+# they carry vanilla textures and are never committed. See docs/design/
+# compat-resource-pack.md and tools/pack/build.js.
+/packs/
+
 # The live server config: machine-specific, copied from aether-server.example.toml
 /aether-server.toml

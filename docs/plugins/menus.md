@@ -108,11 +108,11 @@ how many clicks arrived.
 (titles, item names/lore, messages, commands). An unknown placeholder is left
 verbatim rather than blanked.
 
-Plugin-provided placeholders are **not** resolved by this plugin: a shared
-`placeholders` service is being added to the SDK plugin (queue SB1), and that
-service is the one place they should resolve. Until it lands, only `%player%`
-expands; the expansion hook is `plugins/menus` `Menus::expand`, which will call
-the service for each `%name%` left in the text.
+Plugin-provided placeholders are **not** yet resolved by this plugin: SB1
+lands a shared `sdk.placeholders@0.1` registry that is the one place they
+resolve, but menus do not read it yet. Until they do, only `%player%` expands;
+the expansion hook is `plugins/menus` `Menus::expand`, which will call the
+registry for each `%name%` left in the text.
 
 ## Building on this
 
@@ -123,5 +123,5 @@ the service for each `%name%` left in the text.
   honestly: `balance` conditions fail closed and `[economy]` is inert until the
   service exists. `[give]` and `[sound]` go through the core.
 
-See [KNOWN_ISSUES §20](../KNOWN_ISSUES.md) for the current limits (window
+See [KNOWN_ISSUES §21](../KNOWN_ISSUES.md) for the current limits (window
 shapes, glint/model rendering, pre-1.20.2 codecs).

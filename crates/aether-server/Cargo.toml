@@ -42,6 +42,9 @@ aether-sdk-plugin = { path = "../../plugins/sdk", optional = true }
 # The menus native plugin (tier N): the shared chest-menu host every other
 # plugin opens menus through, and the provider of the `menus` service.
 aether-menus-plugin = { path = "../../plugins/menus", optional = true }
+# The sidebar native plugin. Loaded after the SDK, so its optional permission
+# checks resolve the SDK's service.
+aether-sidebar-plugin = { path = "../../plugins/sidebar", optional = true }
 postgres = { version = "0.19.10", optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -67,6 +70,11 @@ name = "visibility"
 harness = false
 test = false
 
+[[bench]]
+name = "anti_xray"
+harness = false
+test = false
+
 [lints]
 workspace = true
 
@@ -75,5 +83,5 @@ workspace = true
 # build that does not need Wasmtime (tests, a minimal deployment) can drop it
 # with `--no-default-features`.
 default = ["plugins"]
-plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-menus-plugin"]
+plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-menus-plugin", "dep:aether-sidebar-plugin"]
 postgres = ["dep:postgres"]

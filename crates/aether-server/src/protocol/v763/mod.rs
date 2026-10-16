@@ -21,9 +21,12 @@ pub mod registry;
 
 use std::io;
 
-use aether_world::BlockStateId;
+use aether_world::{BlockStateId, ItemTypeId};
 
-use super::{json_escape, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
+use super::{
+    json_escape, legacy_codec_item_hooks, BlockSource, ClientEvent, JoinParams, ProtocolCodec,
+    ServerEvent,
+};
 use crate::players::PosLook;
 use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
 
@@ -69,6 +72,7 @@ const SB_POSITION: i32 = 0x14;
 const SB_POSITION_LOOK: i32 = 0x15;
 const SB_LOOK: i32 = 0x16;
 const SB_FLYING: i32 = 0x17;
+const SB_KEEP_ALIVE: i32 = 0x12;
 const SB_DIG: i32 = 0x1d;
 const SB_PLACE: i32 = 0x31;
 
@@ -92,6 +96,8 @@ impl ProtocolCodec for Codec {
     fn protocol_id(&self) -> i32 {
         PROTOCOL
     }
+
+    legacy_codec_item_hooks!(PROTOCOL, 0x24, false);
 
     fn read_login_start(&self, s: &mut Conn) -> io::Result<Option<String>> {
         // Login Start: the username comes first. Whatever follows it in this
@@ -293,6 +299,12 @@ impl ProtocolCodec for Codec {
         // server's view of the block. It is read from the end because the
         // fields in front of it differ between releases.
         let seq = super::trailing_var_int(&pkt.data);
+        if pkt.id == SB_KEEP_ALIVE {
+            return match pin.i64() {
+                Ok(id) => ClientEvent::KeepAlive(id),
+                Err(_) => ClientEvent::Ignored,
+            };
+        }
         // Movement carries a plain `onGround` bool in this generation; the
         // packed flags byte only arrives much later.
         if pkt.id == SB_POSITION {

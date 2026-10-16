@@ -87,6 +87,28 @@ pub trait KvBackend: Send + Sync {
         }
         Ok(())
     }
+    /// Visit every entry whose key starts with `prefix`, in **descending** key
+    /// order, without collecting them first.
+    ///
+    /// The journal's column and actor indexes end in a big-endian sequence
+    /// number, so a reverse scan yields a block's or a player's newest events
+    /// first, and a query that wants the newest `limit` stops after reading
+    /// exactly that many rather than materialising the whole index. The
+    /// default materialises (all an in-memory store can do); a real backend
+    /// overrides it so the scan is lazy.
+    fn scan_prefix_each_rev(
+        &self,
+        prefix: &[u8],
+        f: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, StorageError>,
+    ) -> Result<(), StorageError> {
+        let items = self.scan_prefix(prefix)?;
+        for (k, v) in items.into_iter().rev() {
+            if !f(&k, &v)? {
+                break;
+            }
+        }
+        Ok(())
+    }
     /// Flush any buffered writes to durable storage.
     fn flush(&self) -> Result<(), StorageError> {
         Ok(())
@@ -118,6 +140,13 @@ impl<B: KvBackend + ?Sized> KvBackend for std::sync::Arc<B> {
     ) -> Result<(), StorageError> {
         (**self).scan_prefix_each(prefix, f)
     }
+    fn scan_prefix_each_rev(
+        &self,
+        prefix: &[u8],
+        f: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, StorageError>,
+    ) -> Result<(), StorageError> {
+        (**self).scan_prefix_each_rev(prefix, f)
+    }
     fn flush(&self) -> Result<(), StorageError> {
         (**self).flush()
     }
@@ -142,6 +171,13 @@ impl<B: KvBackend + ?Sized> KvBackend for &B {
         f: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, StorageError>,
     ) -> Result<(), StorageError> {
         (**self).scan_prefix_each(prefix, f)
+    }
+    fn scan_prefix_each_rev(
+        &self,
+        prefix: &[u8],
+        f: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, StorageError>,
+    ) -> Result<(), StorageError> {
+        (**self).scan_prefix_each_rev(prefix, f)
     }
     fn flush(&self) -> Result<(), StorageError> {
         (**self).flush()
@@ -277,6 +313,21 @@ mod fjall_backend {
             f: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, StorageError>,
         ) -> Result<(), StorageError> {
             for item in self.partition.prefix(prefix) {
+                let (k, v) = item.map_err(|e| StorageError::Backend(e.to_string()))?;
+                if !f(&k, &v)? {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        fn scan_prefix_each_rev(
+            &self,
+            prefix: &[u8],
+            f: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool, StorageError>,
+        ) -> Result<(), StorageError> {
+            // Fjall's prefix iterator is double-ended, so this walks the
+            // index backwards without materialising it.
+            for item in self.partition.prefix(prefix).rev() {
                 let (k, v) = item.map_err(|e| StorageError::Backend(e.to_string()))?;
                 if !f(&k, &v)? {
                     break;

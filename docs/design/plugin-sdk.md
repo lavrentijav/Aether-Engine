@@ -176,6 +176,17 @@ interface confirm {
     request: func(p: player, prompt: string, command: string) -> bool;
 }
 
+interface history {                     // read-only journal queries (PA2)
+    // block-history / worldgen-original / events / item-chain /
+    // container-log / player-events, all paged; see `history-api.md`
+}
+
+interface placeholders {                // shared %name% registry (sidebar, menus, chat)
+    register: func(name: string) -> bool;               // declare a token this caller will fill
+    set: func(name: string, p: player, value: string);  // push a value for one player
+    resolve: func(p: player, text: string) -> string;   // substitute %name% for p
+}
+
 interface services {                    // optional dependencies
     lookup: func(name: string, version: string) -> bool;
 }
@@ -228,6 +239,11 @@ Three coordinated declarations, checked at load:
    client mirrors the manifest `requires` list, so the two cannot drift, and a dependent runs
    `generate!` in-crate against the shipped `dependent` world (see §11).
 
+   A non-SDK service rides the same way: the **sidebar** service is its own package
+   (`aether:sidebar@0.1`, imported by `dependent` and by the host's combined `services` world) and
+   is not a `requires` — a plugin that wants it imports it, and a host without the `plugins/sidebar`
+   provider refuses the call neutrally. See [`sidebar.md`](sidebar.md).
+
 **Optional services** (economy, regions) use the same machinery but are **not** declared as
 `requires`: a dependent calls `services.lookup("economy", "0.1")`, gets `false`/`None` when absent,
 and degrades. Only hard dependencies go in `requires`.
@@ -250,6 +266,8 @@ own invariants (e.g. `grant` needs `permissions.admin`).
 | `scheduler` | timer wheel, run-later/every/cancel, async (native) | own `on-tick` |
 | `cooldowns` | per-dependent, per-key last-tick maps | clock |
 | `confirm` | pending confirmations + expiry | `scheduler` |
+| `history` | read-only facade + the `history.read` capability gate | core journal queries (PA2) |
+| `placeholders` | the shared `%name%` registry + a resolved-token cache | host per-player view (built-ins) |
 | `services` | optional-service lookup facade | host registry |
 
 **Does not own:** the permission *model* (core CMD-01/02 owns nodes, groups, inheritance,
@@ -411,6 +429,54 @@ if services().lookup("regions", "0.1") { /* use typed handle */ }
 
 Not `requires`: absence is `None`/`false`, never a trap (the `supports()` philosophy). Lookup is
 done once in `init` and cached; a call is one service call.
+
+### 7.9 Placeholders — one shared `%name%` registry
+
+Placeholders are consumed by the sidebar, chest menus and chat alike, so their registry is **one
+SDK service**, not a table inside each consumer. A token registered once shows up wherever it
+appears. Native and WASM register differently, because a component cannot hand the host a closure:
+
+```rust
+// Native provider (e.g. economy): a closure, resolved against a query.
+placeholders().register("economy_balance".into(),
+    Arc::new(|q| economy.balance(q.player).map(|m| m.to_string())))?;
+```
+
+```rust
+// WASM provider (e.g. economy/donate): declare once, push per player.
+placeholders::register("economy_balance");
+placeholders::set("economy_balance", &p, balance.to_string());
+```
+
+Any consumer resolves whole text for a player:
+
+```rust
+let line = placeholders().resolve("sidebar", &p, "&6%rank_prefix% &f%player%");
+```
+
+- **Resolution order:** a native provider, then a pushed value, then a **built-in**. Built-ins come
+  from the host's per-player view (`%player%`, `%displayname%`, `%ping%`, `%online%`, `%max%`,
+  `%world%`, `%x%`/`%y%`/`%z%`, `%tps%`, `%health%`, `%level%`, `%time%`/`%world_time%`,
+  `%server_time%`). An unknown token is left **literal**, so a typo is visible rather than
+  vanishing.
+- **Trust — ownership, not a shared global namespace.** A custom name is **owned by the caller that
+  first registers or pushes it**; a second caller's `register`/`register_name`/`set_value` for that
+  name is refused (and logged), so an untrusted WASM plugin cannot spoof another's
+  `%economy_balance%`. The **built-in** names are reserved from the pushed path: a plugin may not
+  `set` `%player%`/`%tps%`/… . A **native** closure *may* shadow a built-in (it is trusted-by-install)
+  — e.g. a plugin's own `%tps%`. **Reading** (`resolve`) is unrestricted, which is the point of a
+  shared registry: the sidebar resolves `%economy_balance%` owned by the economy plugin. Names are
+  chosen by convention (`economy_balance`, `rank_prefix`); first writer owns the slot.
+- **Caching.** Each resolved token is cached **per player, per token** for `placeholder_cache_ticks`
+  (`[plugins.sdk]`, default 20 = one second), so a database-backed provider is not called for every
+  consumer on every redraw. A **pushed** value (`set`) and a newly registered provider take effect
+  immediately (the cache is refreshed/cleared), so an interactive value is never stale. The
+  per-player query (position, ping) is rebuilt each tick, so a moved player is not frozen.
+- **Cost:** a native `resolve` is one in-process call; a WASM one is one boundary crossing. The
+  tokenizer is a single pass and allocates one `String` for the result.
+
+`plugins/sidebar` **requires** this service (`sdk.placeholders@0.1`) and resolves every title/line
+through it — see [`sidebar.md`](sidebar.md).
 
 ## 8. Cost per call
 

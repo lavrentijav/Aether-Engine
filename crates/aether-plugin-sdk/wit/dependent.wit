@@ -21,6 +21,17 @@ world dependent {
     import aether:sdk/scheduler@0.1.0;
     import aether:sdk/cooldowns@0.1.0;
     import aether:sdk/confirm@0.1.0;
+    import aether:sdk/history@0.1.0;
+
+    /// The shared placeholder registry (the SDK plugin), so a dependent can
+    /// feed tokens (`%economy_balance%`) that the sidebar, menus and chat all
+    /// read.
+    import aether:sdk/placeholders@0.1.0;
+
+    /// The sidebar service, so a dependent can override a line or toggle a
+    /// player's panel. Its provider is the `plugins/sidebar` plugin, which may
+    /// be disabled — the call then returns the neutral answer.
+    import aether:sidebar/sidebar@0.1.0;
 
     /// The shared menus service (native `plugins/menus`). Opening a menu is
     /// one call; the core keeps every click out of the player's inventory.

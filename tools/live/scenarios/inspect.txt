@@ -1,18 +1,38 @@
-# 2. inspect — /inspect on, hit a block, read history, /inspect off.
+# 2. inspect — place a block, /inspect it, read its history, /inspect off.
+# The bot's world spawn is around (56.5, 63, 8.5); 57 63 8 is an air cell in
+# reach. (The operator account used to have a personal spawn near -8 70 8, so
+# these coordinates follow the account change; see last-run.md.)
 wait 22
 send /gamemode creative
 wait 3
 expect is now in Creative mode
-send /inspect
-wait 3
-expect Inspect mode ON
-send /look down
+send /spawn
 wait 2
-expect Looking Down
-send /dig
-wait 5
-expect Attempting to dig block
-expect page 1 of
+expect Teleported to spawn
+send /inventory creativedelete 36
+wait 1
+expect Requested to clear slot #36
+send /give minecraft:stone 64
+wait 2
+expect Gave 64 minecraft:stone
+send /changeslot 1
+wait 1
+expect Changed to slot 1
+send /dig 57 63 8
+wait 3
+send /useblock 57 63 8
+wait 2
+expect Useblock at
+send /block 57 63 8
+wait 2
+expect 57 63 8: minecraft:stone
+send /inspect
+wait 2
+expect Inspect mode ON
+send /dig 57 63 8
+wait 4
+expect page [0-9]+ of
+expect placed minecraft:stone
 reject unsupported journal format
 reject journal format
 reject incompatible

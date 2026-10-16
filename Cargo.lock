@@ -136,6 +136,7 @@ dependencies = [
  "aether-menus-plugin",
  "aether-plugin",
  "aether-sdk-plugin",
+ "aether-sidebar-plugin",
  "aether-world",
  "aether-worldgen",
  "cfb8",
@@ -149,6 +150,15 @@ dependencies = [
  "rsa",
  "serde",
  "sha1",
+ "toml",
+]
+
+[[package]]
+name = "aether-sidebar-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-plugin",
+ "serde",
  "toml",
 ]
 

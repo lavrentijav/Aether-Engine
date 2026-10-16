@@ -151,6 +151,74 @@ impl ResourcePackConfig {
     }
 }
 
+/// `[compat.pack]` settings: the per-version resource packs that re-skin only
+/// the block stand-ins. See `docs/design/compat-resource-pack.md`.
+///
+/// The server still only *points* at a pack; a generated pack is produced at
+/// build/deploy time by `tools/pack/build.js` and served by the operator (or by
+/// whatever hosts `url`). A client only ever sees a carrier block state when
+/// its pack status is `successfully_loaded`, so this being off — or a client
+/// declining it — leaves the plain compat stand-in in place.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CompatPackConfig {
+    /// Offer the generated per-version compat pack. Off by default.
+    pub enabled: bool,
+    /// Download URL the client fetches the pack from. Empty disables the
+    /// offer even when `enabled` is set.
+    pub url: String,
+    /// SHA-1 of the pack file, lowercase hex. Clients cache on this.
+    pub hash: String,
+    /// Whether the client must accept the pack to keep playing. `false` by
+    /// default: a declined pack falls back to the plain stand-in rather than
+    /// disconnecting.
+    pub required: bool,
+    /// The `pack_format` the configured pack declares. Enforced against the
+    /// generated carrier table's own format: a mismatch means the pack is for a
+    /// different release, so the compat pack is not offered to that client
+    /// (the plain `[resource_pack]`, if any, applies instead). `0` never
+    /// matches a real table, so leaving it unset keeps the pack off.
+    pub pack_format: u32,
+    /// Directory the generated packs live in (used by `tools/pack/build.js`,
+    /// not read by the server).
+    pub dir: String,
+    /// Vanilla client jar the pack textures are read from at build time. Never
+    /// shipped or read by the server at run time.
+    pub client_jar: String,
+}
+
+impl CompatPackConfig {
+    /// Whether a compat pack should be offered at all.
+    pub fn active(&self) -> bool {
+        self.enabled && !self.url.is_empty()
+    }
+
+    /// Whether the configured pack may be offered to a release whose generated
+    /// carrier table declares `format`. The contract the resource pack rests
+    /// on: the pack's `pack_format` must be the release's.
+    pub fn offers_format(&self, format: u32) -> bool {
+        self.pack_format != 0 && self.pack_format == format
+    }
+
+    /// The resource-pack offer to send, in the shape every codec already
+    /// knows how to encode.
+    pub fn offer(&self) -> ResourcePackConfig {
+        ResourcePackConfig {
+            url: self.url.clone(),
+            hash: self.hash.clone(),
+            required: self.required,
+        }
+    }
+}
+
+/// `[compat]` settings: the version-compatibility layer's optional extras.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CompatConfig {
+    /// The per-version stand-in resource packs.
+    pub pack: CompatPackConfig,
+}
+
 /// `[plugins]` settings: where WebAssembly plugins live and their limits.
 ///
 /// The table is both the global settings and the per-plugin overrides:
@@ -198,32 +266,99 @@ impl Default for PluginsConfig {
     }
 }
 
-/// `[visibility]` settings: the optional anti-xray / visibility-culling module.
+/// `[anti_xray]` settings: the optional anti-xray module.
 ///
-/// Off by default. When on, a section the player cannot see is sent as solid
-/// stone (or air) instead of its real blocks, so x-ray mods and transparent
-/// packs see nothing that is not already on screen. See
-/// `docs/design/visibility-culling.md`.
-#[derive(Debug, Clone, Deserialize)]
+/// Off by default. Ore/x-ray cheats must see nothing useful, so blocks a
+/// player has no way to see are not sent as themselves. Two modes:
+/// - `engine` (cheap, the default): an ore-like block that is fully enclosed
+///   by opaque blocks is sent as the surrounding stone/deepslate/netherrack
+///   and revealed again the moment a neighbour changes (break, explosion,
+///   fluid) so it is on the client before the player can mine to it.
+/// - `culling` (the design in `docs/design/visibility-culling.md`): a whole
+///   section the player cannot see, even after turning or moving a little, is
+///   sent as solid stone instead of its real blocks.
+///
+/// The permission node [`crate::ANTIXRAY_BYPASS_PERMISSION`] (currently held
+/// by operators) lets a player see everything; so does
+/// [`Self::bypass_players`] and `/visibility off`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
-pub struct VisibilityConfig {
-    /// Whether to cull at all. Off until proven.
+pub struct AntiXrayConfig {
+    /// Whether the module runs at all. Off until proven.
     pub enabled: bool,
-    /// How far, in blocks, a section may be from the player and still be sent
-    /// for real without being reached by sight — the "could see it if he
-    /// turned his head or took a step" sphere.
+    /// Which masking strategy to use.
+    pub mode: AntiXrayMode,
+    /// Block names never sent as themselves while fully enclosed. Names are
+    /// accepted with or without the `minecraft:` namespace. Empty means the
+    /// built-in ore list.
+    pub hidden_blocks: Vec<String>,
+    /// The world the module applies to (empty = all).
+    ///
+    /// The server runs one world per process, so this is the per-world toggle
+    /// for a deployment that shares a config across several world
+    /// directories; it matches the last component of `[server] world_dir`.
+    pub worlds: Vec<String>,
+    /// `culling` mode only: how far, in blocks, a section may be from the
+    /// player and still be sent for real without being reached by sight —
+    /// the "could see it if he turned his head or took a step" sphere.
     pub margin_blocks: i32,
-    /// What a hidden section is encoded as.
+    /// `culling` mode only: what a hidden section is encoded as.
     pub hidden_fill: HiddenFill,
-    /// Optional ray refinement — reserved; not implemented.
+    /// `culling` mode only: how many columns may be re-sent (revealed) per
+    /// tick.
+    pub reveal_budget_per_tick: u32,
+    /// Player names always allowed to bypass, in addition to the operators and
+    /// the permission node.
+    pub bypass_players: Vec<String>,
+    /// Deprecated (pre-AX1, used to live under `[visibility]`): accepted and
+    /// ignored, so an old file does not silently lose the key.
+    pub ray_refinement: Option<bool>,
+    /// Deprecated (pre-AX1): accepted and ignored. Engine mode is the
+    /// replacement for the old "buried ore masking" idea.
+    pub mask_buried_ores: Option<bool>,
+}
+
+impl Default for AntiXrayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: AntiXrayMode::Engine,
+            hidden_blocks: Vec::new(),
+            worlds: Vec::new(),
+            margin_blocks: 5,
+            hidden_fill: HiddenFill::Stone,
+            reveal_budget_per_tick: 32,
+            bypass_players: Vec::new(),
+            ray_refinement: None,
+            mask_buried_ores: None,
+        }
+    }
+}
+
+/// The pre-AX1 `[visibility]` table, accepted for backward compatibility.
+///
+/// Before AX1 this was the whole module and always meant section culling, so a
+/// file that still uses it is migrated to `[anti_xray] mode = "culling"` by
+/// [`Config::migrate_legacy`], with a warning, rather than silently becoming
+/// `engine` (or, worse, nothing).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct LegacyVisibilityConfig {
+    /// Whether culling ran at all.
+    pub enabled: bool,
+    /// The margin, in blocks.
+    pub margin_blocks: i32,
+    /// What a hidden section was encoded as.
+    pub hidden_fill: HiddenFill,
+    /// Reserved then; ignored now.
     pub ray_refinement: bool,
-    /// Block-level buried-ore masking — reserved; not implemented.
+    /// Reserved then; ignored now.
     pub mask_buried_ores: bool,
-    /// How many columns may be re-sent (revealed) per tick.
+    /// Columns re-sent per tick.
     pub reveal_budget_per_tick: u32,
 }
 
-impl Default for VisibilityConfig {
+impl Default for LegacyVisibilityConfig {
     fn default() -> Self {
         Self {
             enabled: false,
@@ -234,6 +369,94 @@ impl Default for VisibilityConfig {
             reveal_budget_per_tick: 32,
         }
     }
+}
+
+impl From<LegacyVisibilityConfig> for AntiXrayConfig {
+    fn from(l: LegacyVisibilityConfig) -> Self {
+        AntiXrayConfig {
+            enabled: l.enabled,
+            mode: AntiXrayMode::Culling,
+            hidden_blocks: Vec::new(),
+            worlds: Vec::new(),
+            margin_blocks: l.margin_blocks,
+            hidden_fill: l.hidden_fill,
+            reveal_budget_per_tick: l.reveal_budget_per_tick,
+            bypass_players: Vec::new(),
+            ray_refinement: Some(l.ray_refinement),
+            mask_buried_ores: Some(l.mask_buried_ores),
+        }
+    }
+}
+
+impl AntiXrayConfig {
+    /// The effective hidden-block list: the configured names, or the built-in
+    /// ore list when none are given.
+    pub fn hidden_block_names(&self) -> Vec<String> {
+        if self.hidden_blocks.is_empty() {
+            default_hidden_blocks()
+        } else {
+            self.hidden_blocks.clone()
+        }
+    }
+
+    /// Whether the module applies to a world directory. `worlds` empty means
+    /// every world; otherwise the last path component must match, ignoring
+    /// case and a trailing slash.
+    pub fn applies_to_world(&self, world_dir: &str) -> bool {
+        if self.worlds.is_empty() {
+            return true;
+        }
+        let name = world_dir
+            .trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(world_dir);
+        self.worlds.iter().any(|w| w.eq_ignore_ascii_case(name))
+    }
+}
+
+/// Which anti-xray strategy the server runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AntiXrayMode {
+    /// Hide enclosed ore-like blocks in otherwise real columns. Cheap: only
+    /// ore-candidate blocks do any work.
+    #[default]
+    Engine,
+    /// Hide whole sections the player cannot reach by sight.
+    Culling,
+}
+
+/// The built-in hidden-block list: every ore, ancient debris and monster
+/// spawner. Chests of worldgen structures are deliberately **not** here — the
+/// generator keeps no block entity, so hiding them would hide natural loot
+/// chests without hiding the container texture a player already knows.
+pub fn default_hidden_blocks() -> Vec<String> {
+    [
+        "minecraft:coal_ore",
+        "minecraft:deepslate_coal_ore",
+        "minecraft:iron_ore",
+        "minecraft:deepslate_iron_ore",
+        "minecraft:copper_ore",
+        "minecraft:deepslate_copper_ore",
+        "minecraft:gold_ore",
+        "minecraft:deepslate_gold_ore",
+        "minecraft:redstone_ore",
+        "minecraft:deepslate_redstone_ore",
+        "minecraft:lapis_ore",
+        "minecraft:deepslate_lapis_ore",
+        "minecraft:diamond_ore",
+        "minecraft:deepslate_diamond_ore",
+        "minecraft:emerald_ore",
+        "minecraft:deepslate_emerald_ore",
+        "minecraft:nether_gold_ore",
+        "minecraft:nether_quartz_ore",
+        "minecraft:ancient_debris",
+        "minecraft:spawner",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 /// `[auth]` settings: who may claim a name.
@@ -360,8 +583,14 @@ pub struct Config {
     pub server: ServerConfig,
     /// Optional resource pack offered on join.
     pub resource_pack: ResourcePackConfig,
-    /// Optional anti-xray / visibility culling.
-    pub visibility: VisibilityConfig,
+    /// The compat layer's optional extras: the per-version stand-in packs.
+    pub compat: CompatConfig,
+    /// Optional anti-xray (buried-ore masking or section visibility culling).
+    pub anti_xray: AntiXrayConfig,
+    /// The pre-AX1 `[visibility]` table, if the file still has one. Migrated
+    /// into `anti_xray` by [`Self::migrate_legacy`]; never read directly.
+    #[serde(default, rename = "visibility")]
+    legacy_visibility: Option<LegacyVisibilityConfig>,
     /// Authentication policy.
     pub auth: AuthConfig,
     /// Optional history mirror.
@@ -384,6 +613,50 @@ pub struct Config {
 }
 
 impl Config {
+    /// Apply pre-AX1 backward compatibility and return human-readable warnings.
+    ///
+    /// AX1 renamed `[visibility]` to `[anti_xray]`. The old table always meant
+    /// section culling, so a file that still has one is migrated to
+    /// `[anti_xray] mode = "culling"` with its old knobs instead of quietly
+    /// falling back to the new `engine` default or (with `enabled = true`)
+    /// doing nothing. If the file sets both, `[anti_xray]` wins. The old
+    /// `ray_refinement`/`mask_buried_ores` keys are accepted and reported as
+    /// ignored.
+    pub fn migrate_legacy(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if let Some(legacy) = self.legacy_visibility.take() {
+            let replaced = self.anti_xray == AntiXrayConfig::default();
+            if replaced {
+                self.anti_xray = legacy.into();
+                warnings.push(
+                    "`[visibility]` is deprecated: migrated to `[anti_xray] mode = \"culling\"`"
+                        .to_string(),
+                );
+            } else {
+                warnings.push(
+                    "`[visibility]` is deprecated and both it and `[anti_xray]` are set: \
+                     kept `[anti_xray]`, ignored `[visibility]`"
+                        .to_string(),
+                );
+            }
+        }
+        if self.anti_xray.ray_refinement.is_some() {
+            warnings.push(
+                "`ray_refinement` is deprecated and ignored (the section graph is the robust \
+                 part; see docs/design/visibility-culling.md)"
+                    .to_string(),
+            );
+        }
+        if self.anti_xray.mask_buried_ores.is_some() {
+            warnings.push(
+                "`mask_buried_ores` is deprecated: use `[anti_xray] mode = \"engine\"` (the \
+                 default) instead"
+                    .to_string(),
+            );
+        }
+        warnings
+    }
+
     /// Whether `name`, connecting from `ip`, is an operator. Names compare
     /// case-insensitively; an entry with an address also needs that address.
     pub fn is_operator(&self, name: &str, ip: Option<std::net::IpAddr>) -> bool {
@@ -617,6 +890,18 @@ url = ""
 hash = ""
 required = false
 
+[compat.pack]
+# The per-version compat packs that re-skin only the block stand-ins. Generated
+# by tools/pack/build.js; see docs/design/compat-resource-pack.md. Only a client
+# whose pack status is successfully_loaded sees carrier states.
+enabled = false
+url = ""
+hash = ""
+required = false
+pack_format = 0
+dir = "packs/compat"
+client_jar = ""
+
 [auth]
 # Who may claim a name. "offline" (default): anyone may join under any name.
 # "online": every client must complete Mojang's encryption handshake. "hybrid":
@@ -668,16 +953,25 @@ dir = "world-cache"     # empty disables the cache
 ttl_hours = 24          # entries older than this are regenerated
 max_entries = 20000     # above this the oldest are swept away, hourly
 
-[visibility]
-# Anti-xray / visibility culling. Off by default until it is proven.
-# A section the player cannot see is sent as solid stone instead of its real
-# blocks, so x-ray mods and transparent resource packs see only stone. See
-# docs/design/visibility-culling.md.
+[anti_xray]
+# Anti-xray. Off by default until it is proven.
+# "engine" (cheap): an ore-like block fully enclosed by opaque blocks is sent
+#   as the surrounding stone/deepslate/netherrack, and revealed the moment a
+#   neighbour changes (break, explosion, fluid). "culling" (the design in
+#   docs/design/visibility-culling.md): a whole section the player cannot see
+#   is sent as solid stone. See docs/design/visibility-culling.md.
 enabled = false
+mode = "engine"          # "engine" (buried ores) or "culling" (sections)
+# Blocks never sent as themselves while enclosed. Empty = the built-in list of
+# every ore, ancient debris and monster spawner. Names take an optional
+# minecraft: namespace.
+hidden_blocks = []
+worlds = []              # world-dir names this applies to; empty = all
+bypass_players = []      # names always allowed to see everything
+
+# culling-mode only:
 margin_blocks = 5        # "could see it if he turned or stepped" sphere, in blocks
 hidden_fill = "stone"    # "stone" (safe) or "air" (spectators/flying only)
-ray_refinement = false   # reserved, not implemented
-mask_buried_ores = false # reserved, not implemented
 reveal_budget_per_tick = 32  # columns re-sent (revealed) per tick, nearest first
 "#;
 
@@ -686,7 +980,11 @@ impl Config {
     pub fn load_or_init(path: &str) -> Result<(Config, bool), String> {
         match std::fs::read_to_string(path) {
             Ok(text) => {
-                let cfg = toml::from_str(&text).map_err(|e| format!("parsing {path}: {e}"))?;
+                let mut cfg: Config =
+                    toml::from_str(&text).map_err(|e| format!("parsing {path}: {e}"))?;
+                for w in cfg.migrate_legacy() {
+                    crate::log::warn(&w);
+                }
                 Ok((cfg, false))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -791,20 +1089,140 @@ mod tests {
     }
 
     #[test]
-    fn visibility_is_off_by_default_and_parses_its_settings() {
+    fn anti_xray_is_off_by_default_and_parses_its_settings() {
         let cfg = Config::default();
-        assert!(!cfg.visibility.enabled, "the module is opt-in");
-        assert_eq!(cfg.visibility.hidden_fill, HiddenFill::Stone);
-        assert_eq!(cfg.visibility.margin_blocks, 5);
-        assert_eq!(cfg.visibility.reveal_budget_per_tick, 32);
+        assert!(!cfg.anti_xray.enabled, "the module is opt-in");
+        assert_eq!(cfg.anti_xray.mode, AntiXrayMode::Engine);
+        assert_eq!(cfg.anti_xray.hidden_fill, HiddenFill::Stone);
+        assert_eq!(cfg.anti_xray.margin_blocks, 5);
+        assert_eq!(cfg.anti_xray.reveal_budget_per_tick, 32);
+        assert!(cfg.anti_xray.hidden_blocks.is_empty());
+        assert!(cfg.anti_xray.applies_to_world("world"));
 
         let cfg: Config = toml::from_str(
-            "[visibility]\nenabled = true\nhidden_fill = \"air\"\nmargin_blocks = 2\n",
+            "[anti_xray]\nenabled = true\nmode = \"culling\"\nhidden_fill = \"air\"\n\
+             margin_blocks = 2\nworlds = [\"alpha\"]\nbypass_players = [\"root\"]\n",
         )
         .unwrap();
-        assert!(cfg.visibility.enabled);
-        assert_eq!(cfg.visibility.hidden_fill, HiddenFill::Air);
-        assert_eq!(cfg.visibility.margin_blocks, 2);
+        assert!(cfg.anti_xray.enabled);
+        assert_eq!(cfg.anti_xray.mode, AntiXrayMode::Culling);
+        assert_eq!(cfg.anti_xray.hidden_fill, HiddenFill::Air);
+        assert_eq!(cfg.anti_xray.margin_blocks, 2);
+        assert!(cfg.anti_xray.applies_to_world("saves/alpha"));
+        assert!(!cfg.anti_xray.applies_to_world("beta"));
+        assert_eq!(cfg.anti_xray.bypass_players, vec!["root".to_string()]);
+    }
+
+    #[test]
+    fn the_hidden_block_list_defaults_to_every_ore_and_debris() {
+        let names = AntiXrayConfig::default().hidden_block_names();
+        assert!(names.iter().any(|n| n == "minecraft:diamond_ore"));
+        assert!(names.iter().any(|n| n == "minecraft:deepslate_diamond_ore"));
+        assert!(names.iter().any(|n| n == "minecraft:ancient_debris"));
+        assert!(names.iter().any(|n| n == "minecraft:spawner"));
+        assert!(
+            !names.iter().any(|n| n.contains("chest")),
+            "worldgen chests stay visible"
+        );
+
+        // An explicit list replaces the built-in one.
+        let cfg: Config =
+            toml::from_str("[anti_xray]\nhidden_blocks = [\"diamond_ore\"]\n").unwrap();
+        assert_eq!(cfg.anti_xray.hidden_block_names(), vec!["diamond_ore"]);
+    }
+
+    #[test]
+    fn a_pre_ax1_visibility_config_is_migrated_to_culling() {
+        // The old `[visibility]` table always meant section culling. A server
+        // upgrading must keep hiding, not silently fall back to `engine`.
+        let mut cfg: Config = toml::from_str(
+            "[visibility]\nenabled = true\nmargin_blocks = 3\nhidden_fill = \"air\"\n\
+             mask_buried_ores = false\nray_refinement = false\nreveal_budget_per_tick = 8\n",
+        )
+        .unwrap();
+        let warnings = cfg.migrate_legacy();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("migrated to `[anti_xray]")),
+            "a migration warning is expected: {warnings:?}"
+        );
+        assert!(cfg.anti_xray.enabled, "the old enabled flag is kept");
+        assert_eq!(
+            cfg.anti_xray.mode,
+            AntiXrayMode::Culling,
+            "old configs were culling, not the new engine default"
+        );
+        assert_eq!(cfg.anti_xray.margin_blocks, 3);
+        assert_eq!(cfg.anti_xray.hidden_fill, HiddenFill::Air);
+        assert_eq!(cfg.anti_xray.reveal_budget_per_tick, 8);
+    }
+
+    #[test]
+    fn anti_xray_wins_when_both_sections_are_present() {
+        let mut cfg: Config = toml::from_str(
+            "[anti_xray]\nenabled = true\nmode = \"engine\"\n\n\
+             [visibility]\nenabled = false\n",
+        )
+        .unwrap();
+        let warnings = cfg.migrate_legacy();
+        assert!(
+            warnings.iter().any(|w| w.contains("kept `[anti_xray]`")),
+            "{warnings:?}"
+        );
+        assert_eq!(cfg.anti_xray.mode, AntiXrayMode::Engine);
+        assert!(cfg.anti_xray.enabled);
+    }
+
+    #[test]
+    fn the_deprecated_reserved_keys_are_accepted_and_reported() {
+        let mut cfg: Config = toml::from_str(
+            "[anti_xray]\nenabled = true\nray_refinement = true\nmask_buried_ores = true\n",
+        )
+        .unwrap();
+        let warnings = cfg.migrate_legacy();
+        assert!(
+            warnings.iter().any(|w| w.contains("ray_refinement")),
+            "ray_refinement must be reported: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("mask_buried_ores")),
+            "mask_buried_ores must be reported: {warnings:?}"
+        );
+        // Still parsed, engine mode still on.
+        assert!(cfg.anti_xray.enabled);
+        assert_eq!(cfg.anti_xray.mode, AntiXrayMode::Engine);
+    }
+
+    #[test]
+    fn the_compat_pack_is_off_by_default_and_parses_its_settings() {
+        let cfg = Config::default();
+        assert!(!cfg.compat.pack.active(), "the compat packs are opt-in");
+        assert!(
+            !cfg.compat.pack.required,
+            "a declined pack falls back to the stand-in"
+        );
+
+        let cfg: Config = toml::from_str(
+            "[compat.pack]\nenabled = true\nurl = \"https://example/pack.zip\"\n\
+             hash = \"abc123\"\npack_format = 15\n",
+        )
+        .unwrap();
+        assert!(cfg.compat.pack.active());
+        let offer = cfg.compat.pack.offer();
+        assert_eq!(offer.url, "https://example/pack.zip");
+        assert_eq!(offer.hash, "abc123");
+        assert!(!offer.required, "required stays false unless asked for");
+        // The format contract: the pack is offered only for a matching format,
+        // and an unset format (0) matches nothing.
+        assert!(cfg.compat.pack.offers_format(15));
+        assert!(!cfg.compat.pack.offers_format(0));
+        assert!(!cfg.compat.pack.offers_format(46));
+        assert!(!CompatPackConfig::default().offers_format(0));
+
+        // `enabled` alone, with no URL, offers nothing.
+        let cfg: Config = toml::from_str("[compat.pack]\nenabled = true\n").unwrap();
+        assert!(!cfg.compat.pack.active());
     }
 
     #[test]

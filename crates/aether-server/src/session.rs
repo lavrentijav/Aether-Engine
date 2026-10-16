@@ -16,7 +16,7 @@ use aether_world::BlockStateId;
 
 use crate::config::Config;
 use crate::players::{PosLook, SharedRegistry};
-use crate::proto::{read_packet, Conn};
+use crate::proto::{read_packet, Conn, PacketIn};
 use crate::protocol::{self, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::stored::{self, Stored};
 
@@ -305,6 +305,11 @@ fn login_and_play(
         .map(|s| s.mode)
         .unwrap_or(cfg.server.game_mode);
 
+    // A release with a generated compat pack gets *that* pack; everyone else
+    // keeps whatever `[resource_pack]` offers. `compat_offered` says which this
+    // client got, so the status gate can tell the compat pack apart from the
+    // operator's plain one.
+    let (pack, compat_offered) = select_resource_pack(cfg, codec);
     let params = JoinParams {
         game_mode,
         entity_id: eid,
@@ -315,7 +320,7 @@ fn login_and_play(
         pitch: player.pitch,
         max_players: cfg.server.max_players,
         view_radius: cfg.server.clamped_view_radius(),
-        resource_pack: cfg.resource_pack.clone(),
+        resource_pack: pack,
         online: authenticated,
         properties: properties.clone(),
     };
@@ -373,26 +378,31 @@ fn login_and_play(
     // sent as real blocks even in the first burst, so the reachable set is
     // computed from the spawn position before the handle exists and the same
     // columns are masked here. It is seeded into the handle below, so the
-    // reveal planner knows what this client already holds.
-    let vis = crate::visibility_config()
-        .enabled
+    // reveal planner knows what this client already holds. Engine mode needs
+    // no reachable set — it masks individual buried ores.
+    let anti_xray = crate::anti_xray_enabled();
+    let mode = crate::anti_xray_config().mode;
+    let vis = (anti_xray && mode == crate::config::AntiXrayMode::Culling)
         .then(|| crate::visibility::visible_from(world, (spawn.x, spawn.y, spawn.z), r));
+    let engine_hidden = (anti_xray && mode == crate::config::AntiXrayMode::Engine)
+        .then(crate::visibility::hidden_states);
     let fill = crate::visibility::fill_for_mode(game_mode);
     for cz in spawn_cz - initial..=spawn_cz + initial {
         for cx in spawn_cx - initial..=spawn_cx + initial {
             let view = crate::protocol::ColumnView::new(world, cx, cz);
-            let packets = match &vis {
-                Some(vis) => {
-                    let hidden = crate::visibility::desired_hidden(vis, cx, cz);
-                    if hidden != 0 {
-                        let masked =
-                            crate::visibility::MaskedColumn::new(&view, cx, cz, hidden, fill);
-                        codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &masked)
-                    } else {
-                        codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view)
-                    }
+            let packets = if let Some(vis) = &vis {
+                let hidden = crate::visibility::desired_hidden(vis, cx, cz);
+                if hidden != 0 {
+                    let masked = crate::visibility::MaskedColumn::new(&view, cx, cz, hidden, fill);
+                    codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &masked)
+                } else {
+                    codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view)
                 }
-                None => codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view),
+            } else if let Some(hidden) = engine_hidden {
+                let masked = crate::visibility::EngineColumn::new(&view, hidden);
+                codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &masked)
+            } else {
+                codec.encode(&ServerEvent::ChunkColumn { cx, cz }, &view)
             };
             for pkt in packets {
                 pkt.send(s)?;
@@ -424,10 +434,17 @@ fn login_and_play(
         &*s,
         pos,
     )?;
+    // Remember which pack this client was offered: only the compat one may
+    // turn carrier states on (see `PlayerHandle::pack_table`).
+    if compat_offered {
+        handle.set_compat_pack_offered();
+    }
     // Seed the visibility bookkeeping with the masked first burst: what the
-    // client holds, and the reachable set those masks came from, so the reveal
-    // planner never re-sends a column it already sent and never forgets one it
-    // has not.
+    // client holds, and (culling) the reachable set those masks came from, so
+    // the reveal planner never re-sends a column it already sent and never
+    // forgets one it has not. Engine mode marks every column as possibly
+    // masked, so `/visibility off` re-sends the whole loaded area.
+    let section = crate::visibility::section_of(pos);
     if let Some(visible) = vis {
         let mut sent = std::collections::HashMap::new();
         for cz in spawn_cz - initial..=spawn_cz + initial {
@@ -438,8 +455,15 @@ fn login_and_play(
                 );
             }
         }
-        let section = crate::visibility::section_of(pos);
         handle.visibility().seed(section, visible, sent);
+    } else if engine_hidden.is_some() {
+        let mut sent = std::collections::HashMap::new();
+        for cz in spawn_cz - initial..=spawn_cz + initial {
+            for cx in spawn_cx - initial..=spawn_cx + initial {
+                sent.insert((cx, cz), 1);
+            }
+        }
+        handle.visibility().seed(section, HashSet::new(), sent);
     }
     // A returning player gets what they had; a new one gets the starter
     // hotbar. Seeding over a restored inventory would overwrite the first nine
@@ -525,6 +549,45 @@ fn login_and_play(
     result
 }
 
+/// Decode a client's resource-pack status packet body.
+///
+/// The wire value is a small VarInt; a value this server does not know (or a
+/// malformed body) is [`protocol::PackStatus::Unknown`], never "loaded". This
+/// is the exact parse the play loop runs, extracted so the range check is
+/// testable — reading it as a `u8` once turned a 256 into "loaded".
+fn parse_pack_status(data: &[u8]) -> protocol::PackStatus {
+    match PacketIn::new(data).var_int() {
+        Ok(v) => protocol::PackStatus::from_wire(v),
+        Err(_) => protocol::PackStatus::Unknown,
+    }
+}
+
+/// The resource pack to offer a client of `codec`'s release, and whether it is
+/// the compat pack.
+///
+/// `[compat.pack]` wins for a release the compat layer generated a pack for —
+/// its carrier blocks need exactly that pack — and only then. Every other
+/// release, and every server with the compat packs off, keeps whatever
+/// `[resource_pack]` offers and gets `false`. The caller remembers which was
+/// offered, so only a client that loaded the *compat* pack can be shown
+/// carriers; the operator's plain pack must not enable them.
+fn select_resource_pack(
+    cfg: &Config,
+    codec: &dyn ProtocolCodec,
+) -> (crate::config::ResourcePackConfig, bool) {
+    if cfg.compat.pack.active() {
+        if let Some(table) = crate::protocol::compat::pack::table_for(codec.protocol_id()) {
+            // The pack the operator configured must declare this release's own
+            // `pack_format`; a mismatch is a pack for another release and would
+            // not be applied, so fall through to `[resource_pack]`.
+            if cfg.compat.pack.offers_format(table.pack_format) {
+                return (cfg.compat.pack.offer(), true);
+            }
+        }
+    }
+    (cfg.resource_pack.clone(), false)
+}
+
 /// Whether handling `event` can move, make or use up items. Movement and the
 /// like are the bulk of all packets and cannot, so they skip the capture; a
 /// creative slot set journals itself.
@@ -537,6 +600,7 @@ fn may_move_items(event: &ClientEvent) -> bool {
             | ClientEvent::Sprint(_)
             | ClientEvent::Input { .. }
             | ClientEvent::Swing { .. }
+            | ClientEvent::KeepAlive(_)
             | ClientEvent::Ignored
     )
 }
@@ -568,6 +632,11 @@ fn play_loop(
     // second, so silence this long means the client is gone.
     let mut last_heard = Instant::now();
     let mut keepalive_id: i64 = 1;
+    // The keep-alive id awaiting a reply and when it was sent, so the round
+    // trip can be timed when the client echoes it back. One outstanding at a
+    // time: a reply that arrives after a second keep-alive was sent simply
+    // matches the newer one.
+    let mut awaiting_keepalive: Option<(i64, Instant)> = None;
     let mut last_paid = Instant::now();
     let mut last_saved = Instant::now();
 
@@ -601,6 +670,7 @@ fn play_loop(
         // Send a keep-alive roughly every 10s (clients disconnect after ~30s).
         if last_keepalive.elapsed() >= Duration::from_secs(10) {
             handle.emit(&ServerEvent::KeepAlive(keepalive_id), world);
+            awaiting_keepalive = Some((keepalive_id, Instant::now()));
             keepalive_id = keepalive_id.wrapping_add(1);
             last_keepalive = Instant::now();
         }
@@ -632,6 +702,17 @@ fn play_loop(
             }
         };
         last_heard = Instant::now();
+        // The client's resource-pack status, if its codec reports one. Only a
+        // `successfully_loaded` client may be shown carrier states, so the
+        // moment it loads the pack the whole view is re-sent with carriers —
+        // and until then (or after a decline) the plain stand-in stands.
+        if handle.codec.resource_pack_status_id() == Some(pkt.id) {
+            let status = parse_pack_status(&pkt.data);
+            if handle.set_pack_status(status) {
+                streamer.center(last_chunk, true);
+            }
+            continue;
+        }
         let full = handle.full();
         let dead = full && handle.game().dead;
         let event = handle.codec.decode(&pkt, handle.pos());
@@ -980,6 +1061,16 @@ fn play_loop(
                 interact::set_stance(handle, registry, world, Some(sneak), None)
             }
             ClientEvent::PickBlock { x, y, z } => interact::pick_block(handle, world, x, y, z),
+            ClientEvent::KeepAlive(id) => {
+                // A reply to our last keep-alive times the round trip. Vanilla
+                // reports the ping in the tab list; here it feeds `%ping%`.
+                if let Some((sent_id, at)) = awaiting_keepalive {
+                    if sent_id == id {
+                        handle.set_ping(at.elapsed().as_millis().min(u32::MAX as u128) as u32);
+                        awaiting_keepalive = None;
+                    }
+                }
+            }
             ClientEvent::ChangeGameMode(mode) => {
                 // The switcher is the client asking; only an operator is
                 // answered, the way vanilla gates it on permission level 2.
@@ -989,6 +1080,10 @@ fn play_loop(
                     handle.emit(&ServerEvent::Chat("You are not an operator.".into()), world);
                 }
             }
+            // Handled in the read loop, before this dispatch: it decides
+            // whether the compat pack's carriers may be shown, and re-sends
+            // the view when they may.
+            ClientEvent::ResourcePackStatus(_) => {}
             ClientEvent::Ignored => {}
         }
     }
@@ -1491,20 +1586,13 @@ fn record_slot_change(
     item: Option<aether_world::ItemTypeId>,
     count: u8,
 ) {
-    // An item the client was shown as a *substitute* comes back as the
-    // substitute; the slot's real item wins (see the compat item layer). A
-    // genuinely different report stands as what the player put there. This is
-    // what stops a creative client laundering a spear into a real trident by
-    // moving the slot around.
-    let item = match (item, slot) {
-        (Some(reported), s) if s >= 0 => {
-            let real = handle.inventory().get(s as usize).map(|st| st.item);
-            match real {
-                Some(real) => Some(handle.codec.resolve_reported_item(real, reported)),
-                None => Some(reported),
-            }
-        }
-        _ => item,
+    let Some((item, count)) =
+        resolve_creative_report(handle, world, slot, item.map(|item| (item, count)))
+    else {
+        // The server refused the click — honouring it would have converted one
+        // real item into another (a merge of wire look-alikes). The window was
+        // resynced, so the client reverts; nothing changes here.
+        return;
     };
     let change = handle.set_creative_slot(slot, item, count);
     if change.is_noop() {
@@ -1535,6 +1623,89 @@ fn record_slot_change(
         );
     }
     save_inventory(handle, world);
+}
+
+/// Resolve a creative slot report against the server's authoritative window.
+///
+/// The wire id a client sends for an item it was shown as a *substitute* is
+/// the stand-in's, and says nothing about whether the client means the real
+/// item or the genuine item of that id. The server therefore resolves it from
+/// what it still holds — the slot it is replacing, the shadow the client is
+/// carrying, and (in the no-table fallback) a codec's own rule — so a stand-in
+/// a client *moves* keeps the real item it stands for, while a *creation* with
+/// no source stands as the genuine item the wire id names. The decision itself
+/// is pure and lives in `compat::items`; this only gathers the state and keeps
+/// the resulting shadow.
+///
+/// A version with no item table (1.21.11 and later, whose ids are the engine's
+/// own, so nothing is ever a stand-in) trusts the report as before, still
+/// honouring a codec's own same-slot rule.
+fn resolve_creative_report(
+    handle: &crate::players::PlayerHandle,
+    world: &DemoWorld,
+    slot: i16,
+    reported: Option<(aether_world::ItemTypeId, u8)>,
+) -> Option<(Option<aether_world::ItemTypeId>, u8)> {
+    let table = protocol::compat::items::table_for(handle.codec.protocol_id());
+    let Some(table) = table else {
+        let item = match (reported, slot) {
+            (Some((r, _)), s) if s >= 0 => match handle.inventory().get(s as usize) {
+                Some(real) => Some(handle.codec.resolve_reported_item(real.item, r)),
+                None => Some(r),
+            },
+            (Some((r, _)), _) => Some(r),
+            (None, _) => None,
+        };
+        let count = reported.map_or(0, |(_, c)| c);
+        return Some((item, count));
+    };
+
+    // Snapshot before the move: what the slot holds and the shadow the client
+    // is carrying. Neither the cursor nor the other slots are consulted — the
+    // shadow is the *single* source a move may draw on, so one item can never
+    // feed two placements. Lock order is the game state, then the inventory
+    // (see `PlayerHandle`).
+    let (previous, carried) = {
+        let st = handle.game();
+        let inv = handle.inventory();
+        let previous = if slot >= 0 {
+            inv.get(slot as usize).map(|s| (s.item, s.count))
+        } else {
+            None
+        };
+        (previous, st.creative_carry)
+    };
+
+    let (resolution, carried) = table.resolve_change(reported, previous, carried);
+    // The server's own cursor is the shadow: keep them the same so a window
+    // resync shows the client the item the server believes it carries. Without
+    // this, a rejected click would resync an *empty* cursor and the client would
+    // silently drop the stack it is carrying, while the shadow still held it —
+    // then the next click would destroy it.
+    {
+        let mut st = handle.game();
+        st.creative_carry = carried;
+        st.cursor = carried.map(|c| crate::inventory::Stack {
+            item: c.item,
+            count: c.count,
+            uid: aether_world::journal::ledger::mint_uid(),
+            damage: 0,
+            potion: None,
+            display: None,
+        });
+    }
+    match resolution {
+        protocol::compat::items::Resolution::Apply(Some((item, count))) => {
+            Some((Some(item), count))
+        }
+        protocol::compat::items::Resolution::Apply(None) => Some((None, 0)),
+        protocol::compat::items::Resolution::Reject => {
+            // Show the client the server's view again (the slot it kept and the
+            // cursor it is really carrying), reverting its optimistic merge.
+            handle.sync_inventory(world);
+            None
+        }
+    }
 }
 
 /// Persist a player's inventory into the world's KV store.
@@ -1809,5 +1980,97 @@ mod placement_tests {
         let p = at(0.5, 64.0, 0.5);
         assert!(!stands_in_block(p, 5, 64, 5));
         assert!(!stands_in_block(p, 0, 60, 0), "well below them");
+    }
+
+    #[test]
+    fn the_plain_resource_pack_never_counts_as_the_compat_pack() {
+        // Review 1 blocker: with `[compat.pack]` off but `[resource_pack]` set,
+        // a 1.20.1 client is offered the operator's pack and gets `false`, so
+        // its `successfully_loaded` reply cannot turn carriers on.
+        let cfg: Config =
+            toml::from_str("[resource_pack]\nurl = \"https://example/plain.zip\"\n").unwrap();
+        let codec = crate::protocol::codec_for(763).unwrap();
+        let (pack, compat) = select_resource_pack(&cfg, codec);
+        assert_eq!(pack.url, "https://example/plain.zip");
+        assert!(!compat, "the plain pack is not the compat pack");
+
+        // And a release with no generated table gets the plain pack too, even
+        // with the compat packs on.
+        let cfg: Config = toml::from_str(
+            "[resource_pack]\nurl = \"https://example/plain.zip\"\n\
+             [compat.pack]\nenabled = true\nurl = \"https://example/compat.zip\"\n\
+             pack_format = 15\n",
+        )
+        .unwrap();
+        let (pack, compat) = select_resource_pack(&cfg, crate::protocol::codec_for(47).unwrap());
+        assert_eq!(
+            pack.url, "https://example/plain.zip",
+            "1.8 has no compat pack"
+        );
+        assert!(!compat);
+    }
+
+    #[test]
+    fn the_compat_pack_is_offered_only_when_its_pack_format_matches() {
+        let codec = crate::protocol::codec_for(763).unwrap();
+        let table = crate::protocol::compat::pack::table_for(763).unwrap();
+
+        // The right format: offered.
+        let cfg: Config = toml::from_str(&format!(
+            "[compat.pack]\nenabled = true\nurl = \"https://example/compat.zip\"\n\
+             hash = \"abc\"\npack_format = {}\n",
+            table.pack_format
+        ))
+        .unwrap();
+        let (pack, compat) = select_resource_pack(&cfg, codec);
+        assert_eq!(pack.url, "https://example/compat.zip");
+        assert!(compat, "the compat pack is the offered one");
+
+        // The wrong format (or none): not offered — the pack is for another
+        // release, so the plain `[resource_pack]` applies instead.
+        for bad in [0u32, table.pack_format + 1] {
+            let cfg: Config = toml::from_str(&format!(
+                "[resource_pack]\nurl = \"https://example/plain.zip\"\n\
+                 [compat.pack]\nenabled = true\nurl = \"https://example/compat.zip\"\n\
+                 pack_format = {bad}\n",
+            ))
+            .unwrap();
+            let (pack, compat) = select_resource_pack(&cfg, codec);
+            assert_eq!(pack.url, "https://example/plain.zip", "format {bad}");
+            assert!(!compat, "format {bad} must not enable carriers");
+        }
+    }
+
+    #[test]
+    fn a_resource_pack_status_is_decoded_with_a_range_check() {
+        // Review 1 (`RP1-f`) regression, at the exact parse the play loop runs:
+        // a real `resource_pack_receive` body is a VarInt. 256 encodes as
+        // `0x80 0x02`; read as a `u8` it used to become 0 — "loaded" — and
+        // hand a client that never loaded the pack the carrier states.
+        use crate::protocol::PackStatus;
+        let varint = |mut v: u32| {
+            let mut out = Vec::new();
+            loop {
+                if v < 0x80 {
+                    out.push(v as u8);
+                    return out;
+                }
+                out.push((v as u8 & 0x7f) | 0x80);
+                v >>= 7;
+            }
+        };
+        assert_eq!(parse_pack_status(&varint(0)), PackStatus::Loaded);
+        assert_eq!(parse_pack_status(&varint(1)), PackStatus::Declined);
+        assert_eq!(parse_pack_status(&varint(4)), PackStatus::Downloaded);
+        for wire in [6u32, 7, 255, 256, 300, 65536, u32::MAX] {
+            assert_eq!(
+                parse_pack_status(&varint(wire)),
+                PackStatus::Unknown,
+                "wire {wire} must not read as loaded"
+            );
+        }
+        // A malformed body is unknown, not a panic.
+        assert_eq!(parse_pack_status(&[]), PackStatus::Unknown);
+        assert_eq!(parse_pack_status(&[0x80, 0x80]), PackStatus::Unknown);
     }
 }

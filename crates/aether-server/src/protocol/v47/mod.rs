@@ -8,15 +8,12 @@ pub mod chunk;
 
 use std::io;
 
-use super::{json_escape, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
+use aether_world::{BlockStateId, ItemTypeId};
+
+use super::{json_escape, legacy_codec_item_hooks, BlockSource, ClientEvent, JoinParams};
+use super::{ProtocolCodec, ServerEvent};
 use crate::players::{PlayerHandle, PosLook};
 use crate::proto::{read_packet, Conn, PacketIn, PacketOut, RawPacket};
-
-/// Vanilla item ids handed to every player's hotbar so they can actually
-/// build: this server sends no real inventory, and a client holding nothing
-/// cannot place anything. Kept to blocks [`chunk::engine_id`] maps back, so
-/// anything placed is a block the engine world can really store.
-const HOTBAR: [u16; 7] = [1, 3, 2, 12, 13, 17, 18];
 
 /// The 1.8.9 codec.
 pub struct Codec;
@@ -29,6 +26,8 @@ impl ProtocolCodec for Codec {
     fn protocol_id(&self) -> i32 {
         47
     }
+
+    legacy_codec_item_hooks!(47, 0x19, true);
 
     fn read_login_start(&self, s: &mut Conn) -> io::Result<Option<String>> {
         // Login Start (0x00): username.
@@ -91,12 +90,20 @@ impl ProtocolCodec for Codec {
                 .send(s)?;
         }
 
-        for (slot, item) in HOTBAR.iter().enumerate() {
+        // The starter hotbar, resolved to *this* release's item ids through the
+        // compat item table (the ids are not the engine's). Every entry exists
+        // by the same name in 1.8, so the `unwrap_or` never fires; it is the
+        // stone the old hard-coded table also led with.
+        let table = super::legacy_item_table(47).expect("1.8.9 has a compat item table");
+        for (slot, (name, count)) in super::STARTER_HOTBAR.iter().enumerate() {
+            let wire = table
+                .wire(crate::inventory::item(name))
+                .map_or(1, |w| w.id as u16);
             PacketOut::new(0x2F)
                 .u8(0) // window 0: the player's own inventory
                 .u16(36 + slot as u16) // hotbar occupies slots 36..=44
-                .u16(*item)
-                .u8(1) // count
+                .u16(wire)
+                .u8(*count) // count
                 .u16(0) // damage
                 .u8(0) // no NBT
                 .send(s)?;
@@ -164,6 +171,13 @@ impl ProtocolCodec for Codec {
     fn decode(&self, pkt: &RawPacket, prev: PosLook) -> ClientEvent {
         let mut pin = PacketIn::new(&pkt.data);
         match pkt.id {
+            // Keep Alive (0x00) here is a VarInt, unlike every later version's
+            // 8-byte long. Echoed back so the play loop can time the round
+            // trip.
+            0x00 => match pin.var_int() {
+                Ok(id) => ClientEvent::KeepAlive(id as i64),
+                Err(_) => ClientEvent::Ignored,
+            },
             0x03 => match pin.bool() {
                 Ok(on_ground) => ClientEvent::Move(PosLook { on_ground, ..prev }),
                 Err(_) => ClientEvent::Ignored,
@@ -559,5 +573,47 @@ mod tests {
         let mut want = vec![0x38, 0x04, 0x01];
         want.extend_from_slice(&uuid.to_be_bytes());
         assert_eq!(pkt.body(), want.as_slice());
+    }
+
+    #[test]
+    fn the_starter_hotbar_resolves_to_this_versions_item_ids() {
+        // The hotbar is seeded from engine item *names*, so the wire ids come
+        // from the compat item table rather than a hand-written list. Every
+        // starter entry exists in 1.8 under the same name, so none is a
+        // stand-in; 1.8's stone is item id 1.
+        use super::super::{legacy_item_table, STARTER_HOTBAR};
+        let table = legacy_item_table(47).expect("1.8 has a compat item table");
+        for (name, _) in STARTER_HOTBAR {
+            let item = crate::inventory::item(name);
+            let w = table
+                .wire(item)
+                .unwrap_or_else(|| panic!("{name} missing on 1.8"));
+            assert_eq!(table.engine(w.id), Some(item), "{name}");
+        }
+        let stone = table
+            .wire(crate::inventory::item("minecraft:stone"))
+            .unwrap();
+        assert_eq!(stone.id, 1, "stone is item id 1 in 1.8");
+    }
+
+    #[test]
+    fn a_keep_alive_reply_decodes_with_its_varint_id() {
+        // 1.8 echoes the id as a VarInt, unlike every later version's long.
+        let pkt = RawPacket {
+            id: 0x00,
+            data: vec![0x2A],
+        };
+        let prev = PosLook {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: true,
+        };
+        match Codec.decode(&pkt, prev) {
+            ClientEvent::KeepAlive(id) => assert_eq!(id, 42),
+            _ => panic!("expected a keep-alive"),
+        }
     }
 }
