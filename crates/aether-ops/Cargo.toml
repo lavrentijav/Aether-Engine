@@ -3,6 +3,7 @@ name = "aether-ops"
 description = "Aether Engine live-ops API: the read-only snapshot and views the web admin plugin serves, defined once so core and plugin share one type."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true

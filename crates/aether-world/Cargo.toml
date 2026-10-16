@@ -3,6 +3,7 @@ name = "aether-world"
 description = "Aether Engine world model: AVX-Cell / Sub-Chunk SoA memory layout, palette compression and the KV + Zstd storage backend."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true

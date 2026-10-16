@@ -3,6 +3,7 @@ name = "aether-convert"
 description = "Aether-Convert: parallel Anvil (.mca) world migration into the Aether KV store."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true

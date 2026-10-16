@@ -3,6 +3,7 @@ name = "aether-sdk-plugin"
 description = "The Aether plugin SDK, provided as a native plugin: a thin, in-process service host that other plugins (native or WASM) call for common helpers."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -3,6 +3,7 @@ name = "aether-demo"
 description = "Aether Engine playable demo: generate a world, drop a player, tick physics and report — a quick 'does it run' harness."
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
