@@ -1,21 +1,33 @@
-# Manifest for the WorldGuard-style regions plugin (CMD-34). See crates/aether-plugin/src/manifest.rs.
+# Manifest for the WorldGuard-style regions plugin (CMD-34a). See
+# crates/aether-plugin/src/manifest.rs.
+#
+# A native plugin is compiled into the server, so the host reads its manifest
+# from `manifest()` in src/lib.rs, not from this file. This copy exists so the
+# declaration is visible in one place; keep it in step with `manifest()`.
 id = "regions"
 name = "Regions"
 version = "0.1.0"
 api = "0.1"
 # native: a Rust crate in this workspace, linked in-process (CMD-00N).
 # No .wasm entry: the loader calls it directly, no WASM boundary.
+tier = "native"
 priority = 20
 
+# The core provides these through the host backend. `players` covers
+# `player_position` for `/rg info`; `world.read` is reserved for the later
+# flags/shape work and is asked for but not granted by default (deny-by-default).
 capabilities = ["log", "config", "supports", "storage.kv", "world.read", "players"]
 
 subscribe = [
     "before-block-break",
-    "before-block-place",
-    "before-use-item",
-    "before-attack",
-    "on-command",
+    # Native-only: right-click on a block, used by the internal wand. There is
+    # no matching export in the frozen WASM @0.1.0 world.
+    "before-block-interact",
     "after-player-join",
+    "on-command",
 ]
 
-commands = ["rg", "region"]
+commands = [
+    { name = "rg", node = "worldguard.region.info", op = 0 },
+    { name = "region", node = "worldguard.region.info", op = 0 },
+]

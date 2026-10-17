@@ -870,6 +870,19 @@ fn play_loop(
 
                 if handle.inspecting() {
                     inspect(handle, registry, world, x, y, z);
+                } else if let Some(reason) = crate::plugins::before_block_interact(
+                    handle,
+                    tx,
+                    ty,
+                    tz,
+                    &crate::game::block_name(world, world.get_block(tx, ty, tz))
+                        .unwrap_or_default(),
+                ) {
+                    // A native plugin's wand consumes the click without
+                    // opening, toggling or placing anything.
+                    if !reason.is_empty() {
+                        handle.emit(&ServerEvent::Chat(reason), world);
+                    }
                 } else if full && interact::use_block(handle, world, tx, ty, tz) {
                     // Opened a crafting table, a chest, a furnace, a bed.
                 } else if let Some(crate::placement::Interaction::Toggle(next)) =

@@ -207,6 +207,13 @@ mod imp {
             Some(("minecraft:overworld".to_string(), pos.x, pos.y, pos.z))
         }
 
+        fn held_item(&self, _plugin: &str, player: u64) -> Option<String> {
+            let handle = self.registry.by_entity(player as i32)?;
+            handle
+                .held_item()
+                .and_then(|item| item.vanilla_name().map(str::to_string))
+        }
+
         /// A plugin asked to move a player. Resolved through the core
         /// safe-spot search (CMD-31) rather than an exact move, so a plugin
         /// cannot drop a player into lava, fire or the void — the design
@@ -1134,6 +1141,15 @@ mod imp {
             aether_staff_plugin::registration(),
             "native staff",
         );
+        // The regions plugin edits the process-wide `aether-region` store the
+        // protection hooks read, so it is independent of the SDK as well.
+        install_native_one(
+            host,
+            cfg,
+            grant_sink,
+            aether_regions_plugin::registration(),
+            "native regions",
+        );
 
         // The admin web interface is the one native plugin that needs the live
         // world, which the server attaches here — the plugin host gives a
@@ -1300,6 +1316,20 @@ mod imp {
     pub fn before_use_item(handle: &PlayerHandle, item: &str) -> Option<String> {
         with(None, |h| {
             cancelled(h.before_use_item(&player(handle), item))
+        })
+    }
+
+    /// A right-click on a block, for a native plugin's selection wand. A
+    /// cancelled click does not open, toggle or place anything.
+    pub fn before_block_interact(
+        handle: &PlayerHandle,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: &str,
+    ) -> Option<String> {
+        with(None, |h| {
+            cancelled(h.before_block_interact(&player(handle), x, y, z, block))
         })
     }
 
@@ -1653,6 +1683,15 @@ mod imp {
         None
     }
     pub fn before_use_item(_h: &PlayerHandle, _i: &str) -> Option<String> {
+        None
+    }
+    pub fn before_block_interact(
+        _h: &PlayerHandle,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _b: &str,
+    ) -> Option<String> {
         None
     }
     pub fn before_attack(_h: &PlayerHandle, _t: u64) -> Option<String> {

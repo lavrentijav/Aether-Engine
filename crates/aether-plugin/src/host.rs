@@ -70,6 +70,13 @@ pub trait HostBackend: Send + Sync {
         None
     }
 
+    /// The item in a player's main hand (a `minecraft:` name), for a plugin
+    /// that must tell its own tool from an ordinary block click. The default
+    /// is `None`, so a host without inventories answers "nothing held".
+    fn held_item(&self, _plugin: &str, _player: u64) -> Option<String> {
+        None
+    }
+
     /// Move a player to `(x, y, z)`, searching for a safe spot. The default
     /// refuses, so a host with no world (a test, a stripped build) does not
     /// pretend the move happened. The server overrides it to front the core
@@ -738,6 +745,41 @@ impl LoadedPlugin {
                     backend,
                 };
                 Ok(n.before_use_item(&mut ctx, p, item))
+            }
+        }
+    }
+
+    /// A right-click on a block. Native-only: a WASM component has no export
+    /// for it, so it always answers `Allow` (never a trap and never a veto).
+    #[allow(clippy::too_many_arguments)]
+    fn call_before_block_interact(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: &str,
+    ) -> std::result::Result<Decision, String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { .. } => Ok(Decision::Allow),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                Ok(n.before_block_interact(&mut ctx, p, x, y, z, block))
             }
         }
     }
@@ -1693,6 +1735,22 @@ impl PluginHost {
     pub fn before_use_item(&mut self, p: &Player, item: &str) -> Decision {
         self.before(manifest::EVENT_BEFORE_USE_ITEM, |pl, s, b| {
             pl.call_before_use_item(s, b, p, item)
+        })
+    }
+
+    /// `before-block-interact`: a native-only right-click on a block, with the
+    /// clicked cell. A WASM plugin subscribed to the name is skipped (its
+    /// world has no such export), so the call is free of a boundary crossing.
+    pub fn before_block_interact(
+        &mut self,
+        p: &Player,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: &str,
+    ) -> Decision {
+        self.before(manifest::EVENT_BEFORE_BLOCK_INTERACT, |pl, s, b| {
+            pl.call_before_block_interact(s, b, p, x, y, z, block)
         })
     }
 

@@ -1,0 +1,18 @@
+[package]
+name = "aether-region"
+description = "Region model, spatial index and snapshot store shared by the protection check and the regions plugin."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# Compile the per-thread test-store override used by the server's unit tests.
+# Off in production, so the hot-path `store()` is a plain static read.
+test-store = []
+
+[lints]
+workspace = true

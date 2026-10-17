@@ -117,6 +117,24 @@ pub trait NativePlugin: Send {
         Decision::Allow
     }
 
+    /// A right-click **on a block**, with its coordinates. Native-only: the
+    /// frozen WASM `@0.1.0` world has no export for it, so a WASM plugin never
+    /// receives this call. `block` is the clicked cell's name.
+    ///
+    /// Used by the regions plugin's internal wand; a plugin that does not care
+    /// keeps the neutral [`Decision::Allow`] and the click proceeds normally.
+    fn before_block_interact(
+        &mut self,
+        _ctx: &mut NativeContext,
+        _p: &Player,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _block: &str,
+    ) -> Decision {
+        Decision::Allow
+    }
+
     fn before_attack(&mut self, _ctx: &mut NativeContext, _p: &Player, _target: u64) -> Decision {
         Decision::Allow
     }
