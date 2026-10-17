@@ -12,12 +12,12 @@ Every command Aether knows, grouped by category: the ones that run today and the
 
 **Legend:** ✅ working · 🚧 pending (`CMD-nn` is the task that will implement it). **Node** is the permission node and **Op** the vanilla operator level (0 everyone … 4 owner); for a pending command the stub enforces exactly them. **Gate** is what the server checks *today*: `node` (enforced node/op), `operator` (the legacy operator-only check — Node/Op are the intended target, not yet enforced), or `everyone` (no requirement; Node/Op are the intended target).
 
-**Totals:** 113 commands — 57 working, 56 pending.
+**Totals:** 112 commands — 56 working, 56 pending.
 
 ## Contents
 
 - [admin](#admin) — Player and access management. (10)
-- [server](#server) — Server control and information. (10)
+- [server](#server) — Server control and information. (9)
 - [player](#player) — Player verbs: inventory, movement, effects and items. (22)
 - [world](#world) — Blocks, environment and world rules. (16)
 - [data](#data) — Data, scoreboard, teams and chat. (27)
@@ -57,7 +57,6 @@ Server control and information.
 | `/version` | – | ✅ working | `node` | `minecraft.command.version` | 2 | `/version` |
 | `/setidletimeout` | – | ✅ working | `node` | `minecraft.command.setidletimeout` | 3 | `/setidletimeout <minutes>` |
 | `/transfer` | – | ✅ working | `node` | `minecraft.command.transfer` | 3 | `/transfer <hostname> [port] [players]` |
-| `/publish` | – | ✅ working | `node` | `minecraft.command.publish` | 4 | `/publish [allow-commands] [gamemode] [port]` |
 
 ## player
 

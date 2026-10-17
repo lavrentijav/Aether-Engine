@@ -6,20 +6,21 @@
 //! /save-on
 //! /save-off
 //! /list [uuids]
-//! /seed [<world>]
+//! /seed
 //! /version
 //! /setidletimeout <minutes>
 //! /transfer <hostname> [<port>] [<players>]
-//! /publish [allow-commands] [gamemode] [port]
 //! ```
 //!
-//! The wording and grammar are 1.21.11 `en_us` and `commands.json`. Note that
-//! 1.21.11's `/seed` takes **no** argument (the brief's `[<world>]` form is not
-//! in the release), so the declared tree is bare `/seed`. `/publish` exists on
-//! the dedicated server and fails there (`commands.publish.failed`), which is
-//! the behaviour kept here. `/save-all` and `/stop` use the same save and stop
-//! paths as the signal handler, so the console, RCON, a player and SIGTERM all
-//! leave the world in the same state.
+//! The wording and grammar are 1.21.11 `en_us` and `commands.json`. Two things
+//! differ from the brief but match the live dedicated server: `/seed` takes
+//! **no** argument in 1.21.11, and `/publish` is **absent** from the dedicated
+//! command tree (it belongs to the singleplayer integrated server), so it is
+//! not declared here at all.
+//!
+//! `/save-all` and `/stop` use the same save and stop paths as the signal
+//! handler. A full save takes the shared save lock, so `/save-all`, the
+//! autosave thread and shutdown cannot run two flushes at once.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,6 +35,7 @@ use crate::session::DemoWorld;
 
 /// Vanilla 1.21.11 `en_us` strings this module emits, verbatim.
 mod text {
+    pub const SAVING: &str = "Saving the game (this may take a moment!)";
     pub const SAVED: &str = "Saved the game";
     pub const SAVE_FAILED: &str = "Unable to save the game (is there enough disk space?)";
     pub const SAVE_ENABLED: &str = "Automatic saving is now enabled";
@@ -42,15 +44,41 @@ mod text {
     pub const SAVE_ALREADY_OFF: &str = "Saving is already turned off";
     pub const LIST: &str = "There are %s of a max of %s players online: %s";
     pub const NAME_AND_ID: &str = "%s (%s)";
-    pub const SEED: &str = "Seed: %s";
-    pub const VERSION: &str = "This server is running Aether Engine version %s (MC: 1.21.11)";
+    pub const SEED: &str = "Seed: [%s]";
+    pub const VERSION_HEADER: &str = "Server version info:";
+    pub const VERSION_ID: &str = "id = %s";
+    pub const VERSION_NAME: &str = "name = %s";
+    pub const VERSION_DATA: &str = "data = %s";
+    pub const VERSION_SERIES: &str = "series = %s";
+    pub const VERSION_PROTOCOL: &str = "protocol = %s (%s)";
+    pub const VERSION_BUILD_TIME: &str = "build_time = %s";
+    pub const VERSION_PACK_RESOURCE: &str = "pack_resource = %s";
+    pub const VERSION_PACK_DATA: &str = "pack_data = %s";
+    pub const VERSION_STABLE: &str = "stable = %s";
     pub const IDLE_SET: &str = "The player idle timeout is now %s minute(s)";
     pub const IDLE_DISABLED: &str = "The player idle timeout is now disabled";
     pub const TRANSFER_SINGLE: &str = "Transferring %s to %s:%s";
     pub const TRANSFER_MULTIPLE: &str = "Transferring %s players to %s:%s";
-    pub const TRANSFER_NO_PLAYERS: &str = "Must specify at least one player to transfer";
-    pub const PUBLISH_FAILED: &str = "Unable to host local game";
+    pub const PLAYER_REQUIRED: &str = "A player is required to run this command here";
     pub const NO_PLAYER: &str = "No player was found";
+
+    /// The values `/version` reports for Aether. `data`, `pack_resource` and
+    /// `pack_data` are the 1.21.11 data/resource pack generation the engine's
+    /// tables are built from; `protocol` spans every modern codec; `stable` is
+    /// `no` because the server is an early preview, and `build_time` comes from
+    /// `AETHER_BUILD_TIME` when a build sets it.
+    pub const AETHER_NAME: &str = "Aether Engine";
+    pub const AETHER_SERIES: &str = "main";
+    pub const AETHER_DATA: &str = "4671";
+    pub const AETHER_PROTOCOL: &str = "774-777";
+    pub const AETHER_PROTOCOL_HEX: &str = "0x306-0x309";
+    pub const AETHER_PACK_RESOURCE: &str = "75.0";
+    pub const AETHER_PACK_DATA: &str = "94.1";
+    pub const AETHER_STABLE: &str = "no";
+    pub const AETHER_BUILD_TIME: &str = match option_env!("AETHER_BUILD_TIME") {
+        Some(time) => time,
+        None => "unknown",
+    };
 }
 
 /// Automatic saves (the periodic chunk/clock flush and player snapshots).
@@ -87,11 +115,23 @@ pub(crate) fn save_all(
     world: &DemoWorld,
     registry: &crate::players::SharedRegistry,
 ) -> Result<(), String> {
+    let players = registry.snapshot();
+    save_players_and_world(world, &players)
+}
+
+/// The shared save itself: player records, the scheduled queues, the world
+/// clock and the storage flush, all under [`SAVE_LOCK`]. `/save-all`, the
+/// autosave thread and the shutdown watcher all go through here, so no two of
+/// them flush concurrently.
+pub(crate) fn save_players_and_world(
+    world: &DemoWorld,
+    players: &[Arc<PlayerHandle>],
+) -> Result<(), String> {
     let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    for player in registry.snapshot() {
+    for player in players {
         if player.full() {
-            crate::session::save_inventory(&player, world);
-            crate::session::save_player(&player, world);
+            crate::session::save_inventory(player, world);
+            crate::session::save_player(player, world);
         }
     }
     flush_world(world)
@@ -174,28 +214,6 @@ pub(crate) fn nodes() -> Vec<Node> {
                     ),
             )
             .build(),
-        Builder::literal("publish")
-            .requires(requirement(4, "minecraft.command.publish"))
-            .executable(exec_publish)
-            .then(
-                Builder::arg("allowCommands", tree::ArgKind::Bool)
-                    .executable(exec_publish)
-                    .then(
-                        Builder::arg("gamemode", tree::ArgKind::Gamemode)
-                            .executable(exec_publish)
-                            .then(
-                                Builder::arg(
-                                    "port",
-                                    tree::ArgKind::IntegerRange {
-                                        min: Some(0),
-                                        max: Some(65535),
-                                    },
-                                )
-                                .executable(exec_publish),
-                            ),
-                    ),
-            )
-            .build(),
     ]
 }
 
@@ -205,11 +223,19 @@ fn exec_stop(_ctx: &mut Ctx) -> Reply {
 }
 
 fn exec_save_all(ctx: &mut Ctx) -> Reply {
+    // Vanilla reports the start before it writes and the result after. A
+    // command body returns one `Reply` when it is done, so both lines are
+    // delivered together here; the order is vanilla's.
+    let mut lines = vec![text::SAVING.to_string()];
     match save_all(ctx.world, ctx.registry) {
-        Ok(()) => Reply::one(text::SAVED),
+        Ok(()) => {
+            lines.push(text::SAVED.to_string());
+            Reply(lines)
+        }
         Err(e) => {
             crate::log::error(&format!("save-all failed: {e}"));
-            ctx.fail(text::SAVE_FAILED)
+            lines.push(text::SAVE_FAILED.to_string());
+            ctx.fail_lines(lines)
         }
     }
 }
@@ -283,7 +309,21 @@ fn exec_seed(_ctx: &mut Ctx) -> Reply {
 }
 
 fn exec_version(_ctx: &mut Ctx) -> Reply {
-    Reply::one(lang::format(text::VERSION, &[env!("CARGO_PKG_VERSION")]))
+    Reply(vec![
+        text::VERSION_HEADER.to_string(),
+        lang::format(text::VERSION_ID, &[env!("CARGO_PKG_VERSION")]),
+        lang::format(text::VERSION_NAME, &[text::AETHER_NAME]),
+        lang::format(text::VERSION_DATA, &[text::AETHER_DATA]),
+        lang::format(text::VERSION_SERIES, &[text::AETHER_SERIES]),
+        lang::format(
+            text::VERSION_PROTOCOL,
+            &[text::AETHER_PROTOCOL, text::AETHER_PROTOCOL_HEX],
+        ),
+        lang::format(text::VERSION_BUILD_TIME, &[text::AETHER_BUILD_TIME]),
+        lang::format(text::VERSION_PACK_RESOURCE, &[text::AETHER_PACK_RESOURCE]),
+        lang::format(text::VERSION_PACK_DATA, &[text::AETHER_PACK_DATA]),
+        lang::format(text::VERSION_STABLE, &[text::AETHER_STABLE]),
+    ])
 }
 
 fn exec_setidletimeout(ctx: &mut Ctx) -> Reply {
@@ -302,10 +342,6 @@ fn exec_setidletimeout(ctx: &mut Ctx) -> Reply {
     } else {
         Reply::one(lang::format(text::IDLE_SET, &[&minutes.to_string()]))
     }
-}
-
-fn exec_publish(ctx: &mut Ctx) -> Reply {
-    ctx.fail(text::PUBLISH_FAILED)
 }
 
 fn exec_transfer(ctx: &mut Ctx) -> Reply {
@@ -339,21 +375,22 @@ fn exec_transfer(ctx: &mut Ctx) -> Reply {
                     Target::Offline { .. } => None,
                 })
                 .collect::<Vec<_>>(),
-            Err(e) if e == text::NO_PLAYER => {
-                return ctx.fail(text::TRANSFER_NO_PLAYERS);
-            }
+            // An empty or unknown selector/name is `argument.entity.notfound.player`
+            // (`No player was found`), never `commands.transfer.error.no_players`.
             Err(e) => return ctx.fail(e),
         },
         None => match ctx.player() {
+            // With no `players` argument a player transfers themselves; the
+            // console has no player, which is `permissions.requires.player`.
             Some(player) => match ctx.registry.by_entity(player.entity_id) {
                 Some(handle) => vec![handle],
                 None => return ctx.fail(text::NO_PLAYER),
             },
-            None => return ctx.fail(text::NO_PLAYER),
+            None => return ctx.fail(text::PLAYER_REQUIRED),
         },
     };
     if players.is_empty() {
-        return ctx.fail(text::TRANSFER_NO_PLAYERS);
+        return ctx.fail(text::NO_PLAYER);
     }
 
     if let Some(unsupported) = players
@@ -552,10 +589,13 @@ mod tests {
     #[test]
     fn save_all_accepts_flush_and_still_saves_when_auto_is_off() {
         let env = env(774);
-        assert_eq!(one(&env, "/save-all"), text::SAVED);
-        assert_eq!(one(&env, "/save-all flush"), text::SAVED);
+        // Vanilla reports the start first and the result second; the body can
+        // only return both together, so the order is what is asserted.
+        let saved = vec![text::SAVING.to_string(), text::SAVED.to_string()];
+        assert_eq!(ok(&env, "/save-all"), saved);
+        assert_eq!(ok(&env, "/save-all flush"), saved);
         assert_eq!(one(&env, "/save-off"), text::SAVE_DISABLED);
-        assert_eq!(one(&env, "/save-all"), text::SAVED);
+        assert_eq!(ok(&env, "/save-all"), saved);
         // Vanilla's save-all writes the online players too, not only chunks.
         assert!(
             env.world
@@ -573,6 +613,10 @@ mod tests {
             for _ in 0..2 {
                 scope.spawn(|| {
                     save_all(&env.world, &env.registry).expect("a concurrent save succeeds");
+                });
+                scope.spawn(|| {
+                    save_players_and_world(&env.world, &env.registry.snapshot())
+                        .expect("a shutdown-style save succeeds");
                 });
             }
         });
@@ -627,7 +671,7 @@ mod tests {
         let env = env(774);
         // 1.21.11 `commands.json` declares `/seed` with no argument; the
         // brief's `[<world>]` form is not in the release.
-        assert_eq!(one(&env, "/seed"), format!("Seed: {}", crate::seed()));
+        assert_eq!(one(&env, "/seed"), format!("Seed: [{}]", crate::seed()));
         assert_eq!(
             err(&env, "/seed overworld"),
             "Incorrect argument for command"
@@ -639,14 +683,26 @@ mod tests {
     }
 
     #[test]
-    fn version_names_the_engine_and_protocol_release() {
+    fn version_prints_the_1_21_11_header_and_nine_fields() {
         let env = env(774);
         assert_eq!(
-            one(&env, "/version"),
-            format!(
-                "This server is running Aether Engine version {} (MC: 1.21.11)",
-                env!("CARGO_PKG_VERSION")
-            )
+            ok(&env, "/version"),
+            vec![
+                "Server version info:".to_string(),
+                format!("id = {}", env!("CARGO_PKG_VERSION")),
+                format!("name = {}", text::AETHER_NAME),
+                format!("data = {}", text::AETHER_DATA),
+                format!("series = {}", text::AETHER_SERIES),
+                format!(
+                    "protocol = {} ({})",
+                    text::AETHER_PROTOCOL,
+                    text::AETHER_PROTOCOL_HEX
+                ),
+                format!("build_time = {}", text::AETHER_BUILD_TIME),
+                format!("pack_resource = {}", text::AETHER_PACK_RESOURCE),
+                format!("pack_data = {}", text::AETHER_PACK_DATA),
+                format!("stable = {}", text::AETHER_STABLE),
+            ]
         );
     }
 
@@ -704,12 +760,15 @@ mod tests {
             err(&env, "/transfer example.com 70000"),
             "Integer must not be more than 65535: found 70000"
         );
-        let (_, lines) = run(
+        // The console has no player to default to; vanilla's
+        // `permissions.requires.player` line.
+        let (kind, lines) = run(
             &env,
             Source::Server(ServerKind::Console),
             "/transfer example.com",
         );
-        assert_eq!(lines, vec![text::NO_PLAYER.to_string()]);
+        assert_eq!(kind, FeedbackKind::Error);
+        assert_eq!(lines, vec![text::PLAYER_REQUIRED.to_string()]);
     }
 
     #[test]
@@ -724,11 +783,15 @@ mod tests {
     }
 
     #[test]
-    fn transfer_with_an_empty_selector_uses_the_vanilla_no_players_error() {
+    fn transfer_with_an_empty_or_unknown_target_says_no_player_was_found() {
         let env = env(774);
         assert_eq!(
             err(&env, "/transfer example.com 25565 @a[distance=1000..]"),
-            text::TRANSFER_NO_PLAYERS
+            text::NO_PLAYER
+        );
+        assert_eq!(
+            err(&env, "/transfer example.com 25565 NoSuchPlayer"),
+            text::NO_PLAYER
         );
         // The argument is `EntityArgument.players`; a non-player selector is
         // refused, and a type=player narrowing is accepted.
@@ -744,20 +807,15 @@ mod tests {
     }
 
     #[test]
-    fn publish_fails_like_a_dedicated_server() {
+    fn publish_is_absent_from_the_dedicated_tree() {
         let env = env(774);
-        assert_eq!(err(&env, "/publish"), text::PUBLISH_FAILED);
+        // 1.21.11's dedicated server does not register the singleplayer
+        // integrated-server command: both forms are an unknown command.
+        assert!(tree::tree().find_command("publish").is_none());
+        assert_eq!(err(&env, "/publish"), "Unknown or incomplete command");
         assert_eq!(
             err(&env, "/publish true creative 25565"),
-            text::PUBLISH_FAILED
-        );
-        assert_eq!(
-            err(&env, "/publish true creative 70000"),
-            "Integer must not be more than 65535: found 70000"
-        );
-        assert_eq!(
-            err(&env, "/publish true creative -1"),
-            "Integer must not be less than 0: found -1"
+            "Unknown or incomplete command"
         );
     }
 
@@ -774,7 +832,6 @@ mod tests {
             "/version",
             "/setidletimeout 1",
             "/transfer example.com",
-            "/publish",
         ] {
             let (kind, lines) = run(&env, bob, line);
             assert_eq!(kind, FeedbackKind::Error, "{line} => {lines:?}");
@@ -805,7 +862,7 @@ mod tests {
             let (kind, lines) = run(&env, Source::Player(&env.bob), line);
             assert_eq!(kind, FeedbackKind::Success, "{line} => {lines:?}");
         }
-        for line in ["/stop", "/save-all", "/publish"] {
+        for line in ["/stop", "/save-all"] {
             let (kind, lines) = run(&env, Source::Player(&env.bob), line);
             assert_eq!(kind, FeedbackKind::Error, "{line} => {lines:?}");
             assert_eq!(lines[0], "You do not have permission to run this command.");

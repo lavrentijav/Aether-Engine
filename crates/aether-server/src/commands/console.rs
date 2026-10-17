@@ -137,7 +137,10 @@ mod tests {
         // it, which is what makes the console an admin source.
         assert_eq!(
             run_line("/save-all", &registry, &world),
-            vec!["Saved the game".to_string()]
+            vec![
+                "Saving the game (this may take a moment!)".to_string(),
+                "Saved the game".to_string()
+            ]
         );
     }
 

@@ -355,7 +355,9 @@ pub const CATALOGUE: &[Command] = &[
     // -- server ------------------------------------------------------------
     // `/stop` and `/save-all` were first wired for the console and RCON
     // lifecycle (CMD-07); CMD-09 completes the group with the information and
-    // transfer verbs.
+    // transfer verbs. `/publish` is deliberately absent: 1.21.11's dedicated
+    // server does not register the singleplayer integrated-server command, so
+    // the tree must not either.
     imp_node(
         "stop",
         &[],
@@ -428,14 +430,6 @@ pub const CATALOGUE: &[Command] = &[
         3,
         Category::Server,
         "/transfer <hostname> [port] [players]",
-    ),
-    imp_node(
-        "publish",
-        &[],
-        "minecraft.command.publish",
-        4,
-        Category::Server,
-        "/publish [allow-commands] [gamemode] [port]",
     ),
     // -- player ------------------------------------------------------------
     imp_op(
