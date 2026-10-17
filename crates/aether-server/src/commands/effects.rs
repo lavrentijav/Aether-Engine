@@ -36,6 +36,8 @@ use aether_world::ItemTypeId;
 
 /// Vanilla's particle distance limit when `force` is not given, in blocks.
 const PARTICLE_RANGE: f64 = 32.0;
+/// The distance limit with `force`, in blocks.
+const PARTICLE_RANGE_FORCED: f64 = 512.0;
 
 /// Every command node this module owns.
 pub fn nodes() -> Vec<Node> {
@@ -120,17 +122,29 @@ fn normalize(name: &str) -> String {
     }
 }
 
+/// A sound id: a syntactically valid `namespace:path`, namespaced if needed.
+///
+/// `/playsound` and `/stopsound` take vanilla's plain `resource_location`,
+/// not a registry entry: a resource pack may define its own sound ids, and
+/// vanilla accepts them. Only `/particle` checks its registry, because a
+/// particle id is a codec-level enum a client cannot invent.
 fn sound_resource(name: &str) -> Result<String, String> {
     let name = normalize(name);
     if !args::valid_resource(&name) {
         return Err(format!("Invalid resource location '{name}'"));
     }
-    if !resources::sound_exists(&name) {
-        return Err(format!(
-            "Can't find element '{name}' of type 'minecraft:sound_event'"
-        ));
-    }
     Ok(name)
+}
+
+/// Print a float the way Java's `Float.toString` does in Brigadier errors:
+/// a whole number keeps its `.0`.
+fn fmt_float(v: f32) -> String {
+    let text = v.to_string();
+    if text.contains('.') || text.contains('e') || text.contains('E') {
+        text
+    } else {
+        format!("{text}.0")
+    }
 }
 
 fn source_name(source: u8) -> &'static str {
@@ -508,7 +522,7 @@ fn particle_node() -> Node {
         Builder::literal(name)
             .executable(move |ctx| exec_particle(ctx, force))
             .then(
-                Builder::arg("viewers", ArgKind::Entity)
+                Builder::arg("viewers", ArgKind::Players)
                     .executable(move |ctx| exec_particle(ctx, force)),
             )
     }
@@ -517,12 +531,10 @@ fn particle_node() -> Node {
         .executable(|ctx| exec_particle(ctx, false))
         .then(force_branch(false))
         .then(force_branch(true));
-    let speed = Builder::arg("speed", ArgKind::Float)
-        .executable(|ctx| exec_particle(ctx, false))
-        .then(count);
-    let delta = Builder::arg("delta", ArgKind::Vec3(false))
-        .executable(|ctx| exec_particle(ctx, false))
-        .then(speed);
+    // Vanilla marks only `name`, `pos`, `count`, the mode words and
+    // `viewers` executable: a line may not stop after `delta` or `speed`.
+    let speed = Builder::arg("speed", ArgKind::Float).then(count);
+    let delta = Builder::arg("delta", ArgKind::Vec3(false)).then(speed);
     let pos = Builder::arg("pos", ArgKind::Vec3(true))
         .executable(|ctx| exec_particle(ctx, false))
         .then(delta);
@@ -548,6 +560,24 @@ fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
             "/particle <name> [<pos>] [<delta>] [<speed>] [<count>] [force|normal] [<viewers>]",
         );
     };
+    // Brigadier validates the bounded numeric arguments as it reads them,
+    // before the executor runs, so a negative count or speed wins over an
+    // unknown particle or an unresolvable position.
+    let count = int_arg(ctx, 4).unwrap_or(0);
+    if count < 0 {
+        return ctx.fail(lang::format(
+            lang::ARG_INTEGER_LOW,
+            &["0", &count.to_string()],
+        ));
+    }
+    let speed = float_arg(ctx, 3).unwrap_or(0.0);
+    if speed < 0.0 {
+        return ctx.fail(lang::format(
+            lang::ARG_FLOAT_LOW,
+            &[&fmt_float(0.0), &fmt_float(speed)],
+        ));
+    }
+
     let (id, options_text) = match raw.find('{') {
         Some(index) => (&raw[..index], Some(&raw[index..])),
         None => (raw, None),
@@ -571,20 +601,6 @@ fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
         ParticleOptions::None
     };
 
-    let count = int_arg(ctx, 4).unwrap_or(1);
-    if count < 0 {
-        return ctx.fail(lang::format(
-            lang::ARG_INTEGER_LOW,
-            &["0", &count.to_string()],
-        ));
-    }
-    let speed = float_arg(ctx, 3).unwrap_or(0.0);
-    if speed < 0.0 {
-        return ctx.fail(lang::format(
-            lang::ARG_FLOAT_LOW,
-            &["0", &speed.to_string()],
-        ));
-    }
     let pos = match coords_arg(ctx, 1) {
         Some(c) => match resolve(ctx, c) {
             Ok(p) => p,
@@ -603,32 +619,35 @@ fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
         None => Vector3::ZERO,
     };
 
+    let range = if force {
+        PARTICLE_RANGE_FORCED
+    } else {
+        PARTICLE_RANGE
+    };
+    let in_range = |handle: &Arc<PlayerHandle>| {
+        let p = handle.pos();
+        let (dx, dy, dz) = (p.x - pos.x, p.y - pos.y, p.z - pos.z);
+        dx * dx + dy * dy + dz * dz <= range * range
+    };
     let recipients = match text_arg(ctx, 5) {
         Some(viewers) => match resolve_players(ctx.registry, ctx.source, viewers) {
             Ok(players) => players,
             Err(e) => return ctx.fail(e),
         },
-        None => {
-            let all = ctx.registry.snapshot();
-            if force {
-                all
-            } else {
-                all.into_iter()
-                    .filter(|handle| {
-                        let p = handle.pos();
-                        let (dx, dy, dz) = (p.x - pos.x, p.y - pos.y, p.z - pos.z);
-                        dx * dx + dy * dy + dz * dz <= PARTICLE_RANGE * PARTICLE_RANGE
-                    })
-                    .collect()
-            }
-        }
+        None => ctx.registry.snapshot(),
     };
+    // `force` widens the range to 512 blocks; it does not target the whole
+    // server, and the same range applies to explicitly selected viewers.
+    let recipients: Vec<Arc<PlayerHandle>> = recipients
+        .into_iter()
+        .filter(|handle| in_range(handle))
+        .collect();
     if recipients.is_empty() {
         return ctx.fail(lang::PARTICLE_FAILED);
     }
 
     let event = ServerEvent::Particle {
-        name: name.into(),
+        name: name.clone().into(),
         x: pos.x,
         y: pos.y,
         z: pos.z,
@@ -643,9 +662,9 @@ fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
     for handle in recipients {
         handle.emit(&event, ctx.world);
     }
-    // Vanilla's success line is only for command blocks/functions; an
-    // operator typing it sees nothing.
-    Reply(Vec::new())
+    // `ParticleCommand` calls `sendSuccess(..., true)`; the line is shown to
+    // the executor as well.
+    Reply::one(lang::format(lang::PARTICLE_SUCCESS, &[&name]))
 }
 
 // ---------------------------------------------------------------------------
@@ -666,7 +685,7 @@ fn playsound_tail(source: u8) -> Builder {
     let pos = Builder::arg("pos", ArgKind::Vec3(true))
         .executable(move |ctx| exec_playsound(ctx, source))
         .then(volume);
-    Builder::arg("targets", ArgKind::Entities)
+    Builder::arg("targets", ArgKind::Players)
         .executable(move |ctx| exec_playsound(ctx, source))
         .then(pos)
 }
@@ -713,6 +732,42 @@ fn exec_playsound(ctx: &mut Ctx, source: u8) -> Reply {
             "/playsound <sound> [<source>] [<targets>] [<pos>] [<volume>] [<pitch>] [<minVolume>]",
         );
     };
+    // Bounds are Brigadier parse errors, so they are checked before the
+    // executor resolves targets or coordinates.
+    let volume = float_arg(ctx, 3).unwrap_or(1.0);
+    let pitch = float_arg(ctx, 4).unwrap_or(1.0);
+    let min_volume = float_arg(ctx, 5).unwrap_or(0.0);
+    if volume < 0.0 {
+        return ctx.fail(lang::format(
+            lang::ARG_FLOAT_LOW,
+            &[&fmt_float(0.0), &fmt_float(volume)],
+        ));
+    }
+    if pitch < 0.0 {
+        return ctx.fail(lang::format(
+            lang::ARG_FLOAT_LOW,
+            &[&fmt_float(0.0), &fmt_float(pitch)],
+        ));
+    }
+    if pitch > 2.0 {
+        return ctx.fail(lang::format(
+            lang::ARG_FLOAT_BIG,
+            &[&fmt_float(2.0), &fmt_float(pitch)],
+        ));
+    }
+    if min_volume < 0.0 {
+        return ctx.fail(lang::format(
+            lang::ARG_FLOAT_LOW,
+            &[&fmt_float(0.0), &fmt_float(min_volume)],
+        ));
+    }
+    if min_volume > 1.0 {
+        return ctx.fail(lang::format(
+            lang::ARG_FLOAT_BIG,
+            &[&fmt_float(1.0), &fmt_float(min_volume)],
+        ));
+    }
+
     let sound = match sound_resource(raw) {
         Ok(sound) => sound,
         Err(e) => return ctx.fail(e),
@@ -741,70 +796,66 @@ fn exec_playsound(ctx: &mut Ctx, source: u8) -> Reply {
             Err(e) => return ctx.fail(e),
         },
     };
-    let volume = float_arg(ctx, 3).unwrap_or(1.0);
-    let pitch = float_arg(ctx, 4).unwrap_or(1.0);
-    let min_volume = float_arg(ctx, 5).unwrap_or(0.0);
-    if volume < 0.0 {
-        return ctx.fail(lang::format(
-            lang::ARG_FLOAT_LOW,
-            &["0", &volume.to_string()],
-        ));
-    }
-    if pitch < 0.0 {
-        return ctx.fail(lang::format(
-            lang::ARG_FLOAT_LOW,
-            &["0", &pitch.to_string()],
-        ));
-    }
-    if pitch > 2.0 {
-        return ctx.fail(lang::format(
-            lang::ARG_FLOAT_BIG,
-            &["2", &pitch.to_string()],
-        ));
-    }
-    if min_volume < 0.0 {
-        return ctx.fail(lang::format(
-            lang::ARG_FLOAT_LOW,
-            &["0", &min_volume.to_string()],
-        ));
-    }
-    if min_volume > 1.0 {
-        return ctx.fail(lang::format(
-            lang::ARG_FLOAT_BIG,
-            &["1", &min_volume.to_string()],
-        ));
-    }
-    // Vanilla swaps volume and minVolume when minVolume is larger, so the
-    // packet's volume is the larger of the two.
-    let volume = volume.max(min_volume);
 
-    let event = ServerEvent::Sound {
-        name: sound.clone().into(),
-        category: source,
-        x: pos.x,
-        y: pos.y,
-        z: pos.z,
-        volume,
-        pitch,
-    };
-    let count = targets.len();
-    let single = if count == 1 {
-        Some(targets[0].name.clone())
-    } else {
-        None
-    };
+    // Vanilla's audible range: 16 blocks at volume 1 or less, scaled by the
+    // volume above that. Outside it a sound is skipped unless `minVolume`
+    // asks for it, in which case it is replayed two blocks from the target
+    // at `minVolume`.
+    let range = if volume > 1.0 { volume * 16.0 } else { 16.0 };
+    let max_distance_sq = f64::from(range) * f64::from(range);
+    let mut heard = Vec::new();
     for handle in targets {
-        handle.emit(&event, ctx.world);
+        let p = handle.pos();
+        let (dx, dy, dz) = (p.x - pos.x, p.y - pos.y, p.z - pos.z);
+        let distance_sq = dx * dx + dy * dy + dz * dz;
+        if distance_sq > max_distance_sq {
+            if min_volume > 0.0 {
+                let distance = distance_sq.sqrt();
+                let offset = 2.0 / distance;
+                handle.emit(
+                    &ServerEvent::Sound {
+                        name: sound.clone().into(),
+                        category: source,
+                        x: pos.x + (p.x - pos.x) * offset,
+                        y: pos.y + (p.y - pos.y) * offset,
+                        z: pos.z + (p.z - pos.z) * offset,
+                        volume: min_volume,
+                        pitch,
+                    },
+                    ctx.world,
+                );
+                heard.push(handle.name.clone());
+            }
+            continue;
+        }
+        handle.emit(
+            &ServerEvent::Sound {
+                name: sound.clone().into(),
+                category: source,
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+                volume,
+                pitch,
+            },
+            ctx.world,
+        );
+        heard.push(handle.name.clone());
     }
-    match single {
-        Some(name) => Reply::one(lang::format(
+    if heard.is_empty() {
+        return ctx.fail(lang::PLAYSOUND_FAILED);
+    }
+    // The success count is the players who actually heard it.
+    if heard.len() == 1 {
+        Reply::one(lang::format(
             lang::PLAYSOUND_SUCCESS_SINGLE,
-            &[&sound, &name],
-        )),
-        None => Reply::one(lang::format(
+            &[&sound, &heard[0]],
+        ))
+    } else {
+        Reply::one(lang::format(
             lang::PLAYSOUND_SUCCESS_MULTIPLE,
-            &[&sound, &count.to_string()],
-        )),
+            &[&sound, &heard.len().to_string()],
+        ))
     }
 }
 
@@ -813,7 +864,7 @@ fn exec_playsound(ctx: &mut Ctx, source: u8) -> Reply {
 // ---------------------------------------------------------------------------
 
 fn stopsound_node() -> Node {
-    let mut targets = Builder::arg("targets", ArgKind::Entities)
+    let mut targets = Builder::arg("targets", ArgKind::Players)
         .executable(|ctx| exec_stopsound(ctx, None))
         .then(
             // `*` names no source but still needs a sound; vanilla does not

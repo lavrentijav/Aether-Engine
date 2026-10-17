@@ -247,7 +247,7 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
         // `uuid` and `nbt_path` are single tokens; the entity kinds are
         // CMD-06b's, read as one selector-aware token so a quoted filter with
         // a space (`@a[name="Bob Smith"]`) stays whole.
-        ArgKind::Entity | ArgKind::Entities => {
+        ArgKind::Entity | ArgKind::Entities | ArgKind::Players => {
             let t = read_selector_token(r)?;
             Ok((Value::Text(t.clone()), t))
         }

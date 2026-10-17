@@ -1008,6 +1008,7 @@ mod tests {
             ArgKind::Bool,
             ArgKind::Entity,
             ArgKind::Entities,
+            ArgKind::Players,
             ArgKind::BlockPos,
             ArgKind::Vec3(true),
             ArgKind::Vec2(true),

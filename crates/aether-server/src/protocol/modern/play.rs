@@ -1290,9 +1290,11 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             } else {
                 p.bool(*force);
                 // 1.21.4 added `alwaysShow`; 1.20.5-1.21.3 have only the
-                // long-distance flag.
+                // long-distance flag. `ParticleCommand` always passes
+                // `alwaysShow = false`, so `force` only sets the distance
+                // flag.
                 if v.protocol >= 769 {
-                    p.bool(*force);
+                    p.bool(false);
                 }
                 p.f64(*x)
                     .f64(*y)
@@ -2219,7 +2221,7 @@ mod tests {
         let mut pin = crate::proto::PacketIn::new(pkts[0].body());
         assert_eq!(pin.var_int().unwrap(), 46);
         assert!(pin.bool().unwrap(), "force is the long-distance flag");
-        assert!(pin.bool().unwrap(), "1.21.4+ carries alwaysShow too");
+        assert!(!pin.bool().unwrap(), "alwaysShow is always false");
         assert_eq!(pin.f64().unwrap(), 1.5);
         assert_eq!(pin.f64().unwrap(), 64.0);
         assert_eq!(pin.f64().unwrap(), -2.5);

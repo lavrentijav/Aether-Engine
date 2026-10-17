@@ -260,6 +260,8 @@ pub enum ArgKind {
     Entity,
     /// `minecraft:entities`.
     Entities,
+    /// `minecraft:entity` for players only, possibly many (`EntityArgument.players`).
+    Players,
     /// `minecraft:block_pos`.
     BlockPos,
     /// `minecraft:vec3`. The flag is vanilla's `centerIntegers`: `true` (the
@@ -337,7 +339,7 @@ impl ArgKind {
             ArgKind::Float => "brigadier:float",
             ArgKind::Double => "brigadier:double",
             ArgKind::Bool => "brigadier:bool",
-            ArgKind::Entity | ArgKind::Entities => "minecraft:entity",
+            ArgKind::Entity | ArgKind::Entities | ArgKind::Players => "minecraft:entity",
             ArgKind::BlockPos => "minecraft:block_pos",
             ArgKind::Vec3(_) => "minecraft:vec3",
             ArgKind::Vec2(_) => "minecraft:vec2",
@@ -415,6 +417,8 @@ impl ArgKind {
             // `0x01` is "single", as vanilla writes `EntityArgumentType`.
             ArgKind::Entity => ArgProperties::Flags(0x01),
             ArgKind::Entities => ArgProperties::Flags(0x00),
+            // `0x02` is "players only"; `players` is also multiple.
+            ArgKind::Players => ArgProperties::Flags(0x02),
             ArgKind::ScoreHolder => ArgProperties::Flags(0x00),
             // An `i32` minimum from 1.19.4 on, and no field before that; the
             // serializer decides from the codec's parser generation.

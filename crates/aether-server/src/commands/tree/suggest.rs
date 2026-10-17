@@ -109,7 +109,11 @@ fn argument(kind: ArgKind, partial: &str, ctx: &SuggestCtx) -> Vec<String> {
         ArgKind::Vec2(_) => vec!["~ ~", "^ ^"],
         ArgKind::Rotation => vec!["~ ~"],
         ArgKind::Angle => vec!["~"],
-        ArgKind::Entity | ArgKind::Entities | ArgKind::GameProfile | ArgKind::ScoreHolder => {
+        ArgKind::Entity
+        | ArgKind::Entities
+        | ArgKind::Players
+        | ArgKind::GameProfile
+        | ArgKind::ScoreHolder => {
             return ctx
                 .registry
                 .snapshot()

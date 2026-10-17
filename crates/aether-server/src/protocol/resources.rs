@@ -692,8 +692,8 @@ pub static PARTICLE_GROUPS: &[ParticleGroup] = &[
             ("minecraft:shriek", 103),
             ("minecraft:egg_crack", 104),
             ("minecraft:dust_plume", 105),
-            ("minecraft:trial_spawner_detected_player", 106),
-            ("minecraft:trial_spawner_detected_player_ominous", 107),
+            ("minecraft:trial_spawner_detection", 106),
+            ("minecraft:trial_spawner_detection_ominous", 107),
             ("minecraft:vault_connection", 108),
             ("minecraft:dust_pillar", 109),
             ("minecraft:ominous_spawning", 110),
@@ -2976,6 +2976,13 @@ mod tests {
         assert_eq!(particle_id(777, "minecraft:sulfur_cube_goo"), Some(127));
         assert!(!particle_exists("minecraft:sulfur_cube_goo"));
         assert!(particle_exists("minecraft:dust"));
+        // The 1.21.11 registry calls ids 106/107 `detection`, not
+        // `detected_player`; `minecraft-data` is stale on those names.
+        assert_eq!(
+            particle_id(774, "minecraft:trial_spawner_detection"),
+            Some(106)
+        );
+        assert!(!particle_exists("minecraft:trial_spawner_detected_player"));
     }
 
     #[test]

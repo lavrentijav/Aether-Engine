@@ -207,6 +207,7 @@ fn every_argument_kind_parses_a_valid_word() {
         ArgKind::Enum(&["a", "b"]),
         ArgKind::Entity,
         ArgKind::Entities,
+        ArgKind::Players,
         ArgKind::BlockPos,
         ArgKind::Vec3(true),
         ArgKind::Vec2(true),
@@ -286,6 +287,7 @@ fn the_wire_parser_and_properties_match_each_kind() {
     assert_eq!(ArgKind::Double.properties(), ArgProperties::Flags(0));
     assert_eq!(ArgKind::Entity.properties(), ArgProperties::Flags(0x01));
     assert_eq!(ArgKind::Entities.properties(), ArgProperties::Flags(0x00));
+    assert_eq!(ArgKind::Players.properties(), ArgProperties::Flags(0x02));
     assert_eq!(
         ArgKind::ScoreHolder.properties(),
         ArgProperties::Flags(0x00)
@@ -1542,27 +1544,61 @@ fn particle_and_sound_commands_route_through_the_tree() {
     let env = env();
     let who = &env.tester;
 
-    // `/particle` succeeds silently; the optional position/delta/speed/count
-    // and the `force` flag all parse, and the name may omit `minecraft:`.
-    for text in [
-        "/particle minecraft:flame",
-        "/particle flame 0 64 0 0 0 0 0 4 force",
-        "/particle flame 0 64 0 0.1 0.2 0.3 0 0 normal @a",
-        "/particle dust{color:[1.0,0.0,0.0],scale:1.0}",
-        "/particle minecraft:block{block_state:\"minecraft:stone\"}",
-        "/particle item{item:{id:\"minecraft:stone\",count:1}}",
-        "/particle vibration{destination:{type:\"minecraft:block\",pos:[1,2,3]},arrival_in_ticks:10}",
+    // `/particle` reports vanilla's `Displaying particle …`; the optional
+    // position/delta/speed/count and the `force` flag all parse, and the name
+    // may omit `minecraft:`.
+    for (text, shown) in [
+        ("/particle minecraft:flame", "minecraft:flame"),
+        ("/particle flame 0 64 0 0 0 0 0 4 force", "minecraft:flame"),
+        (
+            "/particle flame 0 64 0 0.1 0.2 0.3 0 0 normal @a",
+            "minecraft:flame",
+        ),
+        (
+            "/particle dust{color:[1.0,0.0,0.0],scale:1.0}",
+            "minecraft:dust",
+        ),
+        (
+            "/particle minecraft:block{block_state:\"minecraft:stone\"}",
+            "minecraft:block",
+        ),
+        (
+            "/particle item{item:{id:\"minecraft:stone\",count:1}}",
+            "minecraft:item",
+        ),
+        (
+            "/particle vibration{destination:{type:\"minecraft:block\",pos:[1,2,3]},arrival_in_ticks:10}",
+            "minecraft:vibration",
+        ),
         // Vanilla allows whitespace before the options object, and an
         // integer colour instead of a float list.
-        "/particle dust {color:16711680,scale:1.0}",
+        ("/particle dust {color:16711680,scale:1.0}", "minecraft:dust"),
         // count 0 means "as many as the client can render".
-        "/particle flame 0 64 0 0.5 0.5 0.5 0 0",
+        ("/particle flame 0 64 0 0.5 0.5 0.5 0 0", "minecraft:flame"),
+        // 1.21.11's registry name for ids 106/107 is `detection`.
+        (
+            "/particle minecraft:trial_spawner_detection",
+            "minecraft:trial_spawner_detection",
+        ),
     ] {
-        assert_eq!(run(&env, who, text), Vec::<String>::new(), "`{text}`");
+        assert_eq!(
+            one(&env, who, text),
+            format!("Displaying particle {shown}"),
+            "`{text}`"
+        );
     }
     assert_eq!(
         one(&env, who, "/particle minecraft:not_a_particle"),
         "Unknown particle: minecraft:not_a_particle"
+    );
+    // The stale `minecraft-data` spelling is not a 1.21.11 name.
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/particle minecraft:trial_spawner_detected_player"
+        ),
+        "Unknown particle: minecraft:trial_spawner_detected_player"
     );
     // Vanilla's `particle.invalidOptions`, for a missing or bad object.
     assert_eq!(
@@ -1593,6 +1629,27 @@ fn particle_and_sound_commands_route_through_the_tree() {
         one(&env, who, "/particle flame 0 64 0 0 0 0 0 -1"),
         "Integer must not be less than 0: found -1"
     );
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/particle minecraft:not_a_particle 0 64 0 0 0 0 0 -1"
+        ),
+        "Integer must not be less than 0: found -1"
+    );
+    assert_eq!(
+        one(&env, who, "/particle flame 0 64 0 0 0 0 -1 0"),
+        "Float must not be less than 0.0: found -1.0"
+    );
+    // `delta` and `speed` are not executable in vanilla's grammar.
+    assert_eq!(
+        one(&env, who, "/particle flame 0 64 0 0 0 0"),
+        "Unknown or incomplete command"
+    );
+    assert_eq!(
+        one(&env, who, "/particle flame 0 64 0 0"),
+        "Incomplete (expected 3 coordinates)"
+    );
 
     // `/playsound`: the default is the caller as the only target, and an
     // explicit target list picks single/multiple wording.
@@ -1616,9 +1673,52 @@ fn particle_and_sound_commands_route_through_the_tree() {
         ),
         "Played sound minecraft:block.note_block.harp to 2 players"
     );
-    assert!(
-        one(&env, who, "/playsound minecraft:not_a_sound").contains("minecraft:not_a_sound"),
-        "an unknown sound is named in the error"
+    // `/playsound` takes a plain resource location: a custom id a pack
+    // defines is accepted even though it is not in the vanilla registry.
+    assert_eq!(
+        one(&env, who, "/playsound minecraft:not_a_sound"),
+        "Played sound minecraft:not_a_sound to tester"
+    );
+    assert_eq!(
+        one(&env, who, "/playsound Bad:Name"),
+        "Invalid resource location 'Bad:Name'"
+    );
+    // Bounds are Brigadier argument errors, so they win over resource and
+    // position errors, and the values print as floats.
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/playsound minecraft:not_a_sound master @a 0 64 0 -1"
+        ),
+        "Float must not be less than 0.0: found -1.0"
+    );
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/playsound block.note_block.harp master @a 0 64 0 1 3"
+        ),
+        "Float must not be more than 2.0: found 3.0"
+    );
+    // Nobody inside the 16-block range and minVolume 0: the command fails.
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/playsound block.note_block.harp master @a 1000 64 0"
+        ),
+        "The sound is too far away to be heard"
+    );
+    // With minVolume the sound is relayed two blocks from each target and
+    // both are counted as hearing it.
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/playsound block.note_block.harp master @a 1000 64 0 1 1 0.5"
+        ),
+        "Played sound minecraft:block.note_block.harp to 2 players"
     );
 
     // `/stopsound` has one line per combination of source and sound.
