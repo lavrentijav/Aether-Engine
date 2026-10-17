@@ -18,7 +18,7 @@
 //! cargo-locked bench -p aether-server --bench region_index
 //! ```
 
-use aether_server::region::{BlockPos, Region, RegionId, RegionIndex, RegionStore};
+use aether_server::region::{Action, Actor, BlockPos, Region, RegionId, RegionIndex, RegionStore};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
 /// Single-chunk regions spread over a grid, `n` of them. The queried point
@@ -52,6 +52,26 @@ fn bench_region_index(c: &mut Criterion) {
         });
     }
     query_group.finish();
+
+    // The check adds the world filter, the flag lookup and the actor test to
+    // the query. One covering region means a flat cost too, which is the
+    // property the hot path needs.
+    let mut check_group = c.benchmark_group("region_index/check");
+    for n in [10usize, 1_000, 100_000] {
+        let index = RegionIndex::from_regions(regions(n));
+        check_group.bench_with_input(BenchmarkId::from_parameter(n), &index, |b, index| {
+            b.iter(|| {
+                let verdict = index.check(
+                    "overworld",
+                    black_box(query),
+                    Action::Break,
+                    &Actor::new("steve"),
+                );
+                black_box(verdict)
+            })
+        });
+    }
+    check_group.finish();
 
     let mut build_group = c.benchmark_group("region_index/build");
     for n in [10usize, 1_000, 100_000] {

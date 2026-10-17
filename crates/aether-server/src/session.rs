@@ -1061,7 +1061,16 @@ fn play_loop(
                     .held_item()
                     .and_then(|id| id.vanilla_name())
                     .unwrap_or_default();
-                if let Some(reason) = crate::plugins::before_use_item(handle, item) {
+                let p = handle.pos();
+                let veto = crate::region::denial_at(
+                    handle,
+                    p.x.floor() as i32,
+                    p.y.floor() as i32,
+                    p.z.floor() as i32,
+                    crate::region::Action::UseItem,
+                )
+                .or_else(|| crate::plugins::before_use_item(handle, item));
+                if let Some(reason) = veto {
                     if !reason.is_empty() {
                         handle.emit(&ServerEvent::Chat(reason), world);
                     }
@@ -1072,7 +1081,21 @@ fn play_loop(
             }
             ClientEvent::Interact { target, attack, .. } => {
                 if attack {
-                    if let Some(reason) = crate::plugins::before_attack(handle, target as u64) {
+                    // PvP is checked at the victim: only a player target is
+                    // subject to the region's pvp flag, never a mob.
+                    let pvp_veto = registry.by_entity(target).and_then(|victim| {
+                        let p = victim.pos();
+                        crate::region::denial_at(
+                            handle,
+                            p.x.floor() as i32,
+                            p.y.floor() as i32,
+                            p.z.floor() as i32,
+                            crate::region::Action::Pvp,
+                        )
+                    });
+                    let veto =
+                        pvp_veto.or_else(|| crate::plugins::before_attack(handle, target as u64));
+                    if let Some(reason) = veto {
                         if !reason.is_empty() {
                             handle.emit(&ServerEvent::Chat(reason), world);
                         }
@@ -1157,9 +1180,11 @@ fn break_block(
         return;
     }
     let name = crate::game::block_name(world, broken).unwrap_or_default();
-    // A plugin may veto the break; the client predicted it, so put the block
-    // back on their screen and say why.
-    if let Some(reason) = crate::plugins::before_block_break(handle, x, y, z, &name) {
+    // A region protects the block before a plugin gets a say. The client
+    // predicted the break, so put the block back on their screen and say why.
+    let veto = crate::region::denial_at(handle, x, y, z, crate::region::Action::Break)
+        .or_else(|| crate::plugins::before_block_break(handle, x, y, z, &name));
+    if let Some(reason) = veto {
         if !reason.is_empty() {
             handle.emit(&ServerEvent::Chat(reason), world);
         }
@@ -1198,6 +1223,12 @@ fn place_block(
     cursor: (f32, f32, f32),
 ) -> bool {
     if !(WORLD_BOTTOM..WORLD_TOP).contains(&y) {
+        return false;
+    }
+    if let Some(reason) = crate::region::denial_at(handle, x, y, z, crate::region::Action::Place) {
+        if !reason.is_empty() {
+            handle.emit(&ServerEvent::Chat(reason), world);
+        }
         return false;
     }
     let here = world.get_block(x, y, z);
@@ -2137,6 +2168,51 @@ mod placement_tests {
         };
         let generator = crate::gencache::Cached::with_revision(generator, seed, revision, &cfg);
         World::new(store, generator)
+    }
+
+    #[test]
+    fn a_region_blocks_break_and_place() {
+        let regions = crate::region::install_test_store(crate::region::RegionStore::new());
+        let region = crate::region::Region::new(
+            crate::region::RegionId(1),
+            "overworld",
+            crate::region::BlockPos::new(0, 0, 0),
+            crate::region::BlockPos::new(15, 255, 15),
+        )
+        .with_flag("build", false);
+        regions.replace_all([region.handle()]);
+
+        let world = test_world(29);
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(1, "RegionGuest");
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+
+        world.set_block(0, 100, 0, "minecraft:stone");
+        break_block(&handle, &registry, &world, 0, 100, 0);
+        assert_eq!(
+            world.get_block(0, 100, 0),
+            aether_world::registry::blocks::default_state("minecraft:stone").unwrap(),
+            "the break hook must leave a protected block in place"
+        );
+
+        let stone = aether_world::registry::blocks::default_state("minecraft:stone").unwrap();
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            1,
+            100,
+            0,
+            stone,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(!placed, "the place hook must refuse a protected cell");
+        assert_eq!(
+            world.get_block(1, 100, 0),
+            block_ids::AIR,
+            "a refused placement writes nothing"
+        );
     }
 
     /// The placement rules are enforced inside `place_block`, before anything

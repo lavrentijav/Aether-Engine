@@ -250,6 +250,21 @@ pub fn use_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i3
         return false;
     }
     let short = name.strip_prefix("minecraft:").unwrap_or(&name);
+    let interactive = short == "crafting_table"
+        || ContainerKind::of_block(&name).is_some()
+        || short.ends_with("_bed");
+    if interactive {
+        if let Some(reason) =
+            crate::region::denial_at(handle, x, y, z, crate::region::Action::Interact)
+        {
+            if !reason.is_empty() {
+                handle.emit(&ServerEvent::Chat(reason), world);
+            }
+            // Consumed: a refused interaction must not fall through to a
+            // placement against the protected block.
+            return true;
+        }
+    }
     if short == "crafting_table" {
         window::open(
             handle,
@@ -835,6 +850,20 @@ pub fn pick_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i
 
 /// Right-click on an entity.
 pub fn use_entity(handle: &PlayerHandle, world: &DemoWorld, target: i32) {
+    if let Some(p) = entities::position(target) {
+        if let Some(reason) = crate::region::denial_at(
+            handle,
+            p.x.floor() as i32,
+            p.y.floor() as i32,
+            p.z.floor() as i32,
+            crate::region::Action::Interact,
+        ) {
+            if !reason.is_empty() {
+                handle.emit(&ServerEvent::Chat(reason), world);
+            }
+            return;
+        }
+    }
     let held = handle.held_item();
     match entities::interact(target, held) {
         Some(entities::Interaction::Replace(with)) => {
