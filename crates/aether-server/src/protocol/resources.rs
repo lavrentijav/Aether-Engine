@@ -2,10 +2,14 @@
 //!
 //! `minecraft:particle_type` ids are per release; the groups below are the
 //! releases that share a table (from each release's own registry dump /
-//! PrismarineJS `minecraft-data`). `minecraft:sound_event` names are the
-//! 1.21.11 registry, which is what `/playsound` and `/stopsound` validate
-//! against; a release without a particle by a name sends no packet, so an
-//! older codec simply ignores a newer particle instead of mis-rendering it.
+//! PrismarineJS `minecraft-data`). A release without a particle by a name
+//! sends no packet, so an older codec simply ignores a newer particle instead
+//! of mis-rendering it.
+//!
+//! `minecraft:sound_event` names are the 1.21.11 registry, kept as reference
+//! data (the sound list a vanilla client knows). `/playsound` and
+//! `/stopsound` do **not** validate against it — their argument is a plain
+//! resource location, and a resource pack may define its own ids.
 
 /// One particle registry, shared by the protocols that use it.
 pub struct ParticleGroup {
@@ -2954,6 +2958,9 @@ pub static SOUND_EVENTS: &[&str] = &[
 ];
 
 /// Whether `name` is a vanilla sound event in the 1.21.11 registry.
+///
+/// Reference data only: the commands do not gate on it, so a pack's custom
+/// sound ids still play.
 pub fn sound_exists(name: &str) -> bool {
     SOUND_EVENTS.binary_search(&name).is_ok()
 }

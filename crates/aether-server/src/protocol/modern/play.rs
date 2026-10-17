@@ -550,7 +550,8 @@ fn write_particle_options(v: &Version, p: &mut PacketOut, options: &ParticleOpti
             }
         }
         ParticleOptions::Flash { color } => {
-            // `flash` arrived in 1.21.9.
+            // The `flash` particle predates this table, but its colour field
+            // arrived in 1.21.9.
             if v.protocol >= 773 {
                 p.i32(*color);
             }

@@ -34,7 +34,7 @@
 //! whole tree.
 
 use crate::commands::tree::{
-    tree, wire_nodes, ArgProperties, CommandTree, NODE_ARGUMENT, NODE_LITERAL,
+    tree, wire_nodes, ArgKind, ArgProperties, CommandTree, NODE_ARGUMENT, NODE_LITERAL,
 };
 use crate::proto::PacketOut;
 
@@ -533,21 +533,27 @@ fn write_tree_for(p: &mut PacketOut, t: &CommandTree, parsers: Parsers) {
         // back to the string parser (a release that does not register it, or a
         // kind the tree cannot express yet) must also write the string
         // parser's properties, or the client reads the wrong bytes after it.
-        let properties = match parsers {
+        let (properties, registered) = match parsers {
             Parsers::ByName => {
                 p.string(kind.parser_name());
-                kind.properties()
+                (kind.properties(), true)
             }
             Parsers::ById(registry) => {
                 if registry.has(kind.registry_name()) {
                     p.var_int(registry.id(kind.registry_name()));
-                    kind.properties()
+                    (kind.properties(), true)
                 } else {
                     p.var_int(STRING_ID);
-                    ArgProperties::VarInt(0)
+                    (ArgProperties::VarInt(0), false)
                 }
             }
         };
+        // A numeric argument may carry its own inclusive bounds; write those
+        // instead of the unbounded flags byte. Only when the numeric parser
+        // itself was declared — the string fallback has no bounds fields.
+        if registered && write_bounds(p, kind, node.bounds) {
+            continue;
+        }
         match properties {
             ArgProperties::None => {}
             ArgProperties::VarInt(mode) => {
@@ -565,6 +571,62 @@ fn write_tree_for(p: &mut PacketOut, t: &CommandTree, parsers: Parsers) {
         }
     }
     p.var_int(root as i32);
+}
+
+/// Write a numeric argument's bounds: the flags byte (bit 0 min, bit 1 max)
+/// then the present values in the parser's own number format.
+fn write_bounds(
+    p: &mut PacketOut,
+    kind: ArgKind,
+    bounds: Option<(Option<f64>, Option<f64>)>,
+) -> bool {
+    let Some((min, max)) = bounds else {
+        return false;
+    };
+    let flags = u8::from(min.is_some()) | (u8::from(max.is_some()) << 1);
+    match kind {
+        ArgKind::Integer => {
+            p.u8(flags);
+            if let Some(v) = min {
+                p.i32(v as i32);
+            }
+            if let Some(v) = max {
+                p.i32(v as i32);
+            }
+            true
+        }
+        ArgKind::Long => {
+            p.u8(flags);
+            if let Some(v) = min {
+                p.i64(v as i64);
+            }
+            if let Some(v) = max {
+                p.i64(v as i64);
+            }
+            true
+        }
+        ArgKind::Float => {
+            p.u8(flags);
+            if let Some(v) = min {
+                p.f32(v as f32);
+            }
+            if let Some(v) = max {
+                p.f32(v as f32);
+            }
+            true
+        }
+        ArgKind::Double => {
+            p.u8(flags);
+            if let Some(v) = min {
+                p.f64(v);
+            }
+            if let Some(v) = max {
+                p.f64(v);
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -646,11 +708,37 @@ mod tests {
             };
             let mut properties = Vec::new();
             if let Some((parser_name, _)) = &parser {
-                match prop_shape(parser_name, parsers.time_min()) {
-                    Prop::None => {}
-                    Prop::VarInt => properties.push(pin.var_int().unwrap()),
-                    Prop::Byte => properties.push(pin.u8().unwrap() as i32),
-                    Prop::Time => properties.push(pin.i32().unwrap()),
+                // A numeric parser writes a bounds flags byte and then the
+                // present min/max values in its own number format; the other
+                // kinds keep the old fixed shapes.
+                let numeric = matches!(
+                    parser_name.as_str(),
+                    "brigadier:integer" | "brigadier:long" | "brigadier:float" | "brigadier:double"
+                );
+                if numeric {
+                    let flags = pin.u8().unwrap();
+                    properties.push(flags as i32);
+                    let mut read = |bit: u8, properties: &mut Vec<i32>| {
+                        if flags & bit == 0 {
+                            return;
+                        }
+                        let value = match parser_name.as_str() {
+                            "brigadier:integer" => pin.i32().unwrap() as f64,
+                            "brigadier:long" => pin.i64().unwrap() as f64,
+                            "brigadier:float" => pin.f32().unwrap() as f64,
+                            _ => pin.f64().unwrap(),
+                        };
+                        properties.push(value as i32);
+                    };
+                    read(0x01, &mut properties);
+                    read(0x02, &mut properties);
+                } else {
+                    match prop_shape(parser_name, parsers.time_min()) {
+                        Prop::None => {}
+                        Prop::VarInt => properties.push(pin.var_int().unwrap()),
+                        Prop::Byte => properties.push(pin.u8().unwrap() as i32),
+                        Prop::Time => properties.push(pin.i32().unwrap()),
+                    }
                 }
             }
             nodes.push(Decoded {
@@ -972,6 +1060,39 @@ mod tests {
                 case.id
             );
         }
+    }
+
+    #[test]
+    fn numeric_bounds_are_written_into_the_tree() {
+        let mut p = PacketOut::new(0);
+        assert!(write_bounds(
+            &mut p,
+            ArgKind::Integer,
+            Some((Some(0.0), None))
+        ));
+        let body = &p.body()[1..];
+        assert_eq!(body[0], 0x01, "min present");
+        assert_eq!(&body[1..5], &0i32.to_be_bytes(), "integer min is an i32");
+
+        let mut p = PacketOut::new(0);
+        assert!(write_bounds(
+            &mut p,
+            ArgKind::Float,
+            Some((Some(0.0), Some(2.0)))
+        ));
+        let body = &p.body()[1..];
+        assert_eq!(body[0], 0x03, "both bounds present");
+        assert_eq!(&body[1..5], &0.0f32.to_be_bytes());
+        assert_eq!(&body[5..9], &2.0f32.to_be_bytes());
+
+        // A non-numeric kind has no bounds field.
+        let mut p = PacketOut::new(0);
+        assert!(!write_bounds(
+            &mut p,
+            ArgKind::String,
+            Some((Some(0.0), None))
+        ));
+        assert!(p.body().len() == 1, "only the packet id was written");
     }
 
     #[test]

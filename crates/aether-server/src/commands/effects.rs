@@ -128,6 +128,15 @@ fn normalize(name: &str) -> String {
 /// not a registry entry: a resource pack may define its own sound ids, and
 /// vanilla accepts them. Only `/particle` checks its registry, because a
 /// particle id is a codec-level enum a client cannot invent.
+/// Whether a target is in the command source's dimension.
+///
+/// A player source carries its world; a console/RCON source has none and
+/// vanilla treats it as the overworld.
+fn in_source_world(source: Option<&str>, target: &PlayerHandle) -> bool {
+    let world = source.unwrap_or(crate::protocol::modern::registry::DIMENSION_NAME);
+    target.world() == world
+}
+
 fn sound_resource(name: &str) -> Result<String, String> {
     let name = normalize(name);
     if !args::valid_resource(&name) {
@@ -283,11 +292,6 @@ fn particle_has_options(name: &str) -> bool {
     PARTICLE_OPTION_NAMES.contains(&name)
 }
 
-/// The error `CommandSyntaxException` body for a bad options object.
-fn invalid_options(detail: impl std::fmt::Display) -> String {
-    lang::format(lang::PARTICLE_INVALID_OPTIONS, &[&detail.to_string()])
-}
-
 fn field<'a>(obj: &'a [(String, Nbt)], key: &str) -> Result<&'a Nbt, String> {
     obj.iter()
         .find(|(name, _)| name == key)
@@ -407,6 +411,63 @@ fn parse_item(value: &Nbt) -> Result<(ItemTypeId, u8), String> {
         }
     };
     Ok((item, count))
+}
+
+/// A parsed `minecraft:particle` argument: the registry name and its options.
+///
+/// Vanilla's `ParticleArgument` resolves the name and parses the options
+/// object **while reading the argument**, so those errors precede every later
+/// argument (`pos`, `delta`, `speed`, `count`). The tree calls
+/// [`parse_particle`] from `ArgKind::Particle`, and the executor uses the
+/// result instead of validating the name again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Particle {
+    /// The `minecraft:`-qualified particle name.
+    pub name: String,
+    /// The type-specific options (ignored for a simple particle).
+    pub options: ParticleOptions,
+}
+
+/// Parse and validate a whole particle argument (`name{options}`).
+pub(crate) fn parse_particle(text: &str) -> Result<Particle, String> {
+    let (id, options_text) = match text.find('{') {
+        Some(index) => (&text[..index], Some(&text[index..])),
+        None => (text, None),
+    };
+    let name = normalize(id.trim());
+    if !args::valid_resource(&name) {
+        return Err(format!("Invalid resource location '{name}'"));
+    }
+    if !resources::particle_exists(&name) {
+        return Err(lang::format(lang::PARTICLE_NOT_FOUND, &[&name]));
+    }
+    let options = if particle_has_options(&name) {
+        parse_particle_options(&name, options_text)
+            .map_err(|detail| lang::format(lang::PARTICLE_INVALID_OPTIONS, &[&detail]))?
+    } else {
+        // Vanilla's `MapCodec.unit` ignores an object on a simple particle
+        // (`/particle flame{color:1}` is accepted and the object dropped),
+        // but the object still has to parse as JSON.
+        if let Some(text) = options_text {
+            match snbt::parse(text) {
+                Ok(Nbt::Compound(_)) => {}
+                Ok(_) => {
+                    return Err(lang::format(
+                        lang::PARTICLE_INVALID_OPTIONS,
+                        &["Expected particle options"],
+                    ))
+                }
+                Err(e) => {
+                    return Err(lang::format(
+                        lang::PARTICLE_INVALID_OPTIONS,
+                        &[&e.to_string()],
+                    ));
+                }
+            }
+        }
+        ParticleOptions::None
+    };
+    Ok(Particle { name, options })
 }
 
 /// Parse the options object of a particle argument.
@@ -547,45 +608,26 @@ fn particle_node() -> Node {
 }
 
 fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
-    let Some(raw) = text_arg(ctx, 0) else {
+    if ctx.args.is_empty() {
+        return ctx.fail(
+            "/particle <name> [<pos>] [<delta>] [<speed>] [<count>] [force|normal] [<viewers>]",
+        );
+    }
+    // The name and options were resolved while the argument was parsed, so
+    // they are already known to be valid; the numeric bounds were enforced
+    // there too.
+    let Some(particle) = ctx.args.first().and_then(|arg| match &arg.value {
+        Value::Particle(particle) => Some(particle),
+        _ => None,
+    }) else {
         return ctx.fail(
             "/particle <name> [<pos>] [<delta>] [<speed>] [<count>] [force|normal] [<viewers>]",
         );
     };
-    // The numeric bounds are enforced while the tree parses the arguments
-    // (see `Node::bounds`), before this executor runs.
+    let name = particle.name.clone();
+    let options = particle.options.clone();
     let speed = float_arg(ctx, 3).unwrap_or(0.0);
     let count = int_arg(ctx, 4).unwrap_or(0);
-
-    let (id, options_text) = match raw.find('{') {
-        Some(index) => (&raw[..index], Some(&raw[index..])),
-        None => (raw, None),
-    };
-    let name = normalize(id.trim());
-    if !args::valid_resource(&name) {
-        return ctx.fail(format!("Invalid resource location '{name}'"));
-    }
-    if !resources::particle_exists(&name) {
-        return ctx.fail(lang::format(lang::PARTICLE_NOT_FOUND, &[&name]));
-    }
-    let options = if particle_has_options(&name) {
-        match parse_particle_options(&name, options_text) {
-            Ok(options) => options,
-            Err(detail) => return ctx.fail(invalid_options(detail)),
-        }
-    } else {
-        // Vanilla's `MapCodec.unit` ignores an object on a simple particle
-        // (`/particle flame{color:1}` is accepted and the object dropped),
-        // but the object still has to parse as JSON.
-        if let Some(text) = options_text {
-            match snbt::parse(text) {
-                Ok(Nbt::Compound(_)) => {}
-                Ok(_) => return ctx.fail(invalid_options("Expected particle options")),
-                Err(e) => return ctx.fail(invalid_options(e)),
-            }
-        }
-        ParticleOptions::None
-    };
 
     let pos = match coords_arg(ctx, 1) {
         Some(c) => match resolve(ctx, c) {
@@ -629,7 +671,7 @@ fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
     let world = ctx.player().map(|handle| handle.world().to_string());
     let recipients: Vec<Arc<PlayerHandle>> = recipients
         .into_iter()
-        .filter(|handle| world.as_deref().map_or(true, |w| handle.world() == w))
+        .filter(|handle| in_source_world(world.as_deref(), handle))
         .filter(|handle| in_range(handle))
         .collect();
     if recipients.is_empty() {
@@ -766,8 +808,14 @@ fn exec_playsound(ctx: &mut Ctx, source: u8) -> Reply {
     // at `minVolume`.
     let range = if volume > 1.0 { volume * 16.0 } else { 16.0 };
     let max_distance_sq = f64::from(range) * f64::from(range);
+    let world = ctx.player().map(|handle| handle.world().to_string());
     let mut heard = Vec::new();
     for handle in targets {
+        // `PlaySoundCommand` skips a target in another level before the
+        // range test.
+        if !in_source_world(world.as_deref(), &handle) {
+            continue;
+        }
         let p = handle.pos();
         let (dx, dy, dz) = (p.x - pos.x, p.y - pos.y, p.z - pos.z);
         let distance_sq = dx * dx + dy * dy + dz * dz;
@@ -901,4 +949,22 @@ fn exec_stopsound(ctx: &mut Ctx, source: Option<u8>) -> Reply {
         (None, None) => lang::STOPSOUND_ANY.into(),
     };
     Reply::one(line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn console_sources_default_to_the_overworld() {
+        let overworld = PlayerHandle::for_test_in_world(1, "surface", crate::WORLD);
+        let nether = PlayerHandle::for_test_in_world(2, "nether", "the_nether");
+        // A player source carries its own level.
+        assert!(in_source_world(Some(crate::WORLD), &overworld));
+        assert!(!in_source_world(Some(crate::WORLD), &nether));
+        // The console and RCON have no level; vanilla treats them as the
+        // overworld.
+        assert!(in_source_world(None, &overworld));
+        assert!(!in_source_world(None, &nether));
+    }
 }

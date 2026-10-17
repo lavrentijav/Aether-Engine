@@ -229,6 +229,10 @@ pub enum Value {
     Nbt(Nbt),
     /// A namespaced resource location, or `#tag`.
     ResourceLocation(String),
+    /// A fully parsed `minecraft:particle` argument: its registry name and
+    /// options. The name and options are resolved while the argument is read,
+    /// as vanilla's `ParticleArgument` does.
+    Particle(super::effects::Particle),
 }
 
 /// Every argument kind the tree understands. The set is the one the brief
@@ -657,6 +661,10 @@ pub struct WireNode {
     pub name: Option<&'static str>,
     /// The argument parser, for an argument node.
     pub parser: Option<ArgKind>,
+    /// Inclusive numeric bounds, for the numeric parsers. The wire writes
+    /// them as the flags byte plus the present values, so a client validates
+    /// the same range the server does.
+    pub bounds: Option<(Option<f64>, Option<f64>)>,
     /// Indices into the same vector of the node's children.
     pub children: Vec<usize>,
 }
@@ -671,6 +679,7 @@ pub fn wire_nodes(t: &CommandTree) -> (Vec<WireNode>, usize) {
         flags: 0,
         name: None,
         parser: None,
+        bounds: None,
         children: Vec::new(),
     }];
     let mut root_children = Vec::new();
@@ -693,6 +702,7 @@ pub fn wire_nodes(t: &CommandTree) -> (Vec<WireNode>, usize) {
                     },
                 name: Some(name),
                 parser: None,
+                bounds: None,
                 children: children.clone(),
             });
             root_children.push(idx);
@@ -709,15 +719,16 @@ fn flatten_node(nodes: &mut Vec<WireNode>, node: &Node) -> usize {
         .map(|child| flatten_node(nodes, child))
         .collect();
     let executable = if node.executable { NODE_EXECUTABLE } else { 0 };
-    let (flags, parser) = match &node.kind {
-        Kind::Argument(kind) => (NODE_ARGUMENT | executable, Some(*kind)),
-        _ => (NODE_LITERAL | executable, None),
+    let (flags, parser, bounds) = match &node.kind {
+        Kind::Argument(kind) => (NODE_ARGUMENT | executable, Some(*kind), node.bounds),
+        _ => (NODE_LITERAL | executable, None, None),
     };
     let idx = nodes.len();
     nodes.push(WireNode {
         flags,
         name: Some(node.name),
         parser,
+        bounds,
         children,
     });
     idx

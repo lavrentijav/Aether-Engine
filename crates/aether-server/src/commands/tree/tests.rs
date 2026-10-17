@@ -248,6 +248,7 @@ fn every_argument_kind_parses_a_valid_word() {
             ArgKind::Gamemode => "creative",
             ArgKind::Difficulty => "normal",
             ArgKind::Operation => "+=",
+            ArgKind::Particle => "minecraft:flame",
             _ => "word",
         };
         let mut r = StringReader::new(text);
@@ -1583,6 +1584,45 @@ fn particle_recipients_are_distance_filtered() {
 }
 
 #[test]
+fn particle_and_playsound_skip_targets_in_another_level() {
+    let env = env();
+    let who = &env.tester;
+    env.registry
+        .insert_for_test(crate::players::PlayerHandle::for_test_in_world(
+            991,
+            "netherguy",
+            "the_nether",
+        ));
+    // The two are at the same position, so only the level check can skip the
+    // target.
+    let here = PosLook {
+        x: 0.5,
+        y: 64.0,
+        z: 0.5,
+        yaw: 0.0,
+        pitch: 0.0,
+        on_ground: true,
+    };
+    env.tester.set_pos(here);
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/particle flame 0 64 0 0 0 0 1 1 force @e[type=player,name=netherguy]"
+        ),
+        "The particle was not visible for anybody"
+    );
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/playsound block.note_block.harp master @e[type=player,name=netherguy]"
+        ),
+        "The sound is too far away to be heard"
+    );
+}
+
+#[test]
 fn particle_and_sound_commands_route_through_the_tree() {
     let env = env();
     let who = &env.tester;
@@ -1655,10 +1695,12 @@ fn particle_and_sound_commands_route_through_the_tree() {
             .starts_with("Can't parse particle options:"),
         "a bad colour list is an options error"
     );
-    // No whitespace may separate the id from its options object.
-    assert_ne!(
+    // No whitespace may separate the id from its options object, so the
+    // parameterised particle is read without one and fails as vanilla's
+    // `ParticleArgument` does.
+    assert_eq!(
         one(&env, who, "/particle dust {color:[1.0,0.0,0.0],scale:1.0}"),
-        "Displaying particle minecraft:dust"
+        "Can't parse particle options: Expected particle options"
     );
     for bad in [
         "/particle block{block_state:\"minecraft:not_a_block\"}",
@@ -1675,13 +1717,24 @@ fn particle_and_sound_commands_route_through_the_tree() {
         one(&env, who, "/particle flame 0 64 0 0 0 0 0 -1"),
         "Integer must not be less than 0: found -1"
     );
+    // Brigadier reads left to right: the particle name and its options are
+    // resolved before `pos`/`delta`/`speed`/`count`, so their errors win.
     assert_eq!(
         one(
             &env,
             who,
             "/particle minecraft:not_a_particle 0 64 0 0 0 0 0 -1"
         ),
-        "Integer must not be less than 0: found -1"
+        "Unknown particle: minecraft:not_a_particle"
+    );
+    assert_eq!(
+        one(&env, who, "/particle minecraft:not_a_particle 0 64"),
+        "Unknown particle: minecraft:not_a_particle"
+    );
+    assert!(
+        one(&env, who, "/particle dust{bad} 0 64 0 0 0 0 0 -1")
+            .starts_with("Can't parse particle options:"),
+        "the options error wins over the later count error"
     );
     assert_eq!(
         one(&env, who, "/particle flame 0 64 0 0 0 0 -1 0"),

@@ -218,10 +218,13 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
         ArgKind::Particle => {
             // A particle id, then an optional `{…}` options object with **no
             // whitespace** between them (`ParticleArgument` checks for `{`
-            // immediately after the id). Kept whole so the executor can hand
-            // the tail to its own parser.
+            // immediately after the id). The registry name and the options
+            // are resolved here, not in the executor: Brigadier reads
+            // arguments left to right, so a bad particle must fail before
+            // `pos`/`delta`/`speed`/`count` are parsed.
             let t = read_component(r)?;
-            Ok((Value::Text(t.clone()), t))
+            let particle = super::effects::parse_particle(&t).map_err(ParseError::Argument)?;
+            Ok((Value::Particle(particle), t))
         }
         ArgKind::ScoreHolder => {
             let t = read_selector_token(r)?;
