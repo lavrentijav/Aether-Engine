@@ -1,0 +1,32 @@
+[package]
+name = "aether-stats-plugin"
+description = "The Aether stats plugin (CMD-47): /stats, /leaderboard (/lb) and /playtime over the journal history API (PA2), with aggregates cached and refreshed on the scheduler (P1)."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# The plugin ships as a `wasm32-wasip2` component. It is also built as an
+# `rlib` so the pure aggregation/playtime model is part of `cargo test` and
+# `cargo clippy --workspace`, with no WebAssembly toolchain in the loop; the
+# component glue in `src/component.rs` is `#[cfg(target_arch = "wasm32")]`.
+[lib]
+name = "stats"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The guest half of the component model: the SDK client ships the `dependent`
+# world and the `requires!` macro; the bindings are generated in `component.rs`.
+aether-plugin-sdk = { path = "../../crates/aether-plugin-sdk" }
+wit-bindgen = "0.57"
+# The plugin's own KV records (aggregates and the playtime ledger). A tiny,
+# explicit JSON schema; no migration, because a parse failure is treated as an
+# empty store rather than an error.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

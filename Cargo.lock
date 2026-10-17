@@ -190,6 +190,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-stats-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-plugin-sdk",
+ "serde",
+ "serde_json",
+ "wit-bindgen",
+]
+
+[[package]]
 name = "aether-telemetry"
 version = "0.1.0"
 

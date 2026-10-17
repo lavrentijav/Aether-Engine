@@ -1,0 +1,2 @@
+# The build output; `make` regenerates it. The source of truth is src/.
+stats.wasm
