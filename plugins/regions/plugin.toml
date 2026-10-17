@@ -1,4 +1,4 @@
-# Manifest for the WorldGuard-style regions plugin (CMD-34a). See
+# Manifest for the WorldGuard-style regions plugin (CMD-34a/34b). See
 # crates/aether-plugin/src/manifest.rs.
 #
 # A native plugin is compiled into the server, so the host reads its manifest

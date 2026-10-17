@@ -14,6 +14,7 @@ struct TestBackend {
     logs: Mutex<Vec<String>>,
     held: Mutex<Option<String>>,
     permissions: AtomicBool,
+    nodes: Mutex<HashMap<(u64, String), bool>>,
     fail_get: AtomicBool,
     fail_put: AtomicBool,
     position: Mutex<Option<(String, f64, f64, f64)>>,
@@ -36,6 +37,16 @@ impl TestBackend {
 
     fn set_position(&self, world: &str, x: f64, y: f64, z: f64) {
         *self.position.lock().unwrap() = Some((world.to_string(), x, y, z));
+    }
+
+    /// Turn the blanket permission answer off and grant only `node` to
+    /// `player`.
+    fn grant_only(&self, player: u64, node: &str) {
+        self.permissions.store(false, Ordering::SeqCst);
+        self.nodes
+            .lock()
+            .unwrap()
+            .insert((player, node.to_string()), true);
     }
 }
 
@@ -99,7 +110,10 @@ impl HostBackend for TestBackend {
             .unwrap()
             .push((player, text.to_string()));
     }
-    fn permission_check(&self, _plugin: &str, _id: u64, _node: &str, _op: u8) -> bool {
+    fn permission_check(&self, _plugin: &str, id: u64, node: &str, _op: u8) -> bool {
+        if let Some(value) = self.nodes.lock().unwrap().get(&(id, node.to_string())) {
+            return *value;
+        }
         self.permissions.load(Ordering::SeqCst)
     }
     fn player_position(&self, _plugin: &str, _player: u64) -> Option<(String, f64, f64, f64)> {
@@ -476,7 +490,7 @@ fn priorities_and_equal_priority_ties_are_deterministic() {
     // higher id an allow. At equal priority the lower id decides.
     for (id, name, build) in [(1, "low", false), (2, "high", true)] {
         let mut flags = BTreeMap::new();
-        flags.insert("build".to_string(), build);
+        flags.insert("build".to_string(), StoredFlag::Bool(build));
         f.plugin.regions.state.regions.insert(
             name.to_string(),
             StoredRegion {
@@ -811,4 +825,335 @@ fn a_shared_store_keeps_another_plugins_regions() {
         .snapshot()
         .get(RegionId(0x434C_4149_0000_0001))
         .is_some());
+}
+
+#[test]
+fn build_flag_controls_break_and_place_at_the_next_safe_point() {
+    let mut f = Fixture::new();
+    let owner = player(1, "Steve", true);
+    f.define(&owner, "spawn", (0, 0, 0), (15, 64, 15));
+
+    // The default for a non-member is deny without any flag.
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, pos(8, 64, 8), Action::Break, &Actor::new("Alex")),
+        Verdict::Deny
+    );
+    let before = f.store.snapshot();
+    let lines = f.command(&owner, &["flag", "spawn", "build", "allow"]);
+    assert!(lines.iter().any(|l| l.contains("to allow")), "{lines:?}");
+
+    // A caller already holding the old snapshot keeps the old answer; the next
+    // snapshot (the safe point) sees the change.
+    assert_eq!(
+        before.check(OVERWORLD, pos(8, 64, 8), Action::Break, &Actor::new("Alex")),
+        Verdict::Deny
+    );
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, pos(8, 64, 8), Action::Break, &Actor::new("Alex")),
+        Verdict::Allow
+    );
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, pos(8, 64, 8), Action::Place, &Actor::new("Alex")),
+        Verdict::Allow
+    );
+
+    let lines = f.command(&owner, &["flag", "spawn", "build", "deny"]);
+    assert!(lines.iter().any(|l| l.contains("to deny")), "{lines:?}");
+    for action in [Action::Break, Action::Place] {
+        assert_eq!(
+            f.store
+                .check(OVERWORLD, pos(8, 64, 8), action, &Actor::new("Alex")),
+            Verdict::Deny,
+            "{action:?} must follow the build deny"
+        );
+    }
+}
+
+#[test]
+fn use_entry_and_pvp_flags_follow_their_actions() {
+    let mut f = Fixture::new();
+    let owner = player(1, "Steve", false);
+    f.define(&owner, "spawn", (0, 0, 0), (15, 64, 15));
+    let at = pos(8, 64, 8);
+
+    for action in [Action::Interact, Action::UseItem] {
+        assert_eq!(
+            f.store.check(OVERWORLD, at, action, &Actor::new("Alex")),
+            Verdict::Deny
+        );
+    }
+    let lines = f.command(&owner, &["flag", "spawn", "use", "allow"]);
+    assert!(lines.iter().any(|l| l.contains("to allow")), "{lines:?}");
+    for action in [Action::Interact, Action::UseItem] {
+        assert_eq!(
+            f.store.check(OVERWORLD, at, action, &Actor::new("Alex")),
+            Verdict::Allow,
+            "{action:?} maps to the use flag"
+        );
+    }
+
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, at, Action::Entry, &Actor::new("Alex")),
+        Verdict::Deny
+    );
+    f.command(&owner, &["flag", "spawn", "entry", "allow"]);
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, at, Action::Entry, &Actor::new("Alex")),
+        Verdict::Allow
+    );
+
+    // PvP is denied by default and follows its own flag, not build/use.
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, at, Action::Pvp, &Actor::new("Alex")),
+        Verdict::Deny
+    );
+    f.command(&owner, &["flag", "spawn", "pvp", "allow"]);
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, at, Action::Pvp, &Actor::new("Alex")),
+        Verdict::Allow
+    );
+    f.command(&owner, &["flag", "spawn", "pvp", "deny"]);
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, at, Action::Pvp, &Actor::new("Alex")),
+        Verdict::Deny
+    );
+}
+
+#[test]
+fn members_get_build_rights_and_strangers_do_not() {
+    let mut f = Fixture::new();
+    let owner = player(1, "Steve", false);
+    let member = player(2, "Alex", false);
+    f.define(&owner, "spawn", (0, 0, 0), (15, 64, 15));
+    let at = pos(8, 64, 8);
+
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, at, Action::Break, &Actor::new(&member.name)),
+        Verdict::Deny
+    );
+    let lines = f.command(&owner, &["addmember", "spawn", "Alex"]);
+    assert!(lines.iter().any(|l| l.contains("member")), "{lines:?}");
+
+    // Membership grants build and use while those flags are unset.
+    for action in [
+        Action::Break,
+        Action::Place,
+        Action::Interact,
+        Action::UseItem,
+    ] {
+        assert_eq!(
+            f.store
+                .check(OVERWORLD, at, action, &Actor::new(&member.name)),
+            Verdict::Allow,
+            "{action:?} is a membership grant"
+        );
+    }
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, at, Action::Break, &Actor::new("Stranger")),
+        Verdict::Deny,
+        "a non-member stays denied"
+    );
+
+    // An explicit flag still wins over membership.
+    f.command(&owner, &["flag", "spawn", "build", "deny"]);
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, at, Action::Break, &Actor::new(&member.name)),
+        Verdict::Deny
+    );
+    f.command(&owner, &["flag", "spawn", "build", "none"]);
+    assert_eq!(
+        f.plugin
+            .regions
+            .by_name("spawn")
+            .unwrap()
+            .flags
+            .get("build"),
+        None,
+        "none clears the flag"
+    );
+
+    let lines = f.command(&owner, &["removemember", "spawn", "Alex"]);
+    assert!(lines.iter().any(|l| l.contains("Removed")), "{lines:?}");
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, at, Action::Break, &Actor::new(&member.name)),
+        Verdict::Deny
+    );
+}
+
+#[test]
+fn owners_can_be_added_and_removed() {
+    let mut f = Fixture::new();
+    let owner = player(1, "Steve", false);
+    f.define(&owner, "spawn", (0, 0, 0), (15, 64, 15));
+    let at = pos(8, 64, 8);
+
+    let lines = f.command(&owner, &["addowner", "spawn", "Alex"]);
+    assert!(lines.iter().any(|l| l.contains("owner")), "{lines:?}");
+    assert!(f
+        .plugin
+        .regions
+        .by_name("spawn")
+        .unwrap()
+        .owners
+        .contains("Alex"));
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, at, Action::Break, &Actor::new("Alex")),
+        Verdict::Allow,
+        "an owner gets the same membership grant as a member"
+    );
+
+    let lines = f.command(&owner, &["removeowner", "spawn", "Alex"]);
+    assert!(lines.iter().any(|l| l.contains("Removed")), "{lines:?}");
+    assert!(!f
+        .plugin
+        .regions
+        .by_name("spawn")
+        .unwrap()
+        .owners
+        .contains("Alex"));
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, at, Action::Break, &Actor::new("Alex")),
+        Verdict::Deny
+    );
+}
+
+#[test]
+fn flags_and_members_survive_a_restart() {
+    let mut f = Fixture::new();
+    let owner = player(1, "Steve", false);
+    f.define(&owner, "spawn", (0, 0, 0), (15, 64, 15));
+    f.command(
+        &owner,
+        &["flag", "spawn", "greeting", "Welcome", "to", "spawn"],
+    );
+    f.command(&owner, &["flag", "spawn", "pvp", "deny"]);
+    f.command(&owner, &["flag", "spawn", "heal-amount", "4"]);
+    f.command(&owner, &["addmember", "spawn", "Alex"]);
+    f.command(&owner, &["addowner", "spawn", "Bob"]);
+
+    f.restart();
+
+    let loaded = f.plugin.regions.by_name("spawn").expect("loaded");
+    assert_eq!(
+        loaded.flags.get("greeting"),
+        Some(&StoredFlag::Text("Welcome to spawn".to_string()))
+    );
+    assert_eq!(loaded.flags.get("pvp"), Some(&StoredFlag::Bool(false)));
+    assert_eq!(loaded.flags.get("heal-amount"), Some(&StoredFlag::Int(4)));
+    assert!(loaded.members.contains("Alex"));
+    assert!(loaded.owners.contains("Bob"));
+    assert_eq!(
+        f.store
+            .check(OVERWORLD, pos(8, 64, 8), Action::Pvp, &Actor::new("Alex")),
+        Verdict::Deny,
+        "the loaded pvp flag reaches the core check"
+    );
+}
+
+#[test]
+fn an_invalid_flag_or_value_errors_and_changes_nothing() {
+    let mut f = Fixture::new();
+    let owner = player(1, "Steve", false);
+    f.define(&owner, "spawn", (0, 0, 0), (15, 64, 15));
+
+    let lines = f.command(&owner, &["flag", "spawn", "not-a-flag", "allow"]);
+    assert!(
+        lines.iter().any(|l| l.contains("Unknown flag")),
+        "{lines:?}"
+    );
+
+    let lines = f.command(&owner, &["flag", "spawn", "build", "maybe"]);
+    assert!(
+        lines.iter().any(|l| l.contains("not a valid value")),
+        "{lines:?}"
+    );
+
+    let lines = f.command(&owner, &["flag", "spawn", "heal-amount", "lots"]);
+    assert!(
+        lines.iter().any(|l| l.contains("not a valid integer")),
+        "{lines:?}"
+    );
+
+    let lines = f.command(&owner, &["addmember", "spawn", "bad name"]);
+    assert!(
+        lines.iter().any(|l| l.contains("invalid player name")),
+        "{lines:?}"
+    );
+
+    assert!(
+        f.plugin.regions.by_name("spawn").unwrap().flags.is_empty(),
+        "a rejected flag/value must not be stored"
+    );
+    assert!(f
+        .plugin
+        .regions
+        .by_name("spawn")
+        .unwrap()
+        .members
+        .is_empty());
+}
+
+#[test]
+fn the_worldguard_bypass_is_per_world_and_needs_the_node() {
+    let mut f = Fixture::new();
+    let owner = player(1, "Steve", true);
+    f.define(&owner, "spawn", (0, 0, 0), (15, 64, 15));
+    f.command(&owner, &["flag", "spawn", "build", "deny"]);
+
+    assert_eq!(
+        bypass_permission(OVERWORLD),
+        "worldguard.region.bypass.overworld"
+    );
+    assert_eq!(
+        bypass_permission("minecraft:the_nether"),
+        "worldguard.region.bypass.the_nether"
+    );
+
+    let op = player(2, "Admin", true);
+    let holder = player(3, "Holder", false);
+    let guest = player(4, "Guest", false);
+    f.backend
+        .grant_only(holder.id, "worldguard.region.bypass.overworld");
+
+    let backend = Arc::clone(&f.backend_dyn);
+    let services = Arc::clone(&f.services);
+    let config = f.config.clone();
+    let context = ctx(&backend, &services, &config);
+
+    assert!(bypass(&context, &op, OVERWORLD), "an operator bypasses");
+    assert!(
+        bypass(&context, &holder, OVERWORLD),
+        "the explicit per-world node grants bypass"
+    );
+    assert!(
+        !bypass(&context, &holder, "the_nether"),
+        "the grant is per-world, not global"
+    );
+    assert!(!bypass(&context, &guest, OVERWORLD));
+
+    let at = pos(8, 64, 8);
+    let bypass_actor = Actor::with_bypass(&holder.name, bypass(&context, &holder, OVERWORLD));
+    let normal_actor = Actor::new(&guest.name);
+    assert_eq!(
+        f.store.check(OVERWORLD, at, Action::Break, &bypass_actor),
+        Verdict::Allow
+    );
+    assert_eq!(
+        f.store.check(OVERWORLD, at, Action::Break, &normal_actor),
+        Verdict::Deny
+    );
 }

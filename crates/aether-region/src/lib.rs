@@ -136,16 +136,193 @@ impl From<u64> for RegionId {
     }
 }
 
+/// The type of a WorldGuard-style region flag.
+///
+/// The check only consults boolean flags (the ones that map to an
+/// [`Action`]); text and integer flags are carried so `/rg flag` can be typed
+/// and validated without a second plugin-local schema.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlagKind {
+    /// `allow` / `deny` (stored as `true` / `false`).
+    Boolean,
+    /// A whole number (`heal-amount`, `damage-amount`).
+    Integer,
+    /// Free text (`greeting`, `farewell`).
+    Text,
+}
+
+/// One typed flag value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FlagValue {
+    /// A boolean/state flag.
+    Bool(bool),
+    /// An integer flag.
+    Int(i64),
+    /// A text flag.
+    Text(String),
+}
+
+impl FlagValue {
+    /// The type of this value.
+    pub const fn kind(&self) -> FlagKind {
+        match self {
+            FlagValue::Bool(_) => FlagKind::Boolean,
+            FlagValue::Int(_) => FlagKind::Integer,
+            FlagValue::Text(_) => FlagKind::Text,
+        }
+    }
+
+    /// The boolean value, if this is a boolean flag.
+    pub const fn as_bool(&self) -> Option<bool> {
+        match self {
+            FlagValue::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// A human/command rendering (`allow`, `deny`, or the literal value).
+    pub fn display(&self) -> String {
+        match self {
+            FlagValue::Bool(true) => "allow".to_string(),
+            FlagValue::Bool(false) => "deny".to_string(),
+            FlagValue::Int(value) => value.to_string(),
+            FlagValue::Text(value) => value.clone(),
+        }
+    }
+}
+
+impl From<bool> for FlagValue {
+    fn from(value: bool) -> Self {
+        FlagValue::Bool(value)
+    }
+}
+
+impl From<i64> for FlagValue {
+    fn from(value: i64) -> Self {
+        FlagValue::Int(value)
+    }
+}
+
+impl From<String> for FlagValue {
+    fn from(value: String) -> Self {
+        FlagValue::Text(value)
+    }
+}
+
+impl From<&str> for FlagValue {
+    fn from(value: &str) -> Self {
+        FlagValue::Text(value.to_string())
+    }
+}
+
+/// The built-in flag definitions. A plugin may add its own on top; `/rg flag`
+/// rejects a name that is not in the registry, so a typo cannot silently set a
+/// flag the check will never consult.
+///
+/// The boolean names map onto the core [`Action`]s where they have one:
+/// `build` covers break/place, `use` covers interaction/item use, and `pvp`,
+/// `entry` and `explosion` are their own actions. The rest are WorldGuard
+/// compatibility flags carried for `/rg flag`/`/rg info`.
+pub const BUILTIN_FLAGS: &[(&str, FlagKind)] = &[
+    ("build", FlagKind::Boolean),
+    ("pvp", FlagKind::Boolean),
+    ("use", FlagKind::Boolean),
+    ("entry", FlagKind::Boolean),
+    ("explosion", FlagKind::Boolean),
+    ("mob-damage", FlagKind::Boolean),
+    ("mob-spawning", FlagKind::Boolean),
+    ("chest-access", FlagKind::Boolean),
+    ("sleep", FlagKind::Boolean),
+    ("item-drop", FlagKind::Boolean),
+    ("item-pickup", FlagKind::Boolean),
+    ("exp-drops", FlagKind::Boolean),
+    ("invincible", FlagKind::Boolean),
+    ("other-explosion", FlagKind::Boolean),
+    ("creeper-explosion", FlagKind::Boolean),
+    ("ghast-fireball", FlagKind::Boolean),
+    ("enderman-grief", FlagKind::Boolean),
+    ("wither-damage", FlagKind::Boolean),
+    ("ravager-grief", FlagKind::Boolean),
+    ("fire-spread", FlagKind::Boolean),
+    ("lava-flow", FlagKind::Boolean),
+    ("water-flow", FlagKind::Boolean),
+    ("snow-fall", FlagKind::Boolean),
+    ("ice-form", FlagKind::Boolean),
+    ("ice-melt", FlagKind::Boolean),
+    ("grass-growth", FlagKind::Boolean),
+    ("leaf-decay", FlagKind::Boolean),
+    ("vine-growth", FlagKind::Boolean),
+    ("soil-dry", FlagKind::Boolean),
+    ("animal-damage", FlagKind::Boolean),
+    ("potion-splash", FlagKind::Boolean),
+    ("lighter", FlagKind::Boolean),
+    ("beacon-effects", FlagKind::Boolean),
+    ("ride", FlagKind::Boolean),
+    ("respawn-anchors", FlagKind::Boolean),
+    ("teleport", FlagKind::Boolean),
+    ("send-chat", FlagKind::Boolean),
+    ("receive-chat", FlagKind::Boolean),
+    ("construct", FlagKind::Boolean),
+    ("interact", FlagKind::Boolean),
+    ("item-use", FlagKind::Boolean),
+    ("greeting", FlagKind::Text),
+    ("farewell", FlagKind::Text),
+    ("deny-message", FlagKind::Text),
+    ("blocked-cmds", FlagKind::Text),
+    ("allowed-cmds", FlagKind::Text),
+    ("heal-amount", FlagKind::Integer),
+    ("damage-amount", FlagKind::Integer),
+];
+
+/// A flag registry: known names and their types.
+#[derive(Clone, Debug)]
+pub struct FlagRegistry {
+    defs: BTreeMap<&'static str, FlagKind>,
+}
+
+impl Default for FlagRegistry {
+    fn default() -> Self {
+        FlagRegistry::builtin()
+    }
+}
+
+impl FlagRegistry {
+    /// The registry with every [`BUILTIN_FLAGS`] entry.
+    pub fn builtin() -> Self {
+        FlagRegistry {
+            defs: BUILTIN_FLAGS.iter().copied().collect(),
+        }
+    }
+
+    /// The type of `name`, or `None` for an unknown flag.
+    ///
+    /// Names are compared exactly: the command layer lower-cases its argument
+    /// before it gets here, and a registry lookup must not be looser than the
+    /// names the check writes.
+    pub fn kind(&self, name: &str) -> Option<FlagKind> {
+        self.defs.get(name).copied()
+    }
+
+    /// Whether `name` is registered.
+    pub fn contains(&self, name: &str) -> bool {
+        self.defs.contains_key(name)
+    }
+
+    /// Every registered `(name, kind)`, in name order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, FlagKind)> + '_ {
+        self.defs.iter().map(|(name, kind)| (*name, *kind))
+    }
+}
+
 /// Per-region flag values the check (CMD-29b) consults.
 ///
-/// The index only carries them: flag *names* are opaque here so the plugin can
-/// register its own (CMD-34) without a core enum. An absent flag is "unset" —
-/// the check falls back to the built-in default for the action — and a present
-/// one is the region's allow/deny. Values beyond a boolean (a greeting, a
-/// `set`-style flag) are a CMD-29b/d design decision, not the index's.
+/// An absent flag is "unset" — the check falls back to the built-in default
+/// for the action — and a present boolean is the region's allow/deny. A text
+/// or integer flag is carried for the plugin's command/info output and does
+/// not affect the protection check.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FlagSet {
-    values: BTreeMap<String, bool>,
+    values: BTreeMap<String, FlagValue>,
 }
 
 impl FlagSet {
@@ -160,14 +337,29 @@ impl FlagSet {
         self
     }
 
-    /// Set (or replace) `flag`.
+    /// Set (or replace) a boolean `flag`.
     pub fn set(&mut self, flag: impl Into<String>, allowed: bool) {
-        self.values.insert(flag.into(), allowed);
+        self.set_value(flag, FlagValue::Bool(allowed));
     }
 
-    /// The value of `flag`, or `None` when unset.
+    /// Set (or replace) `flag` with any typed value.
+    pub fn set_value(&mut self, flag: impl Into<String>, value: impl Into<FlagValue>) {
+        self.values.insert(flag.into(), value.into());
+    }
+
+    /// Remove `flag`, returning its previous value.
+    pub fn remove(&mut self, flag: &str) -> Option<FlagValue> {
+        self.values.remove(flag)
+    }
+
+    /// The boolean value of `flag`, or `None` when unset or not boolean.
     pub fn get(&self, flag: &str) -> Option<bool> {
-        self.values.get(flag).copied()
+        self.get_value(flag).and_then(FlagValue::as_bool)
+    }
+
+    /// The typed value of `flag`, or `None` when unset.
+    pub fn get_value(&self, flag: &str) -> Option<&FlagValue> {
+        self.values.get(flag)
     }
 
     /// Whether `flag` is set at all.
@@ -185,11 +377,20 @@ impl FlagSet {
         self.values.is_empty()
     }
 
-    /// Every set flag, in name order.
+    /// Every boolean flag, in name order. This is the view the host's
+    /// plugin-facing `RegionInfo` carries; text/integer flags stay in the
+    /// regions plugin's own model.
     pub fn iter(&self) -> impl Iterator<Item = (&str, bool)> {
         self.values
             .iter()
-            .map(|(name, allowed)| (name.as_str(), *allowed))
+            .filter_map(|(name, value)| value.as_bool().map(|allowed| (name.as_str(), allowed)))
+    }
+
+    /// Every typed flag, in name order.
+    pub fn iter_values(&self) -> impl Iterator<Item = (&str, &FlagValue)> {
+        self.values
+            .iter()
+            .map(|(name, value)| (name.as_str(), value))
     }
 }
 
@@ -320,11 +521,51 @@ impl<'a> Actor<'a> {
 /// The permission node that skips region protection.
 pub const BYPASS_PERMISSION: &str = "aether.region.bypass";
 
+/// The WorldGuard-style per-world bypass node prefix.
+///
+/// The full node is `worldguard.region.bypass.<world>`, with the
+/// `minecraft:` namespace and the case removed (`overworld`, `the_nether`).
+pub const WORLDGUARD_BYPASS_PREFIX: &str = "worldguard.region.bypass";
+
+/// The per-world WorldGuard bypass node for `world`.
+///
+/// `minecraft:overworld` and `overworld` both produce
+/// `worldguard.region.bypass.overworld`; the namespace is not part of a
+/// region's world identity (see [`same_world`]).
+pub fn worldguard_bypass_permission(world: &str) -> String {
+    let mut node = String::with_capacity(WORLDGUARD_BYPASS_PREFIX.len() + 1 + world.len());
+    node.push_str(WORLDGUARD_BYPASS_PREFIX);
+    node.push('.');
+    for ch in bare_world(world).chars() {
+        // A permission node segment is lower-case `[a-z0-9_-]`. World keys in
+        // this engine are already in that shape once the namespace is gone;
+        // normalising keeps a hand-written `The_Nether` working too.
+        match ch {
+            'A'..='Z' => node.push(ch.to_ascii_lowercase()),
+            'a'..='z' | '0'..='9' | '_' | '-' => node.push(ch),
+            _ => node.push('_'),
+        }
+    }
+    node
+}
+
 /// The dimension key the core's one world uses.
 ///
 /// [`crate::region`] compares world keys with the `minecraft:` namespace
 /// ignored, so a plugin may store either `overworld` or `minecraft:overworld`.
 pub const OVERWORLD: &str = "minecraft:overworld";
+
+/// A world key with the `minecraft:` namespace removed and surrounding
+/// whitespace trimmed.
+fn bare_world(world: &str) -> &str {
+    let world = world.trim();
+    // The namespace is ASCII, so only slice when those bytes really are the
+    // prefix: a UTF-8 world key must not be split mid-character.
+    match world.get(..10) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("minecraft:") => &world[10..],
+        _ => world,
+    }
+}
 
 /// Whether two world keys name the same dimension.
 ///
@@ -332,16 +573,7 @@ pub const OVERWORLD: &str = "minecraft:overworld";
 /// whitespace, so the core's `minecraft:overworld` matches a plugin's
 /// `overworld` / `OVERWORLD`. An empty key matches only an empty key.
 pub fn same_world(a: &str, b: &str) -> bool {
-    fn normal(world: &str) -> &str {
-        let world = world.trim();
-        // The namespace is ASCII, so only slice when those bytes really are
-        // the prefix: a UTF-8 world key must not be split mid-character.
-        match world.get(..10) {
-            Some(prefix) if prefix.eq_ignore_ascii_case("minecraft:") => &world[10..],
-            _ => world,
-        }
-    }
-    normal(a).eq_ignore_ascii_case(normal(b))
+    bare_world(a).eq_ignore_ascii_case(bare_world(b))
 }
 
 /// A cuboid region in one world.
@@ -1653,5 +1885,43 @@ mod tests {
             r.join().unwrap();
         }
         writer.join().unwrap();
+    }
+    #[test]
+    fn typed_flags_validate_against_the_registry_and_keep_the_bool_view() {
+        let registry = FlagRegistry::builtin();
+        assert_eq!(registry.kind("build"), Some(FlagKind::Boolean));
+        assert_eq!(registry.kind("greeting"), Some(FlagKind::Text));
+        assert_eq!(registry.kind("heal-amount"), Some(FlagKind::Integer));
+        assert_eq!(registry.kind("not-a-flag"), None);
+
+        let mut flags = FlagSet::new();
+        flags.set("build", false);
+        flags.set_value("greeting", "Welcome");
+        flags.set_value("heal-amount", 4i64);
+        assert_eq!(flags.get("build"), Some(false));
+        assert_eq!(
+            flags.get_value("greeting"),
+            Some(&FlagValue::Text("Welcome".to_string()))
+        );
+        // The host's `RegionInfo` view only carries the boolean flags.
+        assert_eq!(flags.iter().collect::<Vec<_>>(), vec![("build", false)]);
+        assert_eq!(flags.remove("heal-amount"), Some(FlagValue::Int(4)));
+        assert!(!flags.contains("heal-amount"));
+    }
+
+    #[test]
+    fn the_worldguard_bypass_node_is_per_world_and_namespace_free() {
+        assert_eq!(
+            worldguard_bypass_permission("minecraft:overworld"),
+            "worldguard.region.bypass.overworld"
+        );
+        assert_eq!(
+            worldguard_bypass_permission("the_nether"),
+            "worldguard.region.bypass.the_nether"
+        );
+        assert_eq!(
+            worldguard_bypass_permission("The_Nether"),
+            "worldguard.region.bypass.the_nether"
+        );
     }
 }

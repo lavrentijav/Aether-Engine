@@ -1,5 +1,6 @@
-//! The WorldGuard-style **regions** plugin (CMD-34a): the region model and the
-//! `/rg` commands on top of the core region index and protection check.
+//! The WorldGuard-style **regions** plugin (CMD-34a/34b): the region model, the
+//! `/rg` commands, typed flags, membership and per-world bypass on top of the
+//! core region index and protection check.
 //!
 //! This is a native (tier N) plugin: it is a Rust crate linked into the server
 //! in-process, so it can hold the shared [`RegionStore`] directly and edit the
@@ -12,6 +13,9 @@
 //! /rg redefine <id>            atomically move an existing region's bounds
 //! /rg remove <id>              removed at the next snapshot (safe point)
 //! /rg priority <id> <n>        change the priority used by the check
+//! /rg flag <id> <flag> [value] set/clear a typed flag (allow/deny, text, int)
+//! /rg addmember|removemember <id> <player>
+//! /rg addowner|removeowner <id> <player>
 //! /rg info [<id>]              one region, or the region under the player
 //! /rg list [<player>]          every region, grouped by world
 //! ```
@@ -50,7 +54,10 @@ use aether_plugin::manifest::{CommandDecl, Manifest, PluginTier};
 use aether_plugin::{
     CommandResult, Decision, LogLevel, NativeContext, NativePlugin, NativeRegistration, Player,
 };
-use aether_region::{same_world, BlockPos, Region, RegionId, RegionStore, OVERWORLD};
+use aether_region::{
+    same_world, worldguard_bypass_permission, BlockPos, FlagKind, FlagRegistry, FlagValue, Region,
+    RegionId, RegionStore, BYPASS_PERMISSION, OVERWORLD,
+};
 use serde::{Deserialize, Serialize};
 
 /// The plugin id: its KV namespace and log tag.
@@ -80,6 +87,15 @@ pub const NODE_PRIORITY: &str = "worldguard.region.priority";
 pub const NODE_INFO: &str = "worldguard.region.info";
 /// Permission node for `/rg list`.
 pub const NODE_LIST: &str = "worldguard.region.list";
+/// Permission node for `/rg flag`.
+pub const NODE_FLAG: &str = "worldguard.region.flag";
+/// Permission node for `/rg addmember` and `/rg removemember`.
+pub const NODE_MEMBER: &str = "worldguard.region.member";
+/// Permission node for `/rg addowner` and `/rg removeowner`.
+pub const NODE_OWNER: &str = "worldguard.region.owner";
+
+/// The per-world bypass node prefix (`worldguard.region.bypass.<world>`).
+pub const BYPASS_PREFIX: &str = "worldguard.region.bypass";
 
 /// The default wand item.
 pub const DEFAULT_WAND: &str = "minecraft:golden_axe";
@@ -137,6 +153,49 @@ pub fn registration() -> NativeRegistration {
     }
 }
 
+/// One persisted typed flag value.
+///
+/// `untagged` keeps the file readable and, more importantly, loads a region set
+/// written by CMD-34a where every flag was a JSON boolean. A boolean flag now
+/// round-trips as `Bool`; text (greeting/farewell) and integer flags are the
+/// CMD-34b additions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredFlag {
+    Bool(bool),
+    Int(i64),
+    Text(String),
+}
+
+impl StoredFlag {
+    fn core(&self) -> FlagValue {
+        match self {
+            StoredFlag::Bool(value) => FlagValue::Bool(*value),
+            StoredFlag::Int(value) => FlagValue::Int(*value),
+            StoredFlag::Text(value) => FlagValue::Text(value.clone()),
+        }
+    }
+
+    fn display(&self) -> String {
+        match self {
+            StoredFlag::Bool(true) => "allow".to_string(),
+            StoredFlag::Bool(false) => "deny".to_string(),
+            StoredFlag::Int(value) => value.to_string(),
+            StoredFlag::Text(value) => value.clone(),
+        }
+    }
+}
+
+impl From<FlagValue> for StoredFlag {
+    fn from(value: FlagValue) -> Self {
+        match value {
+            FlagValue::Bool(value) => StoredFlag::Bool(value),
+            FlagValue::Int(value) => StoredFlag::Int(value),
+            FlagValue::Text(value) => StoredFlag::Text(value),
+        }
+    }
+}
+
 /// One persisted region. This is the plugin's data record: the core [`Region`]
 /// is derived from it on every publish, so there is only one spatial index.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -154,7 +213,7 @@ struct StoredRegion {
     #[serde(default)]
     members: BTreeSet<String>,
     #[serde(default)]
-    flags: BTreeMap<String, bool>,
+    flags: BTreeMap<String, StoredFlag>,
 }
 
 impl StoredRegion {
@@ -167,8 +226,8 @@ impl StoredRegion {
         )
         .with_priority(self.priority)
         .with_source(SOURCE);
-        for (name, allowed) in &self.flags {
-            region.flags.set(name.clone(), *allowed);
+        for (name, value) in &self.flags {
+            region.flags.set_value(name.clone(), value.core());
         }
         region.owners = self.owners.clone();
         region.members = self.members.clone();
@@ -212,6 +271,16 @@ impl StoredRegion {
             lines.push(format!(
                 "  members: {}",
                 self.members.iter().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !self.flags.is_empty() {
+            lines.push(format!(
+                "  flags: {}",
+                self.flags
+                    .iter()
+                    .map(|(name, value)| format!("{name}={}", value.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         lines
@@ -509,6 +578,108 @@ impl Regions {
         Ok(updated)
     }
 
+    /// Set (`Some`) or clear (`None`) one typed flag.
+    ///
+    /// The core index is republished with the whole updated region, so the
+    /// change is visible to the next check snapshot and a caller already
+    /// holding one keeps the old, consistent answer until it asks again.
+    fn set_flag(
+        &mut self,
+        ctx: &mut NativeContext,
+        caller: Caller<'_>,
+        name: &str,
+        flag: &str,
+        value: Option<StoredFlag>,
+    ) -> Result<StoredRegion, String> {
+        let previous = self
+            .by_name(name)
+            .cloned()
+            .ok_or_else(|| format!("region `{name}` does not exist"))?;
+        if !caller.may_edit(&previous) {
+            return Err(format!("you do not own region `{name}`"));
+        }
+        let mut updated = previous;
+        match value {
+            Some(value) => {
+                updated.flags.insert(flag.to_string(), value);
+            }
+            None => {
+                updated.flags.remove(flag);
+            }
+        }
+        let mut next = self.state.clone();
+        next.regions.insert(updated.name.clone(), updated.clone());
+        self.persist(ctx, next)?;
+        self.publish(&updated);
+        Ok(updated)
+    }
+
+    /// Add or remove a member. Returns the updated region and whether the set
+    /// actually changed (an add of an existing name is a no-op).
+    fn set_member(
+        &mut self,
+        ctx: &mut NativeContext,
+        caller: Caller<'_>,
+        name: &str,
+        player: &str,
+        add: bool,
+    ) -> Result<(StoredRegion, bool), String> {
+        let previous = self
+            .by_name(name)
+            .cloned()
+            .ok_or_else(|| format!("region `{name}` does not exist"))?;
+        if !caller.may_edit(&previous) {
+            return Err(format!("you do not own region `{name}`"));
+        }
+        let mut updated = previous;
+        let changed = if add {
+            insert_name(&mut updated.members, player)
+        } else {
+            remove_name(&mut updated.members, player).is_some()
+        };
+        if !changed {
+            return Ok((updated, false));
+        }
+        let mut next = self.state.clone();
+        next.regions.insert(updated.name.clone(), updated.clone());
+        self.persist(ctx, next)?;
+        self.publish(&updated);
+        Ok((updated, true))
+    }
+
+    /// Add or remove an owner, with the same persistence and safe-point rules
+    /// as [`Regions::set_member`].
+    fn set_owner(
+        &mut self,
+        ctx: &mut NativeContext,
+        caller: Caller<'_>,
+        name: &str,
+        player: &str,
+        add: bool,
+    ) -> Result<(StoredRegion, bool), String> {
+        let previous = self
+            .by_name(name)
+            .cloned()
+            .ok_or_else(|| format!("region `{name}` does not exist"))?;
+        if !caller.may_edit(&previous) {
+            return Err(format!("you do not own region `{name}`"));
+        }
+        let mut updated = previous;
+        let changed = if add {
+            insert_name(&mut updated.owners, player)
+        } else {
+            remove_name(&mut updated.owners, player).is_some()
+        };
+        if !changed {
+            return Ok((updated, false));
+        }
+        let mut next = self.state.clone();
+        next.regions.insert(updated.name.clone(), updated.clone());
+        self.persist(ctx, next)?;
+        self.publish(&updated);
+        Ok((updated, true))
+    }
+
     /// Forget a player's two points (after a define/redefine/remove, on leave,
     /// or via `/rg cancel`).
     fn clear_selection(&mut self, player: u64) {
@@ -571,6 +742,105 @@ fn normalize(a: BlockPos, b: BlockPos) -> (BlockPos, BlockPos) {
 
 fn xyz(pos: BlockPos) -> [i32; 3] {
     [pos.x, pos.y, pos.z]
+}
+
+/// Insert `name` unless an existing entry matches case-insensitively.
+fn insert_name(set: &mut BTreeSet<String>, name: &str) -> bool {
+    if set
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(name))
+    {
+        return false;
+    }
+    set.insert(name.to_string())
+}
+
+/// Remove the entry matching `name` case-insensitively, returning its stored
+/// spelling.
+fn remove_name(set: &mut BTreeSet<String>, name: &str) -> Option<String> {
+    let existing = set
+        .iter()
+        .find(|existing| existing.eq_ignore_ascii_case(name))
+        .cloned()?;
+    set.remove(&existing);
+    Some(existing)
+}
+
+/// A member/owner name: a Minecraft-style name (`[A-Za-z0-9_]`, 1..=32).
+fn validate_player(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("player name must not be empty".to_string());
+    }
+    if name.len() > 32 {
+        return Err("player name must be at most 32 characters".to_string());
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(format!(
+            "invalid player name `{name}`: use letters, digits or `_`"
+        ));
+    }
+    Ok(())
+}
+
+/// Parse the text after `/rg flag <id> <flag>` for the flag's declared type.
+///
+/// Booleans accept WorldGuard's `allow`/`deny` as well as the usual
+/// `true`/`false`/`yes`/`no`/`on`/`off`; anything else is an error, never a
+/// silent default.
+fn parse_flag_value(kind: FlagKind, raw: &str) -> Result<StoredFlag, String> {
+    match kind {
+        FlagKind::Boolean => match raw.trim().to_ascii_lowercase().as_str() {
+            "allow" | "true" | "yes" | "on" | "1" => Ok(StoredFlag::Bool(true)),
+            "deny" | "false" | "no" | "off" | "0" => Ok(StoredFlag::Bool(false)),
+            _ => Err(format!(
+                "`{raw}` is not a valid value for a boolean flag (use allow or deny)"
+            )),
+        },
+        FlagKind::Integer => raw
+            .trim()
+            .parse::<i64>()
+            .map(StoredFlag::Int)
+            .map_err(|_| format!("`{raw}` is not a valid integer flag value")),
+        FlagKind::Text => {
+            let value = raw.trim();
+            if value.is_empty() {
+                return Err("a text flag value must not be empty".to_string());
+            }
+            if value.len() > 256 {
+                return Err("a text flag value must be at most 256 characters".to_string());
+            }
+            Ok(StoredFlag::Text(value.to_string()))
+        }
+    }
+}
+
+/// The flag name a WorldGuard user expects for a core [`aether_region::Action`].
+///
+/// Kept next to the registry so a test can pin the mapping the hot path uses.
+pub fn flag_for_action(action: aether_region::Action) -> &'static str {
+    action.flag()
+}
+
+/// The per-world WorldGuard bypass node (`worldguard.region.bypass.<world>`).
+pub fn bypass_permission(world: &str) -> String {
+    debug_assert!(worldguard_bypass_permission(world).starts_with(BYPASS_PREFIX));
+    worldguard_bypass_permission(world)
+}
+
+/// Whether `p` may bypass region protection in `world`.
+///
+/// An operator always may (the node is undeclared, so it defaults to op), and a
+/// non-operator may when granted either the WorldGuard per-world node or the
+/// core [`BYPASS_PERMISSION`]. The check itself is core; this is the same
+/// resolution the server uses for its hooks.
+pub fn bypass(ctx: &NativeContext<'_>, p: &Player, world: &str) -> bool {
+    p.operator
+        || ctx
+            .backend
+            .permission_check(ctx.id, p.id, &worldguard_bypass_permission(world), 0)
+        || ctx
+            .backend
+            .permission_check(ctx.id, p.id, BYPASS_PERMISSION, 0)
 }
 
 /// Accept `[A-Za-z0-9_-]`, 1..=32 characters. This keeps an id safe as a KV
@@ -753,6 +1023,150 @@ impl RegionsPlugin {
                     Err(e) => vec![format!("Cannot set priority: {e}")],
                 }
             }
+            "flag" => {
+                if !permitted(ctx, p, NODE_FLAG) {
+                    return vec![denied(NODE_FLAG)];
+                }
+                let (Some(name), Some(flag)) = (args.get(1), args.get(2)) else {
+                    return vec!["Usage: /rg flag <id> <flag> [value]".to_string()];
+                };
+                let flag = flag.to_ascii_lowercase();
+                let registry = FlagRegistry::builtin();
+                let Some(kind) = registry.kind(&flag) else {
+                    return vec![format!(
+                        "Unknown flag `{flag}`. Try one of: {}",
+                        registry
+                            .iter()
+                            .map(|(name, _)| name)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )];
+                };
+                if args.len() == 3 {
+                    let Some(region) = self.regions.by_name(name) else {
+                        return vec![format!("Region `{name}` does not exist.")];
+                    };
+                    return match region.flags.get(&flag) {
+                        Some(value) => vec![format!(
+                            "Flag `{flag}` on region `{}` is {}.",
+                            region.name,
+                            value.display()
+                        )],
+                        None => vec![format!(
+                            "Flag `{flag}` on region `{}` is not set.",
+                            region.name
+                        )],
+                    };
+                }
+                let raw = match kind {
+                    FlagKind::Text => args[3..].join(" "),
+                    _ if args.len() == 4 => args[3].clone(),
+                    _ => return vec!["Usage: /rg flag <id> <flag> [value]".to_string()],
+                };
+                let value = if raw.eq_ignore_ascii_case("none") || raw.eq_ignore_ascii_case("unset")
+                {
+                    None
+                } else {
+                    match parse_flag_value(kind, &raw) {
+                        Ok(value) => Some(value),
+                        Err(e) => return vec![format!("Cannot set flag: {e}")],
+                    }
+                };
+                let caller = Caller {
+                    name: &p.name,
+                    op: p.operator,
+                };
+                let value_for_line = value.as_ref().map(StoredFlag::display);
+                match self.regions.set_flag(ctx, caller, name, &flag, value) {
+                    Ok(region) => match value_for_line {
+                        Some(value) => vec![format!(
+                            "Set flag `{flag}` on region `{}` to {value}.",
+                            region.name
+                        )],
+                        None => vec![format!(
+                            "Cleared flag `{flag}` on region `{}`.",
+                            region.name
+                        )],
+                    },
+                    Err(e) => vec![format!("Cannot set flag: {e}")],
+                }
+            }
+            "addmember" | "removemember" => {
+                if !permitted(ctx, p, NODE_MEMBER) {
+                    return vec![denied(NODE_MEMBER)];
+                }
+                let (Some(name), Some(player)) = (args.get(1), args.get(2)) else {
+                    return vec![format!("Usage: /rg {sub} <id> <player>")];
+                };
+                if args.len() != 3 {
+                    return vec![format!("Usage: /rg {sub} <id> <player>")];
+                }
+                if let Err(e) = validate_player(player) {
+                    return vec![format!("Cannot change members: {e}")];
+                }
+                let caller = Caller {
+                    name: &p.name,
+                    op: p.operator,
+                };
+                let add = sub == "addmember";
+                match self.regions.set_member(ctx, caller, name, player, add) {
+                    Ok((region, true)) if add => vec![format!(
+                        "Added `{player}` as a member of region `{}`.",
+                        region.name
+                    )],
+                    Ok((region, false)) if add => vec![format!(
+                        "`{player}` is already a member of region `{}`.",
+                        region.name
+                    )],
+                    Ok((region, true)) => vec![format!(
+                        "Removed `{player}` from region `{}` members.",
+                        region.name
+                    )],
+                    Ok((region, false)) => vec![format!(
+                        "`{player}` is not a member of region `{}`.",
+                        region.name
+                    )],
+                    Err(e) => vec![format!("Cannot change members: {e}")],
+                }
+            }
+            "addowner" | "removeowner" => {
+                if !permitted(ctx, p, NODE_OWNER) {
+                    return vec![denied(NODE_OWNER)];
+                }
+                let (Some(name), Some(player)) = (args.get(1), args.get(2)) else {
+                    return vec![format!("Usage: /rg {sub} <id> <player>")];
+                };
+                if args.len() != 3 {
+                    return vec![format!("Usage: /rg {sub} <id> <player>")];
+                }
+                if let Err(e) = validate_player(player) {
+                    return vec![format!("Cannot change owners: {e}")];
+                }
+                let caller = Caller {
+                    name: &p.name,
+                    op: p.operator,
+                };
+                let add = sub == "addowner";
+                match self.regions.set_owner(ctx, caller, name, player, add) {
+                    Ok((region, true)) if add => vec![format!(
+                        "Added `{player}` as an owner of region `{}`.",
+                        region.name
+                    )],
+                    Ok((region, false)) if add => vec![format!(
+                        "`{player}` is already an owner of region `{}`.",
+                        region.name
+                    )],
+                    Ok((region, true)) => vec![format!(
+                        "Removed `{player}` from region `{}` owners.",
+                        region.name
+                    )],
+                    Ok((region, false)) => vec![format!(
+                        "`{player}` is not an owner of region `{}`.",
+                        region.name
+                    )],
+                    Err(e) => vec![format!("Cannot change owners: {e}")],
+                }
+            }
             "info" => {
                 if !permitted(ctx, p, NODE_INFO) {
                     return vec![denied(NODE_INFO)];
@@ -825,6 +1239,11 @@ fn usage() -> Vec<String> {
         "  /rg redefine <id>      move its bounds to the wand selection".to_string(),
         "  /rg remove <id>        remove it".to_string(),
         "  /rg priority <id> <n>  change its priority".to_string(),
+        "  /rg flag <id> <flag> [value]  set/clear a typed flag (allow|deny)".to_string(),
+        "  /rg addmember <id> <player>    grant build/use rights".to_string(),
+        "  /rg removemember <id> <player>".to_string(),
+        "  /rg addowner <id> <player>     grant full region rights".to_string(),
+        "  /rg removeowner <id> <player>".to_string(),
         "  /rg info [<id>]        show one region, or the one you stand in".to_string(),
         "  /rg list [<player>]    list regions, optionally only one owner's".to_string(),
         "  /rg cancel             clear the wand selection".to_string(),
