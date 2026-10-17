@@ -831,22 +831,7 @@ fn play_loop(
                 // A dead player can do nothing but press the button above.
             }
             ClientEvent::StartDig { x, y, z, seq } => {
-                let name =
-                    crate::game::block_name(world, world.get_block(x, y, z)).unwrap_or_default();
-                if handle.inspecting() {
-                    inspect(handle, registry, world, x, y, z);
-                } else if let Some(reason) =
-                    crate::plugins::before_block_dig(handle, x, y, z, &name)
-                {
-                    // A native plugin's selection wand takes the click before
-                    // the region check and before a survival dig starts, so a
-                    // protected or unbreakable block is still selectable.
-                    if !reason.is_empty() {
-                        handle.emit(&ServerEvent::Chat(reason), world);
-                    }
-                } else if interact::start_dig(handle, world, x, y, z) {
-                    break_block(handle, registry, world, x, y, z);
-                }
+                handle_start_dig(handle, registry, world, x, y, z);
                 ack(handle, world, seq);
             }
             ClientEvent::CancelDig { seq, .. } => {
@@ -995,20 +980,7 @@ fn play_loop(
                 ack(handle, world, seq);
             }
             ClientEvent::UseBlock { x, y, z } => {
-                // A right-click with a non-block item (protocol 47). It cannot
-                // place anything, but a native plugin's wand needs the click.
-                // Without a plugin the old behaviour is unchanged: ignored.
-                if let Some(reason) = crate::plugins::before_block_interact(
-                    handle,
-                    x,
-                    y,
-                    z,
-                    &crate::game::block_name(world, world.get_block(x, y, z)).unwrap_or_default(),
-                ) {
-                    if !reason.is_empty() {
-                        handle.emit(&ServerEvent::Chat(reason), world);
-                    }
-                }
+                handle_use_block(handle, world, x, y, z);
             }
             ClientEvent::HeldSlot(slot) => {
                 handle.set_held_slot(slot);
@@ -1284,6 +1256,65 @@ fn pvp_denial(
             crate::region::Action::Pvp,
         )
     })
+}
+
+/// The start-of-mining path: a native plugin's wand takes the click **before**
+/// the region check and before a survival dig begins.
+///
+/// Split out of the event loop so the codec→hook wiring is testable. A
+/// cancelled dig still resyncs the block: a 1.8.9 client predicts the break the
+/// moment it sends status 0 (and in creative that is immediate), so without a
+/// [`ServerEvent::BlockChange`] the block would stay a ghost on its screen.
+pub(crate) fn handle_start_dig(
+    handle: &crate::players::PlayerHandle,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    x: i32,
+    y: i32,
+    z: i32,
+) {
+    let name = crate::game::block_name(world, world.get_block(x, y, z)).unwrap_or_default();
+    if handle.inspecting() {
+        inspect(handle, registry, world, x, y, z);
+        return;
+    }
+    if let Some(reason) = crate::plugins::before_block_dig(handle, x, y, z, &name) {
+        // A native plugin's selection wand takes the click before the region
+        // check and before a survival dig starts, so a protected or
+        // unbreakable block is still selectable.
+        if !reason.is_empty() {
+            handle.emit(&ServerEvent::Chat(reason), world);
+        }
+        let block = world.get_block(x, y, z);
+        handle.emit(&ServerEvent::BlockChange { x, y, z, block }, world);
+        return;
+    }
+    if crate::game::interact::start_dig(handle, world, x, y, z) {
+        break_block(handle, registry, world, x, y, z);
+    }
+}
+
+/// A right-click with a non-block item (protocol 47): it cannot place
+/// anything, but a native plugin's wand needs the click. Without a plugin this
+/// is the old no-op.
+pub(crate) fn handle_use_block(
+    handle: &crate::players::PlayerHandle,
+    world: &DemoWorld,
+    x: i32,
+    y: i32,
+    z: i32,
+) {
+    if let Some(reason) = crate::plugins::before_block_interact(
+        handle,
+        x,
+        y,
+        z,
+        &crate::game::block_name(world, world.get_block(x, y, z)).unwrap_or_default(),
+    ) {
+        if !reason.is_empty() {
+            handle.emit(&ServerEvent::Chat(reason), world);
+        }
+    }
 }
 
 /// Break the block at `(x, y, z)` on a player's behalf.

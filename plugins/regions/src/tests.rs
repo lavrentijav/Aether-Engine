@@ -733,3 +733,29 @@ fn the_top_level_command_is_public_and_the_manifest_subscribes_the_wand_hooks() 
     assert!(manifest.subscribes("after-player-leave"));
     assert!(!manifest.capabilities.iter().any(|c| c == "world.read"));
 }
+
+#[test]
+fn an_operator_may_explicitly_allow_starting_empty_after_a_read_error() {
+    let backend = Arc::new(TestBackend::permissive());
+    backend.kv.lock().unwrap().insert(
+        (ID.to_string(), KV_REGIONS.to_string()),
+        b"not json".to_vec(),
+    );
+    let store = Arc::new(RegionStore::new());
+    let mut plugin = RegionsPlugin::with_store(Arc::clone(&store));
+    let services = Arc::new(ServiceRegistry::new());
+    let mut config = BTreeMap::new();
+    config.insert("allow-empty-on-error".to_string(), "true".to_string());
+    let backend_dyn: Arc<dyn HostBackend> = backend.clone();
+    let mut context = ctx(&backend_dyn, &services, &config);
+    plugin
+        .init(&mut context)
+        .expect("the operator chose to start empty");
+    assert!(plugin.regions.state.regions.is_empty());
+    assert!(store.snapshot().is_empty());
+    // Even the explicit choice does not overwrite the unreadable bytes.
+    assert_eq!(
+        backend.kv_get(ID, KV_REGIONS).expect("bytes kept"),
+        b"not json"
+    );
+}

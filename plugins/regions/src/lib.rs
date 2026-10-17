@@ -285,20 +285,44 @@ impl Regions {
             .filter(|item| !item.trim().is_empty())
             .cloned()
             .unwrap_or_else(|| DEFAULT_WAND.to_string());
+        // Starting empty after a failed read is fail-open, so it is only
+        // allowed when the operator says so explicitly. Without that setting
+        // the load is refused (the server logs an error and does not load the
+        // plugin); the bytes are never overwritten.
+        let allow_empty = ctx
+            .config
+            .get("allow-empty-on-error")
+            .is_some_and(|v| matches!(v.as_str(), "true" | "1" | "yes" | "on"));
         match ctx.backend.kv_try_get(ctx.id, KV_REGIONS) {
             Ok(Some(bytes)) => match serde_json::from_slice::<StoredState>(&bytes) {
                 Ok(state) => self.state = state,
                 Err(e) => {
                     let message = format!("region state is unreadable: {e}");
                     ctx.log(LogLevel::Error, &message);
-                    return Err(message);
+                    if allow_empty {
+                        ctx.log(
+                            LogLevel::Error,
+                            "allow-empty-on-error is set: starting with no regions,                              protection is OFF",
+                        );
+                        self.state = StoredState::default();
+                    } else {
+                        return Err(message);
+                    }
                 }
             },
             Ok(None) => {}
             Err(e) => {
                 let message = format!("cannot read region state: {e}");
                 ctx.log(LogLevel::Error, &message);
-                return Err(message);
+                if allow_empty {
+                    ctx.log(
+                        LogLevel::Error,
+                        "allow-empty-on-error is set: starting with no regions,                          protection is OFF",
+                    );
+                    self.state = StoredState::default();
+                } else {
+                    return Err(message);
+                }
             }
         }
         // A record written by an older/hand-edited state must not make the

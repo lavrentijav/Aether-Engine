@@ -93,7 +93,11 @@ therefore survives a server restart.
 
 Loading is fail-closed: an unreadable value or a failed KV read refuses the
 plugin load rather than starting with an empty set and overwriting recoverable
-bytes on the next edit.
+bytes on the next edit. The server logs that at **error** level and states that
+region protection is not active. An operator who accepts an empty start after
+such a failure may set `[plugins.regions] config = { allow-empty-on-error = "true" }`;
+even then the unreadable bytes are never rewritten until a later successful
+edit.
 
 No world file is edited directly: the server's `storage.kv` backend owns the
 bytes, exactly like any other plugin state.

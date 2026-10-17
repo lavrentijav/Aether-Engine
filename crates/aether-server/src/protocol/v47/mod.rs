@@ -219,12 +219,13 @@ impl ProtocolCodec for Codec {
                 _ => ClientEvent::Ignored,
             },
             0x07 => {
-                // Status 0 is "started digging"; in creative that is the whole
-                // interaction, the client breaks the block immediately.
+                // 1.8's Player Digging: 0 started, 1 cancelled, 2 finished.
+                // Status 2 used to be folded into `StartDig`, so a selection
+                // wand set point 1 twice per click and sent two messages.
                 let Ok(status) = pin.u8() else {
                     return ClientEvent::Ignored;
                 };
-                if status != 0 && status != 2 {
+                if !matches!(status, 0..=2) {
                     return ClientEvent::Ignored;
                 }
                 let Ok(packed) = pin.i64() else {
@@ -232,7 +233,11 @@ impl ProtocolCodec for Codec {
                 };
                 let (x, y, z) = decode_position(packed);
                 let y = y - Y_OFFSET;
-                ClientEvent::Dig { x, y, z, seq: 0 }
+                match status {
+                    0 => ClientEvent::StartDig { x, y, z, seq: 0 },
+                    1 => ClientEvent::CancelDig { seq: 0 },
+                    _ => ClientEvent::Dig { x, y, z, seq: 0 },
+                }
             }
             0x08 => {
                 let Ok(packed) = pin.i64() else {
@@ -507,6 +512,64 @@ mod tests {
             let enc = encode_position(p.0 as i64, p.1 as i64, p.2 as i64);
             assert_eq!(decode_position(enc), p, "round trip {p:?}");
         }
+    }
+
+    #[test]
+    fn digging_statuses_map_to_start_finish_and_cancel() {
+        // Status 2 is "finished digging", not another start: folding the two
+        // together made a selection wand set point 1 twice per click.
+        let mut started = vec![0u8];
+        started.extend_from_slice(&encode_position(5, 70, -9).to_be_bytes());
+        started.push(1);
+        let engine_y = 70 - Y_OFFSET;
+        assert!(matches!(
+            Codec.decode(
+                &RawPacket {
+                    id: 0x07,
+                    data: started
+                },
+                pos()
+            ),
+            ClientEvent::StartDig {
+                x: 5,
+                y,
+                z: -9,
+                ..
+            } if y == engine_y
+        ));
+
+        let mut finished = vec![2u8];
+        finished.extend_from_slice(&encode_position(5, 70, -9).to_be_bytes());
+        finished.push(1);
+        assert!(matches!(
+            Codec.decode(
+                &RawPacket {
+                    id: 0x07,
+                    data: finished
+                },
+                pos()
+            ),
+            ClientEvent::Dig {
+                x: 5,
+                y,
+                z: -9,
+                ..
+            } if y == engine_y
+        ));
+
+        let mut cancelled = vec![1u8];
+        cancelled.extend_from_slice(&encode_position(5, 70, -9).to_be_bytes());
+        cancelled.push(1);
+        assert!(matches!(
+            Codec.decode(
+                &RawPacket {
+                    id: 0x07,
+                    data: cancelled
+                },
+                pos()
+            ),
+            ClientEvent::CancelDig { .. }
+        ));
     }
 
     #[test]

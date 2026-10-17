@@ -29,6 +29,8 @@ subscribe = [
     "on-command",
 ]
 
+# `allow-empty-on-error = "true"` lets a corrupt/unreadable KV value start an
+# empty, UNPROTECTED set instead of refusing the load (the bytes stay intact).
 # The top-level command is public; the `worldguard.region.*` nodes gate the
 # individual subcommands inside the plugin, so a deny on `info` cannot block
 # `define` before the arguments are read.
