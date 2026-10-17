@@ -53,6 +53,9 @@ members = [
     # The WorldGuard-style regions plugin (CMD-34a), a native (tier N) plugin:
     # the region model and `/rg` commands on the shared core region index.
     "plugins/regions",
+    # The WorldEdit-style editing plugin (CMD-36a), a native plugin over the
+    # core bulk-edit API.
+    "plugins/worldedit",
     # The stats plugin (CMD-47), a WASM component for deployment. It is also a
     # workspace member so its pure aggregation/playtime model runs under
     # `cargo test` without a WebAssembly toolchain; the component glue is

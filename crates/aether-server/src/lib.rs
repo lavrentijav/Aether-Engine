@@ -45,6 +45,8 @@ pub mod stored;
 pub mod teleport;
 pub mod visibility;
 pub mod web;
+#[cfg(feature = "plugins")]
+pub mod worldedit;
 pub mod worldgen;
 
 use std::io;

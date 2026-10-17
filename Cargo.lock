@@ -194,6 +194,7 @@ dependencies = [
  "aether-voice-plugin",
  "aether-webadmin-plugin",
  "aether-world",
+ "aether-worldedit-plugin",
  "aether-worldgen",
  "cfb8",
  "cipher",
@@ -271,6 +272,13 @@ dependencies = [
  "fjall",
  "libc",
  "zstd",
+]
+
+[[package]]
+name = "aether-worldedit-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-plugin",
 ]
 
 [[package]]

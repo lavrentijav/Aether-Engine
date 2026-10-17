@@ -245,6 +245,7 @@ fn exec_aether(ctx: &mut Ctx) -> Reply {
 /// `registry::register_plugin` refuses core names, this can only answer a name
 /// the core does not own, so the core's gate is never bypassed.
 pub(crate) fn plugin_command(text: &str, handle: &PlayerHandle) -> Option<Reply> {
+    let text = text.trim_start_matches('/');
     let mut parts = text.splitn(2, ' ');
     let cmd = parts.next()?;
     let rest = parts.next().unwrap_or("");
@@ -1003,6 +1004,28 @@ mod tests {
         // The CMD-01 gate is not weakened: a node nobody declared still fails
         // closed for a non-op.
         assert!(!super::permitted_level(0, "plugin.historian.unset", 0));
+    }
+
+    #[test]
+    fn a_double_slash_reaches_the_plugin_command_behind_it() {
+        let _guard = crate::permissions::test_lock();
+        let name = "double_slash_fixture_test";
+        crate::commands::registry::register_plugin(
+            name,
+            "worldedit_fixture",
+            "plugin.worldedit_fixture.double_slash",
+            0,
+        )
+        .unwrap();
+        crate::permissions::declare_node(
+            "plugin.worldedit_fixture.double_slash",
+            crate::permissions::NodeDefault::Allow,
+        )
+        .unwrap();
+        let handle = crate::players::PlayerHandle::for_test(1, "Builder");
+        let reply = super::plugin_command(&format!("//{name}"), &handle)
+            .expect("the double-slash form names the plugin command");
+        assert_eq!(reply.0, vec![format!("/{name} is not available right now")]);
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub mod region;
 pub mod sdk;
 pub mod service;
 pub mod sidebar;
+pub mod worldedit;
 
 /// The generated component-model bindings for the `plugin` world.
 ///

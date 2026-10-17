@@ -68,6 +68,9 @@ aether-regions-plugin = { path = "../../plugins/regions", optional = true }
 # The claims native plugin (CMD-35): GriefPrevention-style player claims on the
 # core region index, owned through /claim and a golden shovel.
 aether-claims-plugin = { path = "../../plugins/claims", optional = true }
+# The WorldEdit-style editing native plugin (CMD-36a): selection and fill on
+# the core bulk-edit API.
+aether-worldedit-plugin = { path = "../../plugins/worldedit", optional = true }
 # The essentials-teleport native plugin (CMD-37a): homes, warps and the plugin
 # spawn on the core teleport/safe-spot service and plugin KV.
 aether-essentials-teleport-plugin = { path = "../../plugins/essentials-teleport", optional = true }
@@ -138,5 +141,5 @@ workspace = true
 # build that does not need Wasmtime (tests, a minimal deployment) can drop it
 # with `--no-default-features`.
 default = ["plugins"]
-plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-menus-plugin", "dep:aether-webadmin-plugin", "dep:aether-sidebar-plugin", "dep:aether-voice-plugin", "dep:aether-staff-plugin", "dep:aether-regions-plugin", "dep:aether-claims-plugin", "dep:aether-essentials-teleport-plugin"]
+plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-menus-plugin", "dep:aether-webadmin-plugin", "dep:aether-sidebar-plugin", "dep:aether-voice-plugin", "dep:aether-staff-plugin", "dep:aether-regions-plugin", "dep:aether-claims-plugin", "dep:aether-worldedit-plugin", "dep:aether-essentials-teleport-plugin"]
 postgres = ["dep:postgres"]
