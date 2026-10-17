@@ -208,6 +208,7 @@ fn game_mode_name(mode: GameMode) -> &'static str {
     match mode {
         GameMode::Survival => lang::GAMEMODE_SURVIVAL,
         GameMode::Creative => lang::GAMEMODE_CREATIVE,
+        GameMode::Adventure => lang::GAMEMODE_ADVENTURE,
         GameMode::Spectator => lang::GAMEMODE_SPECTATOR,
     }
 }
@@ -291,10 +292,11 @@ pub fn kill(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld)
     Vec::new()
 }
 
-/// `/spawn`.
+/// `/spawn` — the world spawn, including a `/setworldspawn` override, so an
+/// online player follows a spawn an operator has just moved.
 pub fn spawn(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld) -> Vec<String> {
-    let s = handle.game().spawn;
-    teleport(handle, registry, world, s.0, s.1, s.2);
+    let s = crate::session::world_spawn(world);
+    teleport(handle, registry, world, s.x, s.y, s.z);
     vec!["Teleported to spawn".into()]
 }
 
@@ -467,6 +469,7 @@ fn parse_mode(s: &str) -> Option<GameMode> {
     match s {
         "s" | "0" => Some(GameMode::Survival),
         "c" | "1" => Some(GameMode::Creative),
+        "a" | "2" => Some(GameMode::Adventure),
         other => other.parse().ok(),
     }
 }

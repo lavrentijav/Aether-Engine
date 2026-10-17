@@ -125,7 +125,7 @@ fn weather_node() -> Node {
             Builder::literal(name)
                 .executable(move |ctx| exec_weather(ctx, weather))
                 .then(
-                    Builder::arg("duration", tree::ArgKind::Integer)
+                    Builder::arg("duration", tree::ArgKind::Time)
                         .executable(move |ctx| exec_weather(ctx, weather)),
                 ),
         );
@@ -140,7 +140,7 @@ fn worldborder_node() -> Node {
             Builder::arg("distance", tree::ArgKind::Double)
                 .executable(move |ctx| exec_worldborder_set(ctx, literal == "add"))
                 .then(
-                    Builder::arg("time", tree::ArgKind::Integer)
+                    Builder::arg("time", tree::ArgKind::Time)
                         .executable(move |ctx| exec_worldborder_set(ctx, literal == "add")),
                 ),
         )
@@ -180,7 +180,7 @@ fn worldborder_node() -> Node {
                 )
                 .then(
                     Builder::literal("time").then(
-                        Builder::arg("time", tree::ArgKind::Integer)
+                        Builder::arg("time", tree::ArgKind::Time)
                             .executable(exec_worldborder_warning_time),
                     ),
                 ),
@@ -199,7 +199,7 @@ fn setworldspawn_node() -> Node {
         .then(
             Builder::arg("pos", tree::ArgKind::BlockPos)
                 .executable(exec_setworldspawn)
-                .then(Builder::arg("angle", tree::ArgKind::Float).executable(exec_setworldspawn)),
+                .then(Builder::arg("angle", tree::ArgKind::Angle).executable(exec_setworldspawn)),
         )
         .build()
 }
@@ -231,8 +231,7 @@ fn exec_time_add(ctx: &mut Ctx) -> Reply {
     let Some(amount) = int_argument(ctx) else {
         return ctx.fail("/time add <time>");
     };
-    let before = game::time_of_day();
-    let after = before.wrapping_add(amount).rem_euclid(24_000);
+    let after = game::daylight_ticks().saturating_add(amount);
     game::set_time_of_day(after);
     ctx.registry.broadcast(&game::time_event(), ctx.world);
     Reply::one(lang::format(lang::TIME_SET, &[&after.to_string()]))
@@ -262,9 +261,11 @@ fn exec_time_query_named(_ctx: &mut Ctx, which: &str) -> Reply {
 }
 
 fn query_time(which: &str) -> String {
+    // Vanilla returns `gametime` modulo `2^31 - 1`; `day` is the daylight
+    // cycle divided by 24,000, not the age of the world.
     let value = match which {
-        "gametime" => game::now() as i64,
-        "day" => game::now() as i64 / 24_000,
+        "gametime" => (game::now() as i64).rem_euclid(2_147_483_647),
+        "day" => game::day(),
         _ => game::time_of_day(),
     };
     lang::format(lang::TIME_QUERY, &[&value.to_string()])
@@ -337,11 +338,15 @@ pub fn weather_state() -> WeatherState {
 /// Vanilla's omitted-duration ranges, narrowed by uptime so the value is
 /// deterministic and still inside the right range.
 fn default_weather_duration(weather: Weather) -> i64 {
-    let n = (game::now() % 12_001) as i64;
+    // Vanilla's ranges: clear 12,000..=180,000, rain 12,000..=24,000,
+    // thunder 3,600..=15,600. Uptime makes the pick deterministic (and still
+    // inside the range) instead of drawing from the world RNG, which the tick
+    // owns.
+    let n = (game::now() % 168_001) as i64;
     match weather {
-        Weather::Clear => 12_000 + (n % 168_001),
-        Weather::Rain => 12_000 + n,
-        Weather::Thunder => 3_600 + n,
+        Weather::Clear => 12_000 + n,
+        Weather::Rain => 12_000 + n % 12_001,
+        Weather::Thunder => 3_600 + n % 12_001,
     }
 }
 
@@ -369,8 +374,34 @@ fn exec_weather_usage(ctx: &mut Ctx) -> Reply {
 }
 
 fn exec_weather(ctx: &mut Ctx, weather: Weather) -> Reply {
-    set_weather(weather, int_argument(ctx));
+    let duration = if !ctx.args.is_empty() {
+        let Some(ticks) = int_argument(ctx) else {
+            return ctx.fail("/weather <clear|rain|thunder> [<duration>]");
+        };
+        if ticks < 1 {
+            return ctx.fail(lang::format(
+                lang::ARG_TIME_TOO_LOW,
+                &["1", &ticks.to_string()],
+            ));
+        }
+        Some(ticks)
+    } else {
+        None
+    };
+    let state = set_weather(weather, duration);
+    broadcast_weather(ctx.registry, ctx.world, state);
     Reply::one(weather.success())
+}
+
+/// Tell every client the weather state.
+fn broadcast_weather(registry: &SharedRegistry, world: &DemoWorld, state: WeatherState) {
+    registry.broadcast(
+        &crate::protocol::ServerEvent::Weather {
+            rain: state.weather != Weather::Clear,
+            thunder: state.weather == Weather::Thunder,
+        },
+        world,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -457,9 +488,10 @@ impl WorldBorder {
         }
     }
 
-    /// Set the diameter, over `seconds` (0 = now).
-    pub fn set_size(&mut self, size: f64, seconds: i64) {
-        let ticks = seconds.max(0).saturating_mul(20).min(i64::from(u32::MAX)) as u32;
+    /// Set the diameter, over `ticks` (0 = now). The argument is a
+    /// `TimeArgumentType`, so it is already in ticks.
+    pub fn set_size(&mut self, size: f64, ticks: i64) {
+        let ticks = ticks.max(0).min(i64::from(u32::MAX)) as u32;
         if ticks == 0 {
             self.size = size;
             self.target_size = size;
@@ -497,11 +529,11 @@ impl BorderError {
             BorderError::TooSmall => lang::format(lang::WORLDBORDER_FAILED_SMALL, &[]),
             BorderError::TooBig => lang::format(
                 lang::WORLDBORDER_FAILED_BIG,
-                &[&fmt_number(WORLD_BORDER_MAX)],
+                &[&fmt_integer(WORLD_BORDER_MAX)],
             ),
             BorderError::TooFar => lang::format(
                 lang::WORLDBORDER_FAILED_FAR,
-                &[&fmt_number(WORLD_BORDER_CENTER_MAX)],
+                &[&fmt_integer(WORLD_BORDER_CENTER_MAX)],
             ),
             BorderError::NoChange => lang::WORLDBORDER_SET_NOCHANGE.into(),
             BorderError::Negative => "The value must not be negative".into(),
@@ -539,40 +571,59 @@ fn exec_worldborder_set(ctx: &mut Ctx, add: bool) -> Reply {
             "/worldborder set <distance> [<time>]"
         });
     };
-    let seconds = if ctx.args.len() > 1 {
+    let ticks = if ctx.args.len() > 1 {
         int_argument(ctx).unwrap_or(0)
     } else {
         0
     };
-    if seconds < 0 {
-        return ctx.fail(format!("Integer must not be less than 0: found {seconds}"));
+    if ticks < 0 {
+        return ctx.fail(lang::format(
+            lang::ARG_TIME_TOO_LOW,
+            &["0", &ticks.to_string()],
+        ));
     }
-    let mut border = border_cell().lock().unwrap_or_else(|e| e.into_inner());
-    let current = border.size;
-    let target = if add { current + distance } else { distance };
-    if target == current {
-        return ctx.fail(BorderError::NoChange.message());
+    // The argument itself is bounded like vanilla's `doubleArg`: an
+    // out-of-range distance is an argument error, not a border-size error.
+    if distance < -WORLD_BORDER_MAX || distance > WORLD_BORDER_MAX {
+        return ctx.fail(lang::format(
+            lang::ARG_DOUBLE_BIG,
+            &[&fmt_integer(WORLD_BORDER_MAX), &fmt_double(distance)],
+        ));
     }
-    if target < WORLD_BORDER_MIN {
-        return ctx.fail(BorderError::TooSmall.message());
-    }
-    if target > WORLD_BORDER_MAX {
-        return ctx.fail(BorderError::TooBig.message());
-    }
-    let message = if seconds == 0 {
-        lang::format(lang::WORLDBORDER_SET_IMMEDIATE, &[&fmt_number(target)])
-    } else if target > current {
-        lang::format(
-            lang::WORLDBORDER_SET_GROW,
-            &[&fmt_number(target), &seconds.to_string()],
-        )
-    } else {
-        lang::format(
-            lang::WORLDBORDER_SET_SHRINK,
-            &[&fmt_number(target), &seconds.to_string()],
+    let (message, event) = {
+        let mut border = border_cell().lock().unwrap_or_else(|e| e.into_inner());
+        let current = border.size;
+        let target = if add { current + distance } else { distance };
+        if target == current {
+            return ctx.fail(BorderError::NoChange.message());
+        }
+        if target < WORLD_BORDER_MIN {
+            return ctx.fail(BorderError::TooSmall.message());
+        }
+        if target > WORLD_BORDER_MAX {
+            return ctx.fail(BorderError::TooBig.message());
+        }
+        let seconds = ticks / 20;
+        let message = if ticks == 0 {
+            lang::format(lang::WORLDBORDER_SET_IMMEDIATE, &[&fmt_one(target)])
+        } else if target > current {
+            lang::format(
+                lang::WORLDBORDER_SET_GROW,
+                &[&fmt_one(target), &seconds.to_string()],
+            )
+        } else {
+            lang::format(
+                lang::WORLDBORDER_SET_SHRINK,
+                &[&fmt_one(target), &seconds.to_string()],
+            )
+        };
+        border.set_size(target, ticks);
+        (
+            message,
+            border_event(&border, current, target, ticks as i32),
         )
     };
-    border.set_size(target, seconds);
+    ctx.registry.broadcast(&event, ctx.world);
     Reply::one(message)
 }
 
@@ -584,7 +635,7 @@ fn exec_worldborder_get(_ctx: &mut Ctx) -> Reply {
     let border = world_border();
     Reply::one(lang::format(
         lang::WORLDBORDER_GET,
-        &[&format!("{}", border.size.round() as i64)],
+        &[&fmt_zero(border.size)],
     ))
 }
 
@@ -605,15 +656,19 @@ fn exec_worldborder_center(ctx: &mut Ctx) -> Reply {
     if x.abs() > WORLD_BORDER_CENTER_MAX || z.abs() > WORLD_BORDER_CENTER_MAX {
         return ctx.fail(BorderError::TooFar.message());
     }
-    let mut border = border_cell().lock().unwrap_or_else(|e| e.into_inner());
-    if border.center_x == x && border.center_z == z {
-        return ctx.fail(lang::WORLDBORDER_CENTER_FAILED);
-    }
-    border.center_x = x;
-    border.center_z = z;
+    let event = {
+        let mut border = border_cell().lock().unwrap_or_else(|e| e.into_inner());
+        if border.center_x == x && border.center_z == z {
+            return ctx.fail(lang::WORLDBORDER_CENTER_FAILED);
+        }
+        border.center_x = x;
+        border.center_z = z;
+        border_event(&border, border.size, border.size, 0)
+    };
+    ctx.registry.broadcast(&event, ctx.world);
     Reply::one(lang::format(
         lang::WORLDBORDER_CENTER_SUCCESS,
-        &[&fmt_number(x), &fmt_number(z)],
+        &[&fmt_two(x), &fmt_two(z)],
     ))
 }
 
@@ -622,16 +677,20 @@ fn exec_worldborder_damage_amount(ctx: &mut Ctx) -> Reply {
         return ctx.fail("/worldborder damage amount <damagePerBlock>");
     };
     if value < 0.0 {
-        return ctx.fail(BorderError::Negative.message());
+        return ctx.fail(lang::format(lang::ARG_FLOAT_LOW, &["0", &fmt_float(value)]));
     }
-    let mut border = border_cell().lock().unwrap_or_else(|e| e.into_inner());
-    if border.damage_per_block == value {
-        return ctx.fail(lang::WORLDBORDER_DAMAGE_AMOUNT_FAILED);
-    }
-    border.damage_per_block = value;
+    let event = {
+        let mut border = border_cell().lock().unwrap_or_else(|e| e.into_inner());
+        if border.damage_per_block == value {
+            return ctx.fail(lang::WORLDBORDER_DAMAGE_AMOUNT_FAILED);
+        }
+        border.damage_per_block = value;
+        border_event(&border, border.size, border.size, 0)
+    };
+    ctx.registry.broadcast(&event, ctx.world);
     Reply::one(lang::format(
         lang::WORLDBORDER_DAMAGE_AMOUNT_SUCCESS,
-        &[&fmt_number(value)],
+        &[&fmt_two(value)],
     ))
 }
 
@@ -640,16 +699,20 @@ fn exec_worldborder_damage_buffer(ctx: &mut Ctx) -> Reply {
         return ctx.fail("/worldborder damage buffer <distance>");
     };
     if value < 0.0 {
-        return ctx.fail(BorderError::Negative.message());
+        return ctx.fail(lang::format(lang::ARG_FLOAT_LOW, &["0", &fmt_float(value)]));
     }
-    let mut border = border_cell().lock().unwrap_or_else(|e| e.into_inner());
-    if border.damage_buffer == value {
-        return ctx.fail(lang::WORLDBORDER_DAMAGE_BUFFER_FAILED);
-    }
-    border.damage_buffer = value;
+    let event = {
+        let mut border = border_cell().lock().unwrap_or_else(|e| e.into_inner());
+        if border.damage_buffer == value {
+            return ctx.fail(lang::WORLDBORDER_DAMAGE_BUFFER_FAILED);
+        }
+        border.damage_buffer = value;
+        border_event(&border, border.size, border.size, 0)
+    };
+    ctx.registry.broadcast(&event, ctx.world);
     Reply::one(lang::format(
         lang::WORLDBORDER_DAMAGE_BUFFER_SUCCESS,
-        &[&fmt_number(value)],
+        &[&fmt_two(value)],
     ))
 }
 
@@ -658,14 +721,21 @@ fn exec_worldborder_warning_distance(ctx: &mut Ctx) -> Reply {
         return ctx.fail("/worldborder warning distance <distance>");
     };
     if value < 0 {
-        return ctx.fail(BorderError::Negative.message());
+        return ctx.fail(lang::format(
+            lang::ARG_INTEGER_LOW,
+            &["0", &value.to_string()],
+        ));
     }
     let value = value as i32;
-    let mut border = border_cell().lock().unwrap_or_else(|e| e.into_inner());
-    if border.warning_distance == value {
-        return ctx.fail(lang::WORLDBORDER_WARNING_DISTANCE_FAILED);
-    }
-    border.warning_distance = value;
+    let event = {
+        let mut border = border_cell().lock().unwrap_or_else(|e| e.into_inner());
+        if border.warning_distance == value {
+            return ctx.fail(lang::WORLDBORDER_WARNING_DISTANCE_FAILED);
+        }
+        border.warning_distance = value;
+        border_event(&border, border.size, border.size, 0)
+    };
+    ctx.registry.broadcast(&event, ctx.world);
     Reply::one(lang::format(
         lang::WORLDBORDER_WARNING_DISTANCE_SUCCESS,
         &[&value.to_string()],
@@ -673,39 +743,63 @@ fn exec_worldborder_warning_distance(ctx: &mut Ctx) -> Reply {
 }
 
 fn exec_worldborder_warning_time(ctx: &mut Ctx) -> Reply {
-    let Some(value) = int_argument(ctx) else {
+    let Some(ticks) = int_argument(ctx) else {
         return ctx.fail("/worldborder warning time <time>");
     };
-    if value < 0 {
-        return ctx.fail(BorderError::Negative.message());
+    if ticks < 0 {
+        return ctx.fail(lang::format(
+            lang::ARG_TIME_TOO_LOW,
+            &["0", &ticks.to_string()],
+        ));
     }
-    let value = value as i32;
-    let mut border = border_cell().lock().unwrap_or_else(|e| e.into_inner());
-    if border.warning_time == value {
-        return ctx.fail(lang::WORLDBORDER_WARNING_TIME_FAILED);
-    }
-    border.warning_time = value;
+    let value = (ticks / 20) as i32;
+    let event = {
+        let mut border = border_cell().lock().unwrap_or_else(|e| e.into_inner());
+        if border.warning_time == value {
+            return ctx.fail(lang::WORLDBORDER_WARNING_TIME_FAILED);
+        }
+        border.warning_time = value;
+        border_event(&border, border.size, border.size, 0)
+    };
+    ctx.registry.broadcast(&event, ctx.world);
     Reply::one(lang::format(
         lang::WORLDBORDER_WARNING_TIME_SUCCESS,
         &[&value.to_string()],
     ))
 }
 
-// ---------------------------------------------------------------------------
-// World spawn and default game mode
-// ---------------------------------------------------------------------------
+/// The Initialize World Border packet's payload for the current state.
+fn border_event(
+    border: &WorldBorder,
+    old_diameter: f64,
+    new_diameter: f64,
+    speed: i32,
+) -> crate::protocol::ServerEvent<'static> {
+    crate::protocol::ServerEvent::WorldBorder {
+        x: border.center_x,
+        z: border.center_z,
+        old_diameter,
+        new_diameter,
+        speed,
+        warning_blocks: border.warning_distance,
+        warning_time: border.warning_time,
+    }
+}
 
 fn exec_setworldspawn(ctx: &mut Ctx) -> Reply {
-    let (x, y, z, angle) = if ctx.args.is_empty() {
+    let (x, y, z, yaw) = if ctx.args.is_empty() {
         let Some(player) = ctx.player() else {
             return ctx.fail(CoordError::NoPosition.message());
         };
         let pos = player.pos();
+        let yaw = angle_argument(ctx, Some(player as &dyn CoordinateSource))
+            .unwrap_or(None)
+            .unwrap_or(0.0);
         (
             pos.x.floor() as i32,
             pos.y.floor() as i32,
             pos.z.floor() as i32,
-            0.0,
+            yaw,
         )
     } else {
         let Some(block) = block_pos_argument(ctx) else {
@@ -726,17 +820,32 @@ fn exec_setworldspawn(ctx: &mut Ctx) -> Reply {
                 }
             }
         };
-        let angle = angle_argument(ctx).unwrap_or(0.0);
-        (x, y, z, angle)
+        let yaw = match angle_argument(ctx, ctx.player().map(|p| p as &dyn CoordinateSource)) {
+            Ok(angle) => angle.unwrap_or(0.0),
+            Err(e) => return ctx.fail(e.message()),
+        };
+        (x, y, z, yaw)
     };
-    game::set_world_spawn(x, y, z, angle);
+    // Vanilla's `setworldspawn` position bounds: x/z in [-30,000,000,
+    // 30,000,000), y in [-20,000,000, 20,000,000).
+    if !(-30_000_000..30_000_000).contains(&x)
+        || !(-30_000_000..30_000_000).contains(&z)
+        || !(-20_000_000..20_000_000).contains(&y)
+    {
+        return ctx.fail("Invalid position for world spawn");
+    }
+    game::set_world_spawn(x, y, z, yaw);
+    ctx.registry.broadcast(
+        &crate::protocol::ServerEvent::SpawnPosition { x, y, z, yaw },
+        ctx.world,
+    );
     Reply::one(lang::format(
         lang::SETWORLDSPAWN_SUCCESS,
         &[
             &x.to_string(),
             &y.to_string(),
             &z.to_string(),
-            &fmt_angle(angle),
+            &fmt_angle(yaw),
         ],
     ))
 }
@@ -763,6 +872,7 @@ fn parse_game_mode(name: &str) -> Option<GameMode> {
     match name {
         "survival" => Some(GameMode::Survival),
         "creative" => Some(GameMode::Creative),
+        "adventure" => Some(GameMode::Adventure),
         "spectator" => Some(GameMode::Spectator),
         _ => None,
     }
@@ -772,6 +882,7 @@ fn game_mode_name(mode: GameMode) -> &'static str {
     match mode {
         GameMode::Survival => lang::GAMEMODE_SURVIVAL,
         GameMode::Creative => lang::GAMEMODE_CREATIVE,
+        GameMode::Adventure => lang::GAMEMODE_ADVENTURE,
         GameMode::Spectator => lang::GAMEMODE_SPECTATOR,
     }
 }
@@ -817,12 +928,21 @@ fn vec2_argument(ctx: &Ctx) -> Option<super::coordinates::Coordinates2> {
     })
 }
 
-fn angle_argument(ctx: &Ctx) -> Option<f32> {
-    ctx.args.iter().rev().find_map(|arg| match &arg.value {
-        tree::Value::Float(v) => Some(*v),
-        tree::Value::Double(v) => Some(*v as f32),
+fn angle_argument(
+    ctx: &Ctx,
+    source: Option<&dyn CoordinateSource>,
+) -> Result<Option<f32>, CoordError> {
+    let Some(coord) = ctx.args.iter().rev().find_map(|arg| match &arg.value {
+        tree::Value::Angle(c) => Some(*c),
         _ => None,
-    })
+    }) else {
+        return Ok(None);
+    };
+    let resolved = match source {
+        Some(source) => super::coordinates::resolve_angle(coord, source)?,
+        None => super::coordinates::resolve_angle(coord, &NoCoordinates)?,
+    };
+    Ok(Some(resolved))
 }
 
 /// A source with no position or rotation, for absolute-only coordinates from
@@ -839,13 +959,38 @@ impl CoordinateSource for NoCoordinates {
     }
 }
 
-/// Format a number the way a component shows it: no trailing `.0`.
-fn fmt_number(value: f64) -> String {
+/// Vanilla's `%.1f`: the `set`/grow/shrink message.
+fn fmt_one(value: f64) -> String {
+    format!("{value:.1}")
+}
+
+/// Vanilla's `%.2f`: the centre and damage messages.
+fn fmt_two(value: f64) -> String {
+    format!("{value:.2}")
+}
+
+/// Vanilla's `%.0f`: `/worldborder get`.
+fn fmt_zero(value: f64) -> String {
+    format!("{value:.0}")
+}
+
+/// A whole-number message argument (`59,999,968`), never `59999968.0`.
+fn fmt_integer(value: f64) -> String {
+    format!("{value:.0}")
+}
+
+/// A Java `Float.toString` argument: `-1.0`, not `-1`.
+fn fmt_float(value: f64) -> String {
     if value.fract() == 0.0 {
-        format!("{}", value as i64)
+        format!("{value:.1}")
     } else {
         format!("{value}")
     }
+}
+
+/// A Java `Double.toString`-ish argument, with a `.0` on whole numbers.
+fn fmt_double(value: f64) -> String {
+    fmt_float(value)
 }
 
 /// A Java `Float.toString`-style angle: `0.0`, not `0`.
@@ -867,14 +1012,20 @@ fn fmt_angle(value: f32) -> String {
 /// twenty ticks, which is vanilla's once-a-second schedule.
 pub fn tick_world(registry: &SharedRegistry, world: &DemoWorld) {
     tick_border();
-    {
+    let cleared = {
         let mut weather = weather_cell().lock().unwrap_or_else(|e| e.into_inner());
+        let mut cleared = false;
         if weather.remaining > 0 {
             weather.remaining -= 1;
             if weather.remaining == 0 && weather.weather != Weather::Clear {
                 weather.weather = Weather::Clear;
+                cleared = true;
             }
         }
+        cleared
+    };
+    if cleared {
+        broadcast_weather(registry, world, weather_state());
     }
     if game::now() % 20 != 0 {
         return;
@@ -909,11 +1060,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_border_grows_and_shrinks_over_time() {
+    fn a_border_grows_and_shrinks_over_time_in_ticks() {
         let mut border = WorldBorder::default();
         border.set_size(100.0, 0);
         assert_eq!(border.size, 100.0);
-        border.set_size(200.0, 10);
+        // 200 ticks = 10 seconds, as the TimeArgumentType says.
+        border.set_size(200.0, 200);
         assert!(border.resizing());
         for _ in 0..100 {
             border.tick();
@@ -925,7 +1077,8 @@ mod tests {
         assert_eq!(border.size, 200.0);
         assert!(!border.resizing());
 
-        border.set_size(50.0, 1);
+        // One second is 20 ticks, not one tick.
+        border.set_size(50.0, 20);
         for _ in 0..20 {
             border.tick();
         }
@@ -971,21 +1124,20 @@ mod tests {
     #[test]
     fn explicit_weather_durations_are_clamped() {
         assert_eq!(
-            weather_duration(Weather::Rain, Some(-5)),
-            0,
-            "negative clamps to zero"
-        );
-        assert_eq!(
             weather_duration(Weather::Rain, Some(2_000_000)),
             WEATHER_MAX_DURATION
         );
         assert_eq!(weather_duration(Weather::Thunder, Some(200)), 200);
+        assert_eq!(weather_duration(Weather::Rain, Some(0)), 0);
     }
 
     #[test]
-    fn the_number_formatter_has_no_trailing_zero() {
-        assert_eq!(fmt_number(100.0), "100");
-        assert_eq!(fmt_number(0.2), "0.2");
-        assert_eq!(fmt_number(-29999984.0), "-29999984");
+    fn border_numbers_use_vanillas_decimal_places() {
+        assert_eq!(fmt_one(100.0), "100.0");
+        assert_eq!(fmt_two(10.0), "10.00");
+        assert_eq!(fmt_two(0.5), "0.50");
+        assert_eq!(fmt_zero(99.6), "100");
+        assert_eq!(fmt_integer(-29_999_984.0), "-29999984");
+        assert_eq!(fmt_float(-1.0), "-1.0");
     }
 }

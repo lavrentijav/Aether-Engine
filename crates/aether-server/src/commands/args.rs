@@ -524,6 +524,9 @@ fn parse_time(r: &mut StringReader) -> Result<(Value, String), ParseError> {
             "The tick count must not be less than 0: found {t}"
         )));
     }
+    // Brigadier's time argument is an `int`: saturate instead of wrapping, so
+    // `/time set 3000000000` cannot turn negative on the way in.
+    let ticks = ticks.clamp(0, i64::from(i32::MAX));
     Ok((Value::Int(ticks as i32), t))
 }
 

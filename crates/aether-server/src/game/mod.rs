@@ -85,6 +85,7 @@ pub fn default_game_mode() -> crate::protocol::GameMode {
     match DEFAULT_GAME_MODE.load(Ordering::Relaxed) {
         0 => crate::protocol::GameMode::Survival,
         1 => crate::protocol::GameMode::Creative,
+        2 => crate::protocol::GameMode::Adventure,
         3 => crate::protocol::GameMode::Spectator,
         _ => crate::server_game_mode(),
     }
@@ -110,14 +111,26 @@ pub fn now() -> u64 {
     AGE.load(Ordering::Relaxed)
 }
 
-/// Time of day, `0..24000`; 0 is sunrise, 6000 noon, 18000 midnight.
-pub fn time_of_day() -> i64 {
+/// The daylight cycle time in absolute ticks: the counter `/time set` and
+/// `/time add` change, and the one `/time query day` divides by 24,000.
+pub fn daylight_ticks() -> i64 {
     TIME_OF_DAY.load(Ordering::Relaxed)
 }
 
-/// Set the time of day.
+/// Time of day, `0..24000`; 0 is sunrise, 6000 noon, 18000 midnight.
+pub fn time_of_day() -> i64 {
+    daylight_ticks().rem_euclid(24_000)
+}
+
+/// The current day number of the daylight cycle.
+pub fn day() -> i64 {
+    daylight_ticks().div_euclid(24_000)
+}
+
+/// Set the absolute daylight cycle time. The stored value is kept whole so
+/// the day count survives; [`time_of_day`] takes the modulo.
 pub fn set_time_of_day(t: i64) {
-    TIME_OF_DAY.store(t.rem_euclid(24000), Ordering::Relaxed);
+    TIME_OF_DAY.store(t, Ordering::Relaxed);
 }
 
 /// The measured ticks per second, smoothed; the ideal 20 before the first
@@ -147,7 +160,9 @@ pub fn is_night() -> bool {
 pub fn time_event() -> crate::protocol::ServerEvent<'static> {
     crate::protocol::ServerEvent::Time {
         age: now() as i64,
-        time_of_day: time_of_day(),
+        // Vanilla sends the absolute daylight time; the client takes the
+        // modulo itself.
+        time_of_day: daylight_ticks(),
     }
 }
 
