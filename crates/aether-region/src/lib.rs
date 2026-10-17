@@ -249,12 +249,12 @@ impl Action {
 
     /// Whether region membership grants this action when its flag is unset.
     ///
-    /// Members and owners may build and use their region; membership is not a
-    /// licence to pvp or to explode inside it.
+    /// Members and owners may enter, build and use their region; membership is
+    /// not a licence to pvp or to explode inside it.
     pub const fn membership_grants(self) -> bool {
         matches!(
             self,
-            Action::Break | Action::Place | Action::Interact | Action::UseItem
+            Action::Break | Action::Place | Action::Interact | Action::UseItem | Action::Entry
         )
     }
 }
@@ -367,6 +367,15 @@ pub struct Region {
     pub members: BTreeSet<String>,
     /// Player names added as owners (full rights).
     pub owners: BTreeSet<String>,
+    /// Per-player action grants, narrower than membership.
+    ///
+    /// Each entry maps a player name to the [`Action::flag`] names they may
+    /// perform even though they are not a member. This is how the claims
+    /// plugin expresses GriefPrevention trust levels: a container-trusted
+    /// player gets `use` (open chests) but not `build` (break/place), while a
+    /// build-trusted player gets both. An explicit flag still wins, so a
+    /// region-wide deny is never overridden by a grant.
+    pub trusted: BTreeMap<String, BTreeSet<String>>,
     /// The plugin that owns this region (`claims`, `regions`), or `None` for a
     /// region created directly in the core. The host stamps it on a plugin
     /// write, so one plugin cannot delete another's region.
@@ -385,6 +394,7 @@ impl Region {
             flags: FlagSet::new(),
             members: BTreeSet::new(),
             owners: BTreeSet::new(),
+            trusted: BTreeMap::new(),
             source: None,
         }
     }
@@ -419,6 +429,18 @@ impl Region {
         self
     }
 
+    /// Grant `name` the actions whose [`Action::flag`] names are in `flags`,
+    /// builder-style.
+    pub fn trusted(
+        mut self,
+        name: impl Into<String>,
+        flags: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.trusted
+            .insert(name.into(), flags.into_iter().collect());
+        self
+    }
+
     /// Put this region behind an `Arc` — the form the index stores.
     pub fn handle(self) -> RegionHandle {
         Arc::new(self)
@@ -441,16 +463,27 @@ impl Region {
     ///
     /// An explicit flag decides for everyone; a bypassing actor is handled by
     /// [`RegionIndex::check`] before this is called. With the flag absent a
-    /// member or owner is allowed to build/use, and everything else defers to
-    /// the next region (with the action's built-in default as the final
-    /// fallback).
+    /// player with a matching [`Region::trusted`] grant is allowed that single
+    /// action, then a member or owner is allowed to build/use, and everything
+    /// else defers to the next region (with the action's built-in default as
+    /// the final fallback).
     pub fn verdict(&self, action: Action, actor: &Actor<'_>) -> Verdict {
         match self.flags.get(action.flag()) {
             Some(true) => Verdict::Allow,
             Some(false) => Verdict::Deny,
+            None if self.is_trusted(actor.name, action.flag()) => Verdict::Allow,
             None if action.membership_grants() && self.is_member(actor.name) => Verdict::Allow,
             None => Verdict::Defer,
         }
+    }
+
+    /// Whether `name` has an explicit grant for the action flag `flag`.
+    fn is_trusted(&self, name: &str, flag: &str) -> bool {
+        !name.is_empty()
+            && self
+                .trusted
+                .iter()
+                .any(|(trusted, flags)| trusted.eq_ignore_ascii_case(name) && flags.contains(flag))
     }
 
     /// Whether `name` is this region's owner or a member.
@@ -616,7 +649,8 @@ impl RegionIndex {
     /// Decide `action` at `pos` in `world` for `actor`.
     ///
     /// Regions are considered in the index's `(priority desc, id asc)` order.
-    /// The first one with an explicit flag (or a membership grant) decides;
+    /// The first one with an explicit flag (or a per-player grant, or a
+    /// membership grant) decides;
     /// [`Verdict::Defer`] moves on to the next. If every covering region
     /// defers, the action's built-in default applies; if no region covers the
     /// position at all, the action is allowed. Only regions whose [`world`]
@@ -1453,6 +1487,70 @@ mod tests {
                 at(8, 64, 8),
                 Action::Break,
                 &Actor::new("Owner")
+            ),
+            Verdict::Deny
+        );
+    }
+
+    #[test]
+    fn per_player_grants_allow_only_the_granted_actions() {
+        let flags = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect::<Vec<_>>()
+        };
+        let container =
+            region(1, (0, 0, 0), (15, 255, 15)).trusted("Container", flags(&["entry", "use"]));
+        let index = RegionIndex::from_regions([container]);
+        for action in [Action::Interact, Action::UseItem, Action::Entry] {
+            assert_eq!(
+                index.check("overworld", at(8, 64, 8), action, &Actor::new("container")),
+                Verdict::Allow,
+                "{action:?} is granted to a container trustee"
+            );
+        }
+        for action in [Action::Break, Action::Place] {
+            assert_eq!(
+                index.check("overworld", at(8, 64, 8), action, &Actor::new("Container")),
+                Verdict::Deny,
+                "{action:?} is not granted to a container trustee"
+            );
+        }
+        // The grant is per player: everyone else is still denied.
+        assert_eq!(
+            index.check(
+                "overworld",
+                at(8, 64, 8),
+                Action::Interact,
+                &Actor::new("guest")
+            ),
+            Verdict::Deny
+        );
+
+        // A build trustee may break and place as well.
+        let build = region(1, (0, 0, 0), (15, 255, 15))
+            .trusted("Builder", flags(&["entry", "use", "build"]));
+        let index = RegionIndex::from_regions([build]);
+        for action in [Action::Break, Action::Place, Action::Interact] {
+            assert_eq!(
+                index.check("overworld", at(8, 64, 8), action, &Actor::new("Builder")),
+                Verdict::Allow,
+                "{action:?} is granted to a build trustee"
+            );
+        }
+
+        // An explicit region-wide deny still wins over a grant.
+        let denied = region(1, (0, 0, 0), (15, 255, 15))
+            .with_flag("build", false)
+            .trusted("Builder", flags(&["build"]));
+        let index = RegionIndex::from_regions([denied]);
+        assert_eq!(
+            index.check(
+                "overworld",
+                at(8, 64, 8),
+                Action::Break,
+                &Actor::new("Builder")
             ),
             Verdict::Deny
         );

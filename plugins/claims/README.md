@@ -5,9 +5,10 @@ GriefPrevention-style player-owned land for Aether, as a **native plugin**
 are the core's (CMD-29a/29b); this plugin owns the claim model, the commands,
 the limits and the golden shovel.
 
-- Task: [CMD-35](../../docs/tasks/CMD-35-claims-plugin.md), this slice
-  [CMD-35a](../../docs/tasks/CMD-35a-claims-model.md)
-- Default limits and storage are documented below; trust levels are CMD-35b.
+- Task: [CMD-35](../../docs/tasks/CMD-35-claims-plugin.md); slices
+  [CMD-35a](../../docs/tasks/CMD-35a-claims-model.md) (model, shovel, limits)
+  and [CMD-35b](../../docs/tasks/CMD-35b-claims-trust.md) (trust levels).
+- Default limits, storage and trust are documented below.
 
 ## Commands
 
@@ -18,6 +19,12 @@ the limits and the golden shovel.
 | `/abandonclaim` | give up the claim you stand in | `griefprevention.abandonclaim` |
 | `/abandonallclaims` | give up every claim; the first run asks for a second within 30 s | `griefprevention.abandonallclaims` |
 | `/claimslist [player]` | list your claims; a moderator may name another player | `griefprevention.claimslist` (+ `.others` or `griefprevention.admin`) |
+| `/trust <player>` | give **build** trust in the claim you stand in | `griefprevention.trust` |
+| `/containertrust <player>` | give **container** trust (chests, doors, buttons; no breaking) | `griefprevention.trust` |
+| `/accesstrust <player>` | give **access** trust (enter only) | `griefprevention.trust` |
+| `/managetrust <player>` | give **manage** trust (build plus changing this claim's trust) | `griefprevention.trust` |
+| `/untrust <player>` | remove every trust level from one player | `griefprevention.trust` |
+| `/untrust all` | remove every trustee from the claim you stand in | `griefprevention.trust` |
 | golden shovel | right-click corner A, then corner B to claim; right-click an existing claim to inspect | `griefprevention.claim` |
 
 `/claim` with no argument claims the whole 16×16 chunk containing the player's
@@ -35,10 +42,30 @@ claims: the plugin only subscribes to the block right-click event.
 `minecraft:golden_shovel` is the only item that triggers claiming; any other
 item falls through to vanilla behaviour.
 
+### Trust levels
+
+Trust is per claim and stored on the claim record. The levels are hierarchical;
+each command replaces the player's previous level and `/untrust` removes every
+level at once:
+
+| level | may enter | open containers / use | break and place | change trust |
+|---|---|---|---|---|
+| access | yes | no | no | no |
+| container | yes | yes | no | no |
+| build | yes | yes | yes | no |
+| manage | yes | yes | yes | yes |
+
+Only the claim's owner or a player with **manage** trust may change the list.
+`/untrust all` clears every trustee of the claim the caller stands in. The
+core region check receives one focused grant per player (the `use` flag for
+container trust, `use` + `build` for build/manage), so a container trustee can
+open a chest but still cannot break; the claim's overall flags/defaults are
+unchanged. An explicit region-wide deny still wins over a grant.
+
 ## Protection and precedence
 
-Every claim is written to the core region index as a region with the owner as a
-member and the plugin's configured priority (default `10`). The core's normal
+Every claim is written to the core region index as a region with the owner as an
+owner and the plugin's configured priority (default `10`). The core's normal
 protection check then denies breaking, placing, using and pvp for non-members,
 and the region survives a restart because it is replayed from the plugin KV at
 startup.
@@ -62,18 +89,20 @@ dir = "plugins"
 
 [plugins.claims]
 enabled = true
-config = { max-claims = "10", max-claim-size = "10000", max-radius = "64", priority = "10" }
+config = { max-claims = "10", max-claim-size = "10000", max-claim-blocks = "100000", max-radius = "64", priority = "10" }
 ```
 
 | key | default | meaning |
 |---|---|---|
 | `max-claims` | `10` | claims a single player may own |
 | `max-claim-size` | `10000` | maximum area of one claim, in blocks |
+| `max-claim-blocks` | `100000` | maximum total area one player may claim, in blocks (alias `max-accrued-blocks`) |
 | `max-radius` | `64` | largest accepted `/claim <radius>` |
 | `priority` | `10` | region priority written to the core index |
 
-A claim over the area limit is refused with the number of blocks over the
-limit; an invalid or too-large radius is refused before anything is written.
+A claim over either area limit is refused with the number of blocks over the
+limit (the shortfall), and a smaller claim still succeeds. An invalid or
+too-large radius is refused before anything is written.
 
 ## Persistence and files
 
@@ -88,8 +117,12 @@ one claim; a refused id is retried rather than silently persisted. On startup
 the plugin loads every record and replays it with the idempotent same-id upsert,
 reassigning any record whose id another plugin now owns. Abandoning a claim
 deletes both the KV record and its region; `/abandonallclaims` is intentionally
-two-step so a typo cannot wipe a player's land. Pending shovel corners and armed
-confirmations are cleared when the player leaves.
+two-step so a typo cannot wipe a player's land. Trust is stored in the same
+record, so it survives a restart; a trust edit publishes the new region first
+and rolls it back if the KV write fails, and a process-wide lock serialises the
+read-modify-write so two concurrent trust commands cannot lose a trustee.
+Pending shovel corners and armed confirmations are cleared when the player
+leaves.
 
 Files:
 
@@ -97,8 +130,8 @@ Files:
 plugins/claims/
   Cargo.toml
   plugin.toml
-  src/lib.rs          claim model, commands, shovel, persistence
-  tests/e2e.rs        policy tests through the host trait
+  src/lib.rs          claim model, commands, trust, shovel, persistence
+  tests/e2e.rs        policy tests through the host trait and the core check
 ```
 
 The plugin implementation is the workspace crate `aether-claims-plugin`; the

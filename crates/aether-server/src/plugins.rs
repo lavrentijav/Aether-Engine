@@ -837,6 +837,11 @@ mod imp {
         }
         region.members = info.members.iter().cloned().collect();
         region.owners = info.owners.iter().cloned().collect();
+        region.trusted = info
+            .trusted
+            .iter()
+            .map(|(name, flags)| (name.clone(), flags.iter().cloned().collect()))
+            .collect();
         region
     }
 
@@ -869,6 +874,11 @@ mod imp {
                 .collect(),
             members: region.members.iter().cloned().collect(),
             owners: region.owners.iter().cloned().collect(),
+            trusted: region
+                .trusted
+                .iter()
+                .map(|(name, flags)| (name.clone(), flags.iter().cloned().collect()))
+                .collect(),
         }
     }
 
@@ -1692,7 +1702,8 @@ mod imp {
             .with_source("claims")
             .with_flag("build", false)
             .owner("Alice")
-            .member("Bob");
+            .member("Bob")
+            .trusted("Carol", ["use".to_string()]);
 
             let info = super::region_info(&region);
             assert_eq!(info.id, 7);
@@ -1703,6 +1714,10 @@ mod imp {
             assert_eq!(info.flags.get("build"), Some(&false));
             assert_eq!(info.owners, vec!["Alice".to_string()]);
             assert_eq!(info.members, vec!["Bob".to_string()]);
+            assert_eq!(
+                info.trusted.get("Carol"),
+                Some(&["use".to_string()].into_iter().collect())
+            );
         }
 
         #[test]
