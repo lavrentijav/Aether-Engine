@@ -642,32 +642,29 @@ pub const CATALOGUE: &[Command] = &[
         Category::World,
         "/time <add,set,query> [...]",
     ),
-    pend(
+    imp_node(
         "setblock",
         &[],
         "minecraft.command.setblock",
         2,
-        "CMD-12",
         Category::World,
-        "/setblock <pos> <block> [mode]",
+        "/setblock <pos> <block> [destroy|keep|replace|strict]",
     ),
-    pend(
+    imp_node(
         "fill",
         &[],
         "minecraft.command.fill",
         2,
-        "CMD-12",
         Category::World,
-        "/fill <from> <to> <block> [mode]",
+        "/fill <from> <to> <block> [destroy|hollow|keep|outline|replace|strict] | <from> <to> <block> replace <filter> [destroy|hollow|keep|outline|strict]",
     ),
-    pend(
+    imp_node(
         "clone",
         &[],
         "minecraft.command.clone",
         2,
-        "CMD-12",
         Category::World,
-        "/clone <from> <to> <dest> [mask] [mode]",
+        "/clone [from <dimension>] <begin> <end> [to <dimension>] <destination> [strict] [replace|masked|filtered <filter>] [force|move|normal]",
     ),
     pend(
         "fillbiome",

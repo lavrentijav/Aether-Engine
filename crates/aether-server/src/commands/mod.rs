@@ -32,6 +32,7 @@ mod snbt;
 pub mod source;
 pub mod tree;
 pub mod world_env;
+pub mod world_edit;
 
 use aether_api::{JournalActor, Ledger};
 use aether_world::journal::{now_ms, ChatKind, Event, EventBody};
