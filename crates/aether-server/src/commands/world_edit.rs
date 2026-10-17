@@ -743,7 +743,7 @@ fn parse_properties(text: &str, list: &str) -> Result<Vec<(String, String)>, Str
 }
 
 /// Parse a vanilla block predicate: `stone`, `oak_stairs[facing=east]`,
-/// `#minecraft:logs` or `#minecraft:logs[axis=x]`.
+/// `#minecraft:planks` or `#minecraft:leaves[persistent=true]`.
 fn parse_filter(raw: &str) -> Result<BlockFilter, String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -857,31 +857,22 @@ fn known_builtin_tag(id: &str) -> bool {
         "beds",
         "buttons",
         "candles",
-        "coral_blocks",
-        "coral_plants",
-        "crops",
-        "dirt",
         "doors",
         "fence_gates",
         "fences",
         "flowers",
         "leaves",
-        "logs",
         "planks",
         "pressure_plates",
         "rails",
         "replaceable",
-        "sand",
-        "saplings",
         "signs",
         "slabs",
         "small_flowers",
         "stairs",
         "standing_signs",
         "stone_bricks",
-        "terracotta",
         "trapdoors",
-        "wall_corals",
         "wall_signs",
         "walls",
         "wooden_buttons",
@@ -969,6 +960,13 @@ fn is_tall_flower(short: &str) -> bool {
     )
 }
 
+/// The built-in fallback's exact member rules.
+///
+/// Only tags whose whole 1.21.11 membership is a fixed list or a family rule
+/// that matches it exactly are here. Anything else — `#logs`, `#saplings`,
+/// `#sand`, `#dirt`, `#terracotta`, `#crops`, the coral tags — is refused as
+/// an unknown tag: an operator who needs it must point the server at the real
+/// data pack, where the tag resolves from its source file.
 fn builtin_tag_matches(tag: &str, name: &str) -> bool {
     let short = name.strip_prefix("minecraft:").unwrap_or(name);
     let suffix = |s: &str| short.strip_suffix(s).is_some();
@@ -979,37 +977,15 @@ fn builtin_tag_matches(tag: &str, name: &str) -> bool {
     let is_wall_sign = suffix("_wall_sign") && !suffix("_wall_hanging_sign");
     match tag {
         "air" => matches!(short, "air" | "cave_air" | "void_air"),
-        "logs" => {
-            suffix("_log")
-                || suffix("_wood")
-                || suffix("_stem")
-                || suffix("_hyphae")
-                || matches!(short, "bamboo_block" | "stripped_bamboo_block")
-        }
         "planks" => suffix("_planks"),
         "leaves" => suffix("_leaves"),
-        "saplings" => suffix("_sapling"),
         "wool" => suffix("_wool"),
-        "terracotta" => short == "terracotta" || suffix("_terracotta"),
         "stone_bricks" => matches!(
             short,
             "stone_bricks"
                 | "mossy_stone_bricks"
                 | "cracked_stone_bricks"
                 | "chiseled_stone_bricks"
-        ),
-        "sand" => matches!(short, "sand" | "red_sand"),
-        "dirt" => matches!(
-            short,
-            "dirt"
-                | "coarse_dirt"
-                | "rooted_dirt"
-                | "grass_block"
-                | "podzol"
-                | "mycelium"
-                | "moss_block"
-                | "mud"
-                | "muddy_mangrove_roots"
         ),
         "base_stone_overworld" => matches!(
             short,
@@ -1032,10 +1008,6 @@ fn builtin_tag_matches(tag: &str, name: &str) -> bool {
                 )
         }
         "small_flowers" => is_small_flower(short),
-        "crops" => matches!(
-            short,
-            "wheat" | "carrots" | "potatoes" | "beetroots" | "torchflower_crop" | "pitcher_crop"
-        ),
         "rails" => short == "rail" || suffix("_rail"),
         "banners" => suffix("_banner"),
         "beds" => suffix("_bed"),
@@ -1053,9 +1025,6 @@ fn builtin_tag_matches(tag: &str, name: &str) -> bool {
         "stairs" => suffix("_stairs"),
         "trapdoors" => suffix("_trapdoor"),
         "walls" => suffix("_wall") && !suffix("_wall_sign") && !suffix("_wall_torch"),
-        "coral_blocks" => suffix("_coral_block"),
-        "coral_plants" => suffix("_coral_plant"),
-        "wall_corals" => suffix("_wall_fan"),
         "wooden_buttons" => suffix("_button") && is_wood(short),
         "wooden_doors" => suffix("_door") && !suffix("_trapdoor") && is_wood(short),
         "wooden_fences" => suffix("_fence") && is_wood(short),
@@ -1840,7 +1809,7 @@ mod tests {
     fn fill_replace_accepts_a_block_tag_filter() {
         let world = test_world();
         assert_eq!(
-            run(&world, "fill 40 200 40 41 200 41 minecraft:oak_log"),
+            run(&world, "fill 40 200 40 41 200 41 minecraft:oak_planks"),
             vec!["Successfully filled 4 block(s)"]
         );
         assert_eq!(
@@ -1849,7 +1818,7 @@ mod tests {
         );
         let out = run(
             &world,
-            "fill 40 200 40 41 200 41 minecraft:dirt replace #minecraft:logs",
+            "fill 40 200 40 41 200 41 minecraft:dirt replace #minecraft:planks",
         );
         assert_eq!(out, vec!["Successfully filled 3 block(s)"]);
         assert_eq!(world.get_block(40, 200, 40), block_ids::STONE);
@@ -2311,9 +2280,9 @@ mod tests {
         );
         assert!(!stairs.matches(west));
 
-        let logs = parse_filter("#minecraft:logs").unwrap();
-        assert!(logs.matches(block("minecraft:oak_log")));
-        assert!(!logs.matches(block_ids::STONE));
+        let planks = parse_filter("#minecraft:planks").unwrap();
+        assert!(planks.matches(block("minecraft:oak_planks")));
+        assert!(!planks.matches(block_ids::STONE));
 
         let wooden_stairs = parse_filter("#minecraft:wooden_stairs").unwrap();
         assert!(wooden_stairs.matches(east));
@@ -2357,25 +2326,20 @@ mod tests {
         assert!(!small_flowers.matches(block("minecraft:pink_petals")));
         assert!(!small_flowers.matches(block("minecraft:potted_red_tulip")));
 
-        // Crops: the two crop blocks added after 1.20 are in, the berry bush
-        // and the stems are not.
-        let crops = parse_filter("#minecraft:crops").unwrap();
-        for crop in [
-            "minecraft:wheat",
-            "minecraft:carrots",
-            "minecraft:potatoes",
-            "minecraft:beetroots",
-            "minecraft:torchflower_crop",
-            "minecraft:pitcher_crop",
+        // The tags whose built-in rules were only approximate are refused
+        // instead of matching a guess; a real pack resolves them.
+        for unavailable in [
+            "#minecraft:crops",
+            "#minecraft:logs",
+            "#minecraft:saplings",
+            "#minecraft:sand",
+            "#minecraft:dirt",
+            "#minecraft:terracotta",
+            "#minecraft:coral_blocks",
+            "#minecraft:coral_plants",
+            "#minecraft:wall_corals",
         ] {
-            assert!(crops.matches(block(crop)), "{crop}");
-        }
-        for not_crop in [
-            "minecraft:sweet_berry_bush",
-            "minecraft:melon_stem",
-            "minecraft:pumpkin_stem",
-        ] {
-            assert!(!crops.matches(block(not_crop)), "{not_crop}");
+            assert!(parse_filter(unavailable).is_err(), "{unavailable}");
         }
 
         let signs = parse_filter("#minecraft:signs").unwrap();
