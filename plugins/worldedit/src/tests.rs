@@ -106,6 +106,9 @@ impl FakeHost {
             "water",
             "oak_stairs",
             "oak_log",
+            "rail",
+            "crafter",
+            "oak_sign",
             "grass_block",
         ];
         known.contains(&bare).then(|| format!("minecraft:{bare}"))
@@ -1298,4 +1301,33 @@ fn a_stack_that_exactly_fits_the_limit_is_accepted() {
     assert!(!error(&lines), "{lines:?}");
     assert_eq!(f.host.begins(), 1);
     assert_eq!(f.host.commits(), 1);
+}
+
+#[test]
+fn flipping_and_pasting_two_way_rails_keeps_a_registered_state() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:rail[shape=east_west]");
+    f.host.put((0, 0, 1), "minecraft:rail[shape=north_east]");
+    f.host
+        .put((0, 0, 2), "minecraft:crafter[orientation=down_east]");
+    f.host.put((0, 0, 3), "minecraft:oak_sign[rotation=1]");
+    f.set(&p, [0, 0, 0], [0, 0, 3]);
+    assert!(!error(&f.command(&p, "copy", &[])));
+
+    f.host.view.lock().unwrap().x = 10.0;
+    let lines = f.command(&p, "flip", &["east"]);
+    assert!(!error(&lines), "{lines:?}");
+    let lines = f.command(&p, "paste", &["-o"]);
+    assert!(
+        !error(&lines),
+        "the mirrored states must be valid: {lines:?}"
+    );
+    assert_eq!(f.host.block(10, 0, 0), "minecraft:rail[shape=east_west]");
+    assert_eq!(f.host.block(10, 0, 1), "minecraft:rail[shape=north_west]");
+    assert_eq!(
+        f.host.block(10, 0, 2),
+        "minecraft:crafter[orientation=down_west]"
+    );
+    assert_eq!(f.host.block(10, 0, 3), "minecraft:oak_sign[rotation=15]");
 }

@@ -490,7 +490,10 @@ pub fn from_bytes(bytes: &[u8], max_volume: usize) -> Result<Clipboard, String> 
             ],
             offset,
         ),
-        None => ([0, 0, 0], minimum),
+        // Without metadata the absolute minimum is all we have, so treat it
+        // as the origin: a paste lands at the player instead of at
+        // `player + absolute-min` (which is far away from any world origin).
+        None => (minimum, [0, 0, 0]),
     };
     Ok(Clipboard {
         world: String::new(),
@@ -584,6 +587,24 @@ mod tests {
                 "minecraft:oak_stairs[facing=north]".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn a_file_without_metadata_treats_the_minimum_as_the_origin() {
+        let mut palette = BTreeMap::new();
+        palette.insert("minecraft:stone".to_string(), 0);
+        let mut w = Writer::new();
+        w.header(10, "Schematic");
+        w.named_short("Width", 1);
+        w.named_short("Height", 1);
+        w.named_short("Length", 1);
+        w.named_int_array("Offset", &[100, 64, -50]);
+        w.palette("Palette", &palette);
+        w.named_byte_array("BlockData", &[0]);
+        w.u8(0);
+        let loaded = from_bytes(&gzip(&w.bytes), 1_000_000).unwrap();
+        assert_eq!(loaded.origin, [100, 64, -50]);
+        assert_eq!(loaded.offset, [0, 0, 0]);
     }
 
     #[test]

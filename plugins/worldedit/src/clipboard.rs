@@ -177,13 +177,55 @@ fn transform_shape(value: &str, step: Step) -> String {
             .iter()
             .all(|word| matches!(*word, "north" | "south" | "east" | "west"))
     {
-        // Vanilla spells a two-way rail as `north_south`/`north_east`: the
-        // north/south word comes first.
-        if matches!(mapped[1], "north" | "south") {
-            mapped.swap(0, 1);
-        }
+        let first = mapped[0];
+        let second = mapped[1];
+        let (first, second) = canonical_pair(first, second);
+        mapped[0] = first;
+        mapped[1] = second;
     }
     mapped.join("_")
+}
+
+/// Vanilla's canonical spelling of a two-direction value: a north/south word
+/// comes first, otherwise east precedes west. Without this an east/west rail
+/// mirrored into `west_east` is not a registered state and the edit fails.
+fn canonical_pair(first: &str, second: &str) -> (&'static str, &'static str) {
+    let names = |word: &str| -> &'static str {
+        match word {
+            "north" => "north",
+            "south" => "south",
+            "east" => "east",
+            _ => "west",
+        }
+    };
+    let (first, second) = (names(first), names(second));
+    let north = if first == "north" || second == "north" {
+        Some("north")
+    } else {
+        None
+    };
+    let south = if first == "south" || second == "south" {
+        Some("south")
+    } else {
+        None
+    };
+    let east = if first == "east" || second == "east" {
+        Some("east")
+    } else {
+        None
+    };
+    let west = if first == "west" || second == "west" {
+        Some("west")
+    } else {
+        None
+    };
+    if let (Some(north), Some(other)) = (north, south.or(east).or(west)) {
+        (north, other)
+    } else if let (Some(south), Some(other)) = (south, east.or(west)) {
+        (south, other)
+    } else {
+        (east.unwrap_or("west"), west.unwrap_or("east"))
+    }
 }
 
 fn transform_type(value: &str, step: Step) -> String {
@@ -203,23 +245,47 @@ fn transform_type(value: &str, step: Step) -> String {
 }
 
 fn transform_rotation(value: &str, step: Step) -> String {
+    // Sign/banner rotations are 16 steps: 0 = south, 4 = west, 8 = north,
+    // 12 = east. All 16 are transformed, not just the quarter turns.
     let Ok(rotation) = value.parse::<i32>() else {
         return value.to_string();
     };
-    if rotation % 4 != 0 {
+    let rotation = rotation.rem_euclid(16);
+    let mapped = match step {
+        Step::RotateY => rotation + 4,
+        Step::MirrorX => -rotation,
+        Step::MirrorZ => 8 - rotation,
+        // A rotation about X/Z tips a floor sign or banner out of the plane
+        // its `rotation` property describes; vanilla has no state for that,
+        // so the yaw is left as it was. A vertical mirror keeps the yaw too.
+        Step::RotateX | Step::RotateZ | Step::MirrorY => rotation,
+    };
+    mapped.rem_euclid(16).to_string()
+}
+
+/// Transform a `FrontAndTop` value (`north_up`, `down_east`, …), used by the
+/// crafter and jigsaw blocks. A valid value has one vertical and one
+/// horizontal face; a rotation preserves that. A vertical mirror can turn
+/// `up` into `down`, which has no valid name with a horizontal front, so the
+/// result falls back to the nearest representable orientation.
+fn transform_orientation(value: &str, step: Step) -> String {
+    let mut parts = value.split('_');
+    let (Some(front), Some(top), None) = (parts.next(), parts.next(), parts.next()) else {
         return value.to_string();
-    }
-    let index = (rotation / 4).rem_euclid(4) as usize;
-    let face = [Face::South, Face::West, Face::North, Face::East][index];
-    let mapped = face.map(step);
-    if !mapped.horizontal() {
+    };
+    let (Some(front), Some(top)) = (Face::parse(front), Face::parse(top)) else {
         return value.to_string();
+    };
+    let front = front.map(step);
+    let top = top.map(step);
+    if front.horizontal() {
+        // A horizontal front is only valid with `top = up`; a vertical
+        // mirror maps `up` to `down`, so normalise back to `up`.
+        format!("{}_{}", front.name(), Face::Up.name())
+    } else {
+        let top = if top.horizontal() { top } else { Face::North };
+        format!("{}_{}", front.name(), top.name())
     }
-    let index = [Face::South, Face::West, Face::North, Face::East]
-        .iter()
-        .position(|candidate| *candidate == mapped)
-        .unwrap_or(0);
-    (index as i32 * 4).to_string()
 }
 
 fn transform_property(key: &str, value: &str, step: Step) -> String {
@@ -232,7 +298,7 @@ fn transform_property(key: &str, value: &str, step: Step) -> String {
         "shape" => transform_shape(value, step),
         "type" => transform_type(value, step),
         "rotation" => transform_rotation(value, step),
-        "orientation" => transform_shape(value, step),
+        "orientation" => transform_orientation(value, step),
         _ => value.to_string(),
     }
 }
@@ -549,5 +615,80 @@ mod tests {
             transform_block("minecraft:oak_log[axis=y]", Step::RotateX),
             "minecraft:oak_log[axis=z]"
         );
+    }
+
+    #[test]
+    fn two_way_compass_shapes_keep_a_valid_canonical_order() {
+        // east_west is the only spelling of an east/west rail; the mirrored
+        // `west_east` is not a registered state.
+        for direction in [Direction::East, Direction::West] {
+            let flipped = transform_block("minecraft:rail[shape=east_west]", step_for(direction));
+            assert_eq!(flipped, "minecraft:rail[shape=east_west]", "{direction:?}");
+        }
+        assert_eq!(
+            transform_block("minecraft:rail[shape=north_east]", Step::MirrorX),
+            "minecraft:rail[shape=north_west]"
+        );
+        assert_eq!(
+            transform_block("minecraft:rail[shape=south_west]", Step::MirrorZ),
+            "minecraft:rail[shape=north_west]"
+        );
+        assert_eq!(
+            transform_block("minecraft:rail[shape=north_south]", Step::MirrorX),
+            "minecraft:rail[shape=north_south]"
+        );
+    }
+
+    #[test]
+    fn arbitrary_sign_rotations_are_transformed() {
+        assert_eq!(
+            transform_block("minecraft:oak_sign[rotation=1]", Step::RotateY),
+            "minecraft:oak_sign[rotation=5]"
+        );
+        assert_eq!(
+            transform_block("minecraft:oak_sign[rotation=1]", Step::MirrorX),
+            "minecraft:oak_sign[rotation=15]"
+        );
+        assert_eq!(
+            transform_block("minecraft:oak_sign[rotation=1]", Step::MirrorZ),
+            "minecraft:oak_sign[rotation=7]"
+        );
+        assert_eq!(
+            transform_block("minecraft:oak_sign[rotation=13]", Step::RotateY),
+            "minecraft:oak_sign[rotation=1]"
+        );
+    }
+
+    #[test]
+    fn crafter_orientation_is_rotated_and_mirrored() {
+        assert_eq!(
+            transform_block("minecraft:crafter[orientation=north_up]", Step::RotateY),
+            "minecraft:crafter[orientation=east_up]"
+        );
+        assert_eq!(
+            transform_block("minecraft:crafter[orientation=down_east]", Step::RotateY),
+            "minecraft:crafter[orientation=down_south]"
+        );
+        assert_eq!(
+            transform_block("minecraft:crafter[orientation=down_east]", Step::MirrorX),
+            "minecraft:crafter[orientation=down_west]"
+        );
+        // A vertical mirror cannot point `up` at `down` with a horizontal
+        // front, so the result is the nearest representable orientation.
+        assert_eq!(
+            transform_block("minecraft:crafter[orientation=north_up]", Step::MirrorY),
+            "minecraft:crafter[orientation=north_up]"
+        );
+        assert_eq!(
+            transform_block("minecraft:jigsaw[orientation=west_up]", Step::RotateZ),
+            "minecraft:jigsaw[orientation=up_east]"
+        );
+    }
+
+    fn step_for(direction: Direction) -> Step {
+        match direction {
+            Direction::East | Direction::West => Step::MirrorX,
+            _ => Step::MirrorZ,
+        }
     }
 }

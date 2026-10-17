@@ -131,10 +131,13 @@ same direction returns the original.
 
 Both transforms also rotate or mirror directional block states: `facing`,
 `axis` (logs, pillars), stair `shape` left/right, chest `type`, rail/jigsaw
-compass shapes, sign/banner `rotation`, and `half`/`type` top/bottom under a
-vertical mirror. A rotation about X or Z that would turn a horizontal rail
-into a vertical one leaves that state unchanged, because vanilla has no such
-state.
+compass shapes (re-spelled in vanilla's canonical order, so an east/west rail
+stays `east_west`), all 16 sign/banner `rotation` steps, crafter/jigsaw
+`orientation` (one vertical plus one horizontal face), and `half`/`type`
+top/bottom under a vertical mirror. A rotation about X or Z that would turn a
+horizontal rail into a vertical one leaves that state unchanged, because
+vanilla has no such state; a vertical mirror of an `orientation` whose top
+would become `down` falls back to the nearest representable value.
 
 `//stack <n> [dir]` copies the selection `n` times in a direction, stepping by
 the selection's size on that axis. It is one bulk commit. The default direction
@@ -155,7 +158,8 @@ Both the source and destination cells are region-checked.
 `BlockData`, an empty `BlockEntities` list and a `Metadata` compound with
 `WEOffsetX/Y/Z` = the minimum relative to the copy origin). `//schem load
 <name>` reads one back, preferring that metadata for relative placement so a
-real WorldEdit file lands at the player; `//schem list` prints the names;
+real WorldEdit file lands at the player; a file without the metadata treats
+its absolute minimum as the origin; `//schem list` prints the names;
 `//schem paste <name>` loads and pastes in one command, accepting the same
 `-a`/`-o`/`-s` flags. The reader caps the inflated size and checks the
 dimensions against the volume limit before allocating the block vector, so a
