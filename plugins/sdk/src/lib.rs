@@ -735,6 +735,16 @@ impl PlayersService for Players {
         self.online(caller).into_iter().find(|p| p.id == id)
     }
 
+    fn uuid(&self, caller: &str, p: &Player) -> Option<(u64, u64)> {
+        // The identity store is core: the host backend resolves the session
+        // entity id to the player's real UUID. Split into low/high halves for
+        // the component model, matching how the journal splits actor ids.
+        self.backend
+            .get()
+            .and_then(|b| b.player_uuid(caller, p.id))
+            .map(|uuid| (uuid as u64, (uuid >> 64) as u64))
+    }
+
     fn offline_name(&self, _caller: &str, _low: u64, _high: u64) -> Option<String> {
         // The offline player store is not exposed yet.
         None
