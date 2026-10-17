@@ -887,32 +887,29 @@ pub const CATALOGUE: &[Command] = &[
         Category::Data,
         "/trigger <objective> [add,set] [value]",
     ),
-    pend(
+    imp_node(
         "particle",
         &[],
         "minecraft.command.particle",
         2,
-        "CMD-19",
         Category::Data,
-        "/particle <name> <pos> [delta] [speed] [count]",
+        "/particle <name> [<pos>] [<delta>] [<speed>] [<count>] [force|normal] [<viewers>]",
     ),
-    pend(
+    imp_node(
         "playsound",
         &[],
         "minecraft.command.playsound",
         2,
-        "CMD-19",
         Category::Data,
-        "/playsound <sound> <source> <targets> [pos]",
+        "/playsound <sound> [<source>] [<targets>] [<pos>] [<volume>] [<pitch>] [<minVolume>]",
     ),
-    pend(
+    imp_node(
         "stopsound",
         &[],
         "minecraft.command.stopsound",
         2,
-        "CMD-19",
         Category::Data,
-        "/stopsound <targets> [source] [sound]",
+        "/stopsound <targets> [<source>] [<sound>]",
     ),
     pend(
         "loot",

@@ -22,6 +22,7 @@ pub mod commands;
 pub mod compat;
 pub mod modern;
 pub mod nbt;
+pub mod resources;
 pub mod scoreboard;
 pub mod v47;
 pub mod v755;
@@ -617,6 +618,32 @@ pub enum ServerEvent<'a> {
         z: f64,
         volume: f32,
         pitch: f32,
+    },
+    /// A client particle burst, named by its `minecraft:particle_type` key.
+    ///
+    /// The codec resolves the name to its own release's registry id (the ids
+    /// moved between releases) and writes that release's data fields. A
+    /// release without the particle renders no packet, so a newer particle
+    /// asked of an older client is ignored rather than mis-rendered. `force`
+    /// is `/particle`'s `force` (vanilla's long-distance/always-show flags).
+    Particle {
+        name: Cow<'static, str>,
+        x: f64,
+        y: f64,
+        z: f64,
+        dx: f32,
+        dy: f32,
+        dz: f32,
+        speed: f32,
+        count: i32,
+        force: bool,
+    },
+    /// Stop one sound, all sounds from a category, or every sound, on the
+    /// receiving client. `source` is the sound category (`None` = every
+    /// category); `sound` is the event key (`None` = every sound).
+    StopSound {
+        source: Option<u8>,
+        sound: Option<Cow<'static, str>>,
     },
     /// One scoreboard packet, already resolved into an explicit operation
     /// (see [`scoreboard::ScoreboardOp`]). The neutral source is a plugin's

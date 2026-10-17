@@ -292,6 +292,28 @@ pub mod lang {
     pub const SETWORLDSPAWN_SUCCESS: &str = "Set the world spawn point to %s, %s, %s [%s]";
     /// `commands.defaultgamemode.success`.
     pub const DEFAULTGAMEMODE_SUCCESS: &str = "The default game mode is now %s";
+    /// `commands.particle.success`.
+    pub const PARTICLE_SUCCESS: &str = "Displaying particle %s";
+    /// `commands.particle.failed`.
+    pub const PARTICLE_FAILED: &str = "The particle was not visible for anybody";
+    /// `particle.notFound`.
+    pub const PARTICLE_NOT_FOUND: &str = "Unknown particle: %s";
+    /// `particle.invalidOptions`.
+    pub const PARTICLE_INVALID_OPTIONS: &str = "Can't parse particle options: %s";
+    /// `commands.playsound.success.single`.
+    pub const PLAYSOUND_SUCCESS_SINGLE: &str = "Played sound %s to %s";
+    /// `commands.playsound.success.multiple`.
+    pub const PLAYSOUND_SUCCESS_MULTIPLE: &str = "Played sound %s to %s players";
+    /// `commands.playsound.failed`.
+    pub const PLAYSOUND_FAILED: &str = "The sound is too far away to be heard";
+    /// `commands.stopsound.success.source.any`.
+    pub const STOPSOUND_SOURCE_ANY: &str = "Stopped all '%s' sounds";
+    /// `commands.stopsound.success.source.sound`.
+    pub const STOPSOUND_SOURCE_SOUND: &str = "Stopped sound '%s' on source '%s'";
+    /// `commands.stopsound.success.sourceless.any`.
+    pub const STOPSOUND_ANY: &str = "Stopped all sounds";
+    /// `commands.stopsound.success.sourceless.sound`.
+    pub const STOPSOUND_SOUND: &str = "Stopped sound '%s'";
 
     /// `argument.integer.low`.
     pub const ARG_INTEGER_LOW: &str = "Integer must not be less than %s: found %s";
@@ -299,6 +321,8 @@ pub mod lang {
     pub const ARG_INTEGER_BIG: &str = "Integer must not be more than %s: found %s";
     /// `argument.float.low`.
     pub const ARG_FLOAT_LOW: &str = "Float must not be less than %s: found %s";
+    /// `argument.float.big`.
+    pub const ARG_FLOAT_BIG: &str = "Float must not be more than %s: found %s";
     /// `argument.double.low`.
     pub const ARG_DOUBLE_LOW: &str = "Double must not be less than %s: found %s";
     /// `argument.double.big`.

@@ -428,6 +428,89 @@ fn write_sound(p: &mut PacketOut, name: &str) {
     p.var_int(0).string(name).bool(false);
 }
 
+/// The `level_particles` packet id of a release in the shared gameplay path.
+///
+/// The id is not in the generated [`super::version::Packets`] table yet
+/// because the packet is only used by CMD-19; the values are the releases'
+/// own packet reports.
+fn particle_packet_id(protocol: i32) -> Option<i32> {
+    Some(match protocol {
+        764 | 765 => 39,
+        766 | 767 => 41,
+        768 | 769 => 42,
+        770..=772 => 41,
+        773 | 774 => 46,
+        775 | 776 => 47,
+        777 => 48,
+        _ => return None,
+    })
+}
+
+/// The `stop_sound` packet id of a release in the shared gameplay path.
+fn stop_sound_packet_id(protocol: i32) -> Option<i32> {
+    Some(match protocol {
+        764 => 102,
+        765 => 104,
+        766 | 767 => 106,
+        768 | 769 => 113,
+        770..=772 => 112,
+        773 | 774 => 117,
+        775 | 776 => 119,
+        777 => 121,
+        _ => return None,
+    })
+}
+
+/// Append a particle's type-specific payload.
+///
+/// `/particle` names only the particle id; vanilla's argument parser lets a
+/// caller spell the options too, but the command layer carries only the id.
+/// Each release still requires the fields its options encode, so the common
+/// ones get their neutral value (white dust, stone block, an empty item) and
+/// every other particle has none. Unknown names never reach here: the
+/// command layer validates them against the 1.21.11 registry.
+fn write_particle_data(v: &Version, p: &mut PacketOut, name: &str) {
+    match name {
+        "minecraft:block"
+        | "minecraft:block_marker"
+        | "minecraft:falling_dust"
+        | "minecraft:dust_pillar"
+        | "minecraft:block_crumble" => {
+            p.var_int(v.state(aether_world::registry::ids::STONE) as i32);
+        }
+        "minecraft:dust" => {
+            p.i32(0xFFFF_FFFFu32 as i32).f32(1.0);
+        }
+        "minecraft:dust_color_transition" => {
+            p.i32(0xFFFF_FFFFu32 as i32)
+                .i32(0xFFFF_FFFFu32 as i32)
+                .f32(1.0);
+        }
+        "minecraft:entity_effect" | "minecraft:tinted_leaves" | "minecraft:flash" => {
+            p.i32(-1);
+        }
+        "minecraft:item" => write_stack(v, p, None),
+        "minecraft:sculk_charge" | "minecraft:dragon_breath" => {
+            p.f32(0.0);
+        }
+        "minecraft:effect" | "minecraft:instant_effect" => {
+            p.i32(-1).f32(0.0);
+        }
+        "minecraft:shriek" => {
+            p.var_int(0);
+        }
+        "minecraft:vibration" => {
+            p.var_int(0) // block position source
+                .i64(0) // packed block position
+                .var_int(0); // arrival ticks
+        }
+        "minecraft:trail" => {
+            p.f64(0.0).f64(0.0).f64(0.0).i32(-1).var_int(0);
+        }
+        _ => {}
+    }
+}
+
 fn abilities(v: &Version, mode: GameMode) -> PacketOut {
     let mut p = PacketOut::new(v.packets.cb_player_abilities);
     let flags = match mode {
@@ -1115,6 +1198,74 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
                 .f32(*volume)
                 .f32(*pitch)
                 .i64(0);
+            vec![p]
+        }
+        ServerEvent::Particle {
+            name,
+            x,
+            y,
+            z,
+            dx,
+            dy,
+            dz,
+            speed,
+            count,
+            force,
+        } => {
+            let Some(id) = crate::protocol::resources::particle_id(v.protocol, name) else {
+                // This release has no particle by that name. It is cosmetic;
+                // sending another release's id would draw the wrong thing.
+                return Some(Vec::new());
+            };
+            let Some(packet_id) = particle_packet_id(v.protocol) else {
+                return Some(Vec::new());
+            };
+            let mut p = PacketOut::new(packet_id);
+            if v.protocol <= 765 {
+                // 1.20.2-1.20.4: the id and distance flag lead the packet.
+                p.var_int(id)
+                    .bool(*force)
+                    .f64(*x)
+                    .f64(*y)
+                    .f64(*z)
+                    .f32(*dx)
+                    .f32(*dy)
+                    .f32(*dz)
+                    .f32(*speed)
+                    .i32(*count);
+            } else {
+                p.bool(*force);
+                // 1.21.4 added `alwaysShow`; 1.20.5-1.21.3 have only the
+                // long-distance flag.
+                if v.protocol >= 769 {
+                    p.bool(*force);
+                }
+                p.f64(*x)
+                    .f64(*y)
+                    .f64(*z)
+                    .f32(*dx)
+                    .f32(*dy)
+                    .f32(*dz)
+                    .f32(*speed)
+                    .i32(*count)
+                    .var_int(id);
+                write_particle_data(v, &mut p, name);
+            }
+            vec![p]
+        }
+        ServerEvent::StopSound { source, sound } => {
+            let Some(packet_id) = stop_sound_packet_id(v.protocol) else {
+                return Some(Vec::new());
+            };
+            let mut p = PacketOut::new(packet_id);
+            let flags = u8::from(source.is_some()) | (u8::from(sound.is_some()) << 1);
+            p.u8(flags);
+            if let Some(source) = source {
+                p.var_int(*source as i32);
+            }
+            if let Some(sound) = sound {
+                p.string(sound);
+            }
             vec![p]
         }
         _ => return None,
@@ -1991,6 +2142,85 @@ mod tests {
         assert_eq!(pin.var_int().unwrap(), 300);
         assert_eq!(pin.u8().unwrap(), 0b110);
         assert!(pin.u8().is_err(), "no factor option from 1.20.5");
+    }
+
+    #[test]
+    fn particle_packets_follow_each_release_layout() {
+        let ev = ServerEvent::Particle {
+            name: "minecraft:flame".into(),
+            x: 1.5,
+            y: 64.0,
+            z: -2.5,
+            dx: 0.25,
+            dy: 0.5,
+            dz: -0.75,
+            speed: 0.1,
+            count: 4,
+            force: true,
+        };
+        // 1.21.11: longDistance, alwaysShow, position, offsets, count, id.
+        let v = &crate::protocol::modern::version::V1_21_11;
+        let pkts = encode(v, &ev).unwrap();
+        let mut pin = crate::proto::PacketIn::new(pkts[0].body());
+        assert_eq!(pin.var_int().unwrap(), 46);
+        assert!(pin.bool().unwrap(), "force is the long-distance flag");
+        assert!(pin.bool().unwrap(), "1.21.4+ carries alwaysShow too");
+        assert_eq!(pin.f64().unwrap(), 1.5);
+        assert_eq!(pin.f64().unwrap(), 64.0);
+        assert_eq!(pin.f64().unwrap(), -2.5);
+        assert_eq!(pin.f32().unwrap(), 0.25);
+        assert_eq!(pin.f32().unwrap(), 0.5);
+        assert_eq!(pin.f32().unwrap(), -0.75);
+        assert_eq!(pin.f32().unwrap(), 0.1);
+        assert_eq!(pin.i32().unwrap(), 4);
+        let id = pin.var_int().unwrap();
+        assert_eq!(
+            id,
+            crate::protocol::resources::particle_id(774, "minecraft:flame").unwrap()
+        );
+        assert!(pin.u8().is_err(), "flame has no option payload");
+
+        // 1.21.1 (protocol 767) predates alwaysShow; the packet starts with
+        // one flag, then the position, and carries no particle options.
+        let v = &crate::protocol::modern::version::V1_21_1;
+        let pkts = encode(v, &ev).unwrap();
+        let mut pin = crate::proto::PacketIn::new(pkts[0].body());
+        assert_eq!(pin.var_int().unwrap(), 41);
+        assert!(pin.bool().unwrap());
+        assert_eq!(pin.f64().unwrap(), 1.5);
+    }
+
+    #[test]
+    fn stop_sound_packets_carry_only_the_parts_that_were_named() {
+        let both = ServerEvent::StopSound {
+            source: Some(4),
+            sound: Some("minecraft:block.note_block.harp".into()),
+        };
+        let v = &crate::protocol::modern::version::V1_21_11;
+        let pkts = encode(v, &both).unwrap();
+        let mut pin = crate::proto::PacketIn::new(pkts[0].body());
+        assert_eq!(pin.var_int().unwrap(), 117);
+        assert_eq!(pin.u8().unwrap(), 0b11);
+        assert_eq!(pin.var_int().unwrap(), 4);
+        assert_eq!(pin.string().unwrap(), "minecraft:block.note_block.harp");
+        assert!(pin.u8().is_err());
+
+        let all = ServerEvent::StopSound {
+            source: None,
+            sound: None,
+        };
+        let pkts = encode(v, &all).unwrap();
+        let mut pin = crate::proto::PacketIn::new(pkts[0].body());
+        assert_eq!(pin.var_int().unwrap(), 117);
+        assert_eq!(pin.u8().unwrap(), 0);
+        assert!(pin.u8().is_err());
+
+        // The 1.20.5 wire has its own stop-sound id.
+        let v = &crate::protocol::modern::version::V1_20_5;
+        let pkts = encode(v, &both).unwrap();
+        let mut pin = crate::proto::PacketIn::new(pkts[0].body());
+        assert_eq!(pin.var_int().unwrap(), 106);
+        assert_eq!(pin.u8().unwrap(), 0b11);
     }
 
     #[test]

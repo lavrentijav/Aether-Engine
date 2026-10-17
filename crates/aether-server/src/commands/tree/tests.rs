@@ -1532,3 +1532,90 @@ fn a_double_slash_command_falls_through_the_tree_to_the_plugin_registry() {
         "the fallback reached the plugin registry, not a parse error"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CMD-19: client effects
+// ---------------------------------------------------------------------------
+
+#[test]
+fn particle_and_sound_commands_route_through_the_tree() {
+    let env = env();
+    let who = &env.tester;
+
+    // `/particle` succeeds silently; the optional position/delta/speed/count
+    // and the `force` flag all parse, and the name may omit `minecraft:`.
+    for text in [
+        "/particle minecraft:flame",
+        "/particle flame 0 64 0 0 0 0 0 4 force",
+        "/particle flame 0 64 0 0.1 0.2 0.3 0 0 normal @a",
+    ] {
+        assert_eq!(run(&env, who, text), Vec::<String>::new(), "`{text}`");
+    }
+    assert_eq!(
+        one(&env, who, "/particle minecraft:not_a_particle"),
+        "Unknown particle: minecraft:not_a_particle"
+    );
+    assert_eq!(
+        one(&env, who, "/particle flame 0 64 0 0 0 0 0 -1"),
+        "Integer must not be less than 0: found -1"
+    );
+
+    // `/playsound`: the default is the caller as the only target, and an
+    // explicit target list picks single/multiple wording.
+    assert_eq!(
+        one(&env, who, "/playsound minecraft:block.note_block.harp"),
+        "Played sound minecraft:block.note_block.harp to tester"
+    );
+    assert_eq!(
+        one(&env, who, "/playsound block.note_block.harp master tester"),
+        "Played sound minecraft:block.note_block.harp to tester"
+    );
+    assert_eq!(
+        one(&env, who, "/playsound block.note_block.harp master @a"),
+        "Played sound minecraft:block.note_block.harp to 2 players"
+    );
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/playsound block.note_block.harp master @a 0 64 0 0 1"
+        ),
+        "Played sound minecraft:block.note_block.harp to 2 players"
+    );
+    assert!(
+        one(&env, who, "/playsound minecraft:not_a_sound").contains("minecraft:not_a_sound"),
+        "an unknown sound is named in the error"
+    );
+
+    // `/stopsound` has one line per combination of source and sound.
+    assert_eq!(one(&env, who, "/stopsound tester"), "Stopped all sounds");
+    assert_eq!(
+        one(&env, who, "/stopsound tester master"),
+        "Stopped all 'master' sounds"
+    );
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/stopsound tester master minecraft:block.note_block.harp"
+        ),
+        "Stopped sound 'minecraft:block.note_block.harp' on source 'master'"
+    );
+    assert_eq!(
+        one(&env, who, "/stopsound @a * minecraft:block.note_block.harp"),
+        "Stopped sound 'minecraft:block.note_block.harp'"
+    );
+
+    // Op level 2: a non-operator is refused by the tree.
+    for text in [
+        "/particle flame",
+        "/playsound block.note_block.harp",
+        "/stopsound tester",
+    ] {
+        assert_eq!(
+            one(&env, &env.bob, text),
+            "You do not have permission to run this command.",
+            "`{text}`"
+        );
+    }
+}
