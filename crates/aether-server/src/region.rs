@@ -334,7 +334,12 @@ pub const OVERWORLD: &str = "minecraft:overworld";
 pub fn same_world(a: &str, b: &str) -> bool {
     fn normal(world: &str) -> &str {
         let world = world.trim();
-        world.strip_prefix("minecraft:").unwrap_or(world)
+        // The namespace is ASCII, so only slice when those bytes really are
+        // the prefix: a UTF-8 world key must not be split mid-character.
+        match world.get(..10) {
+            Some(prefix) if prefix.eq_ignore_ascii_case("minecraft:") => &world[10..],
+            _ => world,
+        }
     }
     normal(a).eq_ignore_ascii_case(normal(b))
 }
@@ -553,6 +558,10 @@ impl RegionIndex {
     /// position at all, the action is allowed. Only regions whose [`world`]
     /// matches are considered, so the world-agnostic index cannot leak a
     /// protection from another dimension.
+    ///
+    /// The return is always [`Verdict::Allow`] or [`Verdict::Deny`];
+    /// [`Verdict::Defer`] is only a per-region answer (see
+    /// [`Region::verdict`]) that this method consumes to move down the chain.
     ///
     /// [`world`]: Region::world
     pub fn check(&self, world: &str, pos: BlockPos, action: Action, actor: &Actor<'_>) -> Verdict {
@@ -1159,6 +1168,7 @@ mod tests {
         // The namespace is not part of the identity.
         assert!(same_world(OVERWORLD, "overworld"));
         assert!(same_world("minecraft:overworld", "OVERWORLD"));
+        assert!(same_world("Minecraft:overworld", "overworld"));
         assert!(!same_world(OVERWORLD, "the_nether"));
         assert!(!same_world("", OVERWORLD));
     }

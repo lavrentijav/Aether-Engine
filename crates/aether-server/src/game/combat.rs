@@ -526,6 +526,10 @@ pub fn respawn(
 }
 
 /// Blow up at `pos`: break blocks, hurt and push everyone nearby.
+///
+/// The region `explosion` flag is consulted per block: a protected block is
+/// skipped while the rest of the blast still breaks. Entity damage is not
+/// region-gated (the brief scopes the flag to block damage).
 pub fn explode(pos: Vector3, radius: f32, registry: &SharedRegistry, world: &DemoWorld) {
     // One snapshot for the whole blast; the check itself is lock-free and
     // allocates nothing. Protected blocks are skipped, unprotected ones in

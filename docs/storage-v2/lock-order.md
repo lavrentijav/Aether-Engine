@@ -40,7 +40,7 @@ held (in `entities::update_tracking`), which the order already permits.
 
 The region index's snapshot lock is a leaf too: the protection hooks
 (`session::break_block`/`place_block`, `game/interact`, `game/combat::explode`)
-clone the `Arc` before taking any player or entity lock, and
+clone the `Arc` before holding any player or entity lock across the check, and
 `RegionIndex::check` then runs lock-free on the snapshot. The check never holds
 a region lock across a world read, so it cannot participate in an inversion
 with the order above.
