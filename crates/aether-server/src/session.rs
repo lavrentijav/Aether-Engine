@@ -1073,8 +1073,17 @@ fn play_loop(
                 // Log and journal only the chat that was actually delivered
                 // (a plugin veto above returns before this point).
                 crate::chatlog::log_chat(handle, &text, world);
-                let line = format!("<{}> {}", handle.name, text);
-                let ev = ServerEvent::Chat(line);
+                // `chat.type.text` — `<name> text`. The name and the message
+                // are literal components, never text re-parsed as a
+                // component, so a name cannot inject a click/hover event.
+                let line = crate::protocol::text::TextComponent::translate(
+                    "chat.type.text",
+                    vec![
+                        crate::protocol::text::TextComponent::text(handle.name.clone()),
+                        crate::protocol::text::TextComponent::text(text),
+                    ],
+                );
+                let ev = ServerEvent::ChatComponent(Box::new(line));
                 handle.emit(&ev, world);
                 registry.broadcast_except(handle.entity_id, &ev, world);
             }

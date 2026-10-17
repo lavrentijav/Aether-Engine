@@ -725,6 +725,7 @@ fn build() -> CommandTree {
     let mut children = Vec::new();
     children.extend(super::core_nodes());
     children.extend(crate::game::commands::nodes());
+    children.extend(crate::commands::text::nodes());
     children.extend(crate::commands::world_env::nodes());
     children.extend(super::world_edit::nodes());
     children.extend(crate::economy::commands::nodes());

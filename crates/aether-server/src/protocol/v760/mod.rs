@@ -298,6 +298,11 @@ impl ProtocolCodec for Codec {
                 p.u8(0);
                 vec![p]
             }
+            ServerEvent::ChatComponent(c) => {
+                let mut p = PacketOut::new(IDS_SYSTEM_CHAT);
+                p.string(&c.to_json()).u8(0);
+                vec![p]
+            }
             // Gameplay events this version does not render.
             _ => Vec::new(),
         }
@@ -602,6 +607,37 @@ mod tests {
         // The action varint leads, then the entry count and the UUID.
         assert_eq!(body[0], 4, "action: remove_player");
         assert_eq!(body.len(), 1 + 1 + 16);
+    }
+
+    #[test]
+    fn a_rich_chat_component_is_json_in_this_generation() {
+        use crate::protocol::text::{ClickEvent, Content, HoverEvent, Style, TextComponent};
+        let component = TextComponent {
+            content: Content::Text("hi".into()),
+            style: Style {
+                color: Some("red".into()),
+                click_event: Some(ClickEvent::RunCommand("/say hi".into())),
+                hover_event: Some(HoverEvent::Text(Box::new(TextComponent::text("tip")))),
+                ..Style::default()
+            },
+            extra: Vec::new(),
+        };
+        let (id, body) = encode_one(&ServerEvent::ChatComponent(Box::new(component)));
+        assert_eq!(id, IDS_SYSTEM_CHAT);
+        let mut pin = crate::proto::PacketIn::new(&body);
+        let text = pin.string().unwrap();
+        assert_eq!(pin.u8().unwrap(), 0, "not an action bar");
+        assert_eq!(pin.remaining(), 0);
+        assert!(text.contains(r#""text":"hi""#));
+        assert!(text.contains(r#""color":"red""#));
+        assert!(
+            text.contains(r#""clickEvent":{"action":"run_command","value":"/say hi"}"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""hoverEvent":{"action":"show_text","contents":{"text":"tip"}}"#),
+            "{text}"
+        );
     }
 
     #[test]

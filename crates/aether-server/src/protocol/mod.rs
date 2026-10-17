@@ -23,6 +23,7 @@ pub mod compat;
 pub mod modern;
 pub mod nbt;
 pub mod scoreboard;
+pub mod text;
 pub mod v47;
 pub mod v755;
 pub mod v756;
@@ -240,6 +241,9 @@ impl ServerEvent<'_> {
             // Codecs before 1.19 have no action-bar overlay, so the status line
             // is shown as an ordinary chat line rather than vanishing.
             ServerEvent::ActionBar(text) => Some(ServerEvent::Chat(text.clone())),
+            // A codec that has no rich-component arm still says something
+            // rather than dropping the line.
+            ServerEvent::ChatComponent(c) => Some(ServerEvent::Chat(c.plain_text())),
             _ => None,
         }
     }
@@ -342,6 +346,12 @@ pub enum ServerEvent<'a> {
     },
     /// A chat line, already formatted as plain text.
     Chat(String),
+    /// A rich text component, rendered in each client's own dialect.
+    ///
+    /// `/tellraw`, `/say`, `/me` and `/msg` use this so a component (hover,
+    /// click, translate, score, …) reaches the client intact, and a player
+    /// name is a literal rather than text re-parsed as a component.
+    ChatComponent(Box<text::TextComponent>),
     /// A status line above the hotbar, already formatted as plain text.
     ///
     /// From 1.19 this is System Chat with the action-bar overlay flag set; on

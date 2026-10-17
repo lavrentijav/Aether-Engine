@@ -308,6 +308,14 @@ impl ProtocolCodec for Codec {
                 p.bytes(&nbt::string(text).to_network()).bool(false);
                 vec![p]
             }
+            ServerEvent::ChatComponent(c) => {
+                // 1.20.3–1.21.4 NBT components still spell the style fields
+                // `clickEvent`/`hoverEvent`.
+                let mut p = PacketOut::new(PLAY_SYSTEM_CHAT);
+                p.bytes(&c.to_nbt(super::text::NbtForm::Legacy).to_network())
+                    .bool(false);
+                vec![p]
+            }
             // Everything else — entities, combat, health, hunger, windows,
             // effects — is the shared gameplay path, driven by this version's
             // ids and its pre-1.20.5 layout gates.

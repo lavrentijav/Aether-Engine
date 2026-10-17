@@ -116,6 +116,25 @@ fn prepare(text: &str, cfg: &ChatConfig) -> String {
     clip(&sanitize(text), cfg.max_len)
 }
 
+/// The most characters a `/say`, `/me` or `/msg` argument may carry.
+///
+/// Command arguments are not chat lines: vanilla lets a command message be
+/// longer than the 256-character chat box, and a command block can type more.
+/// The bound still exists so a hostile caller cannot make one event carry
+/// megabytes into every client's outbox.
+pub const MAX_COMMAND_TEXT: usize = 32 * 1024;
+
+/// Text a chat command broadcasts: control characters and `§` neutralised,
+/// and bounded by [`MAX_COMMAND_TEXT`].
+///
+/// This is the sanitizer for `/say`, `/me` and the private-message body. The
+/// player *name* is never passed through here as text to be re-parsed — the
+/// commands put it in a literal component — but a message can still try to
+/// forge a log line or a legacy formatting escape.
+pub fn command_text(text: &str) -> String {
+    clip(&sanitize(text), MAX_COMMAND_TEXT)
+}
+
 /// Replace every character that could break out of the log line with a space.
 ///
 /// The dangerous set is every control character (Unicode category `Cc`, which

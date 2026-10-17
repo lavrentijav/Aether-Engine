@@ -12,7 +12,7 @@
 
 **Легенда:** ✅ работает · 🚧 ожидает (`CMD-nn` — задача, которая её реализует). **Узел** — правомочие, а **Op** — ванильный уровень оператора (0 — всем … 4 — владельцу); для ожидающей команды заглушка требует ровно их. **Gate** — что сервер проверяет *сегодня*: `node` (узел/op применяются), `operator` (прежняя проверка «только оператор» — узел/op это цель, пока не применяются) или `everyone` (требований нет; узел/op — цель).
 
-**Итого:** 113 команд — 49 работают, 64 ожидают.
+**Итого:** 113 команд — 52 работают, 61 ожидают.
 
 ## Содержание
 
@@ -117,15 +117,15 @@
 
 | Команда | Синонимы | Статус | Gate | Узел | Op | Использование |
 | --- | --- | --- | --- | --- | --- | --- |
-| `/msg` | `tell`, `w` | ✅ работает | `everyone` | `minecraft.command.msg` | 0 | `/msg <player> <message>` |
+| `/msg` | `tell`, `w` | ✅ работает | `everyone` | `minecraft.command.msg` | 0 | `/msg <targets> <message>` |
 | `/data` | – | 🚧 ожидает CMD-14 | `node` | `minecraft.command.data` | 2 | `/data <get,merge,modify,remove> <target> <path> [...]` |
 | `/scoreboard` | – | 🚧 ожидает CMD-15 | `node` | `minecraft.command.scoreboard` | 2 | `/scoreboard <objectives,players> [...]` |
 | `/tag` | – | 🚧 ожидает CMD-16 | `node` | `minecraft.command.tag` | 2 | `/tag <targets> <add,remove,list> <name>` |
 | `/team` | – | 🚧 ожидает CMD-16 | `node` | `minecraft.command.team` | 2 | `/team <add,list,modify,join,leave,remove> [...]` |
 | `/teammsg` | `tm` | 🚧 ожидает CMD-16 | `node` | `minecraft.command.teammsg` | 0 | `/teammsg <message>` |
-| `/say` | – | 🚧 ожидает CMD-17 | `node` | `minecraft.command.say` | 2 | `/say <message>` |
-| `/me` | – | 🚧 ожидает CMD-17 | `node` | `minecraft.command.me` | 0 | `/me <action>` |
-| `/tellraw` | – | 🚧 ожидает CMD-17 | `node` | `minecraft.command.tellraw` | 2 | `/tellraw <targets> <message>` |
+| `/say` | – | ✅ работает | `node` | `minecraft.command.say` | 2 | `/say <message>` |
+| `/me` | – | ✅ работает | `everyone` | `minecraft.command.me` | 0 | `/me <action>` |
+| `/tellraw` | – | ✅ работает | `node` | `minecraft.command.tellraw` | 2 | `/tellraw <targets> <message>` |
 | `/title` | – | 🚧 ожидает CMD-17 | `node` | `minecraft.command.title` | 2 | `/title <targets> <title,subtitle,actionbar,times,reset> [...]` |
 | `/bossbar` | – | 🚧 ожидает CMD-17 | `node` | `minecraft.command.bossbar` | 2 | `/bossbar <add,get,list,remove,set> [...]` |
 | `/dialog` | – | 🚧 ожидает CMD-17 | `node` | `minecraft.command.dialog` | 2 | `/dialog show <targets> <dialog>` |
