@@ -155,6 +155,33 @@ impl PlayerHandle {
         self.session.lock().unwrap()
     }
 
+    /// The counterpart of this player's last private message, if any.
+    ///
+    /// A plugin's `/r` (CMD-40) replies to this. The value lives in the
+    /// per-session command state, so it disappears when the player leaves.
+    pub fn last_whisper(&self) -> Option<(u128, String)> {
+        self.session
+            .lock()
+            .unwrap()
+            .last_whisper
+            .as_ref()
+            .map(|p| (p.uuid, p.name.clone()))
+    }
+
+    /// Record the counterpart of a private message. Also called for the
+    /// recipient so both sides can reply.
+    pub fn set_last_whisper(&self, uuid: u128, name: impl Into<String>) {
+        self.session.lock().unwrap().last_whisper = Some(crate::commands::WhisperPeer {
+            uuid,
+            name: name.into(),
+        });
+    }
+
+    /// Forget the last whisper counterpart (used when a reply target leaves).
+    pub fn clear_last_whisper(&self) {
+        self.session.lock().unwrap().last_whisper = None;
+    }
+
     /// Whether the player is in inspect mode, where digging and placing read
     /// the history instead of changing the world.
     pub fn inspecting(&self) -> bool {
@@ -606,8 +633,23 @@ impl Registry {
     }
 
     /// Remove a player on disconnect.
+    ///
+    /// Any other player who last whispered with them loses that reply target:
+    /// a `/r` must not point at someone who is no longer online.
     pub fn leave(&self, entity_id: i32) {
-        self.players.write().unwrap().remove(&entity_id);
+        let (gone, others) = {
+            let mut players = self.players.write().unwrap();
+            let gone = players.remove(&entity_id).map(|p| p.uuid);
+            let others: Vec<_> = players.values().cloned().collect();
+            (gone, others)
+        };
+        if let Some(uuid) = gone {
+            for other in others {
+                if other.last_whisper().is_some_and(|(peer, _)| peer == uuid) {
+                    other.clear_last_whisper();
+                }
+            }
+        }
     }
 
     /// Snapshot of everyone currently online (e.g. to spawn them for a new
@@ -836,6 +878,39 @@ mod tests {
         let h = handle(v47);
         h.seed_hotbar(&v47.initial_hotbar());
         assert!(h.held_item().is_some());
+    }
+
+    #[test]
+    fn a_rich_chat_component_reaches_every_legacy_codec() {
+        use crate::protocol::text::TextComponent;
+        // Ordinary chat is now a `chat.type.text` component; the old codecs
+        // must render the translation, not a concatenated key + arguments.
+        let ev = ServerEvent::ChatComponent(Box::new(TextComponent::translate(
+            "chat.type.text",
+            vec![TextComponent::text("Alice"), TextComponent::text("hi")],
+        )));
+        for protocol in [47, 760, 763] {
+            let codec = codec_for(protocol).unwrap_or_else(|| panic!("no codec for {protocol}"));
+            let h = handle(codec);
+            let frames = h.render(&ev, &Empty);
+            assert!(!frames.is_empty(), "{protocol} must send a chat packet");
+            let mut cur = frames[0].as_slice();
+            let pkt = read_packet_from(&mut cur, None).unwrap().unwrap();
+            let mut pin = crate::proto::PacketIn::new(&pkt.data);
+            let text = pin.string().unwrap();
+            assert!(
+                text.contains(r#""translate":"chat.type.text""#),
+                "{protocol} lost the translation: {text}"
+            );
+            assert!(
+                text.contains(r#""with":[{"text":"Alice"},{"text":"hi"}]"#),
+                "{protocol} lost the arguments: {text}"
+            );
+            assert!(
+                !text.contains("chat.type.textAlicehi"),
+                "{protocol} downgraded the component to plain text: {text}"
+            );
+        }
     }
 
     #[test]

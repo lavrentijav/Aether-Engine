@@ -61,6 +61,19 @@ pub struct Session {
     /// `/msg`, `/tellraw`). Kept apart from the log limiter so turning command
     /// logging off does not remove the anti-spam bound.
     pub broadcast_limiter: crate::chatlog::LogLimiter,
+    /// The counterpart of the last `/msg` this player sent or received, so a
+    /// plugin's `/r` (CMD-40) can reply. Session-scoped: a disconnect drops
+    /// the handle and with it the reply target.
+    pub last_whisper: Option<WhisperPeer>,
+}
+
+/// Who a player last whispered with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WhisperPeer {
+    /// The counterpart's UUID.
+    pub uuid: u128,
+    /// Their name at the time of the message, for a reply prompt.
+    pub name: String,
 }
 
 /// A command's reply: lines to send back to whoever typed it.

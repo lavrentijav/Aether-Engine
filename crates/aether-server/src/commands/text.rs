@@ -27,7 +27,8 @@ use crate::commands::selector::{EntityRef, Gamemode, LcgRng, Selector, SelectorS
 use crate::commands::tree::{self, ArgKind, Ctx, Node, Requirement, Source, Value};
 use crate::commands::Reply;
 use crate::players::{PlayerHandle, SharedRegistry};
-use crate::protocol::text::TextComponent;
+use crate::protocol::nbt::Nbt;
+use crate::protocol::text::{Content, HoverEvent, NbtSource, TextComponent};
 use crate::protocol::ServerEvent;
 
 /// Register the chat commands on the tree.
@@ -126,6 +127,10 @@ fn exec_msg(ctx: &mut Ctx) -> Reply {
         target.emit(&ServerEvent::ChatComponent(Box::new(line)), ctx.world);
         if let Some(sender) = ctx.source.player() {
             crate::chatlog::log_private(sender, target, &message, ctx.world);
+            // Both sides get a reply target: the sender replies to the last
+            // player they whispered, the recipient to whoever whispered them.
+            sender.set_last_whisper(target.uuid, target.name.clone());
+            target.set_last_whisper(sender.uuid, sender.name.clone());
         }
     }
     Reply(
@@ -159,6 +164,19 @@ fn exec_tellraw(ctx: &mut Ctx) -> Reply {
         Ok(t) => t,
         Err(e) => return ctx.fail(e),
     };
+    // Vanilla resolves server-side before sending: a selector becomes the
+    // display names it matches, a score its value and an NBT path the tag it
+    // selects. The client does none of this.
+    let component = match resolve_component(&component, ctx.registry, ctx.source) {
+        Ok(c) => c,
+        Err(e) => return ctx.fail(format!("Invalid component: {e}")),
+    };
+    if let Err(e) = component.check_limits() {
+        return ctx.fail(format!("Invalid component: {e}"));
+    }
+    if !allow_broadcast(ctx) {
+        return ctx.fail("You are sending messages too quickly.");
+    }
     crate::log::info(&format!(
         "[tellraw] {} -> {} player(s): {}",
         ctx.source.name(),
@@ -192,21 +210,19 @@ pub(crate) fn emote(name: &str, action: &str) -> TextComponent {
     )
 }
 
-/// `commands.message.display.outgoing`.
-#[allow(dead_code)]
-pub(crate) fn whisper_outgoing(target: &str, message: &str) -> TextComponent {
-    TextComponent::translate(
-        "commands.message.display.outgoing",
-        vec![TextComponent::text(target), TextComponent::text(message)],
-    )
-}
-
 /// `commands.message.display.incoming`.
+///
+/// The component carries vanilla's translation key and the rendered en_us line
+/// as its fallback, so a client without the key still sees the right wording.
 pub(crate) fn whisper_incoming(source: &str, message: &str) -> TextComponent {
-    TextComponent::translate(
+    let mut component = TextComponent::translate(
         "commands.message.display.incoming",
         vec![TextComponent::text(source), TextComponent::text(message)],
-    )
+    );
+    if let Content::Translate { fallback, .. } = &mut component.content {
+        *fallback = Some(lang::format(lang::MESSAGE_INCOMING, &[source, message]));
+    }
+    component
 }
 
 /// The plain text of a component, for logs. This is only for the operator log;
@@ -237,6 +253,265 @@ fn allow_broadcast(ctx: &Ctx) -> bool {
     };
     let rate = crate::chat_config().rate_per_min;
     handle.session().broadcast_limiter.allow(rate)
+}
+
+// ---------------------------------------------------------------------------
+// Server-side component resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve the server-side parts of `component` against the command source.
+///
+/// Vanilla's `ComponentUtils.updateForEntity` does this before a component is
+/// sent: `selector` becomes the display names it matches, `score` its value,
+/// and `nbt` the tag its path selects. The client performs none of these, so a
+/// component forwarded verbatim would show `@a`, an empty score, or nothing.
+///
+/// The scoreboard model (CMD-15) is not implemented yet; a score therefore
+/// resolves to an empty component, exactly as vanilla renders a score that has
+/// no value. Selector and NBT resolution are complete.
+fn resolve_component(
+    component: &TextComponent,
+    registry: &SharedRegistry,
+    source: Source<'_>,
+) -> Result<TextComponent, String> {
+    let style = resolve_style(&component.style, registry, source)?;
+    let extra = component
+        .extra
+        .iter()
+        .map(|c| resolve_component(c, registry, source))
+        .collect::<Result<Vec<_>, _>>()?;
+    match &component.content {
+        Content::Selector {
+            selector,
+            separator,
+        } => {
+            let separator = match separator {
+                Some(s) => resolve_component(s, registry, source)?,
+                None => TextComponent::text(", "),
+            };
+            let mut resolved = resolve_selector(selector, &separator, registry, source)?;
+            resolved.style = style;
+            resolved.extra.extend(extra);
+            Ok(resolved)
+        }
+        Content::Nbt {
+            path,
+            source: nbt_source,
+            interpret,
+            separator,
+        } => {
+            let separator = match separator {
+                Some(s) => resolve_component(s, registry, source)?,
+                None => TextComponent::text(", "),
+            };
+            let mut resolved =
+                resolve_nbt(nbt_source, path, *interpret, &separator, registry, source)?;
+            resolved.style = style;
+            resolved.extra.extend(extra);
+            Ok(resolved)
+        }
+        Content::Text(text) => Ok(TextComponent {
+            content: Content::Text(text.clone()),
+            style,
+            extra,
+        }),
+        Content::Translate {
+            key,
+            fallback,
+            with,
+        } => Ok(TextComponent {
+            content: Content::Translate {
+                key: key.clone(),
+                fallback: fallback.clone(),
+                with: with
+                    .iter()
+                    .map(|c| resolve_component(c, registry, source))
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+            style,
+            extra,
+        }),
+        Content::Score { .. } => Ok(TextComponent {
+            // A missing score renders as nothing, as in vanilla.
+            content: Content::Text(String::new()),
+            style,
+            extra,
+        }),
+        Content::Keybind(key) => Ok(TextComponent {
+            content: Content::Keybind(key.clone()),
+            style,
+            extra,
+        }),
+    }
+}
+
+fn resolve_style(
+    style: &crate::protocol::text::Style,
+    registry: &SharedRegistry,
+    source: Source<'_>,
+) -> Result<crate::protocol::text::Style, String> {
+    let mut style = style.clone();
+    match &style.hover_event {
+        Some(HoverEvent::Text(c)) => {
+            style.hover_event = Some(HoverEvent::Text(Box::new(resolve_component(
+                c, registry, source,
+            )?)));
+        }
+        Some(HoverEvent::Entity {
+            kind,
+            id,
+            name: Some(n),
+        }) => {
+            style.hover_event = Some(HoverEvent::Entity {
+                kind: kind.clone(),
+                id: id.clone(),
+                name: Some(Box::new(resolve_component(n, registry, source)?)),
+            });
+        }
+        _ => {}
+    }
+    Ok(style)
+}
+
+/// Resolve one `selector` content. Multiple matches are joined with
+/// `separator`, as `ComponentUtils.formatList` does; no matches is the empty
+/// component.
+fn resolve_selector(
+    selector: &str,
+    separator: &TextComponent,
+    registry: &SharedRegistry,
+    source: Source<'_>,
+) -> Result<TextComponent, String> {
+    let selector = Selector::parse(selector).map_err(|e| e.message())?;
+    let source_view = online_source(registry, source);
+    let found = selector
+        .find(&source_view, &mut LcgRng::new(selector_seed()))
+        .map_err(|e| e.message())?;
+    let mut names = found
+        .iter()
+        .map(|e| TextComponent::text(e.stringified_name()))
+        .collect::<Vec<_>>();
+    let Some(first) = names.first().cloned() else {
+        return Ok(TextComponent::text(String::new()));
+    };
+    let mut out = first;
+    for name in names.drain(1..) {
+        out.extra.push(separator.clone());
+        out.extra.push(name);
+    }
+    Ok(out)
+}
+
+/// Resolve one `nbt` content. Player/entity NBT is carried in
+/// [`EntityRef::nbt`]; the block and storage sources have no NBT model yet, so
+/// they resolve to nothing rather than inventing a value.
+fn resolve_nbt(
+    nbt_source: &NbtSource,
+    path: &str,
+    interpret: bool,
+    separator: &TextComponent,
+    registry: &SharedRegistry,
+    source: Source<'_>,
+) -> Result<TextComponent, String> {
+    let tags: Vec<Nbt> = match nbt_source {
+        NbtSource::Entity(selector) => {
+            let selector = Selector::parse_single(selector).map_err(|e| e.message())?;
+            let source_view = online_source(registry, source);
+            let found = selector
+                .find(&source_view, &mut LcgRng::new(selector_seed()))
+                .map_err(|e| e.message())?;
+            found
+                .first()
+                .and_then(|e| apply_nbt_path(&e.nbt, path).cloned())
+                .into_iter()
+                .collect()
+        }
+        NbtSource::Block(_) | NbtSource::Storage(_) | NbtSource::None => Vec::new(),
+    };
+    let Some(tag) = tags.first() else {
+        return Ok(TextComponent::text(String::new()));
+    };
+    let text = nbt_text(tag);
+    if interpret {
+        if let Ok(nbt) = crate::commands::snbt::parse(&text) {
+            if let Ok(component) = TextComponent::from_nbt(&nbt) {
+                return Ok(component);
+            }
+        }
+    }
+    let _ = separator;
+    Ok(TextComponent::text(text))
+}
+
+/// Evaluate the common NBT-path forms: dotted keys and `[index]`/`["key"]`.
+///
+/// CMD-14 owns the full path language; this is enough for `/tellraw` to read a
+/// value out of the NBT the server already has.
+fn apply_nbt_path<'a>(root: &'a Nbt, path: &str) -> Option<&'a Nbt> {
+    let mut current = root;
+    let mut rest = path.trim();
+    while !rest.is_empty() {
+        rest = rest.trim_start_matches('.');
+        if rest.is_empty() {
+            break;
+        }
+        if let Some(after) = rest.strip_prefix('[') {
+            let close = after.find(']')?;
+            let inner = after[..close].trim();
+            let next = &after[close + 1..];
+            current = if let Ok(index) = inner.parse::<usize>() {
+                match current {
+                    Nbt::List(items) => items.get(index)?,
+                    _ => return None,
+                }
+            } else {
+                let key = inner.trim_matches('"').trim_matches('\'');
+                match current {
+                    Nbt::Compound(fields) => {
+                        fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)?
+                    }
+                    _ => return None,
+                }
+            };
+            rest = next;
+            continue;
+        }
+        let end = rest.find(['.', '[']).unwrap_or(rest.len());
+        let key = &rest[..end];
+        if key.is_empty() {
+            return None;
+        }
+        current = match current {
+            Nbt::Compound(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)?,
+            _ => return None,
+        };
+        rest = &rest[end..];
+        if let Some(after) = rest.strip_prefix('.') {
+            rest = after;
+        }
+    }
+    Some(current)
+}
+
+/// The text of a scalar NBT tag; a compound or list is rendered as JSON.
+fn nbt_text(nbt: &Nbt) -> String {
+    match nbt {
+        Nbt::Str(s) => s.clone(),
+        Nbt::Byte(v) => v.to_string(),
+        Nbt::Short(v) => v.to_string(),
+        Nbt::Int(v) => v.to_string(),
+        Nbt::Long(v) => v.to_string(),
+        Nbt::Float(v) => v.to_string(),
+        Nbt::Double(v) => v.to_string(),
+        _ => crate::protocol::text::nbt_snbt(nbt),
+    }
+}
+
+fn selector_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -411,18 +686,10 @@ mod tests {
             }
         );
         assert_eq!(
-            whisper_outgoing("Bob", "hi").content,
-            Content::Translate {
-                key: "commands.message.display.outgoing".into(),
-                fallback: None,
-                with: vec![TextComponent::text("Bob"), TextComponent::text("hi")],
-            }
-        );
-        assert_eq!(
             whisper_incoming("Alice", "hi").content,
             Content::Translate {
                 key: "commands.message.display.incoming".into(),
-                fallback: None,
+                fallback: Some("Alice whispers to you: hi".into()),
                 with: vec![TextComponent::text("Alice"), TextComponent::text("hi")],
             }
         );
@@ -576,6 +843,100 @@ mod tests {
         assert!(run(&world, &registry, source, "me waves").is_empty());
         // The console is an owner, so both op-2 verbs are reachable.
         assert!(run(&world, &registry, source, r#"tellraw @a {text:"hi"}"#,).is_empty());
+    }
+
+    fn component(text: &str) -> TextComponent {
+        let nbt = crate::commands::snbt::parse(text).unwrap();
+        TextComponent::from_nbt(&nbt).unwrap()
+    }
+
+    #[test]
+    fn tellraw_resolves_selectors_scores_and_nested_components() {
+        let (registry, handles) = registry_with(&[("Alice", 1), ("Bob", 2)]);
+        let source = Source::Player(&handles[0]);
+
+        // A selector becomes the names it matches, joined by the default
+        // separator (vanilla's ", ").
+        let resolved =
+            resolve_component(&component(r#"{selector:"@a"}"#), &registry, source).unwrap();
+        let plain = resolved.plain_text();
+        assert!(plain.contains("Alice"), "{plain:?}");
+        assert!(plain.contains("Bob"), "{plain:?}");
+        assert!(plain.contains(", "), "{plain:?}");
+
+        // The same resolution applies inside `with`, `extra` and a hover's
+        // show_text, because vanilla resolves recursively.
+        let nested = resolve_component(
+            &component(
+                r#"{translate:"chat.type.text",with:[{selector:"@p"},{text:"hi"}],extra:[{selector:"@a"}],hoverEvent:{action:"show_text",value:{selector:"@a"}}}"#,
+            ),
+            &registry,
+            source,
+        )
+        .unwrap();
+        let plain = nested.plain_text();
+        assert!(plain.contains("hi"), "{plain:?}");
+        assert!(
+            plain.contains("Alice") && plain.contains("Bob"),
+            "{plain:?}"
+        );
+        match nested.style.hover_event.as_ref().unwrap() {
+            HoverEvent::Text(c) => {
+                let hover = c.plain_text();
+                assert!(
+                    hover.contains("Alice") && hover.contains("Bob"),
+                    "{hover:?}"
+                );
+            }
+            other => panic!("wrong hover: {other:?}"),
+        }
+
+        // A score with no scoreboard value renders empty, as vanilla does when
+        // the objective has no score for the holder.
+        let score = resolve_component(
+            &component(r#"{score:{name:"Bob",objective:"kills"}}"#),
+            &registry,
+            source,
+        )
+        .unwrap();
+        assert_eq!(score.plain_text(), "");
+
+        // A malformed selector is a command error, not a literal forwarded to
+        // every recipient.
+        assert!(resolve_component(&component(r#"{selector:"@q"}"#), &registry, source).is_err());
+    }
+
+    #[test]
+    fn nbt_paths_select_values_for_tellraw() {
+        let nbt =
+            crate::commands::snbt::parse(r#"{name:"Bob",nested:{count:3,list:[{x:"a"},{x:"b"}]}}"#)
+                .unwrap();
+        assert_eq!(apply_nbt_path(&nbt, "name"), Some(&Nbt::Str("Bob".into())));
+        assert_eq!(apply_nbt_path(&nbt, "nested.count"), Some(&Nbt::Int(3)));
+        assert_eq!(
+            apply_nbt_path(&nbt, "nested.list[1].x"),
+            Some(&Nbt::Str("b".into()))
+        );
+        assert_eq!(apply_nbt_path(&nbt, "nested.missing"), None);
+    }
+
+    #[test]
+    fn a_msg_records_both_reply_targets() {
+        let world = test_world();
+        let (registry, handles) = registry_with(&[("Alice", 1), ("Bob", 2)]);
+        let source = Source::Player(&handles[0]);
+        assert_eq!(
+            run(&world, &registry, source, "msg Bob hello"),
+            vec!["You whisper to Bob: hello"]
+        );
+        assert_eq!(
+            handles[0].last_whisper(),
+            Some((handles[1].uuid, "Bob".to_string()))
+        );
+        assert_eq!(
+            handles[1].last_whisper(),
+            Some((handles[0].uuid, "Alice".to_string()))
+        );
     }
 
     #[test]

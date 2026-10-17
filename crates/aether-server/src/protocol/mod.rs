@@ -241,9 +241,10 @@ impl ServerEvent<'_> {
             // Codecs before 1.19 have no action-bar overlay, so the status line
             // is shown as an ordinary chat line rather than vanishing.
             ServerEvent::ActionBar(text) => Some(ServerEvent::Chat(text.clone())),
-            // A codec that has no rich-component arm still says something
-            // rather than dropping the line.
-            ServerEvent::ChatComponent(c) => Some(ServerEvent::Chat(c.plain_text())),
+            // `ChatComponent` is deliberately *not* downgraded: every codec
+            // has a rich-component arm (JSON before 1.20.3, NBT after), so
+            // mapping it to plain text here would make those arms unreachable
+            // and turn ordinary chat into an untranslated key on 1.8–1.20.1.
             _ => None,
         }
     }

@@ -44,6 +44,19 @@ pub enum NbtForm {
     Modern,
 }
 
+/// Which historical JSON spelling a component is written in.
+///
+/// 1.8 predates the `contents` wrapper: `show_item`/`show_entity` are a single
+/// `value` SNBT string. 1.16–1.20.2 use a `contents` object. The two cannot be
+/// served by one spelling, so the codec picks the form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JsonForm {
+    /// 1.8: `show_item`/`show_entity` as a `value` SNBT string.
+    Legacy8,
+    /// 1.16–1.20.2: hover contents in a `contents` object.
+    Standard,
+}
+
 /// A text component: content plus an inherited style and appended children.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextComponent {
@@ -135,7 +148,13 @@ pub enum ClickEvent {
     RunCommand(String),
     SuggestCommand(String),
     ChangePage(i32),
-    Custom { id: String, payload: Option<Nbt> },
+    CopyToClipboard(String),
+    /// `show_dialog` (1.21.9+), naming a dialog by id.
+    ShowDialog(String),
+    Custom {
+        id: String,
+        payload: Option<Nbt>,
+    },
 }
 
 /// A hover interaction.
@@ -147,14 +166,19 @@ pub enum HoverEvent {
     Item {
         id: String,
         count: i32,
-        /// Pre-1.20.5 `tag` (SNBT string).
-        tag: Option<String>,
+        /// Pre-1.20.5 item NBT (`tag`), kept structurally so each dialect can
+        /// spell it (JSON writes SNBT; legacy NBT writes a compound).
+        tag: Option<Nbt>,
         /// 1.20.5+ data components.
         components: Option<Nbt>,
     },
     /// Show an entity.
+    ///
+    /// `id` is the entity UUID; `kind` is its entity type. The wire spelling
+    /// differs: legacy JSON/NBT writes `type` + `id`, 1.21.5+ writes `id`
+    /// (type) + `uuid` (UUID).
     Entity {
-        kind: Option<String>,
+        kind: String,
         id: String,
         name: Option<Box<TextComponent>>,
     },
@@ -225,7 +249,7 @@ impl TextComponent {
                 with,
             } => {
                 *chars += key.chars().count();
-                *chars += fallback.as_deref().map(str::len).unwrap_or(0);
+                *chars += fallback.as_deref().map(|f| f.chars().count()).unwrap_or(0);
                 for c in with {
                     c.check_limits_at(depth + 1, nodes, chars)?;
                 }
@@ -255,8 +279,31 @@ impl TextComponent {
         for c in &self.extra {
             c.check_limits_at(depth + 1, nodes, chars)?;
         }
-        if let Some(HoverEvent::Text(c)) = &self.style.hover_event {
-            c.check_limits_at(depth + 1, nodes, chars)?;
+        if let Some(hover) = &self.style.hover_event {
+            match hover {
+                HoverEvent::Text(c) => c.check_limits_at(depth + 1, nodes, chars)?,
+                HoverEvent::Item { components, .. } => {
+                    if let Some(c) = components {
+                        check_nbt_limits(c, depth + 1, nodes)?;
+                    }
+                }
+                HoverEvent::Custom { payload, .. } => {
+                    if let Some(p) = payload {
+                        check_nbt_limits(p, depth + 1, nodes)?;
+                    }
+                }
+                HoverEvent::Entity { name, .. } => {
+                    if let Some(n) = name {
+                        n.check_limits_at(depth + 1, nodes, chars)?;
+                    }
+                }
+            }
+        }
+        if let Some(ClickEvent::Custom {
+            payload: Some(p), ..
+        }) = &self.style.click_event
+        {
+            check_nbt_limits(p, depth + 1, nodes)?;
         }
         if *chars > MAX_TEXT_CHARS {
             return Err("component text is too long".into());
@@ -264,13 +311,18 @@ impl TextComponent {
         Ok(())
     }
 
-    /// The pre-1.20.3 JSON spelling, also the argument form clients show.
+    /// The standard JSON spelling (1.16–1.20.2), also what logs use.
     pub fn to_json(&self) -> String {
+        self.to_json_form(JsonForm::Standard)
+    }
+
+    /// The JSON spelling for a specific client generation.
+    pub fn to_json_form(&self, form: JsonForm) -> String {
         let mut fields: Vec<(String, String)> = Vec::new();
-        self.content.push_json(&mut fields);
-        self.style.push_json(&mut fields);
+        self.content.push_json(&mut fields, form);
+        self.style.push_json(&mut fields, form);
         if !self.extra.is_empty() {
-            fields.push(("extra".into(), json_list(&self.extra)));
+            fields.push(("extra".into(), json_list(&self.extra, form)));
         }
         json_object(fields)
     }
@@ -317,8 +369,35 @@ impl TextComponent {
     }
 }
 
+/// Bound an NBT payload carried by a custom click/hover event or item
+/// components. The JSON/NBT writers recurse over it, so the depth budget is
+/// enforced before any writer sees it.
+fn check_nbt_limits(nbt: &Nbt, depth: usize, nodes: &mut usize) -> Result<(), String> {
+    if depth > MAX_DEPTH {
+        return Err("component NBT is nested too deeply".into());
+    }
+    *nodes += 1;
+    if *nodes > MAX_NODES {
+        return Err("component has too many parts".into());
+    }
+    match nbt {
+        Nbt::List(items) => {
+            for item in items {
+                check_nbt_limits(item, depth + 1, nodes)?;
+            }
+        }
+        Nbt::Compound(fields) => {
+            for (_, value) in fields {
+                check_nbt_limits(value, depth + 1, nodes)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 impl Content {
-    fn push_json(&self, fields: &mut Vec<(String, String)>) {
+    fn push_json(&self, fields: &mut Vec<(String, String)>, form: JsonForm) {
         match self {
             Content::Text(s) => fields.push(("text".into(), quote(s))),
             Content::Translate {
@@ -331,7 +410,7 @@ impl Content {
                     fields.push(("fallback".into(), quote(f)));
                 }
                 if !with.is_empty() {
-                    fields.push(("with".into(), json_list(with)));
+                    fields.push(("with".into(), json_list(with, form)));
                 }
             }
             Content::Selector {
@@ -340,7 +419,7 @@ impl Content {
             } => {
                 fields.push(("selector".into(), quote(selector)));
                 if let Some(s) = separator {
-                    fields.push(("separator".into(), s.to_json()));
+                    fields.push(("separator".into(), s.to_json_form(form)));
                 }
             }
             Content::Score { name, objective } => {
@@ -368,7 +447,7 @@ impl Content {
                     fields.push(("interpret".into(), "true".into()));
                 }
                 if let Some(s) = separator {
-                    fields.push(("separator".into(), s.to_json()));
+                    fields.push(("separator".into(), s.to_json_form(form)));
                 }
             }
         }
@@ -437,7 +516,7 @@ impl Content {
 }
 
 impl Style {
-    fn push_json(&self, fields: &mut Vec<(String, String)>) {
+    fn push_json(&self, fields: &mut Vec<(String, String)>, form: JsonForm) {
         if let Some(c) = &self.color {
             fields.push(("color".into(), quote(c)));
         }
@@ -456,7 +535,7 @@ impl Style {
             fields.push(("clickEvent".into(), c.to_json()));
         }
         if let Some(h) = &self.hover_event {
-            fields.push(("hoverEvent".into(), h.to_json()));
+            fields.push(("hoverEvent".into(), h.to_json(form)));
         }
     }
 
@@ -509,6 +588,18 @@ impl ClickEvent {
                 return json_object(vec![
                     ("action".into(), quote("change_page")),
                     ("value".into(), quote(&v.to_string())),
+                ]);
+            }
+            ClickEvent::CopyToClipboard(v) => {
+                return json_object(vec![
+                    ("action".into(), quote("copy_to_clipboard")),
+                    ("value".into(), quote(v)),
+                ]);
+            }
+            ClickEvent::ShowDialog(v) => {
+                return json_object(vec![
+                    ("action".into(), quote("show_dialog")),
+                    ("dialog".into(), quote(v)),
                 ]);
             }
             ClickEvent::Custom { id, payload } => {
@@ -567,6 +658,14 @@ impl ClickEvent {
                     NbtForm::Modern => fields.push(("page".into(), Nbt::Int(*v))),
                 }
             }
+            ClickEvent::CopyToClipboard(v) => {
+                fields.push(("action".into(), Nbt::Str("copy_to_clipboard".into())));
+                fields.push(("value".into(), Nbt::Str(v.clone())));
+            }
+            ClickEvent::ShowDialog(v) => {
+                fields.push(("action".into(), Nbt::Str("show_dialog".into())));
+                fields.push(("dialog".into(), Nbt::Str(v.clone())));
+            }
             ClickEvent::Custom { id, payload } => {
                 fields.push(("action".into(), Nbt::Str("custom".into())));
                 fields.push(("id".into(), Nbt::Str(id.clone())));
@@ -580,41 +679,70 @@ impl ClickEvent {
 }
 
 impl HoverEvent {
-    fn to_json(&self) -> String {
+    fn to_json(&self, form: JsonForm) -> String {
         match self {
-            HoverEvent::Text(c) => json_object(vec![
-                ("action".into(), quote("show_text")),
-                // Pre-1.21.5 spelling. 1.21.5 renamed it to `value`.
-                ("contents".into(), c.to_json()),
-            ]),
+            HoverEvent::Text(c) => {
+                let key = match form {
+                    JsonForm::Legacy8 => "value",
+                    JsonForm::Standard => "contents",
+                };
+                json_object(vec![
+                    ("action".into(), quote("show_text")),
+                    (key.into(), c.to_json_form(form)),
+                ])
+            }
             HoverEvent::Item {
                 id,
                 count,
                 tag,
                 components,
             } => {
-                let mut fields = vec![
-                    ("action".into(), quote("show_item")),
+                if form == JsonForm::Legacy8 {
+                    let mut snbt = format!("{{id:{},Count:{}b", quote(id), count);
+                    if let Some(t) = tag {
+                        snbt.push_str(&format!(",tag:{}", nbt_snbt(t)));
+                    }
+                    snbt.push('}');
+                    return json_object(vec![
+                        ("action".into(), quote("show_item")),
+                        ("value".into(), quote(&snbt)),
+                    ]);
+                }
+                let mut contents = vec![
                     ("id".into(), quote(id)),
                     ("count".into(), count.to_string()),
                 ];
                 if let Some(t) = tag {
-                    fields.push(("tag".into(), quote(t)));
+                    contents.push(("tag".into(), quote(&nbt_snbt(t))));
                 } else if let Some(c) = components {
-                    fields.push(("components".into(), nbt_to_json(c)));
+                    contents.push(("components".into(), nbt_to_json(c)));
                 }
-                json_object(fields)
+                json_object(vec![
+                    ("action".into(), quote("show_item")),
+                    ("contents".into(), json_object(contents)),
+                ])
             }
             HoverEvent::Entity { kind, id, name } => {
-                let mut fields = vec![("action".into(), quote("show_entity"))];
-                if let Some(k) = kind {
-                    fields.push(("type".into(), quote(k)));
+                if form == JsonForm::Legacy8 {
+                    // 1.8 carries the entity as one SNBT string.
+                    let mut snbt = format!("{{type:{},id:{}", quote(kind), quote(id));
+                    if let Some(n) = name {
+                        snbt.push_str(&format!(",name:{}", quote(&n.plain_text())));
+                    }
+                    snbt.push('}');
+                    return json_object(vec![
+                        ("action".into(), quote("show_entity")),
+                        ("value".into(), quote(&snbt)),
+                    ]);
                 }
-                fields.push(("id".into(), quote(id)));
+                let mut contents = vec![("type".into(), quote(kind)), ("id".into(), quote(id))];
                 if let Some(n) = name {
-                    fields.push(("name".into(), n.to_json()));
+                    contents.push(("name".into(), n.to_json_form(form)));
                 }
-                json_object(fields)
+                json_object(vec![
+                    ("action".into(), quote("show_entity")),
+                    ("contents".into(), json_object(contents)),
+                ])
             }
             HoverEvent::Custom { id, payload } => {
                 let mut fields = vec![("action".into(), quote("custom")), ("id".into(), quote(id))];
@@ -644,17 +772,24 @@ impl HoverEvent {
                 components,
             } => {
                 fields.push(("action".into(), Nbt::Str("show_item".into())));
-                fields.push(("id".into(), Nbt::Str(id.clone())));
-                fields.push(("count".into(), Nbt::Int(*count)));
                 match form {
+                    // 1.16–1.21.4 wraps the item in `contents`.
                     NbtForm::Legacy => {
+                        let mut contents = vec![
+                            ("id".into(), Nbt::Str(id.clone())),
+                            ("count".into(), Nbt::Int(*count)),
+                        ];
                         if let Some(t) = tag {
-                            fields.push(("tag".into(), Nbt::Str(t.clone())));
+                            contents.push(("tag".into(), t.clone()));
                         } else if let Some(c) = components {
-                            fields.push(("components".into(), c.clone()));
+                            contents.push(("components".into(), c.clone()));
                         }
+                        fields.push(("contents".into(), Nbt::Compound(contents)));
                     }
+                    // 1.21.5+ flattens the fields.
                     NbtForm::Modern => {
+                        fields.push(("id".into(), Nbt::Str(id.clone())));
+                        fields.push(("count".into(), Nbt::Int(*count)));
                         if let Some(c) = components {
                             fields.push(("components".into(), c.clone()));
                         }
@@ -663,12 +798,28 @@ impl HoverEvent {
             }
             HoverEvent::Entity { kind, id, name } => {
                 fields.push(("action".into(), Nbt::Str("show_entity".into())));
-                if let Some(k) = kind {
-                    fields.push(("type".into(), Nbt::Str(k.clone())));
-                }
-                fields.push(("id".into(), Nbt::Str(id.clone())));
-                if let Some(n) = name {
-                    fields.push(("name".into(), n.to_nbt(form)));
+                match form {
+                    // Legacy NBT (1.20.3–1.21.4): `type` names the entity
+                    // type and `id` is the UUID, wrapped in `contents`.
+                    NbtForm::Legacy => {
+                        let mut contents = vec![
+                            ("type".into(), Nbt::Str(kind.clone())),
+                            ("id".into(), Nbt::Str(id.clone())),
+                        ];
+                        if let Some(n) = name {
+                            contents.push(("name".into(), n.to_nbt(form)));
+                        }
+                        fields.push(("contents".into(), Nbt::Compound(contents)));
+                    }
+                    // 1.21.5 renamed the fields: `id` is the entity type and
+                    // `uuid` is the UUID.
+                    NbtForm::Modern => {
+                        fields.push(("id".into(), Nbt::Str(kind.clone())));
+                        fields.push(("uuid".into(), Nbt::Str(id.clone())));
+                        if let Some(n) = name {
+                            fields.push(("name".into(), n.to_nbt(form)));
+                        }
+                    }
                 }
             }
             HoverEvent::Custom { id, payload } => {
@@ -710,6 +861,7 @@ fn parse_component(nbt: &Nbt, depth: usize, nodes: &mut usize) -> Result<TextCom
                 Content::Text(as_str(v, "text")?.to_string())
             } else if let Some(v) = field(fields, "translate") {
                 let key = as_str(v, "translate")?.to_string();
+                validate_key(&key)?;
                 let fallback = match field(fields, "fallback") {
                     Some(v) => Some(as_str(v, "fallback")?.to_string()),
                     None => None,
@@ -725,6 +877,7 @@ fn parse_component(nbt: &Nbt, depth: usize, nodes: &mut usize) -> Result<TextCom
                 }
             } else if let Some(v) = field(fields, "selector") {
                 let selector = as_str(v, "selector")?.to_string();
+                validate_plain_value(&selector, "selector")?;
                 let separator = match field(fields, "separator") {
                     Some(v) => Some(Box::new(parse_component(v, depth + 1, nodes)?)),
                     None => None,
@@ -737,11 +890,16 @@ fn parse_component(nbt: &Nbt, depth: usize, nodes: &mut usize) -> Result<TextCom
                 let score = as_compound(v, "score")?;
                 let name = get_str(score, "name")?;
                 let objective = get_str(score, "objective")?;
+                validate_plain_value(&name, "score holder")?;
+                validate_plain_value(&objective, "objective")?;
                 Content::Score { name, objective }
             } else if let Some(v) = field(fields, "keybind") {
-                Content::Keybind(as_str(v, "keybind")?.to_string())
+                let key = as_str(v, "keybind")?.to_string();
+                validate_resource_location(&key, "keybind")?;
+                Content::Keybind(key)
             } else if let Some(v) = field(fields, "nbt") {
                 let path = as_str(v, "nbt")?.to_string();
+                validate_plain_value(&path, "nbt path")?;
                 let source = if let Some(v) = field(fields, "block") {
                     NbtSource::Block(as_str(v, "block")?.to_string())
                 } else if let Some(v) = field(fields, "entity") {
@@ -808,10 +966,14 @@ fn parse_component_list(
 fn parse_style(fields: &[(String, Nbt)], depth: usize, nodes: &mut usize) -> Result<Style, String> {
     let mut style = Style::default();
     if let Some(v) = field(fields, "color") {
-        style.color = Some(as_str(v, "color")?.to_string());
+        let color = as_str(v, "color")?;
+        validate_color(color)?;
+        style.color = Some(color.to_string());
     }
     if let Some(v) = field(fields, "font") {
-        style.font = Some(as_str(v, "font")?.to_string());
+        let font = as_str(v, "font")?;
+        validate_resource_location(font, "font")?;
+        style.font = Some(font.to_string());
     }
     style.bold = parse_optional_bool(fields, "bold")?;
     style.italic = parse_optional_bool(fields, "italic")?;
@@ -819,7 +981,9 @@ fn parse_style(fields: &[(String, Nbt)], depth: usize, nodes: &mut usize) -> Res
     style.strikethrough = parse_optional_bool(fields, "strikethrough")?;
     style.obfuscated = parse_optional_bool(fields, "obfuscated")?;
     if let Some(v) = field(fields, "insertion") {
-        style.insertion = Some(as_str(v, "insertion")?.to_string());
+        let insertion = as_str(v, "insertion")?;
+        validate_plain_value(insertion, "insertion")?;
+        style.insertion = Some(insertion.to_string());
     }
     if let Some(v) = field(fields, "clickEvent").or_else(|| field(fields, "click_event")) {
         style.click_event = Some(parse_click(v)?);
@@ -843,10 +1007,26 @@ fn parse_click(nbt: &Nbt) -> Result<ClickEvent, String> {
         }
     };
     Ok(match action.as_str() {
-        "open_url" => ClickEvent::OpenUrl(value("url")?),
-        "open_file" => ClickEvent::OpenFile(value("path")?),
-        "run_command" => ClickEvent::RunCommand(value("command")?),
-        "suggest_command" => ClickEvent::SuggestCommand(value("command")?),
+        "open_url" => {
+            let url = value("url")?;
+            validate_url(&url)?;
+            ClickEvent::OpenUrl(url)
+        }
+        "open_file" => {
+            let path = value("path")?;
+            validate_plain_value(&path, "open_file path")?;
+            ClickEvent::OpenFile(path)
+        }
+        "run_command" => {
+            let command = value("command")?;
+            validate_command(&command)?;
+            ClickEvent::RunCommand(command)
+        }
+        "suggest_command" => {
+            let command = value("command")?;
+            validate_command(&command)?;
+            ClickEvent::SuggestCommand(command)
+        }
         "change_page" => {
             let page = if let Some(v) = field(fields, "page") {
                 as_i32(v, "page")?
@@ -857,8 +1037,23 @@ fn parse_click(nbt: &Nbt) -> Result<ClickEvent, String> {
             };
             ClickEvent::ChangePage(page)
         }
+        "copy_to_clipboard" => {
+            let text = value("value")?;
+            validate_plain_value(&text, "clipboard text")?;
+            ClickEvent::CopyToClipboard(text)
+        }
+        "show_dialog" => {
+            let id = if let Some(v) = field(fields, "dialog").or_else(|| field(fields, "value")) {
+                as_str(v, "dialog")?.to_string()
+            } else {
+                return Err("click event 'show_dialog' has no dialog".into());
+            };
+            validate_resource_location(&id, "dialog")?;
+            ClickEvent::ShowDialog(id)
+        }
         "custom" => {
             let id = get_str(fields, "id")?;
+            validate_resource_location(&id, "custom click id")?;
             let payload = field(fields, "payload").cloned();
             ClickEvent::Custom { id, payload }
         }
@@ -877,16 +1072,27 @@ fn parse_hover(nbt: &Nbt, depth: usize, nodes: &mut usize) -> Result<HoverEvent,
             HoverEvent::Text(Box::new(parse_component(v, depth + 1, nodes)?))
         }
         "show_item" => {
-            let id = get_str(fields, "id")?;
-            let count = match field(fields, "count") {
+            // 1.16–1.21.4 wrap the item in `contents`; 1.8 uses a single
+            // `value` SNBT string. 1.21.5+ flattens the fields.
+            let inner = hover_contents(fields, "show_item")?;
+            let id = get_str(&inner, "id")?;
+            validate_resource_location(&id, "item id")?;
+            let count = match field(&inner, "count") {
                 Some(v) => as_i32(v, "count")?,
                 None => 1,
             };
-            let tag = match field(fields, "tag") {
-                Some(Nbt::Str(s)) => Some(s.clone()),
-                _ => None,
+            if !(1..=99).contains(&count) {
+                return Err("hover event 'show_item' count must be 1..=99".into());
+            }
+            let tag = match field(&inner, "tag") {
+                Some(Nbt::Str(s)) => Some(
+                    crate::commands::snbt::parse(s)
+                        .map_err(|e| format!("invalid show_item tag: {e}"))?,
+                ),
+                Some(other) => Some(other.clone()),
+                None => None,
             };
-            let components = field(fields, "components").cloned();
+            let components = field(&inner, "components").cloned();
             HoverEvent::Item {
                 id,
                 count,
@@ -895,12 +1101,27 @@ fn parse_hover(nbt: &Nbt, depth: usize, nodes: &mut usize) -> Result<HoverEvent,
             }
         }
         "show_entity" => {
-            let id = get_str(fields, "id")?;
-            let kind = match field(fields, "type") {
-                Some(v) => Some(as_str(v, "type")?.to_string()),
-                None => None,
+            let inner = hover_contents(fields, "show_entity")?;
+            // 1.21.5+ spells the type `id` and the UUID `uuid`; the older
+            // dialects spell them `type` and `id`. Accept both so a component
+            // copied from either documentation parses.
+            let (kind, id) = if field(&inner, "uuid").is_some() {
+                let kind = get_str(&inner, "id")?;
+                let uuid = normalize_uuid(&get_str(&inner, "uuid")?)?;
+                validate_resource_location(&kind, "entity type")?;
+                (kind, uuid)
+            } else {
+                let kind = match field(&inner, "type") {
+                    Some(v) => as_str(v, "type")?.to_string(),
+                    // Vanilla's pre-1.21.5 codec defaults a missing type to a
+                    // pig rather than refusing the component.
+                    None => "minecraft:pig".to_string(),
+                };
+                let id = normalize_uuid(&get_str(&inner, "id")?)?;
+                validate_resource_location(&kind, "entity type")?;
+                (kind, id)
             };
-            let name = match field(fields, "name") {
+            let name = match field(&inner, "name") {
                 Some(v) => Some(Box::new(parse_component(v, depth + 1, nodes)?)),
                 None => None,
             };
@@ -908,11 +1129,152 @@ fn parse_hover(nbt: &Nbt, depth: usize, nodes: &mut usize) -> Result<HoverEvent,
         }
         "custom" => {
             let id = get_str(fields, "id")?;
+            validate_resource_location(&id, "custom hover id")?;
             let payload = field(fields, "payload").cloned();
             HoverEvent::Custom { id, payload }
         }
         other => return Err(format!("unknown hover event action '{other}'")),
     })
+}
+
+/// The effective fields of a hover event: a `contents` compound, a pre-1.16
+/// `value` SNBT string, or the event's own fields (1.21.5+).
+fn hover_contents(fields: &[(String, Nbt)], what: &str) -> Result<Vec<(String, Nbt)>, String> {
+    if let Some(v) = field(fields, "contents") {
+        return Ok(as_compound(v, what)?.to_vec());
+    }
+    if let Some(Nbt::Str(s)) = field(fields, "value") {
+        let parsed =
+            crate::commands::snbt::parse(s).map_err(|e| format!("invalid {what} value: {e}"))?;
+        return Ok(as_compound(&parsed, what)?.to_vec());
+    }
+    Ok(fields.to_vec())
+}
+
+/// Normalise a UUID to the hyphenated 8-4-4-4-12 form the client codec emits
+/// and expects.
+fn normalize_uuid(uuid: &str) -> Result<String, String> {
+    validate_uuid(uuid)?;
+    let hex: String = uuid.chars().filter(|c| *c != '-').collect();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    ))
+}
+
+/// The sixteen named colours a [`TextColor`] accepts, plus a `#RRGGBB` hex
+/// value. Anything else is a value the client codec rejects.
+fn validate_color(color: &str) -> Result<(), String> {
+    const NAMED: &[&str] = &[
+        "black",
+        "dark_blue",
+        "dark_green",
+        "dark_aqua",
+        "dark_red",
+        "dark_purple",
+        "gold",
+        "gray",
+        "dark_gray",
+        "blue",
+        "green",
+        "aqua",
+        "red",
+        "light_purple",
+        "yellow",
+        "white",
+    ];
+    if NAMED.contains(&color) {
+        return Ok(());
+    }
+    if let Some(hex) = color.strip_prefix('#') {
+        if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(());
+        }
+    }
+    Err(format!("invalid colour '{color}'"))
+}
+
+/// A resource location (`namespace:path`, or a bare path). The client's
+/// codecs reject anything outside the allowed character set.
+fn validate_resource_location(value: &str, what: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{what} must not be empty"));
+    }
+    let (namespace, path) = match value.split_once(':') {
+        Some((ns, path)) => (ns, path),
+        None => ("minecraft", value),
+    };
+    let valid_ns = !namespace.is_empty()
+        && namespace
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '.'));
+    let valid_path = !path.is_empty()
+        && path.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '.' | '/')
+        });
+    if valid_ns && valid_path {
+        Ok(())
+    } else {
+        Err(format!("invalid {what} '{value}'"))
+    }
+}
+
+/// A string a client interpolates directly: no control characters, and a
+/// bounded length.
+fn validate_plain_value(value: &str, what: &str) -> Result<(), String> {
+    if value.chars().any(char::is_control) {
+        return Err(format!("{what} must not contain control characters"));
+    }
+    if value.chars().count() > 32_767 {
+        return Err(format!("{what} is too long"));
+    }
+    Ok(())
+}
+
+/// `open_url` accepts only an `http`/`https` URI, as the client's click-event
+/// codec does.
+fn validate_url(url: &str) -> Result<(), String> {
+    validate_plain_value(url, "url")?;
+    let lower = url.to_ascii_lowercase();
+    if (lower.starts_with("http://") || lower.starts_with("https://"))
+        && !url.chars().any(char::is_whitespace)
+    {
+        Ok(())
+    } else {
+        Err(format!("invalid url '{url}'"))
+    }
+}
+
+/// A command carried by a click event: no control characters, non-empty and
+/// bounded.
+fn validate_command(command: &str) -> Result<(), String> {
+    if command.is_empty() {
+        return Err("command must not be empty".into());
+    }
+    validate_plain_value(command, "command")
+}
+
+/// A UUID in either the hyphenated or the compact form.
+fn validate_uuid(uuid: &str) -> Result<(), String> {
+    let hex: String = uuid.chars().filter(|c| *c != '-').collect();
+    if hex.len() == 32 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(format!("invalid uuid '{uuid}'"))
+    }
+}
+
+/// A translation key: a non-empty dotted identifier, as the client's language
+/// table uses.
+fn validate_key(key: &str) -> Result<(), String> {
+    if key.is_empty() {
+        return Err("translation key must not be empty".into());
+    }
+    validate_plain_value(key, "translation key")
 }
 
 fn field<'a>(fields: &'a [(String, Nbt)], key: &str) -> Option<&'a Nbt> {
@@ -989,10 +1351,10 @@ fn json_object(fields: Vec<(String, String)>) -> String {
     format!("{{{body}}}")
 }
 
-fn json_list(items: &[TextComponent]) -> String {
+fn json_list(items: &[TextComponent], form: JsonForm) -> String {
     let body = items
         .iter()
-        .map(|c| c.to_json())
+        .map(|c| c.to_json_form(form))
         .collect::<Vec<_>>()
         .join(",");
     format!("[{body}]")
@@ -1021,6 +1383,66 @@ pub fn nbt_to_json(nbt: &Nbt) -> String {
         ),
         Nbt::IntArray(v) => json_numbers(v.iter().map(|i| *i as i64)),
         Nbt::LongArray(v) => json_numbers(v.iter().copied()),
+    }
+}
+
+/// Render an NBT value as SNBT, the form the old item/entity hover payloads
+/// and vanilla's non-interpreting NBT component use.
+pub fn nbt_snbt(nbt: &Nbt) -> String {
+    match nbt {
+        Nbt::Byte(v) => format!("{v}b"),
+        Nbt::Short(v) => format!("{v}s"),
+        Nbt::Int(v) => v.to_string(),
+        Nbt::Long(v) => format!("{v}L"),
+        Nbt::Float(v) => format!("{v}f"),
+        Nbt::Double(v) => format!("{v}d"),
+        Nbt::ByteArray(v) => {
+            let body = v
+                .iter()
+                .map(|b| format!("{b}b"))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[B;{body}]")
+        }
+        Nbt::Str(s) => quote(s),
+        Nbt::List(items) => {
+            let body = items.iter().map(nbt_snbt).collect::<Vec<_>>().join(",");
+            format!("[{body}]")
+        }
+        Nbt::Compound(fields) => {
+            let body = fields
+                .iter()
+                .map(|(k, v)| {
+                    let key = if k
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+'))
+                    {
+                        k.clone()
+                    } else {
+                        quote(k)
+                    };
+                    format!("{key}:{}", nbt_snbt(v))
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{body}}}")
+        }
+        Nbt::IntArray(v) => {
+            let body = v
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[I;{body}]")
+        }
+        Nbt::LongArray(v) => {
+            let body = v
+                .iter()
+                .map(|i| format!("{i}L"))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[L;{body}]")
+        }
     }
 }
 
@@ -1188,5 +1610,201 @@ mod tests {
         let json = nbt_to_json(&legacy);
         assert!(json.contains(r#""clickEvent":{"action":"open_file","value":"/tmp/a"}"#));
         assert!(json.contains(r#""hoverEvent":{"action":"show_text","contents":{"text":"t"}}"#));
+    }
+
+    #[test]
+    fn modern_show_entity_uses_id_for_type_and_uuid_for_the_uuid() {
+        let uuid = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
+        let c = parse(&format!(
+            r#"{{text:"x",hover_event:{{action:"show_entity",id:"minecraft:pig",uuid:"{uuid}",name:"Pig"}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            c.style.hover_event,
+            Some(HoverEvent::Entity {
+                kind: "minecraft:pig".into(),
+                id: uuid.into(),
+                name: Some(Box::new(TextComponent::text("Pig"))),
+            })
+        );
+        let modern = nbt_to_json(&c.to_nbt(NbtForm::Modern));
+        assert!(
+            modern.contains(&format!(
+                r#""hover_event":{{"action":"show_entity","id":"minecraft:pig","uuid":"{uuid}""#
+            )),
+            "{modern}"
+        );
+        assert!(!modern.contains(r#""type":"minecraft:pig""#), "{modern}");
+
+        // The legacy dialects keep `type` + `id`, and the parser accepts a
+        // component copied from one of them.
+        let legacy = nbt_to_json(&c.to_nbt(NbtForm::Legacy));
+        assert!(
+            legacy.contains(&format!(
+                r#""hoverEvent":{{"action":"show_entity","contents":{{"type":"minecraft:pig","id":"{uuid}""#
+            )),
+            "{legacy}"
+        );
+        let back = parse(&format!(
+            r#"{{text:"x",hoverEvent:{{action:"show_entity",type:"minecraft:pig",id:"{uuid}",name:"Pig"}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(back.style.hover_event, c.style.hover_event);
+    }
+
+    #[test]
+    fn json_show_text_uses_value_for_1_8_and_contents_for_1_16() {
+        let c = parse(r#"{text:"x",hover_event:{action:"show_text",value:"tip"}}"#).unwrap();
+        let legacy = c.to_json_form(JsonForm::Legacy8);
+        assert!(
+            legacy.contains(r#""hoverEvent":{"action":"show_text","value":{"text":"tip"}}"#),
+            "{legacy}"
+        );
+        assert!(!legacy.contains("contents"), "{legacy}");
+
+        let standard = c.to_json();
+        assert!(
+            standard.contains(r#""hoverEvent":{"action":"show_text","contents":{"text":"tip"}}"#),
+            "{standard}"
+        );
+    }
+
+    #[test]
+    fn legacy_hover_wrappers_match_each_client_generation() {
+        let item =
+            parse(r#"{text:"x",hoverEvent:{action:"show_item",id:"minecraft:stone",count:1}}"#)
+                .unwrap();
+        let v8 = item.to_json_form(JsonForm::Legacy8);
+        assert!(
+            v8.contains(r#""value":"{id:\"minecraft:stone\",Count:1b}""#),
+            "{v8}"
+        );
+        let json = item.to_json();
+        assert!(
+            json.contains(r#""contents":{"id":"minecraft:stone","count":1}"#),
+            "{json}"
+        );
+        let legacy_nbt = nbt_to_json(&item.to_nbt(NbtForm::Legacy));
+        assert!(
+            legacy_nbt.contains(r#""contents":{"id":"minecraft:stone","count":1}"#),
+            "{legacy_nbt}"
+        );
+        let modern_nbt = nbt_to_json(&item.to_nbt(NbtForm::Modern));
+        assert!(
+            modern_nbt.contains(r#""id":"minecraft:stone","count":1"#),
+            "{modern_nbt}"
+        );
+        assert!(!modern_nbt.contains("contents"), "{modern_nbt}");
+
+        let uuid = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
+        let entity = parse(&format!(
+            r#"{{text:"x",hoverEvent:{{action:"show_entity",type:"minecraft:pig",id:"{uuid}"}}}}"#
+        ))
+        .unwrap();
+        let v8 = entity.to_json_form(JsonForm::Legacy8);
+        assert!(
+            v8.contains(&format!(
+                r#""value":"{{type:\"minecraft:pig\",id:\"{uuid}\"}}""#
+            )),
+            "{v8}"
+        );
+        let json = entity.to_json();
+        assert!(
+            json.contains(&format!(
+                r#""contents":{{"type":"minecraft:pig","id":"{uuid}"}}"#
+            )),
+            "{json}"
+        );
+        let legacy_nbt = nbt_to_json(&entity.to_nbt(NbtForm::Legacy));
+        assert!(
+            legacy_nbt.contains(&format!(
+                r#""contents":{{"type":"minecraft:pig","id":"{uuid}"}}"#
+            )),
+            "{legacy_nbt}"
+        );
+    }
+
+    #[test]
+    fn a_compact_uuid_is_written_hyphenated() {
+        let c = parse(
+            r#"{text:"x",hover_event:{action:"show_entity",id:"minecraft:pig",uuid:"069a79f444e94726a5befca90e38aaf5"}}"#,
+        )
+        .unwrap();
+        let json = nbt_to_json(&c.to_nbt(NbtForm::Modern));
+        assert!(
+            json.contains("069a79f4-44e9-4726-a5be-fca90e38aaf5"),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn values_the_client_would_reject_are_refused_at_parse_time() {
+        for bad in [
+            r#"{text:"x",color:"bogus"}"#,
+            r##"{text:"x",color:"#12345"}"##,
+            r#"{text:"x",font:"Not A Font"}"#,
+            r#"{text:"x",clickEvent:{action:"open_url",value:"file:///etc/passwd"}}"#,
+            r#"{text:"x",clickEvent:{action:"open_url",value:"javascript:alert(1)"}}"#,
+            r#"{text:"x",clickEvent:{action:"run_command",value:"a\u0000b"}}"#,
+            r#"{text:"x",hoverEvent:{action:"show_item",id:"Stone",count:1}}"#,
+            r#"{text:"x",hoverEvent:{action:"show_entity",type:"minecraft:pig",id:"not-a-uuid"}}"#,
+        ] {
+            assert!(parse(bad).is_err(), "`{bad}` should not parse");
+        }
+        // The accepted forms stay accepted.
+        for good in [
+            r##"{text:"x",color:"#a0B1c2"}"##,
+            r#"{text:"x",font:"minecraft:default"}"#,
+            r#"{text:"x",clickEvent:{action:"open_url",value:"https://example.com/a?b=c"}}"#,
+            r#"{text:"x",clickEvent:{action:"run_command",value:"/say hi"}}"#,
+            r#"{text:"x",clickEvent:{action:"copy_to_clipboard",value:"hello"}}"#,
+            r#"{text:"x",clickEvent:{action:"show_dialog",dialog:"minecraft:server_links"}}"#,
+        ] {
+            assert!(
+                parse(good).is_ok(),
+                "`{good}` should parse: {:?}",
+                parse(good).err()
+            );
+        }
+    }
+
+    #[test]
+    fn check_limits_rejects_a_deep_payload_that_bypassed_snbt() {
+        let mut payload = Nbt::Byte(1);
+        for _ in 0..(MAX_DEPTH + 2) {
+            payload = Nbt::Compound(vec![("x".into(), payload)]);
+        }
+        let component = TextComponent {
+            content: Content::Text("x".into()),
+            style: Style {
+                click_event: Some(ClickEvent::Custom {
+                    id: "minecraft:test".into(),
+                    payload: Some(payload.clone()),
+                }),
+                hover_event: Some(HoverEvent::Item {
+                    id: "minecraft:stone".into(),
+                    count: 1,
+                    tag: None,
+                    components: Some(payload),
+                }),
+                ..Style::default()
+            },
+            extra: Vec::new(),
+        };
+        assert!(component.check_limits().is_err());
+    }
+
+    #[test]
+    fn deep_nbt_payloads_are_bounded_too() {
+        // A custom click payload nested beyond the component depth budget.
+        let mut payload = "1b".to_string();
+        for _ in 0..(MAX_DEPTH + 2) {
+            payload = format!("[{{a:{payload}}}]");
+            payload = format!("{{x:[{payload}]}}");
+        }
+        let component = format!(
+            r#"{{text:"x",clickEvent:{{action:"custom",id:"minecraft:test",payload:{payload}}}}}"#
+        );
+        assert!(parse(&component).is_err(), "deep payload must be refused");
     }
 }

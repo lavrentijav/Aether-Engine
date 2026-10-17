@@ -742,6 +742,38 @@ mod tests {
     }
 
     #[test]
+    fn legacy_item_and_entity_hovers_are_wrapped_in_contents() {
+        use crate::protocol::text::{HoverEvent, TextComponent};
+        let uuid = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
+        for hover in [
+            HoverEvent::Item {
+                id: "minecraft:stone".into(),
+                count: 1,
+                tag: None,
+                components: None,
+            },
+            HoverEvent::Entity {
+                kind: "minecraft:pig".into(),
+                id: uuid.into(),
+                name: None,
+            },
+        ] {
+            let mut component = TextComponent::text("x");
+            component.style.hover_event = Some(hover);
+            let (_id, body) = encode_one(&ServerEvent::ChatComponent(Box::new(component)));
+            assert!(
+                body.windows(8).any(|w| w == b"contents"),
+                "1.20.3–1.21.4 require the contents wrapper"
+            );
+            assert!(
+                body.windows(9).any(|w| w == b"show_item")
+                    || body.windows(11).any(|w| w == b"show_entity"),
+                "the hover action must be present"
+            );
+        }
+    }
+
+    #[test]
     fn a_use_then_release_routes_a_trident_stand_in_to_the_real_spear() {
         // A 1.20.4 client has no spears; the compat layer shows it a trident.
         // Its use and release must run the *real* spear's charge, not the
