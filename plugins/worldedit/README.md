@@ -1,12 +1,13 @@
-# worldedit — selection, fill and history (CMD-36a)
+# worldedit — selection, clipboard, schematics and brushes (CMD-36)
 
 A **native** (tier N) Aether plugin: a Rust crate linked into the server
-in-process. It owns the player selection and the `//` commands; the batched
-writes, atomic journal revision, undo journal and budgeted publication are the
-**core** bulk-edit API (`aether_server::bulk`, CMD-30a/30b). It never keeps a
-second write path.
+in-process. It owns the player selection, clipboard, history, schematics and
+brushes; the batched writes, atomic journal revision, undo journal and budgeted
+publication are the **core** bulk-edit API (`aether_server::bulk`, CMD-30a/30b).
+It never keeps a second write path.
 
-- Task: [`docs/tasks/CMD-36a-worldedit-selection.md`](../../docs/tasks/CMD-36a-worldedit-selection.md)
+- Selection/fill task: [`docs/tasks/CMD-36a-worldedit-selection.md`](../../docs/tasks/CMD-36a-worldedit-selection.md)
+- Clipboard task: [`docs/tasks/CMD-36b-worldedit-clipboard.md`](../../docs/tasks/CMD-36b-worldedit-clipboard.md)
 - Umbrella: [`docs/tasks/CMD-36-worldedit-plugin.md`](../../docs/tasks/CMD-36-worldedit-plugin.md)
 - Core: [`docs/design/bulk-edit.md`](../../docs/design/bulk-edit.md)
 
@@ -25,17 +26,26 @@ command registry stores the name without the slash, so the plugin declares
 | replace | `//replace [<filter>] <pattern>` | `worldedit.region.replace` | 2 |
 | walls | `//walls <pattern>` | `worldedit.region.walls` | 2 |
 | outline | `//outline <pattern>` | `worldedit.region.outline` | 2 |
+| copy | `//copy` | `worldedit.clipboard.copy` | 0 |
+| cut | `//cut` | `worldedit.clipboard.cut` | 2 |
+| paste | `//paste [-a] [-o] [-s]` | `worldedit.clipboard.paste` | 2 |
+| rotate | `//rotate <y> [x] [z]` | `worldedit.clipboard.rotate` | 0 |
+| flip | `//flip [dir]` | `worldedit.clipboard.flip` | 0 |
+| stack | `//stack <n> [dir]` | `worldedit.clipboard.stack` | 2 |
+| move | `//move <n> [dir]`, `//move <dir> <n>` | `worldedit.region.move` | 2 |
+| schematics | `//schem save\|load\|list\|paste <name>` | `worldedit.schematic` | 2 |
+| brush | `//brush sphere\|cyl\|smooth\|clear`, `/brush` | `worldedit.brush` | 2 |
+| mask | `//mask [<filter>]`, `/mask clear` | `worldedit.brush.mask` | 0 |
 | history | `//undo [<n>]`, `//redo [<n>]` | `worldedit.history.undo` / `worldedit.history.redo` | 2 |
 
-Selection and the wand are **op 0** (public), because reading a selection or
-receiving the wand changes nothing. The commands that write the world and the
-history that can replay those writes are **op 2** — the same level as the core
-`/fill`, `/setblock` and `/clone`. This matters because op 0 declares the node
-`Allow`: an op-0 `//set` would let any player bulk-edit unprotected terrain.
-An operator who wants a player to build with WorldEdit grants the
-`worldedit.region.*` / `worldedit.history.*` nodes (CMD-01/02); the command
-registry checks the node and op level before the plugin sees the command,
-exactly like a core command.
+Selection, the wand, reading the clipboard into memory and changing the
+clipboard's orientation are **op 0**. Commands that write the world — directly
+or through a brush — and the history that can replay those writes are **op 2**,
+the same level as the core `/fill`, `/setblock` and `/clone`. `//schem` is op 2
+as a whole because `//schem paste` writes the world and `save` writes a file.
+An operator who wants a player to build with WorldEdit grants the relevant
+nodes (CMD-01/02); the command registry checks the node and op level before the
+plugin sees the command, exactly like a core command.
 
 `//pos1` / `//pos2` without an argument use the player's current block cell.
 With arguments they use the core coordinate parser (CMD-06a), so absolute,
@@ -57,8 +67,9 @@ filter and then a pattern.
 - `#existing` — the block already at each position.
 - `#hand` — the block held in the main hand.
 - `#pos1` — the block at selection position 1.
-- `#clipboard` — the clipboard pattern. Copy/cut/paste is CMD-36b; until then
-  the clipboard is empty and this pattern reports an error.
+- `#clipboard` — the copied block at the same relative position in the
+  selection. A selection larger than the clipboard, or an empty clipboard, is
+  an error and no edit starts.
 
 `//replace`'s filter is a comma-separated list of block names (a weight prefix
 is accepted and ignored) or `#existing` for “not air”. Without a filter the
@@ -82,11 +93,117 @@ The selection is per session, is reset when the player leaves, and is not
 persisted across a restart. This is the WorldEdit session model (a stale
 selection from a reused entity id is worse than no selection).
 
+## Clipboard
+
+`//copy` captures the selection into an in-memory per-player clipboard: its
+size, the block state at every cell (air included) and its offset relative to
+the player's block position at copy time. The clipboard is reset when the
+player leaves. It is deliberately not persisted; schematics are.
+
+`//paste` places the clipboard at the player's current position plus that
+offset, so staying still reproduces the copy in place and walking somewhere
+else shifts it by the same delta.
+
+- Default: every clipboard cell is written only where the target is air, so a
+  paste does not demolish existing builds.
+- `-o`: overwrite — write every cell regardless of what is at the target,
+  air included.
+- `-a`: skip air — do not write air from the clipboard (useful with `-o` to
+  stamp a shape without a bounding-box hole).
+- `-s`: select the pasted region after the edit (the clipboard footprint, not
+  just the non-air cells).
+- An unknown option, an empty clipboard, or a clipboard over the core limit is
+  an error **before** an edit handle is created.
+
+`//cut` copies the selection and then replaces it with air in one atomic
+revision. The clipboard still holds the cut blocks, including air.
+
+`//rotate <y> [x] [z]` rotates the clipboard **about the copy origin** (the
+player's position when `//copy` ran), which is what WorldEdit does, in 90°
+steps. The origin-relative offset is transformed with the footprint, so a
+bar copied from its middle still passes through the origin after a rotation
+instead of pivoting about its old minimum corner. Angles are applied in Y, X,
+Z order; every angle must be a multiple of 90 (negative angles and full turns
+are accepted). `//flip [dir]` mirrors about the same origin along the axis
+named by the direction: north/south flips Z, east/west flips X, up/down flips
+Y; without a direction it uses the player's facing. Flipping twice with the
+same direction returns the original.
+
+Both transforms also rotate or mirror directional block states: `facing`,
+`axis` (logs, pillars), stair `shape` left/right, chest `type`, rail/jigsaw
+compass shapes (re-spelled in vanilla's canonical order, so an east/west rail
+stays `east_west`), all 16 sign/banner `rotation` steps, crafter/jigsaw
+`orientation` (one vertical plus one horizontal face), and `half`/`type`
+top/bottom under a vertical mirror. A rotation about X or Z that would turn a
+horizontal rail into a vertical one leaves that state unchanged, because
+vanilla has no such state; a vertical mirror of an `orientation` whose top
+would become `down` falls back to the nearest representable value.
+
+`//stack <n> [dir]` copies the selection `n` times in a direction, stepping by
+the selection's size on that axis. It is one bulk commit. The default direction
+is the player's facing; the selection is expanded to cover the source and all
+copies. A stack whose written volume (the copies only; the source is
+unchanged) exceeds the limit is refused before the edit starts.
+
+`//move <n> [dir]` (also `//move <dir> <n>`) moves the selection by `n` blocks
+in one atomic revision: the source becomes air and the destination receives
+the copied snapshot, including overlap. The selection follows the destination.
+Both the source and destination cells are region-checked.
+
+## Schematics
+
+`//schem save <name>` writes the clipboard as a gzip-NBT `.schem` file
+(Sponge schematic version 2: `Version`, `DataVersion`, `Width`, `Height`,
+`Length`, `Offset` = the absolute minimum point, `Palette`, `PaletteMax`,
+`BlockData`, an empty `BlockEntities` list and a `Metadata` compound with
+`WEOffsetX/Y/Z` = the minimum relative to the copy origin). `//schem load
+<name>` reads one back, preferring that metadata for relative placement so a
+real WorldEdit file lands at the player; a file without the metadata treats
+its absolute minimum as the origin; `//schem list` prints the names;
+`//schem paste <name>` loads and pastes in one command, accepting the same
+`-a`/`-o`/`-s` flags. The reader caps the inflated size and checks the
+dimensions against the volume limit before allocating the block vector, so a
+crafted or simply huge file cannot exhaust memory.
+
+Names are a single file stem: ASCII letters, digits, `_` and `-`, at most 64
+characters. The host validates the name again and writes under
+`<world_dir>/schematics/<name>.schem`, so a name can never escape that
+directory. The files survive a restart because the plugin sends bytes over the
+`worldedit.host` service and the host owns the filesystem.
+
+## Brushes
+
+`//brush` (and `/brush`) binds a brush to the item held when the command runs:
+
+- `//brush sphere <pattern> [radius]` — default radius 2.
+- `//brush cyl <pattern> <radius> [height]` — default height 1; the cylinder is
+  centred on the clicked cell.
+- `//brush smooth [radius]` — default radius 3; removes blocks inside the
+  sphere, optionally restricted by the mask.
+- `//brush clear` removes the bound brush.
+
+The volume limit counts the brush's exact lattice cells, not its bounding
+cube: a radius-6 sphere is 925 blocks, not 2,197, so it is accepted under a
+1,000-block limit. The count stops as soon as it exceeds the limit.
+- `//brush` with no arguments prints the current brush.
+
+`//mask <filter>` / `/mask <filter>` sets a brush mask with the same filter
+syntax as `//replace` (`#existing` = not air, or a block list). `/mask clear`
+removes it.
+
+A brush applies with **right-click** on a block while holding its bound item;
+left-click is also accepted. The click is cancelled. Every application is a
+normal core bulk edit: target cells are region-checked, the volume limit is
+checked before the edit, the whole application is one journal revision, and
+`//undo` covers it. The bound item is the configured `brush-item` when the
+player was holding nothing at bind time (default `minecraft:blaze_rod`).
+
 ## Limits, region protection and attribution
 
 - The maximum edit volume is the core bulk-edit limit
   (`aether_server::bulk::DEFAULT_MAX_BLOCKS`, 1,000,000 distinct positions).
-  A selection over it is refused **before** an edit handle is created.
+  A selection, clipboard, stack, move or brush over it is refused **before** an
+  edit handle is created.
 - The plugin stages a whole operation first; a failed item aborts the edit and
   leaves the world untouched. A successful commit is one atomic journal
   revision (`EventBody::BlockGroup`) attributed to the player's UUID.
@@ -94,11 +211,14 @@ selection from a reused entity id is worse than no selection).
   is the core `BulkPublisher`, driven by the `[bulk]` per-tick budget
   (`cells_per_tick`, `columns_per_tick`, `hooks_per_tick`). The plugin does not
   invent its own tick budget.
-- Before an edit the plugin asks the core region check (CMD-29b) about every
-  cell in the selection with `Action::Place`. If any protected region denies
-  it, the whole edit is refused. The existing bypass nodes
-  (`aether.region.bypass` and `worldguard.region.bypass.<world>`) are honoured
-  by the core check; the plugin has no separate bypass.
+- Before an edit the plugin asks the core region check (CMD-29b) about the
+  **cells it will touch**: the selection for fill/cut, the exact writes for
+  paste/stack/move and the brush sphere/cylinder. A corner of a protected
+  region does not refuse an unrelated paste that only shares its bounding box.
+  If any protected region denies a cell, the whole edit is refused. The
+  existing bypass nodes (`aether.region.bypass` and
+  `worldguard.region.bypass.<world>`) are honoured by the core check; the
+  plugin has no separate bypass.
 - **`//undo` and `//redo` run the same check** over the cells the revision
   actually changed, before the inverse is written. A player who filled
   wilderness cannot undo over a region somebody else defined there afterwards;
@@ -108,7 +228,8 @@ selection from a reused entity id is worse than no selection).
 Undo/redo keeps a bounded per-player stack (default 20, configurable up to
 1000). Undo is a new journal revision attributed to the same author, so it is
 auditable and can itself be undone; `//redo` is the undo of that revision. A
-new edit clears the redo stack.
+new edit clears the redo stack. Clipboard, transforms, cut, paste, stack, move
+and brush applications all go through the same stack.
 
 ## Configuration
 
@@ -118,39 +239,43 @@ its own):
 ```toml
 [plugins.worldedit]
 enabled = true
-config = { wand-item = "minecraft:wooden_axe", history-size = "20", max-volume = "250000" }
+config = { wand-item = "minecraft:wooden_axe", brush-item = "minecraft:blaze_rod", history-size = "20", max-volume = "250000" }
 ```
 
-The plugin asks for `log`, `config`, `world.read`, `world.write` and
-`players` — only what it uses (selection and history are in memory, so no
-`storage.kv`, and nothing probes features, so no `supports`). As with every
-native plugin, grants are deny-by-default: list the capabilities under
-`[plugins.worldedit]` as well.
+The plugin asks for `log`, `config`, `world.read`, `world.write` and `players` —
+only what it uses (clipboard, selection and history are in memory; schematics
+go through the host service, so no `storage.kv`; nothing probes features, so no
+`supports`). As with every native plugin, grants are deny-by-default: list the
+capabilities under `[plugins.worldedit]` as well.
 
 `max-volume` lowers the maximum edit volume (default and hard ceiling is the
 core `aether_server::bulk::DEFAULT_MAX_BLOCKS`, 1,000,000 distinct blocks). The
 same value is used by the plugin's pre-check and by `BulkEdit::with_limit`, so
-the refusal message and the actual transaction agree.
+the refusal message and the actual transaction agree. Schematic files live
+under `<world_dir>/schematics`; there is no separate setting.
 
 The edit path is a host service, `worldedit.host@0.1`, declared in
 `crates/aether-plugin/src/worldedit.rs` and implemented in
 `crates/aether-server/src/worldedit.rs`. The service owns the `BulkEdit`
-handles, the `BulkHistory`, the region check and the coordinate parsing; the
-plugin owns pattern parsing, selection state, command grammar and history
-stacks. A native plugin cannot depend on `aether-server` without a cycle, so
-the service is the API seam.
+handles, the `BulkHistory`, the region check, coordinate parsing and schematic
+files; the plugin owns pattern parsing, selection/clipboard/brush state,
+command grammar, transforms, `.schem` encoding and history stacks. A native
+plugin cannot depend on `aether-server` without a cycle, so the service is the
+API seam.
 
 ## Wiring
 
 The server compiles the plugin behind its `plugins` feature and installs it in
 `install_native` (`crates/aether-server/src/plugins.rs`), after registering the
-`worldedit.host@0.1` service. It still requires `[plugins] dir` as the
-subsystem master switch and `[plugins.worldedit] enabled = false` skips it.
+`worldedit.host@0.1` service with `<world_dir>/schematics` as its schematic
+directory. It still requires `[plugins] dir` as the subsystem master switch and
+`[plugins.worldedit] enabled = false` skips it.
 
 ## Tests
 
 ```sh
-cargo-locked test -p aether-worldedit-plugin -p aether-server --lib worldedit
+cargo-locked test -p aether-worldedit-plugin
+cargo-locked test -p aether-server --lib worldedit
 ```
 
 The plugin suite covers: a legal `//set` committing once, an over-limit
@@ -160,17 +285,25 @@ multi-step undo/redo with bounded history, explicit and facing-relative
 expand/contract on every axis/direction, a selection across chunk borders, a
 protected region refusing the edit, selection reset on leave, a stale
 selection from another world, the wand and its two clicks, absolute and
-relative positions, `#existing`/`#pos1`/`#existing`-filter patterns, and the
-op-level/capability manifest. The server suite covers the real service over
-the core `BulkEdit`/journal (one revision, undo restores exactly), the core
-and configured limits, region denial plus an operator bypass on a fill **and
-on an undo over a region defined afterwards**, undo-handle scoping to its
-plugin, the core coordinate parser, block resolution and hand lookup. The tree
-suite drives `//name` through the real dispatcher fallback.
+relative positions, `#existing`/`#pos1`/`#clipboard` patterns, and the
+op-level/capability manifest. For CMD-36b it adds: copy/paste in place and
+after the player moves, the `-a`/`-o`/`-s` paste semantics, rotate
+90/180/270 plus an invalid angle, the rotation pivot with the player away from
+the minimum corner, directional state transforms (stairs, log axis, rails),
+flip twice and every axis, stack direction and its exact written volume, both
+move argument orders and source clearing, cut filling the clipboard and
+clearing the selection, schematic save/load/list/paste across a plugin restart,
+an external WorldEdit/Sponge v2 fixture (absolute `Offset`, metadata-relative
+placement), gzip-NBT round-trip and rejection of a non-gzip/truncated/oversized
+file and a decompression bomb, brush application through the bulk path with
+undo, the exact brush lattice count at the limit, brush and region denial, a
+mask-limited brush, empty-clipboard errors and an over-limit clipboard refused
+before any edit starts.
 
-## Not in this slice
-
-Clipboard (`//copy`, `//cut`, `//paste`), transforms (`//rotate`, `//flip`,
-`//stack`, `//move`), schematics and brushes are CMD-36b. `#clipboard` is
-recognised now so a pattern fails clearly rather than being read as a block
-name.
+The server suite covers the real service over the core
+`BulkEdit`/journal (one revision, undo restores exactly), the core and
+configured limits, region denial plus an operator bypass on a fill **and on an
+undo over a region defined afterwards**, undo-handle scoping to its plugin, the
+core coordinate parser, block resolution and hand lookup, and schematic files
+surviving a new host. The tree suite drives `//name` through the real
+dispatcher fallback.

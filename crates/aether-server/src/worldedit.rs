@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aether_api::{JournalActor, World};
-use aether_plugin::worldedit::{EditOutcome, PlayerView, WorldEditHost};
+use aether_plugin::worldedit::{valid_schematic_name, EditOutcome, PlayerView, WorldEditHost};
 use aether_world::KvBackend;
 use aether_worldgen::ChunkGenerator;
 
@@ -29,6 +30,9 @@ pub struct Host<B: KvBackend + Send + Sync + 'static, G: ChunkGenerator + Send +
     /// the service still scopes them to the caller that committed the edit so
     /// one plugin cannot undo another's revision.
     history_owners: Mutex<BTreeMap<u64, String>>,
+    /// Where `.schem` files live. `None` (a unit fixture) refuses saves rather
+    /// than writing somewhere the operator did not choose.
+    schematic_dir: Option<PathBuf>,
 }
 
 impl<B, G> Host<B, G>
@@ -37,6 +41,18 @@ where
     G: ChunkGenerator + Send + Sync + 'static,
 {
     pub fn new(world: Arc<World<B, G>>, registry: SharedRegistry, max_volume: usize) -> Self {
+        Self::with_schematics(world, registry, max_volume, None)
+    }
+
+    /// The production constructor: every schematic is a gzip-NBT `.schem` file
+    /// under `dir`, so it survives a restart. The plugin only moves bytes; the
+    /// path and extension are the host's.
+    pub fn with_schematics(
+        world: Arc<World<B, G>>,
+        registry: SharedRegistry,
+        max_volume: usize,
+        schematic_dir: Option<PathBuf>,
+    ) -> Self {
         Host {
             world,
             registry,
@@ -45,7 +61,19 @@ where
             next_edit: AtomicU64::new(1),
             history: Mutex::new(BulkHistory::new(64)),
             history_owners: Mutex::new(BTreeMap::new()),
+            schematic_dir,
         }
+    }
+
+    fn schematic_path(&self, name: &str) -> Result<PathBuf, String> {
+        let dir = self
+            .schematic_dir
+            .as_ref()
+            .ok_or_else(|| "schematic storage is not configured".to_string())?;
+        if !valid_schematic_name(name) {
+            return Err(format!("invalid schematic name `{name}`"));
+        }
+        Ok(dir.join(format!("{name}.schem")))
     }
 
     /// Remember `undo_id` as issued to `caller`, pruning the oldest entries so
@@ -81,7 +109,7 @@ where
     }
 
     /// The core region check (CMD-29b) over `cells`, as `player`.
-    fn check_cells(
+    fn check_region(
         &self,
         player: u64,
         cells: impl Iterator<Item = [i32; 3]>,
@@ -194,12 +222,16 @@ where
                 self.max_volume
             ));
         }
-        self.check_cells(
+        self.check_region(
             player,
             (min[0]..=max[0]).flat_map(|x| {
                 (min[1]..=max[1]).flat_map(move |y| (min[2]..=max[2]).map(move |z| [x, y, z]))
             }),
         )
+    }
+
+    fn check_cells(&self, _caller: &str, player: u64, cells: &[[i32; 3]]) -> Result<(), String> {
+        self.check_region(player, cells.iter().copied())
     }
 
     fn begin_edit(&self, caller: &str, player: u64, expected_volume: usize) -> Result<u64, String> {
@@ -315,7 +347,7 @@ where
         let revision = history
             .revision_changes(&*self.world, undo_id)
             .map_err(|e| e.to_string())?;
-        self.check_cells(player, revision.iter().map(|c| [c.x, c.y, c.z]))?;
+        self.check_region(player, revision.iter().map(|c| [c.x, c.y, c.z]))?;
         let result = history
             .undo(&*self.world, undo_id)
             .map_err(|e| e.to_string())?;
@@ -348,6 +380,43 @@ where
             .resolve_block(handle.as_ref())
             .map_err(|e| e.message())?;
         Ok([pos.x, pos.y, pos.z])
+    }
+
+    fn save_schematic(&self, _caller: &str, name: &str, bytes: &[u8]) -> Result<(), String> {
+        let path = self.schematic_path(name)?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("cannot create schematic directory: {e}"))?;
+        }
+        std::fs::write(&path, bytes).map_err(|e| format!("cannot save schematic `{name}`: {e}"))
+    }
+
+    fn load_schematic(&self, _caller: &str, name: &str) -> Result<Option<Vec<u8>>, String> {
+        let path = self.schematic_path(name)?;
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("cannot load schematic `{name}`: {e}")),
+        }
+    }
+
+    fn list_schematics(&self, _caller: &str) -> Vec<String> {
+        let Some(dir) = self.schematic_dir.as_deref() else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "schem"))
+            .filter_map(|entry| {
+                let name = entry.path().file_stem()?.to_str()?.to_string();
+                valid_schematic_name(&name).then_some(name)
+            })
+            .collect();
+        names.sort();
+        names
     }
 }
 
@@ -575,6 +644,51 @@ mod tests {
         assert!(host
             .check_build("worldedit", 1, pos(0, 20, 0), pos(1, 20, 0))
             .is_ok());
+    }
+
+    #[test]
+    fn schematics_are_files_that_survive_a_new_host() {
+        let dir = std::env::temp_dir().join(format!(
+            "aether-worldedit-schem-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let world = world();
+        let registry = registry(&[(1, "Steve", 0.0, 64.0, 0.0, 0.0)]);
+        let host = Host::with_schematics(
+            Arc::clone(&world),
+            Arc::clone(&registry),
+            bulk::DEFAULT_MAX_BLOCKS,
+            Some(dir.clone()),
+        );
+        host.save_schematic("worldedit", "house", b"gzip-nbt")
+            .unwrap();
+        assert_eq!(
+            host.load_schematic("worldedit", "house")
+                .unwrap()
+                .as_deref(),
+            Some(&b"gzip-nbt"[..])
+        );
+        assert!(host.save_schematic("worldedit", "../escape", b"x").is_err());
+
+        let restarted =
+            Host::with_schematics(world, registry, bulk::DEFAULT_MAX_BLOCKS, Some(dir.clone()));
+        assert_eq!(
+            restarted
+                .load_schematic("worldedit", "house")
+                .unwrap()
+                .as_deref(),
+            Some(&b"gzip-nbt"[..])
+        );
+        assert_eq!(restarted.list_schematics("worldedit"), vec!["house"]);
+        assert!(restarted
+            .load_schematic("worldedit", "missing")
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
