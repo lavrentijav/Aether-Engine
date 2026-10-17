@@ -1,26 +1,71 @@
-//! Bulk-edit throughput: blocks written and committed per second.
+//! Bulk-edit throughput and the CMD-30b per-tick publish budget.
 //!
-//! One revision of a `32×16×32` fill (16,384 blocks) is staged and committed
-//! each iteration, flipping the block between runs so every commit is a real
-//! change rather than a no-op. The columns are generated once up front, so the
-//! number is the write + journal cost the bulk path owns, not worldgen.
+//! Three groups:
 //!
-//! This is CMD-30a's half of the performance story — the batched write and the
-//! one-revision commit — plus CMD-30b's tick budget: one `BulkPublisher::step`
-//! over a large queued edit, with the default per-tick caps. The step's setup
-//! (cloning the change list into the queue) is excluded by `iter_batched`, so
-//! the number is the publish work a tick actually pays.
+//! * `bulk_edit/commit_fill_32x16x32` — the synchronous write half (CMD-30a):
+//!   stage and commit one revision of 16,384 blocks. This is the half the
+//!   design note says must run **off** the tick thread.
+//! * `bulk_publish/*` — the tick-visible half, split by the phase a real tick
+//!   can be in when the budget ends:
+//!   - `settle_step`: one default settle slice;
+//!   - `settle_to_resend_step`: the step that finishes the last slice and then
+//!     re-sends the touched columns **through the real 1.21.11 column
+//!     encoder** (palette + light + compression framing), the worst combined
+//!     settle/re-send step;
+//!   - `hooks_step`: a step that only fires `hooks_per_tick` callbacks;
+//!   - `sparse_settle_step`: the worst shape-settle case — changed cells are
+//!     isolated, so each pays the cell reshape plus six unchanged neighbours
+//!     (up to seven `reshape` calls per budgeted cell), unlike the dense fill
+//!     whose interior cells have only changed neighbours.
+//!
+//! Setup (building the committed change list, and for the phase benches the
+//! earlier slices) is excluded by `iter_batched`, so each number is the work a
+//! tick actually pays in that phase. Read absolute times as load-sensitive on
+//! the shared builder; the group is meaningful as a ratio to the 50 ms tick.
+//!
+//! ```text
+//! export CARGO_TARGET_DIR=/srv/dev/build/aether-target CARGO_INCREMENTAL=0
+//! cargo-locked bench -p aether-server --bench bulk_edit
+//! ```
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use std::time::Duration;
 
 use aether_api::{block_ids, BlockStateId, JournalActor, MemStore, World};
 use aether_server::bulk::{BulkEdit, BulkPublisher, PublishBudget, PublishSink};
+use aether_server::protocol::{codec_for, BlockSource, ColumnView, ServerEvent};
 use aether_worldgen::FlatGenerator;
 
 const SIDE: i32 = 32;
 const HEIGHT: i32 = 16;
 const BASE_Y: i32 = 64;
+
+type BenchWorld = World<MemStore, FlatGenerator>;
+
+/// The bench world seen as a `BlockSource`, the exact view a codec reads. The
+/// whole-column snapshot makes the encode see one state, as on a live server.
+struct BenchSource<'a>(&'a BenchWorld);
+
+impl BlockSource for BenchSource<'_> {
+    fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+        self.0.get_block(x, y, z)
+    }
+    fn copy_section(&self, cx: i32, cy: i32, cz: i32, out: &mut [BlockStateId; 4096]) {
+        self.0.copy_section(cx, cy, cz, out);
+    }
+    fn section_y_range(&self) -> (i32, i32) {
+        (-4, 23)
+    }
+    fn copy_column(
+        &self,
+        cx: i32,
+        cz: i32,
+        cy_min: i32,
+        cy_max: i32,
+    ) -> Option<Vec<Box<[BlockStateId; 4096]>>> {
+        Some(self.0.copy_column_sections(cx, cz, cy_min, cy_max))
+    }
+}
 
 fn bench_bulk_commit(c: &mut Criterion) {
     let world = World::new(MemStore::new(), FlatGenerator::classic());
@@ -94,26 +139,90 @@ impl PublishSink for CountingSink {
     }
 }
 
+/// A sink that encodes every re-sent column with the real codec, so the number
+/// includes palette packing, the light pass and framing — what a viewer's tick
+/// actually costs.
+struct WireSink<'a> {
+    source: &'a dyn BlockSource,
+    codec: &'static dyn aether_server::protocol::ProtocolCodec,
+    columns: u64,
+    bytes: u64,
+}
+
+impl PublishSink for WireSink<'_> {
+    fn resend_column(&mut self, cx: i32, cz: i32) {
+        // The exact shape the render path uses: one whole-column snapshot,
+        // then the codec reads every block and the light pass from it.
+        let view = ColumnView::new(self.source, cx, cz);
+        let packets = self
+            .codec
+            .encode(&ServerEvent::ChunkColumn { cx, cz }, &view);
+        self.columns += 1;
+        self.bytes += packets
+            .iter()
+            .map(|p| p.frame(None).len() as u64)
+            .sum::<u64>();
+    }
+    fn after_block_break(
+        &mut self,
+        _actor: JournalActor,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _was: BlockStateId,
+    ) {
+    }
+    fn after_block_place(
+        &mut self,
+        _actor: JournalActor,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _now: BlockStateId,
+    ) {
+    }
+}
+
+fn committed_fill(
+    world: &BenchWorld,
+    x1: i32,
+    y1: i32,
+    z1: i32,
+    x2: i32,
+    y2: i32,
+    z2: i32,
+) -> aether_server::bulk::BulkCommit {
+    let mut edit = BulkEdit::new(JournalActor(1));
+    edit.fill(world, (x1, y1, z1), (x2, y2, z2), block_ids::STONE)
+        .unwrap();
+    edit.commit_with_changes(world).unwrap()
+}
+
 fn bench_bulk_publish(c: &mut Criterion) {
     let world = World::new(MemStore::new(), FlatGenerator::classic());
-    // A 64x16x64 edit: 65,536 changed blocks over 16 columns. Small enough to
-    // build the committed change list once, large enough that one default
-    // step (16,384 cells) is a real slice rather than the whole job.
-    let mut edit = BulkEdit::new(JournalActor(1));
-    edit.fill(&world, (0, 64, 0), (63, 79, 63), block_ids::STONE)
-        .unwrap();
-    let committed = edit.commit_with_changes(&world).unwrap();
-    let blocks = committed.result.changed as u64;
+    // 64x16x64 = 65,536 changed blocks over 16 columns: four default settle
+    // slices, then the re-sends.
+    let dense = committed_fill(&world, 0, 100, 0, 63, 115, 63);
+    let blocks = dense.result.changed as u64;
+    let source = BenchSource(&world);
+    let codec = codec_for(773).expect("the 1.21.11 codec");
+
+    // A job whose default settle slice is one slice short of finishing, so
+    // the measured step settles the remainder and enters Resend in the same
+    // tick. Disjoint from `dense`, or the fill would be a no-op (already
+    // stone) and the first slice would finish the whole job.
+    let transition = committed_fill(&world, 0, 200, 0, 63, 201, 65);
 
     let mut group = c.benchmark_group("bulk_publish");
     group.throughput(Throughput::Elements(blocks));
     group.sample_size(30);
     group.measurement_time(Duration::from_secs(5));
-    group.bench_function("step_default_tick_budget", |b| {
+
+    group.bench_function("settle_step", |b| {
         b.iter_batched(
             || {
                 let mut publisher = BulkPublisher::new();
-                publisher.enqueue(committed.actor, committed.changes.clone());
+                publisher.enqueue(dense.actor, dense.changes.clone());
                 publisher
             },
             |mut publisher| {
@@ -124,6 +233,96 @@ fn bench_bulk_publish(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
+
+    group.bench_function("settle_to_resend_step_real_encoder", |b| {
+        b.iter_batched(
+            || {
+                let mut publisher = BulkPublisher::new();
+                publisher.enqueue(transition.actor, transition.changes.clone());
+                let mut sink = CountingSink::default();
+                let first = publisher.step(&world, &mut sink, PublishBudget::default());
+                debug_assert_eq!(first.remaining, 1, "the first slice must not finish it");
+                publisher
+            },
+            |mut publisher| {
+                let mut sink = WireSink {
+                    source: &source,
+                    codec,
+                    columns: 0,
+                    bytes: 0,
+                };
+                let progress = publisher.step(&world, &mut sink, PublishBudget::default());
+                black_box((progress, sink.columns, sink.bytes))
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("hooks_step", |b| {
+        b.iter_batched(
+            || {
+                let mut publisher = BulkPublisher::new();
+                publisher.enqueue(dense.actor, dense.changes.clone());
+                let mut sink = CountingSink::default();
+                // Settle and re-send everything, then fire exactly one hook;
+                // the measured step is the remaining hook slice.
+                let first = publisher.step(
+                    &world,
+                    &mut sink,
+                    PublishBudget {
+                        cells: usize::MAX,
+                        columns: usize::MAX,
+                        hooks: 1,
+                    },
+                );
+                debug_assert_eq!(first.hooks, 1);
+                debug_assert_eq!(first.remaining, 1);
+                publisher
+            },
+            |mut publisher| {
+                let mut sink = CountingSink::default();
+                let progress = publisher.step(&world, &mut sink, PublishBudget::default());
+                black_box((progress, sink.hooks))
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Worst shape work per budgeted cell: isolated changes, so every cell
+    // pays its own reshape and six unchanged-neighbour reshapes.
+    let mut sparse_edit = BulkEdit::new(JournalActor(1));
+    let mut placed = 0;
+    'outer: for x in (0..64).step_by(2) {
+        for z in (0..64).step_by(2) {
+            // Every coordinate is even, so all six neighbours are odd
+            // (unchanged) cells: the full cell + six-neighbour reshape cost.
+            for y in (300..332).step_by(2) {
+                sparse_edit.set(&world, x, y, z, block_ids::STONE).unwrap();
+                placed += 1;
+                if placed == 16_384 {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    let sparse = sparse_edit.commit_with_changes(&world).unwrap();
+    debug_assert_eq!(sparse.result.changed, 16_384);
+    group.bench_function("sparse_settle_step", |b| {
+        b.iter_batched(
+            || {
+                let mut publisher = BulkPublisher::new();
+                publisher.enqueue(sparse.actor, sparse.changes.clone());
+                publisher
+            },
+            |mut publisher| {
+                let mut sink = CountingSink::default();
+                let progress = publisher.step(&world, &mut sink, PublishBudget::default());
+                black_box((progress, sink.columns, sink.hooks))
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
     group.finish();
 }
 

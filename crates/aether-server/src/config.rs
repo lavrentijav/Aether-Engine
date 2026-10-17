@@ -645,9 +645,11 @@ pub enum HiddenFill {
 /// tick when one is reached.
 ///
 /// The defaults were measured with `cargo-locked bench -p aether-server
-/// --bench bulk_edit` (see `docs/design/bulk-edit.md`): a budget step stays
+/// --bench bulk_edit` (see `docs/design/bulk-edit.md`): each phase's step stays
 /// well under one 50 ms tick on the target machine, and a one-million-block
-/// fill finishes in a few seconds rather than stalling the server.
+/// edit's publication finishes in a few seconds. These budgets cover the
+/// **publish** half only; the atomic commit is synchronous and must run off the
+/// game/plugin tick thread.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct BulkConfig {
@@ -665,9 +667,9 @@ impl Default for BulkConfig {
         Self {
             // One step is a small multiple of the per-cell work in the bench
             // and leaves the rest of the 50 ms tick for gameplay.
-            cells_per_tick: 16_384,
-            columns_per_tick: 32,
-            hooks_per_tick: 16_384,
+            cells_per_tick: 8_192,
+            columns_per_tick: 4,
+            hooks_per_tick: 8_192,
         }
     }
 }
@@ -1219,9 +1221,9 @@ max_entries = 20000     # above this the oldest are swept away, hourly
 # revision; the follow-up shape settling and chunk re-sends are spread over
 # ticks so a one-million-block fill does not stall a tick. Each value is a hard
 # per-tick cap; a job resumes on the next tick. See docs/design/bulk-edit.md.
-cells_per_tick = 16384    # changed cells whose neighbours are settled per tick
-columns_per_tick = 32     # chunk columns re-sent per tick
-hooks_per_tick = 16384    # after-block-break/place calls per tick
+cells_per_tick = 8192     # changed cells whose neighbours are settled per tick
+columns_per_tick = 4      # chunk column sends per tick (each encoded per viewer)
+hooks_per_tick = 8192     # after-block-break/place calls per tick
 
 [anti_xray]
 # Anti-xray. Off by default until it is proven.
@@ -1396,13 +1398,13 @@ mod tests {
     #[test]
     fn bulk_publishing_has_a_configurable_per_tick_budget() {
         let cfg = Config::default();
-        assert_eq!(cfg.bulk.cells_per_tick, 16_384);
-        assert_eq!(cfg.bulk.columns_per_tick, 32);
-        assert_eq!(cfg.bulk.hooks_per_tick, 16_384);
+        assert_eq!(cfg.bulk.cells_per_tick, 8_192);
+        assert_eq!(cfg.bulk.columns_per_tick, 4);
+        assert_eq!(cfg.bulk.hooks_per_tick, 8_192);
         let budget = cfg.bulk.budget();
-        assert_eq!(budget.cells, 16_384);
-        assert_eq!(budget.columns, 32);
-        assert_eq!(budget.hooks, 16_384);
+        assert_eq!(budget.cells, 8_192);
+        assert_eq!(budget.columns, 4);
+        assert_eq!(budget.hooks, 8_192);
 
         let cfg: Config = toml::from_str(
             "[bulk]\ncells_per_tick = 8\ncolumns_per_tick = 2\nhooks_per_tick = 4\n",

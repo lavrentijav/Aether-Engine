@@ -36,11 +36,26 @@
 //! surfaces as [`BulkError::Journal`] rather than a silent partial apply.
 //! `commit` and `undo` therefore return `Result`.
 //!
-//! The commit is not, however, serialised against other writers: `plan` reads
-//! each `from` from the live world and only then applies, so two transactions
-//! over the same block can lose an update. This mirrors
-//! [`World::set_block_by`](aether_api::World::set_block_by) and does not
-//! corrupt the journal; CMD-30b owns per-region serialisation.
+//! Every commit, undo and publish-settle step is serialised by one coarse
+//! process-wide lock ([`COMMIT_LOCK`]), taken around the plan+apply (and
+//! around a settle slice's read+apply). Two transactions over the same block
+//! therefore cannot interleave a read with someone else's write, and a stale
+//! shape correction cannot overwrite a newer commit. Commits are rare, batched
+//! operations, so the coarse lock costs nothing measurable.
+//!
+//! # Publishing (CMD-30b)
+//!
+//! The **write half** of a commit (journal append plus the world batch) is
+//! synchronous: it is one journal revision by design and cannot be split
+//! across ticks without breaking that. It is also the expensive half for a
+//! huge edit (roughly `12.7 ms / 16,384` blocks on the reference machine, so
+//! about `0.8 s` for a million). **[`BulkHistory::commit_and_publish`] must
+//! therefore be called off the game/plugin tick thread**; a plugin command
+//! that runs on the tick thread must hand a large edit to a worker thread (or
+//! use [`BulkEdit::commit`] from one) and publish there. The **publish half**
+//! is what the tick budget covers: [`BulkPublisher`] re-settles derived
+//! shapes, re-sends the touched columns and fires the after-* hooks in bounded
+//! slices across ticks.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::{Mutex, OnceLock};
@@ -524,18 +539,30 @@ impl BulkHistory {
     /// Commit `edit` and queue its publication, so the touched chunk columns
     /// are re-sent (and the after-* hooks fire) over the next ticks.
     ///
-    /// This is the entry point a bulk-edit command or plugin should use. Use
-    /// [`BulkHistory::commit`] when the caller publishes the changes itself.
+    /// **The commit itself is synchronous.** It writes one journal revision and
+    /// applies the whole batch to the world, which for a million-block edit
+    /// takes on the order of a second. Call this **off the game/plugin tick
+    /// thread** (a connection thread, a console/RCON command, or a worker the
+    /// caller spawns); a plugin command handler runs on the tick thread and
+    /// must not call it for a large edit. The publication it queues is
+    /// budgeted by [`BulkPublisher`] and safe to drain from the tick.
+    ///
+    /// Use [`BulkHistory::commit_with_changes`] plus [`enqueue_publish`] when
+    /// the caller already owns the change list.
     pub fn commit_and_publish<B: KvBackend, G: ChunkGenerator>(
         &mut self,
         world: &World<B, G>,
         edit: BulkEdit,
     ) -> Result<BulkResult, BulkError> {
-        let committed = self.commit_with_changes(world, edit)?;
-        if !committed.changes.is_empty() {
-            enqueue_publish(committed.actor, committed.changes.clone());
+        let BulkCommit {
+            result,
+            actor,
+            changes,
+        } = self.commit_with_changes(world, edit)?;
+        if !changes.is_empty() {
+            enqueue_publish(actor, changes);
         }
-        Ok(committed.result)
+        Ok(result)
     }
 
     /// Undo the revision `undo_id`, restoring every block it changed.
@@ -598,11 +625,24 @@ impl BulkHistory {
             .commit_block_group(actor, &inverse)
             .map_err(BulkError::Journal)?
             .unwrap_or(0);
+        let changed = inverse.len();
         if new_id != 0 {
             self.record(new_id, actor, inverse.clone());
+            // Drop the commit lock **before** taking the publish-queue lock:
+            // `publish_tick` takes the queue lock first and a settle slice
+            // then takes the commit lock, so enqueueing while still holding
+            // the commit lock would invert the order and deadlock against a
+            // concurrent tick.
+            drop(_guard);
+            // Publish the undo like any other committed revision: without
+            // this a viewer keeps the post-edit column until something else
+            // re-sends it. The publisher re-runs the settle pass, which also
+            // puts derived neighbour shapes back (the revision itself holds
+            // only the user-visible changes).
+            enqueue_publish(actor, inverse);
         }
         Ok(BulkResult {
-            changed: inverse.len(),
+            changed,
             undo_id: new_id,
         })
     }
@@ -636,9 +676,21 @@ pub struct PublishBudget {
 impl Default for PublishBudget {
     fn default() -> Self {
         Self {
-            cells: 16_384,
-            columns: 32,
-            hooks: 16_384,
+            cells: 8_192,
+            columns: 4,
+            hooks: 8_192,
+        }
+    }
+}
+
+impl PublishBudget {
+    /// Every counter at least one, so a directly constructed budget with a
+    /// zero field cannot make [`BulkPublisher::step`] spin without progress.
+    pub fn clamped(self) -> Self {
+        Self {
+            cells: self.cells.max(1),
+            columns: self.columns.max(1),
+            hooks: self.hooks.max(1),
         }
     }
 }
@@ -770,7 +822,16 @@ impl PublishJob {
                         self.build_columns();
                         continue;
                     }
-                    let end = (self.cursor + budget.cells.max(1)).min(self.changes.len());
+                    // Serialise a settle slice with every commit. The slice
+                    // reads current block states and then writes shape
+                    // corrections unconditionally; without the lock a commit
+                    // landing in between could be overwritten by a correction
+                    // derived from the older state.
+                    let _guard = commit_guard();
+                    let end = self
+                        .cursor
+                        .saturating_add(budget.cells.max(1))
+                        .min(self.changes.len());
                     let mut corrections = Vec::new();
                     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
                     for i in self.cursor..end {
@@ -840,7 +901,10 @@ impl PublishJob {
                         self.phase = Phase::Hooks;
                         continue;
                     }
-                    let end = (self.column_cursor + budget.columns.max(1)).min(self.columns.len());
+                    let end = self
+                        .column_cursor
+                        .saturating_add(budget.columns.max(1))
+                        .min(self.columns.len());
                     for &((cx, cz), sections) in &self.columns[self.column_cursor..end] {
                         sink.resend_column(cx, cz);
                         progress.columns += 1;
@@ -857,7 +921,10 @@ impl PublishJob {
                     if self.hook_cursor >= self.changes.len() {
                         return true;
                     }
-                    let end = (self.hook_cursor + budget.hooks.max(1)).min(self.changes.len());
+                    let end = self
+                        .hook_cursor
+                        .saturating_add(budget.hooks.max(1))
+                        .min(self.changes.len());
                     for i in self.hook_cursor..end {
                         let c = self.changes[i];
                         let now = self.final_to[i];
@@ -929,6 +996,7 @@ impl BulkPublisher {
         sink: &mut S,
         budget: PublishBudget,
     ) -> PublishProgress {
+        let budget = budget.clamped();
         let mut progress = PublishProgress::default();
         // One tick's aggregate budget, shared by every job it touches. A
         // phase uses only its own counter, so subtracting that counter is
@@ -983,6 +1051,16 @@ pub fn pending_publish_jobs() -> usize {
     publisher().lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
+/// The online handle a hook is attributed to, or `None` for an offline actor
+/// (console/RCON). Factored out so the actor→player lookup is testable without
+/// constructing a concrete `DemoWorld`.
+fn actor_handle(
+    registry: &SharedRegistry,
+    actor: JournalActor,
+) -> Option<std::sync::Arc<crate::players::PlayerHandle>> {
+    registry.by_uuid(actor.0)
+}
+
 /// The server-side [`PublishSink`]: broadcast one column to every viewer and
 /// dispatch the native after-* hooks for the edit's author.
 struct ServerSink<'a> {
@@ -1007,7 +1085,7 @@ impl PublishSink for ServerSink<'_> {
         // Hooks carry a player, so an edit by an offline actor (console) has
         // no hook call. The world and journal still change; only the
         // observe-only callback is skipped. Documented in the design note.
-        if let Some(handle) = self.registry.by_uuid(actor.0) {
+        if let Some(handle) = actor_handle(self.registry, actor) {
             let name = self.world.block_name_of(was).unwrap_or_default();
             crate::plugins::after_block_break(&handle, x, y, z, &name);
         }
@@ -1021,7 +1099,7 @@ impl PublishSink for ServerSink<'_> {
         z: i32,
         now: BlockStateId,
     ) {
-        if let Some(handle) = self.registry.by_uuid(actor.0) {
+        if let Some(handle) = actor_handle(self.registry, actor) {
             let name = self.world.block_name_of(now).unwrap_or_default();
             crate::plugins::after_block_place(&handle, x, y, z, &name);
         }
@@ -1034,17 +1112,35 @@ impl PublishSink for ServerSink<'_> {
 /// lock and a length check), so a server that never bulk-edits pays nothing.
 pub fn publish_tick(registry: &SharedRegistry, world: &DemoWorld) -> PublishProgress {
     let budget = crate::bulk_config().budget();
-    let mut queue = publisher().lock().unwrap_or_else(|e| e.into_inner());
-    if queue.is_empty() {
-        return PublishProgress::default();
-    }
+    // Take the oldest job out and **drop the queue lock before doing any
+    // work**: the hook phase calls native plugins, and a plugin that commits a
+    // bulk edit would otherwise re-enter `enqueue_publish` and self-deadlock
+    // on this non-reentrant mutex. A job that does not finish is put back at
+    // the front, ahead of anything the hooks enqueued.
+    let job = {
+        let mut queue = publisher().lock().unwrap_or_else(|e| e.into_inner());
+        if queue.is_empty() {
+            return PublishProgress::default();
+        }
+        queue.jobs.pop_front().expect("checked non-empty above")
+    };
+    let mut local = BulkPublisher {
+        jobs: VecDeque::from([job]),
+    };
     let mut sink = ServerSink { registry, world };
-    queue.step(world, &mut sink, budget)
+    let mut progress = local.step(world, &mut sink, budget);
+    let mut queue = publisher().lock().unwrap_or_else(|e| e.into_inner());
+    while let Some(job) = local.jobs.pop_front() {
+        queue.jobs.push_front(job);
+    }
+    progress.remaining = queue.jobs.len();
+    progress
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{BlockSource, ProtocolCodec};
     use aether_api::{block_ids, MemStore};
     use aether_world::light::column::{compute_column, ColumnBlocks};
     use aether_world::registry::props;
@@ -1531,7 +1627,7 @@ mod tests {
     fn publish_all(
         publisher: &mut BulkPublisher,
         world: &TestWorld,
-        sink: &mut RecordingSink,
+        sink: &mut impl PublishSink,
         budget: PublishBudget,
     ) -> PublishProgress {
         let mut total = PublishProgress::default();
@@ -1826,40 +1922,27 @@ mod tests {
     }
 
     #[test]
-    fn a_million_block_fill_completes_within_the_tick_budget() {
-        // The brief's headline case. The world write itself is CMD-30a's
-        // atomic commit; this checks the *publishing* half stays bounded per
-        // step and still finishes.
+    fn a_million_block_fill_commits_then_publishes_within_the_tick_budget() {
+        // The brief's headline case, through the **real commit path** (journal
+        // revision + world batch), not a hand-applied change list. The commit
+        // itself is deliberately synchronous and documented as off-tick work:
+        // this test pays it here and then proves the tick-visible publishing
+        // half stays bounded per step and still finishes.
         let world = world();
         let mut edit = BulkEdit::new(actor(1));
         edit.fill(&world, (0, 0, 0), (99, 99, 99), block_ids::STONE)
             .unwrap();
         assert_eq!(edit.len(), 1_000_000);
-        // The write half is CMD-30a and is benchmarked separately. Stage the
-        // real 1M fill, build the plan it would commit, and apply it directly
-        // so this test measures the *publish* budget rather than re-paying the
-        // journal-encoding cost in a debug test.
-        let changes: Vec<BlockChange> = edit
-            .pending
-            .iter()
-            .map(|(&(x, y, z), &to)| BlockChange {
-                x,
-                y,
-                z,
-                from: BlockStateId::AIR,
-                to,
-            })
-            .collect();
-        world.apply_block_changes(&changes);
+        let committed = edit.commit_with_changes(&world).unwrap();
+        assert_eq!(committed.result.changed, 1_000_000);
+        assert_ne!(committed.result.undo_id, 0, "one journal revision");
 
         let mut publisher = BulkPublisher::new();
-        publisher.enqueue(actor(1), changes);
+        publisher.enqueue(committed.actor, committed.changes);
         let mut sink = RecordingSink::default();
-        let budget = PublishBudget {
-            cells: 65_536,
-            columns: 64,
-            hooks: 65_536,
-        };
+        // The shipped defaults, not a relaxed budget: 123 settle slices, 4
+        // columns per tick and 123 hook slices.
+        let budget = PublishBudget::default();
         let total = publish_all(&mut publisher, &world, &mut sink, budget);
 
         assert_eq!(total.settled, 1_000_000);
@@ -1940,5 +2023,250 @@ mod tests {
             "both jobs touch the same single column; no torn section was sent"
         );
         assert_eq!(publisher.len(), 0);
+    }
+    #[test]
+    fn a_zero_field_budget_is_clamped_instead_of_spinning() {
+        let world = world();
+        let mut edit = BulkEdit::new(actor(1));
+        edit.set(&world, 0, 20, 0, block_ids::STONE).unwrap();
+        let committed = edit.commit_with_changes(&world).unwrap();
+
+        let mut publisher = BulkPublisher::new();
+        publisher.enqueue(committed.actor, committed.changes);
+        let mut sink = RecordingSink::default();
+        // Directly constructed, not via config: all three fields zero.
+        let p = publisher.step(
+            &world,
+            &mut sink,
+            PublishBudget {
+                cells: 0,
+                columns: 0,
+                hooks: 0,
+            },
+        );
+        assert!(p.finished + p.settled + p.columns + p.hooks > 0);
+        assert!(
+            publisher.is_empty(),
+            "a clamped budget still makes progress"
+        );
+    }
+
+    /// A `BlockSource` over a test world, for encoding a real column.
+    struct TestSource<'a>(&'a TestWorld);
+
+    impl BlockSource for TestSource<'_> {
+        fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+            self.0.get_block(x, y, z)
+        }
+        fn copy_section(&self, cx: i32, cy: i32, cz: i32, out: &mut [BlockStateId; 4096]) {
+            self.0.copy_section(cx, cy, cz, out)
+        }
+        fn section_y_range(&self) -> (i32, i32) {
+            (-4, 23)
+        }
+        fn copy_column(
+            &self,
+            cx: i32,
+            cz: i32,
+            cy_min: i32,
+            cy_max: i32,
+        ) -> Option<Vec<Box<[BlockStateId; 4096]>>> {
+            Some(self.0.copy_column_sections(cx, cz, cy_min, cy_max))
+        }
+    }
+
+    /// A sink that actually encodes each touched column through the real
+    /// 1.21.11 codec, so the test measures the wire surface rather than a
+    /// counter.
+    struct WireSink<'a> {
+        source: &'a dyn BlockSource,
+        codec: &'static dyn ProtocolCodec,
+        columns: Vec<(i32, i32)>,
+        packets: usize,
+        bytes: usize,
+    }
+
+    impl PublishSink for WireSink<'_> {
+        fn resend_column(&mut self, cx: i32, cz: i32) {
+            let ev = ServerEvent::ChunkColumn { cx, cz };
+            let packets = self.codec.encode(&ev, self.source);
+            assert!(!packets.is_empty(), "a column must produce a packet");
+            self.packets += packets.len();
+            self.bytes += packets.iter().map(|p| p.frame(None).len()).sum::<usize>();
+            self.columns.push((cx, cz));
+        }
+        fn after_block_break(
+            &mut self,
+            _actor: JournalActor,
+            _x: i32,
+            _y: i32,
+            _z: i32,
+            _was: BlockStateId,
+        ) {
+        }
+        fn after_block_place(
+            &mut self,
+            _actor: JournalActor,
+            _x: i32,
+            _y: i32,
+            _z: i32,
+            _now: BlockStateId,
+        ) {
+        }
+    }
+
+    #[test]
+    fn the_wire_surface_is_one_packet_per_touched_column() {
+        // Finding 6: the protocol has a whole-column packet, so "one packet
+        // per changed section" is implemented as "one packet per changed
+        // column". Encode for real and count packets, not an internal counter.
+        let world = world();
+        let mut edit = BulkEdit::new(actor(1));
+        for (x, y, z) in [(15, 20, 15), (16, 20, 15), (15, 20, 16), (16, 32, 16)] {
+            edit.set(&world, x, y, z, block_ids::STONE).unwrap();
+        }
+        let committed = edit.commit_with_changes(&world).unwrap();
+        let expected_columns: BTreeSet<(i32, i32)> = committed
+            .changes
+            .iter()
+            .map(|c| (c.x >> 4, c.z >> 4))
+            .collect();
+
+        let source = TestSource(&world);
+        let codec = crate::protocol::codec_for(773).expect("1.21.11 codec");
+        let mut sink = WireSink {
+            source: &source,
+            codec,
+            columns: Vec::new(),
+            packets: 0,
+            bytes: 0,
+        };
+        let mut publisher = BulkPublisher::new();
+        publisher.enqueue(committed.actor, committed.changes);
+        publish_all(&mut publisher, &world, &mut sink, PublishBudget::default());
+
+        assert_eq!(
+            sink.columns.iter().copied().collect::<BTreeSet<_>>(),
+            expected_columns
+        );
+        assert_eq!(sink.columns.len(), expected_columns.len());
+        assert_eq!(
+            sink.packets,
+            expected_columns.len(),
+            "one chunk-column packet per touched column, never per section or block"
+        );
+        assert!(sink.bytes > 0);
+    }
+
+    #[test]
+    fn concurrent_multi_section_commits_never_tear_a_column_read() {
+        // A commit writes both sections under one cache write lock, but a
+        // section-at-a-time reader takes the cache read lock twice; a commit
+        // landing between the reads would show the lower section before the
+        // edit and the upper after. `ColumnView` now copies the whole column
+        // under one read lock, so both cells always match.
+        let world = std::sync::Arc::new(world());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let writer_world = std::sync::Arc::clone(&world);
+        let writer_stop = std::sync::Arc::clone(&stop);
+        let writer = std::thread::spawn(move || {
+            let mut stone = true;
+            while !writer_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let block = if stone {
+                    block_ids::STONE
+                } else {
+                    block_ids::DIRT
+                };
+                stone = !stone;
+                let mut edit = BulkEdit::new(actor(1));
+                // One cell in section 1 (y=20) and one in section 2 (y=40).
+                edit.set(&writer_world, 0, 20, 0, block).unwrap();
+                edit.set(&writer_world, 0, 40, 0, block).unwrap();
+                edit.commit_with_changes(&writer_world).unwrap();
+            }
+        });
+
+        let source = TestSource(&world);
+        let mut seen = 0;
+        for _ in 0..2_000 {
+            let view = crate::protocol::ColumnView::new(&source, 0, 0);
+            let low = view.block_at(0, 20, 0);
+            let high = view.block_at(0, 40, 0);
+            assert_eq!(
+                low, high,
+                "torn column: section 1 = {low:?}, section 2 = {high:?}"
+            );
+            seen += 1;
+        }
+        assert!(seen > 0);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn undo_is_published_and_restores_derived_neighbour_shapes() {
+        let world = world();
+        world.set_block(0, 20, 0, "minecraft:oak_fence").unwrap();
+        let fence = aether_world::registry::blocks::default_state("minecraft:oak_fence").unwrap();
+
+        let mut history = BulkHistory::new(8);
+        let mut edit = BulkEdit::new(actor(1));
+        edit.set(&world, 1, 20, 0, fence).unwrap();
+        let result = history.commit(&world, edit).unwrap();
+
+        // Publish the edit, settling the pre-existing fence's shape.
+        let mut local_publisher = BulkPublisher::new();
+        // Re-read the revision for its changes, as a caller publishing would.
+        let event = world.journal().get(result.undo_id).unwrap().unwrap();
+        let changes = match event.body {
+            EventBody::BlockGroup { changes } => changes,
+            other => panic!("expected a group, got {other:?}"),
+        };
+        local_publisher.enqueue(actor(1), changes);
+        let mut sink = RecordingSink::default();
+        publish_all(
+            &mut local_publisher,
+            &world,
+            &mut sink,
+            PublishBudget::default(),
+        );
+        let name =
+            |x: i32, z: i32| props::state_name(world.get_block(x, 20, z).raw()).unwrap_or_default();
+        assert!(name(0, 0).contains("east=true"), "{}", name(0, 0));
+
+        // Undo queues its own publication and re-settles derived shapes.
+        let undone = history.undo(&world, result.undo_id).unwrap();
+        assert_eq!(undone.changed, 1);
+        assert!(pending_publish_jobs() >= 1, "undo queued a publish job");
+
+        let mut queue = publisher().lock().unwrap_or_else(|e| e.into_inner());
+        while !queue.is_empty() {
+            queue.step(&world, &mut sink, PublishBudget::default());
+        }
+        drop(queue);
+
+        assert_eq!(world.get_block(1, 20, 0), BlockStateId::AIR);
+        assert!(
+            name(0, 0).contains("east=false"),
+            "undo left the derived fence shape: {}",
+            name(0, 0)
+        );
+        assert!(
+            sink.columns.contains(&(0, 0)),
+            "undo re-sent the touched column"
+        );
+    }
+
+    #[test]
+    fn the_server_sink_resolves_an_online_actor_by_uuid() {
+        let registry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(0xAA, "alice");
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+        assert!(actor_handle(&registry, actor(0xAA)).is_some());
+        assert!(
+            actor_handle(&registry, actor(0xBB)).is_none(),
+            "an offline actor gets no hook"
+        );
     }
 }

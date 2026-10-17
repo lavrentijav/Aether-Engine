@@ -72,6 +72,13 @@ records is read from the world at undo time, so the event is accurate even if
 someone edited the same block since; a position already holding its old state
 is dropped rather than journalled as a no-op. Nothing is ever erased.
 
+An undo **queues its own publication**, like any other commit, so the re-sent
+columns are not left showing the post-edit state. Its settle phase re-runs over
+the inverse's changed cells and their neighbours, which also restores the
+derived fence/wall/pane/stair shapes that the original publish settled (those
+corrections are not separate journal events). The same off-tick rule applies:
+the undo commit is synchronous.
+
 ## Limits
 
 `BulkEdit` enforces a block limit (`DEFAULT_MAX_BLOCKS`, raisable with
@@ -99,9 +106,19 @@ commit takes one process-wide coarse lock around plan+apply (`COMMIT_LOCK`).
 Commits are rare, batched operations, so a coarse lock costs nothing measurable
 and gives the stronger guarantee the publish path needs: two actors can never
 interleave their per-section writes, and a concurrent fill of one section can
-only leave it wholly one actor's state. The lock is not held during publication
-(which spans ticks); resends read sections that each commit applied under the
-world's own cache lock, so a section is never observed half-written.
+only leave it wholly one actor's state. A publish **settle slice** takes the
+same lock around its read-and-correct, so a shape correction derived from one
+state cannot overwrite a commit that landed in between.
+
+The read side is covered separately. A chunk encoder used to copy a column
+section by section (one cache read lock each), so a commit landing between two
+copies produced a column whose lower half was before the edit and upper half
+after. `ColumnView` now asks the source for a whole-column snapshot
+(`BlockSource::copy_column` → `World::copy_column_sections`), which materialises
+the column and then copies every section under **one** read lock. `main` has no
+incremental light engine yet, so that snapshot is also what the per-column light
+pass reads; a test commits changes to two sections from a writer thread while
+reading both from a `ColumnView` and requires them to agree.
 
 ## Publishing (CMD-30b)
 
@@ -111,6 +128,17 @@ its publication. A caller that already holds the `BulkCommit` (from
 game tick drains the queue with `bulk::publish_tick`, one bounded slice per
 tick. `BulkPublisher` is the testable core: `step(world, sink, budget)` returns
 a `PublishProgress` and resumes on the next call.
+
+**The commit is synchronous and off-tick.** One journal revision cannot be split
+across ticks without breaking the one-event guarantee, so the write half is
+*not* budgeted: the measured 16,384-block commit is ≈12.7 ms, making a
+million-block fill's commit ≈0.8 s (plus the journal encoding, which the bench
+includes). `commit_and_publish` must therefore run on a connection thread, a
+console/RCON command, or a worker the caller spawns — **not** in a plugin
+command handler, which the host runs on the tick thread. Only the publish half
+below is tick-budgeted; the one-million-block test commits through the real
+journal-and-world path and then asserts every publish step stays inside the
+budget.
 
 A job has three phases, in this order:
 
@@ -158,15 +186,28 @@ updates; the publisher's `resend_column` is the single call site to route
 through it.
 
 The budget is configurable under `[bulk]`: `cells_per_tick`,
-`columns_per_tick`, `hooks_per_tick` (all default `16384`, `32`, `16384`). Each is
-a hard per-tick cap; a job resumes where it stopped, so an edit larger than the
-budget always eventually completes. On the target machine the default
-`cells_per_tick` step measured **≈ 14–16 ms** across runs on the shared builder
-(`cargo-locked bench -p aether-server --bench bulk_edit`,
-`bulk_publish/step_default_tick_budget`), leaving most of the 50 ms tick for
-gameplay. A 1M-block fill is 61 settle steps, 49 column sends and
-61 hook steps in the worst case (about six seconds), and never takes an unbounded
-tick.
+`columns_per_tick`, `hooks_per_tick` (defaults `8192`, `4`, `8192`). Each is a
+hard per-tick cap; a job resumes where it stopped, so an edit larger than the
+budget always eventually completes. The defaults are set from the measured
+**worst** step, not the cheapest one (`cargo-locked bench -p aether-server
+--bench bulk_edit`):
+
+| step | measured (reference builder) |
+|---|---|
+| `settle_step` (8,192 dense cells) | ≈ 7 ms |
+| `settle_to_resend_step_real_encoder` (remainder + 4 columns through the real 1.21.11 codec, one viewer) | ≈ 7–8 ms |
+| `hooks_step` (8,192 callbacks) | ≈ 5 µs |
+| `sparse_settle_step` (8,192 isolated cells, up to seven `reshape` calls each) | ≈ 16 ms |
+
+`cells_per_tick` bounds changed cells, not reshape work, which is why the sparse
+case is separate. `columns_per_tick` is a **send per viewer**: `ServerSink`
+broadcasts a `ChunkColumn` and the registry encodes it once per online client,
+so the wall-clock cost scales with the audience. Four columns leaves room for a
+handful of viewers in one tick; on a large server lower it (the work just takes
+more ticks). With the defaults a 1M-block fill is 123 settle slices
+(`1,000,000 / 8,192` rounds up), 49 column sends (13 ticks at four per tick) and
+123 hook slices — the publication completes over a few seconds and never takes
+an unbounded tick. The commit half is separate and off-tick, above.
 
 ## Format version
 

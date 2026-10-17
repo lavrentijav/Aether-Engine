@@ -100,6 +100,11 @@ thread at a safe point:
   `before-use-item`, `before-attack`, `before-chat`, `before-container-click`);
 - `after-*` events are observe-only (`after-player-join/leave`, `after-block-break`,
   `after-entity-death`, `after-damage`, `after-craft`, `after-enchant`).
+- `after-block-place` is a **native-only** observe-only event (CMD-30b): the frozen
+  `@0.1.0` WIT world has no export for it, and adding one would change the package
+  identity every compiled component matches. It fires once per placed block for a normal
+  placement (both halves of a two-block placement) and once per changed non-air block
+  when a bulk edit is published.
 - `on-tick(n)` only if the plugin subscribed, at most every N ticks (manifest).
 - `on-command(player, name, args) -> command-result` for commands it registered.
 A plugin subscribes in its manifest; unsubscribed events cost nothing (no call).
