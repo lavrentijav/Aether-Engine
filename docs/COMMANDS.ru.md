@@ -12,7 +12,7 @@
 
 **Легенда:** ✅ работает · 🚧 ожидает (`CMD-nn` — задача, которая её реализует). **Узел** — правомочие, а **Op** — ванильный уровень оператора (0 — всем … 4 — владельцу); для ожидающей команды заглушка требует ровно их. **Gate** — что сервер проверяет *сегодня*: `node` (узел/op применяются), `operator` (прежняя проверка «только оператор» — узел/op это цель, пока не применяются) или `everyone` (требований нет; узел/op — цель).
 
-**Итого:** 113 команд — 42 работают, 71 ожидают.
+**Итого:** 113 команд — 45 работают, 68 ожидают.
 
 ## Содержание
 
@@ -95,9 +95,9 @@
 | Команда | Синонимы | Статус | Gate | Узел | Op | Использование |
 | --- | --- | --- | --- | --- | --- | --- |
 | `/time` | – | ✅ работает | `operator` | `minecraft.command.time` | 2 | `/time [set] <day,noon,night,midnight,ticks>` |
-| `/setblock` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.setblock` | 2 | `/setblock <pos> <block> [mode]` |
-| `/fill` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.fill` | 2 | `/fill <from> <to> <block> [mode]` |
-| `/clone` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.clone` | 2 | `/clone <from> <to> <dest> [mask] [mode]` |
+| `/setblock` | – | ✅ работает | `node` | `minecraft.command.setblock` | 2 | `/setblock <pos> <block> [destroy\|keep\|replace]` |
+| `/fill` | – | ✅ работает | `node` | `minecraft.command.fill` | 2 | `/fill <from> <to> <block> [destroy\|hollow\|keep\|outline\|replace] \| <from> <to> replace <filter> <block>` |
+| `/clone` | – | ✅ работает | `node` | `minecraft.command.clone` | 2 | `/clone <begin> <end> <destination> [replace\|masked] [force\|normal] [filtered <filter>]` |
 | `/fillbiome` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.fillbiome` | 2 | `/fillbiome <from> <to> <biome>` |
 | `/place` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.place` | 2 | `/place <feature,template> <pos> [...]` |
 | `/forceload` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.forceload` | 2 | `/forceload <add,remove,query> <from> [to]` |

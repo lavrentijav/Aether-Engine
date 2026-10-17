@@ -31,9 +31,9 @@ pub type DemoWorld = World<FjallStore, crate::gencache::Cached<crate::worldgen::
 /// `Y_OFFSET` in those codecs — so their players see the same world as
 /// `0..=447`. The one exception is 1.8.9, whose 16-bit section mask makes 256
 /// blocks a protocol limit rather than a choice.
-const WORLD_BOTTOM: i32 = -64;
+pub(crate) const WORLD_BOTTOM: i32 = -64;
 /// One past the tallest addressable block.
-const WORLD_TOP: i32 = 384;
+pub(crate) const WORLD_TOP: i32 = 384;
 
 impl BlockSource for DemoWorld {
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockStateId {
