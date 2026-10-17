@@ -15,7 +15,7 @@ use aether_api::{block_ids, FjallStore, JournalActor, Player, Vector3, World};
 use aether_world::BlockStateId;
 
 use crate::config::Config;
-use crate::players::{PosLook, SharedRegistry};
+use crate::players::{PlayerHandle, PosLook, SharedRegistry};
 use crate::proto::{read_packet, Conn, PacketIn};
 use crate::protocol::{self, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::stored::{self, Stored};
@@ -531,12 +531,14 @@ fn login_and_play(
             st.xp_total = s.xp_total;
             st.effects = crate::game::effects::Effects::from_list(s.effects.clone());
             st.absorption = st.effects.absorption_amount();
+            st.tags = s.tags.iter().cloned().collect();
         }
     }
 
     // What this server answers, so the client can complete it. Sent before
     // anything the player might type at.
     handle.emit(&ServerEvent::CommandTree, world);
+    crate::team::send_all(&handle, world);
 
     // Join events run **before** anything is broadcast about this player, so a
     // plugin can restore per-player state the join burst must respect — the
@@ -805,8 +807,21 @@ fn play_loop(
         let _items = (full && may_move_items(&event))
             .then(|| crate::game::provenance::Scope::begin(handle, world));
         match event {
-            ClientEvent::Move(pos) => {
+            ClientEvent::Move(mut pos) => {
                 let before = handle.pos();
+                if team_collision_blocks(handle, registry, world, before, pos) {
+                    pos = before;
+                    handle.emit(
+                        &ServerEvent::Teleport {
+                            x: before.x,
+                            y: before.y,
+                            z: before.z,
+                            yaw: before.yaw,
+                            pitch: before.pitch,
+                        },
+                        world,
+                    );
+                }
                 handle.set_pos(pos);
                 if full {
                     interact::on_move(handle, registry, world, before, pos);
@@ -1106,7 +1121,10 @@ fn play_loop(
                 // Log and journal only the chat that was actually delivered
                 // (a plugin veto above returns before this point).
                 crate::chatlog::log_chat(handle, &text, world);
-                let line = format!("<{}> {}", handle.name, text);
+                let line = match crate::team::team_of(world, &handle.name) {
+                    Some(team) => format!("<{}> {}", team.format_player_name(&handle.name), text),
+                    None => format!("<{}> {}", handle.name, text),
+                };
                 let ev = ServerEvent::Chat(line);
                 handle.emit(&ev, world);
                 registry.broadcast_except(handle.entity_id, &ev, world);
@@ -1700,6 +1718,7 @@ pub(crate) fn save_player(handle: &crate::players::PlayerHandle, world: &DemoWor
         mode: st.mode,
         spawn: st.spawn,
         effects: st.effects.all().to_vec(),
+        tags: st.tags.iter().cloned().collect(),
     };
     let pos = if st.dead { st.spawn } else { saved.pos };
     drop(st);
@@ -1708,6 +1727,44 @@ pub(crate) fn save_player(handle: &crate::players::PlayerHandle, world: &DemoWor
         &crate::game::player::key(handle.uuid),
         &crate::game::player::encode(&saved),
     );
+}
+
+/// Persist only the scoreboard tags, keeping whatever else the player's save
+/// already holds. `/tag` must survive a logout even for a client that does not
+/// run the full gameplay save path; it also must not overwrite a modern save
+/// with a compat client's defaults, so an existing record is decoded and
+/// updated in place.
+pub(crate) fn save_tags(handle: &crate::players::PlayerHandle, world: &DemoWorld) {
+    let key = crate::game::player::key(handle.uuid);
+    let tags: Vec<String> = handle.game().tags.iter().cloned().collect();
+    let mut saved = match world.get_meta(&key) {
+        Ok(Some(blob)) => match crate::game::player::decode(&blob) {
+            Some(saved) => saved,
+            // Never write over a record that exists but does not decode: that
+            // is the same rule the login path applies before gameplay starts.
+            None => return,
+        },
+        Ok(None) => {
+            let pos = handle.pos();
+            let st = handle.game();
+            crate::game::player::Saved {
+                pos: (pos.x, pos.y, pos.z),
+                yaw: pos.yaw,
+                pitch: pos.pitch,
+                health: if st.dead { 20.0 } else { st.health },
+                food: if st.dead { 20 } else { st.food },
+                saturation: st.saturation,
+                xp_total: st.xp_total,
+                mode: st.mode,
+                spawn: st.spawn,
+                effects: st.effects.all().to_vec(),
+                tags: Vec::new(),
+            }
+        }
+        _ => return,
+    };
+    saved.tags = tags;
+    let _ = world.put_meta(&key, &crate::game::player::encode(&saved));
 }
 
 /// How many columns are generated at once, across every player: one per
@@ -1881,6 +1938,68 @@ fn would_bury_a_player(
         .snapshot()
         .iter()
         .any(|p| stands_in_block(p.pos(), x, y, z))
+}
+
+/// Whether a move by `handle` from `before` to `to` would enter another
+/// player's box whose team collision rules forbid it.
+///
+/// Vanilla's `EntitySelector.pushableBy` combines **both** sides' rules. The
+/// check is per other player: one `before` already overlapping that player is
+/// skipped (they may walk apart), and only a move that would newly enter their
+/// box is refused. A spectator on either side never collides. The
+/// [`crate::team::TeamIndex`] is loaded only when at least one such candidate
+/// exists, so a move into empty space costs no store scan.
+pub(crate) fn team_collision_blocks(
+    handle: &PlayerHandle,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    before: PosLook,
+    to: PosLook,
+) -> bool {
+    let mover = {
+        let st = handle.game();
+        (st.dead, st.mode)
+    };
+    if mover.0 || mover.1 == crate::protocol::GameMode::Spectator {
+        return false;
+    }
+    // Candidate: a player the move would newly enter. One already overlapping
+    // at `before` is skipped, so a player can always walk out of a pile-up
+    // instead of being pinned by it.
+    let candidates: Vec<(String, PosLook)> = registry
+        .snapshot()
+        .into_iter()
+        .filter(|other| other.entity_id != handle.entity_id)
+        .filter_map(|other| {
+            {
+                let st = other.game();
+                if st.dead || st.mode == crate::protocol::GameMode::Spectator {
+                    return None;
+                }
+            }
+            let other_pos = other.pos();
+            (!player_boxes_overlap(before, other_pos) && player_boxes_overlap(to, other_pos))
+                .then(|| (other.name.clone(), other_pos))
+        })
+        .collect();
+    if candidates.is_empty() {
+        // The common case: nobody in the destination box, so no team scan.
+        return false;
+    }
+    let teams = crate::team::TeamIndex::load(world);
+    candidates
+        .iter()
+        .any(|(name, _)| teams.collides(&handle.name, name))
+}
+
+/// Whether two players' 0.6 × 1.8 boxes overlap.
+fn player_boxes_overlap(a: PosLook, b: PosLook) -> bool {
+    (a.x + PLAYER_HALF_WIDTH > b.x - PLAYER_HALF_WIDTH)
+        && (a.x - PLAYER_HALF_WIDTH < b.x + PLAYER_HALF_WIDTH)
+        && (a.z + PLAYER_HALF_WIDTH > b.z - PLAYER_HALF_WIDTH)
+        && (a.z - PLAYER_HALF_WIDTH < b.z + PLAYER_HALF_WIDTH)
+        && (a.y + PLAYER_HEIGHT > b.y)
+        && (a.y < b.y + PLAYER_HEIGHT)
 }
 
 /// Whether a player standing at `pos` overlaps the cube at `(x, y, z)`.

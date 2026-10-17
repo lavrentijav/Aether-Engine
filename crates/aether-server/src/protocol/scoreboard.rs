@@ -115,6 +115,42 @@ pub enum ScoreboardOp {
     },
     /// Remove a score.
     ResetScore { objective: String, entry: String },
+    /// A real scoreboard team (`/team`), with every option vanilla sends.
+    Team(TeamChange),
+}
+
+/// The options a scoreboard team packet carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeamInfo {
+    pub name: String,
+    pub display_name: String,
+    /// `ChatFormatting` id (`0..=15`, reset `21`).
+    pub color: i32,
+    pub friendly_fire: bool,
+    pub see_friendly_invisibles: bool,
+    pub nametag_visibility: i32,
+    pub death_message_visibility: i32,
+    pub collision_rule: i32,
+    pub prefix: String,
+    pub suffix: String,
+}
+
+/// One team packet action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeamChange {
+    /// Mode 0: create a team, with its members.
+    Add {
+        info: TeamInfo,
+        members: Vec<String>,
+    },
+    /// Mode 1: remove a team.
+    Remove { name: String },
+    /// Mode 2: rewrite a team's options (members unchanged).
+    Update { info: TeamInfo },
+    /// Mode 3: add these scoreboard names to the team.
+    Join { name: String, members: Vec<String> },
+    /// Mode 4: remove these scoreboard names from the team.
+    Leave { name: String, members: Vec<String> },
 }
 
 /// The entry name for line `i`: an invisible run of colour codes on the
@@ -554,6 +590,107 @@ pub fn encode(wire: &Wire, op: &ScoreboardOp) -> Vec<PacketOut> {
             p.string(entry);
             vec![p]
         }
+        ScoreboardOp::Team(change) => vec![write_team_change(wire, change)],
+    }
+}
+
+/// Write one full team packet for `change`.
+fn write_team_change(wire: &Wire, change: &TeamChange) -> PacketOut {
+    let (name, mode, info, members) = match change {
+        TeamChange::Add { info, members } => (info.name.as_str(), 0u8, Some(info), Some(members)),
+        TeamChange::Remove { name } => (name.as_str(), 1, None, None),
+        TeamChange::Update { info } => (info.name.as_str(), 2, Some(info), None),
+        TeamChange::Join { name, members } => (name.as_str(), 3, None, Some(members)),
+        TeamChange::Leave { name, members } => (name.as_str(), 4, None, Some(members)),
+    };
+    let mut p = PacketOut::new(wire.team);
+    p.string(name).u8(mode);
+    if let Some(info) = info {
+        // A real team has no length limit on modern clients (`writeUtf`
+        // carries the whole component); only 1.8's fixed 16-character halves
+        // need splitting.
+        let (prefix, suffix) = if matches!(wire.team_form, TeamForm::Legacy) {
+            split_line(&info.prefix, &info.suffix, wire.team_width())
+        } else {
+            (info.prefix.clone(), info.suffix.clone())
+        };
+        match wire.team_form {
+            TeamForm::Legacy => {
+                p.string(&info.display_name);
+                p.string(&prefix).string(&suffix);
+                p.u8(info.friendly_fire as u8);
+                p.string(visibility_name(info.nametag_visibility));
+                let color = if info.color == 21 {
+                    -1
+                } else {
+                    info.color.clamp(0, 15)
+                };
+                p.u8(color as u8);
+            }
+            TeamForm::Classic => {
+                write_text(&mut p, TextForm::Json, &info.display_name);
+                p.u8(info.friendly_fire as u8);
+                p.string(visibility_name(info.nametag_visibility));
+                p.string(collision_name(info.collision_rule));
+                p.var_int(info.color);
+                write_text(&mut p, TextForm::Json, &prefix);
+                write_text(&mut p, TextForm::Json, &suffix);
+            }
+            TeamForm::Nbt => {
+                write_text(&mut p, TextForm::Nbt, &info.display_name);
+                p.u8(info.friendly_fire as u8);
+                p.string(visibility_name(info.nametag_visibility));
+                p.string(collision_name(info.collision_rule));
+                p.var_int(info.color);
+                write_text(&mut p, TextForm::Nbt, &prefix);
+                write_text(&mut p, TextForm::Nbt, &suffix);
+            }
+            TeamForm::NbtEnums => {
+                write_text(&mut p, TextForm::Nbt, &info.display_name);
+                p.u8(info.friendly_fire as u8);
+                p.var_int(info.nametag_visibility);
+                p.var_int(info.collision_rule);
+                p.var_int(info.color);
+                write_text(&mut p, TextForm::Nbt, &prefix);
+                write_text(&mut p, TextForm::Nbt, &suffix);
+            }
+            TeamForm::NbtFlags => {
+                write_text(&mut p, TextForm::Nbt, &info.display_name);
+                let flags =
+                    (info.friendly_fire as u8) | ((info.see_friendly_invisibles as u8) << 1);
+                p.u8(flags);
+                p.var_int(info.nametag_visibility);
+                p.var_int(info.collision_rule);
+                p.var_int(info.color);
+                write_text(&mut p, TextForm::Nbt, &prefix);
+                write_text(&mut p, TextForm::Nbt, &suffix);
+            }
+        }
+    }
+    if let Some(members) = members {
+        p.var_int(members.len() as i32);
+        for member in members {
+            p.string(member);
+        }
+    }
+    p
+}
+
+fn visibility_name(id: i32) -> &'static str {
+    match id {
+        1 => "never",
+        2 => "hideForOtherTeams",
+        3 => "hideForOwnTeam",
+        _ => "always",
+    }
+}
+
+fn collision_name(id: i32) -> &'static str {
+    match id {
+        1 => "never",
+        2 => "pushOtherTeams",
+        3 => "pushOwnTeam",
+        _ => "always",
     }
 }
 
@@ -1347,6 +1484,78 @@ mod tests {
         assert_eq!(pin.u8().unwrap(), 0, "flags: none set");
         assert_eq!(pin.var_int().unwrap(), 0, "visibility: always");
         assert_eq!(pin.var_int().unwrap(), 0, "collision: always");
+    }
+
+    #[test]
+    fn a_full_team_packet_carries_options_colour_and_members() {
+        let wire = wire_for(774).unwrap();
+        let ops = encode(
+            &wire,
+            &ScoreboardOp::Team(TeamChange::Add {
+                info: TeamInfo {
+                    name: "red".into(),
+                    display_name: "Red Team".into(),
+                    color: 12,
+                    friendly_fire: true,
+                    see_friendly_invisibles: false,
+                    nametag_visibility: 1,
+                    death_message_visibility: 2,
+                    collision_rule: 3,
+                    prefix: "<".into(),
+                    suffix: ">".into(),
+                },
+                members: vec!["alice".into(), "bob".into()],
+            }),
+        );
+        let mut pin = crate::proto::PacketIn::new(ops[0].body());
+        assert_eq!(pin.var_int().unwrap(), 0x6B);
+        assert_eq!(pin.string().unwrap(), "red");
+        assert_eq!(pin.u8().unwrap(), 0, "add");
+        assert_eq!(pin.u8().unwrap(), 8, "display name is TAG_String");
+        let len = pin.u16().unwrap() as usize;
+        pin.skip(len).unwrap();
+        assert_eq!(pin.u8().unwrap(), 1, "friendly fire only");
+        assert_eq!(pin.var_int().unwrap(), 1, "nametag: never");
+        assert_eq!(pin.var_int().unwrap(), 3, "collision: push own team");
+        assert_eq!(pin.var_int().unwrap(), 12, "red");
+        assert_eq!(pin.u8().unwrap(), 8, "prefix is TAG_String");
+        let len = pin.u16().unwrap() as usize;
+        pin.skip(len).unwrap();
+        assert_eq!(pin.u8().unwrap(), 8, "suffix is TAG_String");
+        let len = pin.u16().unwrap() as usize;
+        pin.skip(len).unwrap();
+        assert_eq!(pin.var_int().unwrap(), 2, "two members");
+        assert_eq!(pin.string().unwrap(), "alice");
+        assert_eq!(pin.string().unwrap(), "bob");
+    }
+
+    #[test]
+    fn a_team_join_and_leave_only_carry_members() {
+        let wire = wire_for(774).unwrap();
+        for (change, mode) in [
+            (
+                TeamChange::Join {
+                    name: "red".into(),
+                    members: vec!["alice".into()],
+                },
+                3,
+            ),
+            (
+                TeamChange::Leave {
+                    name: "red".into(),
+                    members: vec!["alice".into()],
+                },
+                4,
+            ),
+        ] {
+            let ops = encode(&wire, &ScoreboardOp::Team(change));
+            let mut pin = crate::proto::PacketIn::new(ops[0].body());
+            assert_eq!(pin.var_int().unwrap(), 0x6B);
+            assert_eq!(pin.string().unwrap(), "red");
+            assert_eq!(pin.u8().unwrap(), mode);
+            assert_eq!(pin.var_int().unwrap(), 1);
+            assert_eq!(pin.string().unwrap(), "alice");
+        }
     }
 
     #[test]

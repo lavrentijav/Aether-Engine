@@ -98,6 +98,17 @@ fn argument(kind: ArgKind, partial: &str, ctx: &SuggestCtx) -> Vec<String> {
         ArgKind::Operation => vec!["=", "+=", "-=", "*=", "/=", "%=", "<", ">", "><"],
         ArgKind::Swizzle => vec!["x", "y", "z", "xy", "xz", "yz", "xyz"],
         ArgKind::Time => vec!["1t", "1s", "1d"],
+        ArgKind::Color => crate::team::Color::NAMES.to_vec(),
+        ArgKind::Team => {
+            let Some(world) = ctx.world else {
+                return Vec::new();
+            };
+            return crate::team::all(world)
+                .into_iter()
+                .map(|t| t.name)
+                .filter(|n| n.starts_with(partial))
+                .collect();
+        }
         ArgKind::BlockState => aether_world::registry::blocks::BLOCKS
             .iter()
             .map(|row| row.0)

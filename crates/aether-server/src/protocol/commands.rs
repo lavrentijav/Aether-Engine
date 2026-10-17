@@ -804,20 +804,26 @@ mod tests {
         assert_ne!(stop.flags & NODE_EXECUTABLE, 0, "/stop executable");
     }
 
+    fn subtree_executor(node: &Node) -> bool {
+        node.executor.is_some() || node.children.iter().any(subtree_executor)
+    }
+
+    /// Whether a decoded node or any descendant is executable.
+    fn decoded_has_executor(nodes: &[Decoded], i: i32) -> bool {
+        let node = &nodes[i as usize];
+        node.flags & NODE_EXECUTABLE != 0
+            || node
+                .children
+                .iter()
+                .any(|&child| decoded_has_executor(nodes, child))
+    }
+
     #[test]
     fn every_declared_name_is_answered_by_the_tree() {
         // The tree is a promise: a declared name with no executor anywhere
         // below it is a completion that leads nowhere. A root may itself take
         // arguments (`/transfer <hostname>`, `/setidletimeout <minutes>`) as
         // in vanilla, so any executable descendant answers the name.
-        fn tree_runs(node: &crate::commands::tree::Node) -> bool {
-            (node.executable && node.executor.is_some()) || node.children.iter().any(tree_runs)
-        }
-        fn wire_runs(nodes: &[Decoded], index: i32) -> bool {
-            let node = &nodes[index as usize];
-            node.flags & NODE_EXECUTABLE != 0
-                || node.children.iter().any(|&child| wire_runs(nodes, child))
-        }
         let (nodes, _) = decode(Parsers::ById(&PARSERS_1_21_6));
         for &i in &nodes[0].children {
             let name = nodes[i as usize].name.as_deref().unwrap();
@@ -828,12 +834,12 @@ mod tests {
             let command =
                 command.unwrap_or_else(|| panic!("`{name}` is declared but the tree has no node"));
             assert!(
-                tree_runs(command),
-                "`{name}` is declared but nothing below it is executable"
+                command.executor.is_some() || command.children.iter().any(subtree_executor),
+                "`{name}` is declared but not answered anywhere"
             );
             assert!(
-                wire_runs(&nodes, i),
-                "`{name}` is declared but not marked executable"
+                decoded_has_executor(&nodes, i),
+                "`{name}` is declared but its subtree has no executable node"
             );
         }
     }

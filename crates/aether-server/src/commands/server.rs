@@ -373,7 +373,7 @@ fn exec_transfer(ctx: &mut Ctx) -> Reply {
     }
 
     let players = match ctx.args.get(2) {
-        Some(arg) => match resolve_targets(ctx.registry, ctx.source, &arg.text, false) {
+        Some(arg) => match resolve_targets(ctx.registry, ctx.world, ctx.source, &arg.text, false) {
             Ok(targets) => targets
                 .into_iter()
                 .filter_map(|target| match target {

@@ -323,6 +323,10 @@ pub enum ArgKind {
     Particle,
     /// `minecraft:score_holder`.
     ScoreHolder,
+    /// `minecraft:team`.
+    Team,
+    /// `minecraft:color`.
+    Color,
     /// `minecraft:swizzle`.
     Swizzle,
     /// `minecraft:angle`.
@@ -382,6 +386,8 @@ impl ArgKind {
             ArgKind::Gamemode => "minecraft:gamemode",
             ArgKind::Particle => "minecraft:particle",
             ArgKind::ScoreHolder => "minecraft:score_holder",
+            ArgKind::Team => "minecraft:team",
+            ArgKind::Color => "minecraft:color",
             ArgKind::Swizzle => "minecraft:swizzle",
             ArgKind::Angle => "minecraft:angle",
             ArgKind::Operation => "minecraft:operation",
@@ -430,6 +436,8 @@ impl ArgKind {
             | ArgKind::GameProfile
             | ArgKind::Gamemode
             | ArgKind::Particle
+            | ArgKind::Team
+            | ArgKind::Color
             | ArgKind::Swizzle
             | ArgKind::Angle
             | ArgKind::Operation
@@ -763,6 +771,7 @@ fn build() -> CommandTree {
     let mut children = Vec::new();
     children.extend(super::core_nodes());
     children.extend(crate::game::commands::nodes());
+    children.extend(crate::commands::team_tag::nodes());
     children.extend(crate::commands::world_env::nodes());
     children.extend(super::world_edit::nodes());
     children.extend(crate::economy::commands::nodes());
