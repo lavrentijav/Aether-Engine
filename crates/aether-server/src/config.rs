@@ -635,6 +635,59 @@ pub enum HiddenFill {
     Air,
 }
 
+/// `[bulk]` settings: how a committed bulk edit is published over ticks.
+///
+/// A large edit (a million-block fill) is applied to the world as one atomic
+/// revision at commit time, but the follow-up work — settling neighbour-based
+/// shapes and re-sending the touched chunk columns — is spread over ticks so
+/// it never occupies a whole tick. The three numbers below are independent
+/// budgets; each is a hard cap per tick, and a job simply resumes on the next
+/// tick when one is reached.
+///
+/// The defaults were measured with `cargo-locked bench -p aether-server
+/// --bench bulk_edit` (see `docs/design/bulk-edit.md`), including the
+/// fence-heavy sparse settle and the fixed-point frontier step followed by real
+/// column encodes. Each phase stays well under one 50 ms tick on the target
+/// machine; `hooks_per_tick` is a safety cap because plugin dispatch time is
+/// unbounded in plugin code. These budgets cover the **publish** half only; the
+/// atomic commit is synchronous, must run off the game/plugin tick thread, and
+/// holds the world cache write lock for its batch (a one-off pause for
+/// concurrent reads).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct BulkConfig {
+    /// Changed cells whose shape/neighbours are settled per tick.
+    pub cells_per_tick: usize,
+    /// Chunk columns re-sent per tick (one packet per touched column; a
+    /// column that changed in many sections is still sent once).
+    pub columns_per_tick: usize,
+    /// `after-block-break` / `after-block-place` hook calls per tick.
+    pub hooks_per_tick: usize,
+}
+
+impl Default for BulkConfig {
+    fn default() -> Self {
+        Self {
+            // One step is a small multiple of the per-cell work in the bench
+            // and leaves the rest of the 50 ms tick for gameplay.
+            cells_per_tick: 4_096,
+            columns_per_tick: 4,
+            hooks_per_tick: 8_192,
+        }
+    }
+}
+
+impl BulkConfig {
+    /// The runtime budget the publisher reads.
+    pub fn budget(&self) -> crate::bulk::PublishBudget {
+        crate::bulk::PublishBudget {
+            cells: self.cells_per_tick.max(1),
+            columns: self.columns_per_tick.max(1),
+            hooks: self.hooks_per_tick.max(1),
+        }
+    }
+}
+
 /// Whole server config.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -676,6 +729,9 @@ pub struct Config {
     /// The generated-column cache. See [`crate::gencache`].
     #[serde(default)]
     pub cache: CacheSection,
+    /// How a committed bulk edit is published over ticks. See [`BulkConfig`].
+    #[serde(default)]
+    pub bulk: BulkConfig,
 }
 
 /// Explicit per-player permission grants, for the nodes the operator wants to
@@ -1163,6 +1219,19 @@ dir = "world-cache"     # empty disables the cache
 ttl_hours = 24          # entries older than this are regenerated
 max_entries = 20000     # above this the oldest are swept away, hourly
 
+[bulk]
+# Publishing a committed bulk edit (CMD-30b). The world write is one atomic
+# revision; the follow-up shape settling and chunk re-sends are spread over
+# ticks so a one-million-block fill's publication does not stall a tick. The
+# atomic commit itself is synchronous (~0.8 s for 1M blocks) and must be run
+# off the game/plugin tick thread; it also holds the world cache write lock for
+# its batch, a one-off pause for concurrent reads. Each value below is a
+# per-tick safety cap; a job resumes on the next tick. See
+# docs/design/bulk-edit.md.
+cells_per_tick = 4096     # changed cells whose neighbours are settled per tick
+columns_per_tick = 4      # chunk column sends per tick (each encoded per viewer)
+hooks_per_tick = 8192     # after-block-break/place calls per tick
+
 [anti_xray]
 # Anti-xray. Off by default until it is proven.
 # "engine" (cheap): an ore-like block fully enclosed by opaque blocks is sent
@@ -1331,6 +1400,26 @@ mod tests {
             .granted("root", None, "aether.antixray.bypass"));
         // Default: no grants at all.
         assert!(Config::default().permissions.grants.is_empty());
+    }
+
+    #[test]
+    fn bulk_publishing_has_a_configurable_per_tick_budget() {
+        let cfg = Config::default();
+        assert_eq!(cfg.bulk.cells_per_tick, 4_096);
+        assert_eq!(cfg.bulk.columns_per_tick, 4);
+        assert_eq!(cfg.bulk.hooks_per_tick, 8_192);
+        let budget = cfg.bulk.budget();
+        assert_eq!(budget.cells, 4_096);
+        assert_eq!(budget.columns, 4);
+        assert_eq!(budget.hooks, 8_192);
+
+        let cfg: Config = toml::from_str(
+            "[bulk]\ncells_per_tick = 8\ncolumns_per_tick = 2\nhooks_per_tick = 4\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.bulk.budget().cells, 8);
+        assert_eq!(cfg.bulk.budget().columns, 2);
+        assert_eq!(cfg.bulk.budget().hooks, 4);
     }
 
     #[test]

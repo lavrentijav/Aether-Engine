@@ -62,6 +62,29 @@ pub trait BlockSource: Sync {
         }
     }
 
+    /// The vertical section range a column reader should ask for, inclusive.
+    /// The default is the whole `i8` addressable band.
+    fn section_y_range(&self) -> (i32, i32) {
+        (i8::MIN as i32, i8::MAX as i32)
+    }
+
+    /// Copy every section of column `(cx, cz)` from `cy_min` to `cy_max`
+    /// (inclusive) as **one consistent snapshot**.
+    ///
+    /// `None` (the default) means "no single-lock snapshot available": a
+    /// reader copies section by section, which is correct for a static source
+    /// but can tear under concurrent writes. A world that can take one read
+    /// lock for the whole column should return `Some`.
+    fn copy_column(
+        &self,
+        _cx: i32,
+        _cz: i32,
+        _cy_min: i32,
+        _cy_max: i32,
+    ) -> Option<Vec<Box<[BlockStateId; 4096]>>> {
+        None
+    }
+
     /// The biomes of column `(cx, cz)`, when the generator produced any.
     fn column_biomes(
         &self,
@@ -85,6 +108,10 @@ pub struct ColumnView<'a> {
     cx: i32,
     cz: i32,
     sections: std::sync::Mutex<std::collections::HashMap<i32, Box<[BlockStateId; 4096]>>>,
+    /// A whole-column copy taken under one read lock on first use, when the
+    /// source offers one. It is what makes an encode see a single state even
+    /// while a bulk commit is applying its batches.
+    snapshot: std::sync::OnceLock<Option<(i32, Vec<Box<[BlockStateId; 4096]>>)>>,
 }
 
 impl<'a> ColumnView<'a> {
@@ -94,7 +121,21 @@ impl<'a> ColumnView<'a> {
             cx,
             cz,
             sections: std::sync::Mutex::new(std::collections::HashMap::new()),
+            snapshot: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The whole-column snapshot, taken once. `None` when the source cannot
+    /// promise one; the caller then falls back to per-section copies.
+    fn snapshot(&self) -> Option<&(i32, Vec<Box<[BlockStateId; 4096]>>)> {
+        self.snapshot
+            .get_or_init(|| {
+                let (min, max) = self.inner.section_y_range();
+                self.inner
+                    .copy_column(self.cx, self.cz, min, max)
+                    .map(|v| (min, v))
+            })
+            .as_ref()
     }
 }
 
@@ -104,17 +145,53 @@ impl BlockSource for ColumnView<'_> {
             return self.inner.block_at(x, y, z);
         }
         let cy = y >> 4;
+        let index = ((y & 15) << 8 | (z & 15) << 4 | (x & 15)) as usize;
+        if let Some((min, sections)) = self.snapshot() {
+            return sections
+                .get((cy - *min) as usize)
+                .map(|sec| sec[index])
+                .unwrap_or(BlockStateId::AIR);
+        }
         let mut sections = self.sections.lock().unwrap();
         let sec = sections.entry(cy).or_insert_with(|| {
             let mut out = Box::new([BlockStateId::AIR; 4096]);
             self.inner.copy_section(self.cx, cy, self.cz, &mut out);
             out
         });
-        sec[((y & 15) << 8 | (z & 15) << 4 | (x & 15)) as usize]
+        sec[index]
     }
 
     fn copy_section(&self, cx: i32, cy: i32, cz: i32, out: &mut [BlockStateId; 4096]) {
+        if cx == self.cx && cz == self.cz {
+            if let Some((min, sections)) = self.snapshot() {
+                match sections.get((cy - *min) as usize) {
+                    Some(sec) => {
+                        out.copy_from_slice(&sec[..]);
+                        return;
+                    }
+                    None => {
+                        out.fill(BlockStateId::AIR);
+                        return;
+                    }
+                }
+            }
+        }
         self.inner.copy_section(cx, cy, cz, out)
+    }
+
+    fn section_y_range(&self) -> (i32, i32) {
+        self.inner.section_y_range()
+    }
+
+    fn copy_column(
+        &self,
+        cx: i32,
+        cz: i32,
+        cy_min: i32,
+        cy_max: i32,
+    ) -> Option<Vec<Box<[BlockStateId; 4096]>>> {
+        // A nested view delegates the one-lock snapshot to its source.
+        self.inner.copy_column(cx, cz, cy_min, cy_max)
     }
 
     fn column_biomes(
