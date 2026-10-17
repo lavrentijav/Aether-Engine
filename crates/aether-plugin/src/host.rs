@@ -537,6 +537,11 @@ pub trait HostBackend: Send + Sync {
     /// Append a staff-accountability event to the world journal: who did what.
     fn staff_journal(&self, _plugin: &str, _actor: u64, _action: &str, _detail: &str) {}
 
+    /// Append a permission-administration event to the world journal (who
+    /// changed which node/parent). The default does nothing, so a test backend
+    /// needs no journal.
+    fn permissions_journal(&self, _plugin: &str, _actor: u64, _action: &str, _detail: &str) {}
+
     // --- Regions and claims (the native `regions` / `claims` plugins) -------
     //
     // The core owns the index and the protection check (CMD-29a/29b); these
@@ -1477,6 +1482,37 @@ impl LoadedPlugin {
     /// A plugin-channel message. Native plugins subscribed to
     /// `on-plugin-message` are called in order; the frozen WASM world has no
     /// callback, so a WASM plugin is a no-op here.
+    fn call_on_complete(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        name: &str,
+        args: &[String],
+    ) -> std::result::Result<Vec<String>, String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            // The frozen WIT world has no completion export.
+            Kind::Wasm { .. } => Ok(Vec::new()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                Ok(n.on_complete(&mut ctx, p, name, args))
+            }
+        }
+    }
+
     fn call_on_plugin_message(
         &mut self,
         services: &Arc<ServiceRegistry>,
@@ -2363,6 +2399,40 @@ impl PluginHost {
             };
         }
         None
+    }
+
+    /// Tab-completion for a plugin command resolved from the core registry.
+    /// A plugin that does not handle the name returns an empty list.
+    pub fn on_complete_for(
+        &mut self,
+        plugin: &str,
+        p: &Player,
+        name: &str,
+        args: &[String],
+    ) -> Vec<String> {
+        let services = Arc::clone(&self.services);
+        let backend = Arc::clone(&self.backend);
+        for i in 0..self.plugins.len() {
+            if self.plugins[i].manifest.id != plugin {
+                continue;
+            }
+            let ms = self.call_budget_ms();
+            if ms == 0 {
+                return Vec::new();
+            }
+            self.plugins[i].set_deadline(ms);
+            let started = Instant::now();
+            let r = self.plugins[i].call_on_complete(&services, &backend, p, name, args);
+            self.charge_tick(started, ms, r.is_err());
+            return match r {
+                Ok(out) => out,
+                Err(e) => {
+                    self.fault(i, manifest::EVENT_ON_COMMAND, e);
+                    Vec::new()
+                }
+            };
+        }
+        Vec::new()
     }
 }
 

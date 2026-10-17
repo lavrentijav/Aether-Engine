@@ -65,6 +65,8 @@ aether-staff-plugin = { path = "../../plugins/staff", optional = true }
 # The WorldGuard-style regions plugin: the model and `/rg` commands on the
 # shared `aether-region` index the protection hooks consult.
 aether-regions-plugin = { path = "../../plugins/regions", optional = true }
+# The permissions UI plugin (CMD-33a): `/lp` over the core permission store.
+aether-permissions-plugin = { path = "../../plugins/permissions", optional = true }
 # The claims native plugin (CMD-35): GriefPrevention-style player claims on the
 # core region index, owned through /claim and a golden shovel.
 aether-claims-plugin = { path = "../../plugins/claims", optional = true }
@@ -141,5 +143,5 @@ workspace = true
 # build that does not need Wasmtime (tests, a minimal deployment) can drop it
 # with `--no-default-features`.
 default = ["plugins"]
-plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-menus-plugin", "dep:aether-webadmin-plugin", "dep:aether-sidebar-plugin", "dep:aether-voice-plugin", "dep:aether-staff-plugin", "dep:aether-regions-plugin", "dep:aether-claims-plugin", "dep:aether-worldedit-plugin", "dep:aether-essentials-teleport-plugin"]
+plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-menus-plugin", "dep:aether-webadmin-plugin", "dep:aether-sidebar-plugin", "dep:aether-voice-plugin", "dep:aether-staff-plugin", "dep:aether-permissions-plugin", "dep:aether-regions-plugin", "dep:aether-claims-plugin", "dep:aether-worldedit-plugin", "dep:aether-essentials-teleport-plugin"]
 postgres = ["dep:postgres"]

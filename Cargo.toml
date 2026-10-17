@@ -38,6 +38,9 @@ members = [
     # The staff, as a native plugin: vanish, admin spectate and per-admin
     # anti-xray control, with a journal audit trail.
     "plugins/staff",
+    # The permissions UI plugin (CMD-33a), a native plugin over the core
+    # permission store: `/lp user|group ...` and parent management.
+    "plugins/permissions",
     # The claims plugin (CMD-35), a native plugin on the core region index:
     # GriefPrevention-style player claims, a golden shovel and /claim.
     "plugins/claims",

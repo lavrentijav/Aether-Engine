@@ -10,7 +10,7 @@ resolution and the file it persists to.
 | concept | summary |
 |---|---|
 | **level** | vanilla `0..=4`, clamped on the way in. |
-| **node** | lower-case, dot-separated `[a-z0-9_.-]`; a malformed node is a deny. |
+| **node** | lower-case, dot-separated `[a-z0-9_.-]`; a malformed node is a deny. A stored node may be a wildcard: `*`, or a trailing `.*` (`aether.command.*`). |
 | **default** | per node: `allow` / `deny` / `op` (unknown defaults to `op`, failing closed). |
 | **group** | id, `level`, `priority`, `parents`, explicit `nodes`, `meta`, `members`. |
 | **player** | explicit `nodes` and `meta` (its own prefix/suffix/weight). |
@@ -25,6 +25,16 @@ command's op floor.
 
 Context is resolved **within** a holder: a node with the matching context beats that holder's
 global node, and a node for another context is skipped. Callers with no world pass `None`.
+
+Within a holder an **exact** node beats a wildcard. Among wildcards the longest matching prefix
+wins, and at equal length a context-specific pattern beats a global one; `*` is the least specific.
+Across holders the normal order applies, so a player's deny still beats a group's wildcard grant.
+
+A user's **direct groups** are the groups whose member list names them. `/lp user <u> parent
+set|clear` therefore rewrites those memberships atomically; a group's **parents** are its own
+`parents` list and `/lp group <g> parent …` validates existence, de-duplicates and rejects a cycle
+before changing the store. Deleting a group removes it from every parent list and from its members'
+effective groups (as LuckPerms does); the built-in `op` group cannot be deleted.
 
 ## Persistence
 

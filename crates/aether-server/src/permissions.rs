@@ -138,6 +138,25 @@ pub enum NodeDefault {
     Op,
 }
 
+/// Where an explicit node came from, for the `/lp ... check` and `list` UI.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NodeSource {
+    /// The subject's own node.
+    Player(String),
+    /// A group in the subject's inheritance chain.
+    Group(String),
+}
+
+impl NodeSource {
+    /// The LuckPerms-style source label.
+    pub fn label(&self) -> String {
+        match self {
+            NodeSource::Player(name) => format!("user {name}"),
+            NodeSource::Group(id) => format!("group {id}"),
+        }
+    }
+}
+
 /// The built-in group every operator belongs to.
 pub const OP_GROUP: &str = "op";
 
@@ -154,8 +173,25 @@ pub const STORE_FILE: &str = "permissions.toml";
 /// for `minecraft.command.ban`, `false` for `Minecraft.Command.Ban`, `""`,
 /// `.leading`, `trailing.` or `a..b`. A rejected name is denied by [`check`],
 /// so a typo cannot match a node nobody declared.
+///
+/// A **wildcard** is a legal stored node too: `*` on its own, or a trailing
+/// `.*` (`aether.command.*`). It may only be the last segment, so
+/// `a.*.b` and `foo*` are rejected rather than silently matching nothing.
 pub fn valid_node(node: &str) -> bool {
-    !node.is_empty() && node.split('.').all(valid_segment)
+    if node.is_empty() {
+        return false;
+    }
+    let mut segments = node.split('.').peekable();
+    while let Some(seg) = segments.next() {
+        if seg == "*" {
+            // A wildcard is only meaningful as the final segment.
+            return segments.peek().is_none();
+        }
+        if !valid_segment(seg) {
+            return false;
+        }
+    }
+    true
 }
 
 fn valid_segment(seg: &str) -> bool {
@@ -163,6 +199,44 @@ fn valid_segment(seg: &str) -> bool {
         && seg
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Whether `id` is a legal group id: non-empty ASCII letters, digits, `_` or
+/// `-`. Group ids are not permission nodes, so they are case-sensitive and may
+/// not contain `.` (a dot would read as a node segment in a UI).
+pub fn valid_group_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Whether the stored node pattern `pattern` grants/denies `node`.
+///
+/// `*` matches every legal node; `a.*` matches `a.b` and every deeper
+/// descendant, but not `a` itself or `ab`.
+fn wildcard_matches(pattern: &str, node: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    match pattern.strip_suffix(".*") {
+        Some(prefix) => {
+            node.len() > prefix.len()
+                && node.starts_with(prefix)
+                && node.as_bytes()[prefix.len()] == b'.'
+        }
+        None => false,
+    }
+}
+
+/// How specific a wildcard pattern is: a longer prefix is more specific, and
+/// `*` is the least specific of all.
+fn wildcard_len(pattern: &str) -> usize {
+    if pattern == "*" {
+        0
+    } else {
+        pattern.len()
+    }
 }
 
 /// The map key for a node plus its context. A global node is the bare name; a
@@ -184,15 +258,50 @@ fn split_key(key: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Look `node` up in one holder's map: a matching context-specific node beats
-/// the global one, and the global one is the fallback everywhere.
+/// Look `node` up in one holder's map.
+///
+/// A matching context-specific node beats the global one, and an exact node
+/// beats a wildcard. Among wildcards the most specific pattern wins; at equal
+/// specificity a context-specific entry beats a global one. The search is
+/// confined to one holder, so a child group's grant still beats its parent's
+/// deny under the holder ordering.
 fn lookup(nodes: &BTreeMap<String, bool>, node: &str, context: Option<&str>) -> Option<bool> {
-    if let Some(ctx) = context.filter(|c| !c.is_empty()) {
+    let ctx = context.filter(|c| !c.is_empty());
+    if let Some(ctx) = ctx {
         if let Some(v) = nodes.get(&node_key(node, Some(ctx))) {
             return Some(*v);
         }
     }
-    nodes.get(&node_key(node, None)).copied()
+    if let Some(v) = nodes.get(&node_key(node, None)) {
+        return Some(*v);
+    }
+
+    // No exact match: the longest matching wildcard decides. Context-specific
+    // is preferred to global at the same length.
+    let mut best: Option<(bool, usize, bool)> = None;
+    for (key, value) in nodes {
+        let (pattern, key_ctx) = split_key(key);
+        if !wildcard_matches(pattern, node) {
+            continue;
+        }
+        let contextual = key_ctx.is_some() && key_ctx == ctx;
+        if key_ctx.is_some() && !contextual {
+            continue;
+        }
+        let rank = (contextual, wildcard_len(pattern), *value);
+        let better = match best {
+            None => true,
+            Some((best_ctx, best_len, _)) => match (rank.0, best_ctx) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => rank.1 > best_len,
+            },
+        };
+        if better {
+            best = Some(rank);
+        }
+    }
+    best.map(|(_, _, value)| value)
 }
 
 /// One group member on the wire: an optional required address, omitted for a
@@ -393,6 +502,13 @@ impl Player {
         &self.meta
     }
 
+    /// The player's explicit nodes, as `(node, context, value)`.
+    pub fn nodes(&self) -> impl Iterator<Item = (&str, Option<&str>, bool)> {
+        self.nodes
+            .iter()
+            .map(|(k, v)| (split_key(k).0, split_key(k).1, *v))
+    }
+
     /// The number of explicit nodes.
     pub fn len(&self) -> usize {
         self.nodes.len()
@@ -591,6 +707,30 @@ impl Store {
             .collect()
     }
 
+    /// Every group id, sorted, for completion and `/lp group info`.
+    pub fn group_ids(&self) -> Vec<String> {
+        self.groups.keys().cloned().collect()
+    }
+
+    /// Every player name the store knows, sorted.
+    pub fn player_names(&self) -> Vec<String> {
+        self.players.keys().cloned().collect()
+    }
+
+    /// Every node name the store knows: declared defaults plus explicit
+    /// player/group patterns. Contexts are stripped, sorted and de-duplicated,
+    /// so this is exactly the candidate list for tab-completion.
+    pub fn known_nodes(&self) -> Vec<String> {
+        let mut out: BTreeSet<String> = self.nodes.keys().cloned().collect();
+        for player in self.players.values() {
+            out.extend(player.nodes.keys().map(|k| split_key(k).0.to_string()));
+        }
+        for group in self.groups.values() {
+            out.extend(group.nodes.keys().map(|k| split_key(k).0.to_string()));
+        }
+        out.into_iter().collect()
+    }
+
     /// Create a non-built-in group. The built-in `op` group already exists.
     pub fn create_group(&mut self, id: &str, level: Level) -> Result<(), String> {
         if id.is_empty() {
@@ -673,6 +813,72 @@ impl Store {
             .ok_or_else(|| format!("no group `{child}`"))?;
         group.parents.retain(|p| p != parent);
         Ok(())
+    }
+
+    /// Replace `child`'s whole parent set atomically: validates every parent,
+    /// de-duplicates and **rejects a cycle** before the store changes, so a
+    /// failed `parent set`/`switch`/`clear` leaves the previous edges intact.
+    pub fn set_group_parents(&mut self, child: &str, parents: &[String]) -> Result<(), String> {
+        if !self.groups.contains_key(child) {
+            return Err(format!("no group `{child}`"));
+        }
+        let mut next = self.clone();
+        let mut unique: Vec<String> = Vec::new();
+        for parent in parents {
+            if !next.groups.contains_key(parent) {
+                return Err(format!("no group `{parent}`"));
+            }
+            if !unique.iter().any(|p| p == parent) {
+                unique.push(parent.clone());
+            }
+        }
+        unique.sort();
+        next.groups.get_mut(child).expect("checked above").parents = unique;
+        next.validate()?;
+        *self = next;
+        Ok(())
+    }
+
+    /// Set a user's direct groups, replacing the previous set. Validates every
+    /// group before touching membership, so a bad name changes nothing.
+    pub fn set_user_groups(&mut self, name: &str, groups: &[String]) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a player name is empty".to_string());
+        }
+        for id in groups {
+            if !self.groups.contains_key(id) {
+                return Err(format!("no group `{id}`"));
+            }
+        }
+        let key = name.to_ascii_lowercase();
+        for group in self.groups.values_mut() {
+            group.members.remove(&key);
+        }
+        let mut unique: Vec<&String> = Vec::new();
+        for id in groups {
+            if !unique.contains(&id) {
+                unique.push(id);
+            }
+        }
+        for id in unique {
+            self.groups
+                .get_mut(id)
+                .expect("validated above")
+                .members
+                .insert(key.clone(), Member { addr: None });
+        }
+        Ok(())
+    }
+
+    /// Add `name` to a group (a user `parent add`), keeping any other groups.
+    pub fn add_user_group(&mut self, name: &str, group: &str) -> Result<bool, String> {
+        self.add_member(group, name, None)
+    }
+
+    /// Remove `name` from `group` (a user `parent remove`), keeping the rest.
+    pub fn remove_user_group(&mut self, name: &str, group: &str) -> Result<bool, String> {
+        self.remove_member(group, name)
     }
 
     /// Set or clear an explicit node on a group.
@@ -845,16 +1051,30 @@ impl Store {
         if let Some(player) = self.player(name) {
             out.push(player);
         }
-
-        // Breadth-first from every direct group, keeping the shallowest depth
-        // at which each group is reached.
-        let mut depth: BTreeMap<String, usize> = BTreeMap::new();
-        let mut level: Vec<String> = self
+        let roots: Vec<String> = self
             .groups
             .values()
             .filter(|g| g.contains(name, ip))
             .map(|g| g.id.clone())
             .collect();
+        out.extend(
+            self.group_order(roots)
+                .into_iter()
+                .map(|g| g as &dyn Holder),
+        );
+        out
+    }
+
+    /// The reachable groups from `roots`, highest precedence first:
+    /// `(priority desc, depth asc, id asc)`.
+    ///
+    /// `depth` is `0` for a root, `1` for its parent, and so on. Breadth-first
+    /// keeps the shallowest depth at which a group is reached, so a child
+    /// beats a parent at equal priority; priority outranks depth across the
+    /// whole tree. The order is total, so a resolution is reproducible.
+    fn group_order(&self, roots: impl IntoIterator<Item = String>) -> Vec<&Group> {
+        let mut depth: BTreeMap<String, usize> = BTreeMap::new();
+        let mut level: Vec<String> = roots.into_iter().collect();
         let mut d = 0usize;
         while !level.is_empty() {
             let mut next: Vec<String> = Vec::new();
@@ -883,10 +1103,10 @@ impl Store {
             .filter_map(|(id, &dep)| self.groups.get(id).map(|g| (g.priority, dep, id.as_str())))
             .collect();
         order.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(b.2)));
-        for (_, _, id) in order {
-            out.push(&self.groups[id]);
-        }
-        out
+        order
+            .into_iter()
+            .filter_map(|(_, _, id)| self.groups.get(id))
+            .collect()
     }
 
     /// The explicit node a `(name, ip)` subject holds for `node` in `context`,
@@ -904,6 +1124,73 @@ impl Store {
             }
         }
         None
+    }
+
+    /// Like [`Store::explicit`], but names the holder that decided.
+    pub fn explicit_source(
+        &self,
+        name: &str,
+        ip: Option<IpAddr>,
+        node: &str,
+        context: Option<&str>,
+    ) -> Option<(bool, NodeSource)> {
+        if let Some(player) = self.player(name) {
+            if let Some(value) = lookup(&player.nodes, node, context) {
+                return Some((value, NodeSource::Player(name.to_string())));
+            }
+        }
+        let roots: Vec<String> = self
+            .groups
+            .values()
+            .filter(|g| g.contains(name, ip))
+            .map(|g| g.id.clone())
+            .collect();
+        for group in self.group_order(roots) {
+            if let Some(value) = lookup(&group.nodes, node, context) {
+                return Some((value, NodeSource::Group(group.id.clone())));
+            }
+        }
+        None
+    }
+
+    /// The explicit node a **group** holds for `node` in `context`, walking the
+    /// group itself and then its ancestors.
+    pub fn group_explicit(
+        &self,
+        group: &str,
+        node: &str,
+        context: Option<&str>,
+    ) -> Option<(bool, NodeSource)> {
+        let group = self.groups.get(group)?;
+        for holder in self.group_order(vec![group.id.clone()]) {
+            if let Some(value) = lookup(&holder.nodes, node, context) {
+                return Some((value, NodeSource::Group(holder.id.clone())));
+            }
+        }
+        None
+    }
+
+    /// The groups `name`, from `ip`, belongs to **by inheritance**, including
+    /// the direct ones, in resolution order.
+    pub fn inherited_groups(&self, name: &str, ip: Option<IpAddr>) -> Vec<String> {
+        let roots: Vec<String> = self
+            .groups
+            .values()
+            .filter(|g| g.contains(name, ip))
+            .map(|g| g.id.clone())
+            .collect();
+        self.group_order(roots)
+            .into_iter()
+            .map(|g| g.id.clone())
+            .collect()
+    }
+
+    /// The parents of `id`, or every reachable ancestor excluding `id` itself.
+    pub fn group_parents(&self, id: &str) -> Vec<String> {
+        self.groups
+            .get(id)
+            .map(|g| g.parents.clone())
+            .unwrap_or_default()
     }
 
     /// The decision: may a player at `level` use `node`, in `context`, for a
@@ -1246,6 +1533,208 @@ pub fn declare_node(node: &str, default: NodeDefault) -> Result<(), String> {
 /// A node's declared default in the process-wide store.
 pub fn node_default(node: &str) -> Option<NodeDefault> {
     snapshot_store().node_default(node)
+}
+
+/// The server side of the `/lp` plugin's `permissions.admin` service.
+///
+/// It is a thin adapter: every read clones the current immutable snapshot and
+/// every write goes through [`update`] + [`save`], exactly like the core's own
+/// `/op` write model. It is registered in [`crate::plugins::install`] before
+/// native plugins load, so the `permissions` plugin resolves it in `init`.
+#[cfg(feature = "plugins")]
+pub struct AdminService;
+
+#[cfg(feature = "plugins")]
+fn node_entries<'a>(
+    nodes: impl Iterator<Item = (&'a str, Option<&'a str>, bool)>,
+) -> Vec<aether_plugin::permissions::NodeEntry> {
+    nodes
+        .map(
+            |(node, context, value)| aether_plugin::permissions::NodeEntry {
+                node: node.to_string(),
+                context: context.map(str::to_string),
+                value,
+            },
+        )
+        .collect()
+}
+
+#[cfg(feature = "plugins")]
+impl aether_plugin::permissions::PermissionsAdmin for AdminService {
+    fn groups(&self) -> Vec<String> {
+        snapshot_store().group_ids()
+    }
+
+    fn users(&self) -> Vec<String> {
+        snapshot_store().player_names()
+    }
+
+    fn nodes(&self) -> Vec<String> {
+        snapshot_store().known_nodes()
+    }
+
+    fn user(&self, name: &str) -> Option<aether_plugin::permissions::UserInfo> {
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        let store = snapshot_store();
+        Some(aether_plugin::permissions::UserInfo {
+            name: name.to_ascii_lowercase(),
+            level: store.level_of(name, None).get(),
+            groups: store.groups_of(name, None),
+            inherited_groups: store.inherited_groups(name, None),
+            nodes: node_entries(store.player(name).map(|p| p.nodes()).into_iter().flatten()),
+        })
+    }
+
+    fn group(&self, id: &str) -> Option<aether_plugin::permissions::GroupInfo> {
+        let store = snapshot_store();
+        let group = store.group(id)?;
+        let inherited = store
+            .group_order(vec![group.id().to_string()])
+            .into_iter()
+            .filter(|g| g.id() != group.id())
+            .map(|g| g.id().to_string())
+            .collect();
+        Some(aether_plugin::permissions::GroupInfo {
+            id: group.id().to_string(),
+            level: group.level().get(),
+            builtin: group.is_builtin(),
+            priority: group.priority,
+            parents: group.parents().to_vec(),
+            inherited_parents: inherited,
+            nodes: node_entries(group.nodes()),
+            members: group.members().map(|(name, _)| name.to_string()).collect(),
+        })
+    }
+
+    fn check_user(
+        &self,
+        name: &str,
+        node: &str,
+        context: Option<&str>,
+    ) -> aether_plugin::permissions::Check {
+        use aether_plugin::permissions::{Check, Source};
+        let store = snapshot_store();
+        let level = store.level_of(name, None);
+        let value = store.resolve(level, name, None, node, context, 0);
+        let source = match store.explicit_source(name, None, node, context) {
+            Some((_, NodeSource::Player(name))) => Source::User(name),
+            Some((_, NodeSource::Group(id))) => Source::Group(id),
+            None => Source::Default,
+        };
+        Check { value, source }
+    }
+
+    fn check_group(
+        &self,
+        id: &str,
+        node: &str,
+        context: Option<&str>,
+    ) -> aether_plugin::permissions::Check {
+        use aether_plugin::permissions::{Check, Source};
+        let store = snapshot_store();
+        let Some(group) = store.group(id) else {
+            return Check {
+                value: false,
+                source: Source::Default,
+            };
+        };
+        let explicit = store.group_explicit(id, node, context);
+        let value = explicit
+            .as_ref()
+            .map(|(value, _)| *value)
+            .unwrap_or_else(|| store.check(group.level(), node, 0));
+        let source = match explicit {
+            Some((_, NodeSource::Player(name))) => Source::User(name),
+            Some((_, NodeSource::Group(id))) => Source::Group(id),
+            None => Source::Default,
+        };
+        Check { value, source }
+    }
+
+    fn set_user_node(
+        &self,
+        name: &str,
+        node: &str,
+        context: Option<&str>,
+        value: bool,
+    ) -> Result<(), String> {
+        update(|store| store.set_player_node(name, node, context, Some(value)))?;
+        save()
+    }
+
+    fn unset_user_node(&self, name: &str, node: &str, context: Option<&str>) -> Result<(), String> {
+        update(|store| store.set_player_node(name, node, context, None))?;
+        save()
+    }
+
+    fn set_group_node(
+        &self,
+        id: &str,
+        node: &str,
+        context: Option<&str>,
+        value: bool,
+    ) -> Result<(), String> {
+        update(|store| store.set_group_node(id, node, context, Some(value)))?;
+        save()
+    }
+
+    fn unset_group_node(&self, id: &str, node: &str, context: Option<&str>) -> Result<(), String> {
+        update(|store| store.set_group_node(id, node, context, None))?;
+        save()
+    }
+
+    fn set_group_parents(&self, id: &str, parents: Vec<String>) -> Result<(), String> {
+        update(|store| store.set_group_parents(id, &parents))?;
+        save()
+    }
+
+    fn add_group_parent(&self, id: &str, parent: &str) -> Result<(), String> {
+        update(|store| store.set_parent(id, parent))?;
+        save()
+    }
+
+    fn remove_group_parent(&self, id: &str, parent: &str) -> Result<(), String> {
+        update(|store| store.remove_parent(id, parent))?;
+        save()
+    }
+
+    fn set_user_groups(&self, name: &str, groups: Vec<String>) -> Result<(), String> {
+        update(|store| store.set_user_groups(name, &groups))?;
+        save()
+    }
+
+    fn add_user_group(&self, name: &str, group: &str) -> Result<(), String> {
+        update(|store| store.add_user_group(name, group))?;
+        save()
+    }
+
+    fn remove_user_group(&self, name: &str, group: &str) -> Result<(), String> {
+        update(|store| store.remove_user_group(name, group))?;
+        save()
+    }
+
+    fn create_group(&self, id: &str) -> Result<(), String> {
+        let id = id.trim();
+        if !valid_group_id(id) {
+            return Err(format!(
+                "`{id}` is not a legal group name (use letters, digits, `_` or `-`)"
+            ));
+        }
+        update(|store| store.create_group(id, Level::NONE))?;
+        save()
+    }
+
+    fn delete_group(&self, id: &str) -> Result<(), String> {
+        update(|store| store.delete_group(id))?;
+        save()
+    }
+
+    fn save(&self) -> Result<(), String> {
+        crate::permissions::save()
+    }
 }
 
 #[cfg(test)]
@@ -1946,5 +2435,275 @@ parents = ["ghost"]
         assert!(check_for("perm_cmd02_subject", None, "perm_cmd02_test", 0));
         unset_node("perm_cmd02_subject", "perm_cmd02_test", None).unwrap();
         assert!(!check_for("perm_cmd02_subject", None, "perm_cmd02_test", 0));
+    }
+
+    // --- CMD-33a: wildcards, parent sets and user group membership ---------
+
+    #[test]
+    fn a_wildcard_is_legal_only_as_a_final_segment() {
+        for ok in ["*", "a.*", "a.b.*", "a-b.c_d.*"] {
+            assert!(valid_node(ok), "`{ok}` should be a legal wildcard");
+        }
+        for bad in ["a.*.b", "foo*", "*.a", "a..*", "*.*.b"] {
+            assert!(!valid_node(bad), "`{bad}` should be rejected");
+        }
+    }
+
+    #[test]
+    fn wildcard_nodes_match_descendants_and_exact_nodes_win() {
+        let mut s = Store::new();
+        s.create_group("staff", Level::new(1)).unwrap();
+        s.add_member("staff", "alice", None).unwrap();
+        s.declare_node("test.wild.child", NodeDefault::Deny)
+            .unwrap();
+        s.declare_node("test.wild.grand.child", NodeDefault::Deny)
+            .unwrap();
+        s.declare_node("test.wilder.child", NodeDefault::Deny)
+            .unwrap();
+
+        s.set_group_node("staff", "test.wild.*", None, Some(true))
+            .unwrap();
+        assert!(s.resolve(
+            s.level_of("alice", None),
+            "alice",
+            None,
+            "test.wild.child",
+            None,
+            0
+        ));
+        assert!(s.resolve(
+            s.level_of("alice", None),
+            "alice",
+            None,
+            "test.wild.grand.child",
+            None,
+            0
+        ));
+        // The wildcard does not leak to a sibling prefix.
+        assert!(!s.resolve(
+            s.level_of("alice", None),
+            "alice",
+            None,
+            "test.wilder.child",
+            None,
+            0
+        ));
+
+        // An exact deny beats the wildcard grant within the same holder.
+        s.set_group_node("staff", "test.wild.child", None, Some(false))
+            .unwrap();
+        assert!(!s.resolve(
+            s.level_of("alice", None),
+            "alice",
+            None,
+            "test.wild.child",
+            None,
+            0
+        ));
+        assert!(s.resolve(
+            s.level_of("alice", None),
+            "alice",
+            None,
+            "test.wild.grand.child",
+            None,
+            0
+        ));
+    }
+
+    #[test]
+    fn the_bare_star_grants_a_node_no_group_names() {
+        let mut s = Store::new();
+        s.create_group("all", Level::NONE).unwrap();
+        s.add_member("all", "bob", None).unwrap();
+        s.set_group_node("all", "*", None, Some(true)).unwrap();
+        s.declare_node("unlisted.node", NodeDefault::Deny).unwrap();
+        assert!(s.resolve(
+            s.level_of("bob", None),
+            "bob",
+            None,
+            "unlisted.node",
+            None,
+            0
+        ));
+        // A player-level deny still outranks the group's `*`.
+        s.set_player_node("bob", "unlisted.node", None, Some(false))
+            .unwrap();
+        assert!(!s.resolve(
+            s.level_of("bob", None),
+            "bob",
+            None,
+            "unlisted.node",
+            None,
+            0
+        ));
+    }
+
+    #[test]
+    fn a_context_wildcard_applies_only_in_its_world() {
+        let mut s = Store::new();
+        s.create_group("ctx", Level::NONE).unwrap();
+        s.add_member("ctx", "carol", None).unwrap();
+        s.set_group_node("ctx", "test.*", Some("overworld"), Some(true))
+            .unwrap();
+        s.declare_node("test.node", NodeDefault::Deny).unwrap();
+        assert!(s.resolve(
+            s.level_of("carol", None),
+            "carol",
+            None,
+            "test.node",
+            Some("overworld"),
+            0
+        ));
+        assert!(!s.resolve(
+            s.level_of("carol", None),
+            "carol",
+            None,
+            "test.node",
+            Some("nether"),
+            0
+        ));
+    }
+
+    #[test]
+    fn explicit_source_names_the_group_that_decided() {
+        let mut s = Store::new();
+        s.create_group("source", Level::NONE).unwrap();
+        s.add_member("source", "dave", None).unwrap();
+        s.set_group_node("source", "test.source.*", None, Some(true))
+            .unwrap();
+        let (value, source) = s
+            .explicit_source("dave", None, "test.source.child", None)
+            .expect("the wildcard matched");
+        assert!(value);
+        assert_eq!(source, NodeSource::Group("source".into()));
+        assert_eq!(
+            s.explicit_source("nobody", None, "test.source.child", None),
+            None
+        );
+    }
+
+    #[test]
+    fn set_group_parents_replaces_dedups_and_rejects_cycles_atomically() {
+        let mut s = Store::new();
+        for id in ["a", "b", "c"] {
+            s.create_group(id, Level::NONE).unwrap();
+        }
+        s.set_group_parents("a", &["b".into(), "c".into(), "b".into()])
+            .unwrap();
+        assert_eq!(
+            s.group("a").unwrap().parents(),
+            &["b".to_string(), "c".to_string()]
+        );
+
+        // `b -> a` would close a cycle. The failed write leaves `a` untouched.
+        assert!(s.set_group_parents("b", &["a".into()]).is_err());
+        assert!(s.group("b").unwrap().parents().is_empty());
+        assert_eq!(
+            s.group("a").unwrap().parents(),
+            &["b".to_string(), "c".to_string()]
+        );
+
+        // An unknown parent is refused before any edge changes.
+        assert!(s.set_group_parents("b", &["missing".into()]).is_err());
+        assert!(s.group("b").unwrap().parents().is_empty());
+
+        // Clear is the empty set.
+        s.set_group_parents("a", &[]).unwrap();
+        assert!(s.group("a").unwrap().parents().is_empty());
+    }
+
+    #[test]
+    fn set_user_groups_replaces_and_deduplicates() {
+        let mut s = Store::new();
+        s.create_group("one", Level::NONE).unwrap();
+        s.create_group("two", Level::NONE).unwrap();
+        s.set_user_groups("Eve", &["one".into(), "two".into(), "one".into()])
+            .unwrap();
+        let mut groups = s.groups_of("eve", None);
+        groups.sort();
+        assert_eq!(groups, vec!["one".to_string(), "two".to_string()]);
+        s.set_user_groups("eve", &["two".into()]).unwrap();
+        assert_eq!(s.groups_of("eve", None), vec!["two".to_string()]);
+        s.set_user_groups("eve", &[]).unwrap();
+        assert!(s.groups_of("eve", None).is_empty());
+        assert!(s.set_user_groups("eve", &["missing".into()]).is_err());
+    }
+
+    #[test]
+    fn wildcards_and_parent_sets_survive_a_file_round_trip() {
+        let path = temp_path("wildcard");
+        let _ = std::fs::remove_file(&path);
+        let mut s = Store::new();
+        s.create_group("parent", Level::NONE).unwrap();
+        s.create_group("child", Level::NONE).unwrap();
+        s.set_group_parents("child", &["parent".into()]).unwrap();
+        s.set_group_node("parent", "test.*", Some("overworld"), Some(true))
+            .unwrap();
+        s.save(&path).unwrap();
+
+        let back = Store::load(&path).unwrap().expect("the file exists");
+        assert_eq!(
+            back.group("child").unwrap().parents(),
+            &["parent".to_string()]
+        );
+        // Membership is not part of the group node itself: the grant belongs
+        // to the group and is resolved for whoever joins it later.
+        assert!(!back.resolve(
+            Level::NONE,
+            "someone",
+            None,
+            "test.anything",
+            Some("overworld"),
+            0
+        ));
+        assert_eq!(
+            back.group("parent")
+                .unwrap()
+                .node("test.anything", Some("overworld")),
+            Some(true)
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.tmp"));
+    }
+
+    #[cfg(feature = "plugins")]
+    #[test]
+    fn the_admin_service_reads_writes_and_names_the_source() {
+        use aether_plugin::permissions::{PermissionsAdmin, Source};
+
+        let _guard = test_lock();
+        install_store_for_test(Store::new());
+        let admin = AdminService;
+        admin.create_group("service").unwrap();
+        admin
+            .set_group_node("service", "service.*", None, true)
+            .unwrap();
+        admin.add_user_group("alice", "service").unwrap();
+
+        let info = admin.user("alice").expect("a user view");
+        assert_eq!(info.groups, vec!["service".to_string()]);
+        assert_eq!(info.inherited_groups, vec!["service".to_string()]);
+        let check = admin.check_user("alice", "service.child", None);
+        assert!(check.value);
+        assert_eq!(check.source, Source::Group("service".into()));
+
+        admin
+            .set_user_node("alice", "service.child", None, false)
+            .unwrap();
+        let check = admin.check_user("alice", "service.child", None);
+        assert!(!check.value);
+        assert_eq!(check.source, Source::User("alice".into()));
+
+        admin
+            .unset_user_node("alice", "service.child", None)
+            .unwrap();
+        assert!(admin.check_user("alice", "service.child", None).value);
+
+        let group = admin.group("service").expect("a group view");
+        assert!(group.members.contains(&"alice".to_string()));
+        assert!(admin.group("op").expect("builtin").builtin);
+        assert!(admin.delete_group("op").is_err());
+        assert!(admin.delete_group("service").is_ok());
+        assert!(admin.group("service").is_none());
     }
 }

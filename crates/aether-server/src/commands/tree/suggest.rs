@@ -18,8 +18,35 @@ pub struct SuggestCtx<'a> {
 
 /// Suggest completions for `text` to `handle`. The result is the set of words
 /// that may replace the token currently being typed.
+///
+/// A **plugin command** is completed by the plugin itself: the core tree does
+/// not carry its grammar, and `/lp` needs the live user/group/node lists. The
+/// command registry decides ownership, so a core name never takes this path.
 pub fn suggest(text: &str, handle: &PlayerHandle, ctx: &SuggestCtx) -> Vec<String> {
+    if let Some((name, args)) = plugin_tokens(text) {
+        if crate::commands::registry::plugin_command(&name).is_some() {
+            if let Some(out) = crate::plugins::on_complete(handle, &name, &args) {
+                return out;
+            }
+        }
+    }
     suggest_in(tree(), text, handle, ctx)
+}
+
+/// Split a partially-typed line into the plugin command name and the tokens
+/// after it. Trailing spaces are preserved as an empty final token, because
+/// that is what moves completion from the command name to its arguments.
+fn plugin_tokens(text: &str) -> Option<(String, Vec<String>)> {
+    let body = text
+        .trim_start()
+        .strip_prefix('/')
+        .unwrap_or(text.trim_start());
+    let mut words = body.split(' ').map(str::to_string);
+    let name = words.next().unwrap_or_default();
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((name, words.collect()))
 }
 
 /// The engine behind [`suggest`], against a given tree so tests can drive a
