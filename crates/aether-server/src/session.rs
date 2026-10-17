@@ -841,12 +841,23 @@ fn play_loop(
             ClientEvent::Dig { x, y, z, seq } => {
                 if handle.inspecting() {
                     inspect(handle, registry, world, x, y, z);
-                } else if !full || interact::finish_dig(handle, x, y, z) {
-                    break_block(handle, registry, world, x, y, z);
                 } else {
-                    // Refused: put the block back on their screen.
-                    let block = world.get_block(x, y, z);
-                    handle.emit(&ServerEvent::BlockChange { x, y, z, block }, world);
+                    // A legacy (non-`full`) client's completion is trusted, but
+                    // its tracked dig still has to be dropped or the tick keeps
+                    // sending break particles for an old position.
+                    let finished = if full {
+                        interact::finish_dig(handle, x, y, z)
+                    } else {
+                        interact::forget_dig(handle);
+                        true
+                    };
+                    if finished {
+                        break_block(handle, registry, world, x, y, z);
+                    } else {
+                        // Refused: put the block back on their screen.
+                        let block = world.get_block(x, y, z);
+                        handle.emit(&ServerEvent::BlockChange { x, y, z, block }, world);
+                    }
                 }
                 ack(handle, world, seq);
             }
@@ -1265,6 +1276,7 @@ fn pvp_denial(
 /// cancelled dig still resyncs the block: a 1.8.9 client predicts the break the
 /// moment it sends status 0 (and in creative that is immediate), so without a
 /// [`ServerEvent::BlockChange`] the block would stay a ghost on its screen.
+/// Returns whether a plugin cancelled the dig and the block was resynced.
 pub(crate) fn handle_start_dig(
     handle: &crate::players::PlayerHandle,
     registry: &SharedRegistry,
@@ -1272,11 +1284,11 @@ pub(crate) fn handle_start_dig(
     x: i32,
     y: i32,
     z: i32,
-) {
+) -> bool {
     let name = crate::game::block_name(world, world.get_block(x, y, z)).unwrap_or_default();
     if handle.inspecting() {
         inspect(handle, registry, world, x, y, z);
-        return;
+        return false;
     }
     if let Some(reason) = crate::plugins::before_block_dig(handle, x, y, z, &name) {
         // A native plugin's selection wand takes the click before the region
@@ -1287,11 +1299,12 @@ pub(crate) fn handle_start_dig(
         }
         let block = world.get_block(x, y, z);
         handle.emit(&ServerEvent::BlockChange { x, y, z, block }, world);
-        return;
+        return true;
     }
     if crate::game::interact::start_dig(handle, world, x, y, z) {
         break_block(handle, registry, world, x, y, z);
     }
+    false
 }
 
 /// A right-click with a non-block item (protocol 47): it cannot place
@@ -2378,6 +2391,32 @@ mod placement_tests {
             world.get_block(1, 100, 0),
             block_ids::AIR,
             "a refused placement writes nothing"
+        );
+    }
+
+    #[test]
+    fn a_legacy_dig_completion_clears_the_tracked_dig() {
+        // Protocol 47 is not a `full` codec, so its `Dig` completion takes the
+        // trusted path without `finish_dig`. Before `forget_dig` the entry a
+        // survival start inserted stayed in DIGS and kept animating an old
+        // position every tick.
+        let world = test_world(29, "legacy-dig");
+        let handle = crate::players::PlayerHandle::for_test(77, "LegacyMiner");
+        handle.game().mode = crate::protocol::GameMode::Survival;
+        world.set_block(0, 100, 0, "minecraft:stone");
+
+        // A slow block in survival registers a dig (returns false: not yet
+        // broken). Creative would return true and register nothing.
+        assert!(
+            !crate::game::interact::start_dig(&handle, &world, 0, 100, 0),
+            "survival mining a slow block starts a dig"
+        );
+        assert!(handle.game().digging.is_some(), "the dig is tracked");
+
+        crate::game::interact::forget_dig(&handle);
+        assert!(
+            handle.game().digging.is_none(),
+            "the trusted legacy completion must not leave a stale dig"
         );
     }
 

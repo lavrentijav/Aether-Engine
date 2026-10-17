@@ -302,7 +302,7 @@ impl Regions {
                     if allow_empty {
                         ctx.log(
                             LogLevel::Error,
-                            "allow-empty-on-error is set: starting with no regions,                              protection is OFF",
+                            "allow-empty-on-error is set: starting with no regions, protection is OFF",
                         );
                         self.state = StoredState::default();
                     } else {
@@ -317,7 +317,7 @@ impl Regions {
                 if allow_empty {
                     ctx.log(
                         LogLevel::Error,
-                        "allow-empty-on-error is set: starting with no regions,                          protection is OFF",
+                        "allow-empty-on-error is set: starting with no regions, protection is OFF",
                     );
                     self.state = StoredState::default();
                 } else {

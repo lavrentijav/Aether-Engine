@@ -1292,6 +1292,10 @@ mod imp {
     }
 
     /// Install `host` for the current test thread only.
+    ///
+    /// The `Box::leak` is deliberate: the slot is a `&'static` because the
+    /// host must outlive the test's locals, and a test process is short-lived,
+    /// so reclaiming one host per test is not worth a registry.
     #[cfg(test)]
     pub(crate) fn install_test_host(host: PluginHost) {
         let host: &'static Mutex<PluginHost> = Box::leak(Box::new(Mutex::new(host)));
@@ -1632,14 +1636,21 @@ mod imp {
             std::sync::Arc<crate::players::PlayerHandle>,
             std::sync::Arc<crate::players::Registry>,
             crate::session::DemoWorld,
+            std::sync::Arc<aether_region::RegionStore>,
         ) {
             use std::sync::Arc;
-            let world = test_world(9_001);
+            let world = test_world(9_001, tag);
             let registry: crate::players::Registry = crate::players::Registry::default();
             let registry = Arc::new(registry);
             let handle = crate::players::PlayerHandle::for_test(9_101, tag);
             registry.insert_for_test(Arc::clone(&handle));
 
+            // A per-test store: the plugin's `Default` reads
+            // `aether_region::global()`, so install this thread's own index
+            // rather than replacing the process-wide one another test uses.
+            let region_store = std::sync::Arc::new(aether_region::RegionStore::new());
+            aether_region::install_test_store(aether_region::RegionStore::new());
+            aether_region::install_test_global(std::sync::Arc::clone(&region_store));
             let backend = Arc::new(RegionsTestBackend::default());
             let mut host =
                 aether_plugin::PluginHost::new(aether_plugin::HostConfig::default(), backend)
@@ -1653,15 +1664,18 @@ mod imp {
                 .expect("regions loads");
             super::register_commands(&file.manifest);
             super::install_test_host(host);
-            (handle, registry, world)
+            (handle, registry, world, region_store)
         }
 
         #[test]
         fn a_use_block_event_reaches_the_wand_hook() {
             // Point 1 through StartDig, point 2 through UseBlock: the second
             // click is the protocol-47 tool right-click path, not a Place.
-            let (handle, registry, world) = install_regions_host("UseBlockHook");
-            crate::session::handle_start_dig(&handle, &registry, &world, 1, 64, 1);
+            let (handle, registry, world, store) = install_regions_host("UseBlockHook");
+            assert!(
+                crate::session::handle_start_dig(&handle, &registry, &world, 1, 64, 1),
+                "the wand cancels the dig and resyncs the block"
+            );
             crate::session::handle_use_block(&handle, &world, 4, 64, 4);
             let lines = super::on_command(
                 &handle,
@@ -1673,14 +1687,22 @@ mod imp {
                 lines.iter().any(|l| l.contains("Created region")),
                 "{lines:?}"
             );
+            assert_eq!(
+                store.snapshot().len(),
+                1,
+                "the region went into this test's own store"
+            );
         }
 
         #[test]
         fn a_start_dig_event_reaches_the_wand_hook() {
             // Point 2 first, then point 1 through the start-of-dig hook.
-            let (handle, registry, world) = install_regions_host("StartDigHook");
+            let (handle, registry, world, store) = install_regions_host("StartDigHook");
             crate::session::handle_use_block(&handle, &world, 4, 64, 4);
-            crate::session::handle_start_dig(&handle, &registry, &world, 1, 64, 1);
+            assert!(
+                crate::session::handle_start_dig(&handle, &registry, &world, 1, 64, 1),
+                "the wand cancels the dig and resyncs the block"
+            );
             let lines = super::on_command(
                 &handle,
                 "rg",
@@ -1691,13 +1713,22 @@ mod imp {
                 lines.iter().any(|l| l.contains("Created region")),
                 "{lines:?}"
             );
+            assert_eq!(
+                store.snapshot().len(),
+                1,
+                "the region went into this test's own store"
+            );
         }
 
-        /// A throwaway world on a temp store, for the plugin-host e2e test.
-        fn test_world(seed: u64) -> crate::session::DemoWorld {
+        /// A throwaway world on a temp store. `tag` keeps every test's
+        /// directory unique: tests run in parallel, and the store's `flock`
+        /// refuses a second open of the same path.
+        fn test_world(seed: u64, tag: &str) -> crate::session::DemoWorld {
             use aether_api::{FjallStore, World};
-            let dir =
-                std::env::temp_dir().join(format!("aether-mn1-host-{}-{seed}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!(
+                "aether-mn1-host-{}-{seed}-{tag}",
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&dir);
             let store = FjallStore::open(&dir).expect("temp store");
             let generator =
@@ -1755,7 +1786,7 @@ actions = ["[command] menu shop"]
             cfg.plugins.plugins.insert("menus".to_string(), entry);
             let cfg = Arc::new(cfg);
 
-            let world = Arc::new(test_world(31));
+            let world = Arc::new(test_world(31, "menus-e2e"));
             let registry: crate::players::SharedRegistry =
                 Arc::new(crate::players::Registry::default());
             let handle = crate::players::PlayerHandle::for_test(9001, "Steve");

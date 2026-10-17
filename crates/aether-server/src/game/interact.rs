@@ -102,6 +102,17 @@ pub fn finish_dig(handle: &PlayerHandle, x: i32, y: i32, z: i32) -> bool {
     }
 }
 
+/// Forget a tracked dig without broadcasting: a legacy client's completion is
+/// trusted, but its `DIGS` entry must not keep animating an old block.
+///
+/// Protocol 47 is not a `full` codec, so the `Dig` handler takes the trusted
+/// path without calling [`finish_dig`]; without this the entry a survival
+/// `start_dig` inserted would stay until the next dig or logout.
+pub fn forget_dig(handle: &PlayerHandle) {
+    handle.game().digging = None;
+    DIGS.lock().unwrap().remove(&handle.entity_id);
+}
+
 /// Gave up mining: clear the cracks for everyone.
 pub fn cancel_dig(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld) {
     handle.game().digging = None;

@@ -749,7 +749,16 @@ pub fn store() -> &'static RegionStore {
 
 /// The process-wide store as a shared handle, for a plugin that wants to hold
 /// it as a field (and for tests that inject their own).
+///
+/// With the `test-store` feature, a thread-local override installed by
+/// [`install_test_global`] wins: a test can give a plugin its own store without
+/// passing it through the plugin's constructor, and other tests (on their own
+/// threads) keep the real one.
 pub fn global() -> Arc<RegionStore> {
+    #[cfg(feature = "test-store")]
+    if let Some(store) = TEST_GLOBAL.with(|slot| slot.borrow().clone()) {
+        return store;
+    }
     Arc::clone(shared())
 }
 
@@ -766,6 +775,17 @@ fn shared() -> &'static Arc<RegionStore> {
 thread_local! {
     static TEST_STORE: std::cell::RefCell<Option<&'static RegionStore>> =
         const { std::cell::RefCell::new(None) };
+    static TEST_GLOBAL: std::cell::RefCell<Option<Arc<RegionStore>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install a shared store for [`global`] on this test thread only.
+///
+/// `store()` (the server hooks) still needs [`install_test_store`]; a test that
+/// drives a plugin constructed with `Default` uses this one.
+#[cfg(feature = "test-store")]
+pub fn install_test_global(store: Arc<RegionStore>) {
+    TEST_GLOBAL.with(|slot| *slot.borrow_mut() = Some(store));
 }
 
 /// Install a store for this test thread only. The caller keeps filling it via

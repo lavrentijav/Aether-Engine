@@ -22,5 +22,10 @@ aether-region = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+# The per-thread store override, so a test can drive `Default` without touching
+# the process-wide index.
+aether-region = { workspace = true, features = ["test-store"] }
+
 [lints]
 workspace = true
