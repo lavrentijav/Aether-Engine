@@ -35,6 +35,7 @@ pub mod plugins;
 pub mod proto;
 pub mod protocol;
 pub mod rcon;
+pub mod region;
 pub mod rewards;
 pub mod session;
 pub mod staff;
