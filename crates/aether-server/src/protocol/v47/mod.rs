@@ -219,12 +219,13 @@ impl ProtocolCodec for Codec {
                 _ => ClientEvent::Ignored,
             },
             0x07 => {
-                // Status 0 is "started digging"; in creative that is the whole
-                // interaction, the client breaks the block immediately.
+                // 1.8's Player Digging: 0 started, 1 cancelled, 2 finished.
+                // Status 2 used to be folded into `StartDig`, so a selection
+                // wand set point 1 twice per click and sent two messages.
                 let Ok(status) = pin.u8() else {
                     return ClientEvent::Ignored;
                 };
-                if status != 0 && status != 2 {
+                if !matches!(status, 0..=2) {
                     return ClientEvent::Ignored;
                 }
                 let Ok(packed) = pin.i64() else {
@@ -232,7 +233,11 @@ impl ProtocolCodec for Codec {
                 };
                 let (x, y, z) = decode_position(packed);
                 let y = y - Y_OFFSET;
-                ClientEvent::Dig { x, y, z, seq: 0 }
+                match status {
+                    0 => ClientEvent::StartDig { x, y, z, seq: 0 },
+                    1 => ClientEvent::CancelDig { seq: 0 },
+                    _ => ClientEvent::Dig { x, y, z, seq: 0 },
+                }
             }
             0x08 => {
                 let Ok(packed) = pin.i64() else {
@@ -247,14 +252,22 @@ impl ProtocolCodec for Codec {
                 let Ok(item) = pin.u16() else {
                     return ClientEvent::Ignored;
                 };
+                let (bx, by, bz) = decode_position(packed);
+                let by = by - Y_OFFSET;
                 if item as i16 == -1 {
                     return ClientEvent::Ignored; // empty hand
                 }
                 let Some(block) = chunk::engine_id(item) else {
-                    return ClientEvent::Ignored; // not a block this engine has
+                    // A tool or item in hand: this packet is a right-click on
+                    // the clicked cell, not a placement. Report it so a native
+                    // selection wand sees the click (the core ignores it,
+                    // exactly as it ignored the old whole packet).
+                    return ClientEvent::UseBlock {
+                        x: bx,
+                        y: by,
+                        z: bz,
+                    };
                 };
-                let (bx, by, bz) = decode_position(packed);
-                let by = by - Y_OFFSET;
                 let (dx, dy, dz) = face_offset(face);
                 ClientEvent::Place {
                     x: bx + dx,
@@ -476,6 +489,17 @@ mod tests {
     }
     use super::*;
 
+    fn pos() -> PosLook {
+        PosLook {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: true,
+        }
+    }
+
     #[test]
     fn position_encoding_matches_1_8() {
         let enc = encode_position(8, 4, 8);
@@ -488,6 +512,94 @@ mod tests {
             let enc = encode_position(p.0 as i64, p.1 as i64, p.2 as i64);
             assert_eq!(decode_position(enc), p, "round trip {p:?}");
         }
+    }
+
+    #[test]
+    fn digging_statuses_map_to_start_finish_and_cancel() {
+        // Status 2 is "finished digging", not another start: folding the two
+        // together made a selection wand set point 1 twice per click.
+        let mut started = vec![0u8];
+        started.extend_from_slice(&encode_position(5, 70, -9).to_be_bytes());
+        started.push(1);
+        let engine_y = 70 - Y_OFFSET;
+        assert!(matches!(
+            Codec.decode(
+                &RawPacket {
+                    id: 0x07,
+                    data: started
+                },
+                pos()
+            ),
+            ClientEvent::StartDig {
+                x: 5,
+                y,
+                z: -9,
+                ..
+            } if y == engine_y
+        ));
+
+        let mut finished = vec![2u8];
+        finished.extend_from_slice(&encode_position(5, 70, -9).to_be_bytes());
+        finished.push(1);
+        assert!(matches!(
+            Codec.decode(
+                &RawPacket {
+                    id: 0x07,
+                    data: finished
+                },
+                pos()
+            ),
+            ClientEvent::Dig {
+                x: 5,
+                y,
+                z: -9,
+                ..
+            } if y == engine_y
+        ));
+
+        let mut cancelled = vec![1u8];
+        cancelled.extend_from_slice(&encode_position(5, 70, -9).to_be_bytes());
+        cancelled.push(1);
+        assert!(matches!(
+            Codec.decode(
+                &RawPacket {
+                    id: 0x07,
+                    data: cancelled
+                },
+                pos()
+            ),
+            ClientEvent::CancelDig { .. }
+        ));
+    }
+
+    #[test]
+    fn a_right_click_with_a_tool_reports_the_clicked_block() {
+        // Protocol 47's 0x08 names the held item's id. A non-block item (a
+        // golden axe, id 286) used to be dropped whole, so a native selection
+        // wand never saw point 2 on the main protocol. It now becomes a
+        // `UseBlock` naming the *clicked* cell (no face offset).
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_position(10, 64 + Y_OFFSET as i64, -7).to_be_bytes());
+        data.push(1); // face: up
+        data.extend_from_slice(&286u16.to_be_bytes()); // golden axe
+        let pkt = RawPacket { id: 0x08, data };
+        match Codec.decode(&pkt, pos()) {
+            ClientEvent::UseBlock { x, y, z } => assert_eq!((x, y, z), (10, 64, -7)),
+            _ => panic!("expected a tool right-click"),
+        }
+    }
+
+    #[test]
+    fn a_right_click_with_a_block_still_places_it() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_position(10, 64 + Y_OFFSET as i64, -7).to_be_bytes());
+        data.push(1); // face: up
+        data.extend_from_slice(&1u16.to_be_bytes()); // stone
+        let pkt = RawPacket { id: 0x08, data };
+        assert!(matches!(
+            Codec.decode(&pkt, pos()),
+            ClientEvent::Place { .. }
+        ));
     }
 
     #[test]

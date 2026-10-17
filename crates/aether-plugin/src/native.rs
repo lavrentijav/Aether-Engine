@@ -117,6 +117,43 @@ pub trait NativePlugin: Send {
         Decision::Allow
     }
 
+    /// A right-click **on a block**, with its coordinates. Native-only: the
+    /// frozen WASM `@0.1.0` world has no export for it, so a WASM plugin never
+    /// receives this call. `block` is the clicked cell's name.
+    ///
+    /// Used by the regions plugin's internal wand; a plugin that does not care
+    /// keeps the neutral [`Decision::Allow`] and the click proceeds normally.
+    fn before_block_interact(
+        &mut self,
+        _ctx: &mut NativeContext,
+        _p: &Player,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _block: &str,
+    ) -> Decision {
+        Decision::Allow
+    }
+
+    /// The player **started mining** a block, before the core's region check
+    /// and before a survival dig begins. Native-only, like
+    /// [`Self::before_block_interact`].
+    ///
+    /// [`Self::before_block_break`] fires only when the block actually breaks
+    /// (after the region check), which is too late — and unreachable for an
+    /// unbreakable or protected block — for a wand's first point.
+    fn before_block_dig(
+        &mut self,
+        _ctx: &mut NativeContext,
+        _p: &Player,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _block: &str,
+    ) -> Decision {
+        Decision::Allow
+    }
+
     /// A right-click **on a block** with `item`, at the clicked cell
     /// `(x, y, z)` whose block is `block`. Native-only: the frozen WASM world
     /// has no export for this, and a golden shovel needs the coordinates the

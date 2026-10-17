@@ -118,6 +118,22 @@ mod imp {
                 .flatten()
         }
 
+        fn kv_try_get(&self, plugin: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
+            self.world
+                .journal()
+                .backend()
+                .get(&kv_key(plugin, key))
+                .map_err(|e| format!("kv-get failed: {e}"))
+        }
+
+        fn kv_try_put(&self, plugin: &str, key: &str, value: &[u8]) -> Result<(), String> {
+            self.world
+                .journal()
+                .backend()
+                .put(&kv_key(plugin, key), value)
+                .map_err(|e| format!("kv-put failed: {e}"))
+        }
+
         fn kv_put(&self, plugin: &str, key: &str, value: &[u8]) {
             if let Err(e) = self
                 .world
@@ -205,6 +221,13 @@ mod imp {
             let handle = self.registry.by_entity(player as i32)?;
             let pos = handle.pos();
             Some(("minecraft:overworld".to_string(), pos.x, pos.y, pos.z))
+        }
+
+        fn held_item(&self, _plugin: &str, player: u64) -> Option<String> {
+            let handle = self.registry.by_entity(player as i32)?;
+            handle
+                .held_item()
+                .and_then(|item| item.vanilla_name().map(str::to_string))
         }
 
         /// A plugin asked to move a player. Resolved through the core
@@ -1258,8 +1281,17 @@ mod imp {
             aether_staff_plugin::registration(),
             "native staff",
         );
-        // Claims fill the core region index through the `region_*` host hooks;
-        // the protection check itself stays in the core (CMD-29b).
+        // The regions plugin edits the process-wide `aether-region` store the
+        // protection hooks read, so it is independent of the SDK as well.
+        install_native_one(
+            host,
+            cfg,
+            grant_sink,
+            aether_regions_plugin::registration(),
+            "native regions",
+        );
+        // Claims fill the same core region index through the `region_*` host
+        // hooks; the protection check itself stays in the core (CMD-29b).
         install_native_one(
             host,
             cfg,
@@ -1336,7 +1368,19 @@ mod imp {
                 register_commands(&file.manifest);
                 crate::log::info(&format!("plugin     : {id} ({what})"));
             }
-            Err(e) => crate::log::warn(&format!("plugin `{id}` not loaded: {e}")),
+            Err(e) => {
+                // A protection plugin that failed to load leaves the shared
+                // region store empty, so every region stops protecting. Say so
+                // at error level instead of a warning lost among plugin noise;
+                // the state bytes are intact, but the operator must act.
+                if id == aether_regions_plugin::ID {
+                    crate::log::error(&format!(
+                        "plugin `{id}` not loaded: {e} — REGION PROTECTION IS NOT ACTIVE;                          fix the plugin storage and restart"
+                    ));
+                } else {
+                    crate::log::warn(&format!("plugin `{id}` not loaded: {e}"));
+                }
+            }
         }
     }
 
@@ -1372,8 +1416,31 @@ mod imp {
         names
     }
 
+    // A per-test-thread host override, so a test can drive a plugin without
+    // racing the process-wide `HOST` another test may install.
+    #[cfg(test)]
+    thread_local! {
+        static TEST_HOST: std::cell::RefCell<Option<&'static Mutex<PluginHost>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Install `host` for the current test thread only.
+    ///
+    /// The `Box::leak` is deliberate: the slot is a `&'static` because the
+    /// host must outlive the test's locals, and a test process is short-lived,
+    /// so reclaiming one host per test is not worth a registry.
+    #[cfg(test)]
+    pub(crate) fn install_test_host(host: PluginHost) {
+        let host: &'static Mutex<PluginHost> = Box::leak(Box::new(Mutex::new(host)));
+        TEST_HOST.with(|slot| *slot.borrow_mut() = Some(host));
+    }
+
     /// Call `f` with the host, if one is installed.
     fn with<R>(default: R, f: impl FnOnce(&mut PluginHost) -> R) -> R {
+        #[cfg(test)]
+        if let Some(lock) = TEST_HOST.with(|slot| *slot.borrow()) {
+            return f(&mut lock.lock().unwrap());
+        }
         match HOST.get() {
             Some(lock) => f(&mut lock.lock().unwrap()),
             None => default,
@@ -1439,6 +1506,35 @@ mod imp {
     pub fn before_use_item(handle: &PlayerHandle, item: &str) -> Option<String> {
         with(None, |h| {
             cancelled(h.before_use_item(&player(handle), item))
+        })
+    }
+
+    /// The player started mining a block, before the region check and before a
+    /// survival dig begins. A native plugin's selection wand uses this so the
+    /// point is set immediately, even on a protected or unbreakable block.
+    pub fn before_block_dig(
+        handle: &PlayerHandle,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: &str,
+    ) -> Option<String> {
+        with(None, |h| {
+            cancelled(h.before_block_dig(&player(handle), x, y, z, block))
+        })
+    }
+
+    /// A right-click on a block, for a native plugin's selection wand. A
+    /// cancelled click does not open, toggle or place anything.
+    pub fn before_block_interact(
+        handle: &PlayerHandle,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: &str,
+    ) -> Option<String> {
+        with(None, |h| {
+            cancelled(h.before_block_interact(&player(handle), x, y, z, block))
         })
     }
 
@@ -1654,11 +1750,166 @@ mod imp {
             assert_eq!(entry.op, 3);
         }
 
-        /// A throwaway world on a temp store, for the plugin-host e2e test.
-        fn test_world(seed: u64) -> crate::session::DemoWorld {
+        /// A minimal host for the regions event-wiring tests: KV in memory,
+        /// a golden axe in hand, everyone permitted and in the overworld.
+        #[derive(Default)]
+        struct RegionsTestBackend {
+            kv: std::sync::Mutex<std::collections::HashMap<(String, String), Vec<u8>>>,
+        }
+
+        impl aether_plugin::HostBackend for RegionsTestBackend {
+            fn kv_get(&self, plugin: &str, key: &str) -> Option<Vec<u8>> {
+                self.kv
+                    .lock()
+                    .unwrap()
+                    .get(&(plugin.to_string(), key.to_string()))
+                    .cloned()
+            }
+            fn kv_put(&self, plugin: &str, key: &str, value: &[u8]) {
+                self.kv
+                    .lock()
+                    .unwrap()
+                    .insert((plugin.to_string(), key.to_string()), value.to_vec());
+            }
+            fn kv_delete(&self, plugin: &str, key: &str) {
+                self.kv
+                    .lock()
+                    .unwrap()
+                    .remove(&(plugin.to_string(), key.to_string()));
+            }
+            fn kv_list(&self, plugin: &str, prefix: &str) -> Vec<String> {
+                self.kv
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .filter(|(p, k)| p == plugin && k.starts_with(prefix))
+                    .map(|(_, k)| k.clone())
+                    .collect()
+            }
+            fn log(&self, _plugin: &str, _level: aether_plugin::LogLevel, _message: &str) {}
+            fn config(&self, _plugin: &str, _key: &str) -> Option<String> {
+                None
+            }
+            fn supports(&self, _plugin: &str, _feature: &str) -> bool {
+                true
+            }
+            fn held_item(&self, _plugin: &str, _player: u64) -> Option<String> {
+                Some("minecraft:golden_axe".to_string())
+            }
+            fn player_position(
+                &self,
+                _plugin: &str,
+                _player: u64,
+            ) -> Option<(String, f64, f64, f64)> {
+                Some(("minecraft:overworld".to_string(), 0.0, 64.0, 0.0))
+            }
+            fn permission_check(&self, _plugin: &str, _id: u64, _node: &str, _op: u8) -> bool {
+                true
+            }
+        }
+
+        /// Load the regions plugin into a test host and install it for this
+        /// thread, returning a handle whose world/registry the session-side
+        /// helpers can drive.
+        fn install_regions_host(
+            tag: &str,
+        ) -> (
+            std::sync::Arc<crate::players::PlayerHandle>,
+            std::sync::Arc<crate::players::Registry>,
+            crate::session::DemoWorld,
+            std::sync::Arc<aether_region::RegionStore>,
+        ) {
+            use std::sync::Arc;
+            let world = test_world(9_001, tag);
+            let registry: crate::players::Registry = crate::players::Registry::default();
+            let registry = Arc::new(registry);
+            let handle = crate::players::PlayerHandle::for_test(9_101, tag);
+            registry.insert_for_test(Arc::clone(&handle));
+
+            // A per-test store: the plugin's `Default` reads
+            // `aether_region::global()`, so install this thread's own index
+            // rather than replacing the process-wide one another test uses.
+            let region_store = std::sync::Arc::new(aether_region::RegionStore::new());
+            aether_region::install_test_store(aether_region::RegionStore::new());
+            aether_region::install_test_global(std::sync::Arc::clone(&region_store));
+            let backend = Arc::new(RegionsTestBackend::default());
+            let mut host =
+                aether_plugin::PluginHost::new(aether_plugin::HostConfig::default(), backend)
+                    .unwrap();
+            let registration = aether_regions_plugin::registration();
+            let file = aether_plugin::ManifestFile {
+                dir: std::path::PathBuf::new(),
+                manifest: registration.manifest,
+            };
+            host.add_native(&file, &[], &Default::default(), (registration.new)())
+                .expect("regions loads");
+            super::register_commands(&file.manifest);
+            super::install_test_host(host);
+            (handle, registry, world, region_store)
+        }
+
+        #[test]
+        fn a_use_block_event_reaches_the_wand_hook() {
+            // Point 1 through StartDig, point 2 through UseBlock: the second
+            // click is the protocol-47 tool right-click path, not a Place.
+            let (handle, registry, world, store) = install_regions_host("UseBlockHook");
+            assert!(
+                crate::session::handle_start_dig(&handle, &registry, &world, 1, 64, 1),
+                "the wand cancels the dig and resyncs the block"
+            );
+            crate::session::handle_use_block(&handle, &world, 4, 64, 4);
+            let lines = super::on_command(
+                &handle,
+                "rg",
+                &["define".to_string(), "useblock-hook".to_string()],
+            )
+            .expect("/rg is registered");
+            assert!(
+                lines.iter().any(|l| l.contains("Created region")),
+                "{lines:?}"
+            );
+            assert_eq!(
+                store.snapshot().len(),
+                1,
+                "the region went into this test's own store"
+            );
+        }
+
+        #[test]
+        fn a_start_dig_event_reaches_the_wand_hook() {
+            // Point 2 first, then point 1 through the start-of-dig hook.
+            let (handle, registry, world, store) = install_regions_host("StartDigHook");
+            crate::session::handle_use_block(&handle, &world, 4, 64, 4);
+            assert!(
+                crate::session::handle_start_dig(&handle, &registry, &world, 1, 64, 1),
+                "the wand cancels the dig and resyncs the block"
+            );
+            let lines = super::on_command(
+                &handle,
+                "rg",
+                &["define".to_string(), "startdig-hook".to_string()],
+            )
+            .expect("/rg is registered");
+            assert!(
+                lines.iter().any(|l| l.contains("Created region")),
+                "{lines:?}"
+            );
+            assert_eq!(
+                store.snapshot().len(),
+                1,
+                "the region went into this test's own store"
+            );
+        }
+
+        /// A throwaway world on a temp store. `tag` keeps every test's
+        /// directory unique: tests run in parallel, and the store's `flock`
+        /// refuses a second open of the same path.
+        fn test_world(seed: u64, tag: &str) -> crate::session::DemoWorld {
             use aether_api::{FjallStore, World};
-            let dir =
-                std::env::temp_dir().join(format!("aether-mn1-host-{}-{seed}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!(
+                "aether-mn1-host-{}-{seed}-{tag}",
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&dir);
             let store = FjallStore::open(&dir).expect("temp store");
             let generator =
@@ -1716,7 +1967,7 @@ actions = ["[command] menu shop"]
             cfg.plugins.plugins.insert("menus".to_string(), entry);
             let cfg = Arc::new(cfg);
 
-            let world = Arc::new(test_world(31));
+            let world = Arc::new(test_world(31, "menus-e2e"));
             let registry: crate::players::SharedRegistry =
                 Arc::new(crate::players::Registry::default());
             let handle = crate::players::PlayerHandle::for_test(9001, "Steve");
@@ -1835,6 +2086,24 @@ mod imp {
         None
     }
     pub fn before_use_item(_h: &PlayerHandle, _i: &str) -> Option<String> {
+        None
+    }
+    pub fn before_block_dig(
+        _h: &PlayerHandle,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _b: &str,
+    ) -> Option<String> {
+        None
+    }
+    pub fn before_block_interact(
+        _h: &PlayerHandle,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _b: &str,
+    ) -> Option<String> {
         None
     }
     #[allow(clippy::too_many_arguments)]

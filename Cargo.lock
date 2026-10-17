@@ -144,6 +144,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-region"
+version = "0.1.0"
+
+[[package]]
+name = "aether-regions-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-plugin",
+ "aether-region",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aether-sdk-plugin"
 version = "0.1.0"
 dependencies = [
@@ -161,6 +175,8 @@ dependencies = [
  "aether-ops",
  "aether-physics",
  "aether-plugin",
+ "aether-region",
+ "aether-regions-plugin",
  "aether-sdk-plugin",
  "aether-sidebar-plugin",
  "aether-staff-plugin",

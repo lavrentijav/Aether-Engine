@@ -781,6 +781,15 @@ pub enum ClientEvent {
     UseItem { hand: u8, seq: i32 },
     /// Hit (`attack`) or use an entity.
     Interact { target: i32, attack: bool },
+    /// Right-click a block while holding something that is not a placeable
+    /// block (a tool, an item). `x`/`y`/`z` are the **clicked** cell, not the
+    /// cell in front of it.
+    ///
+    /// A codec only emits this when it cannot produce a [`ClientEvent::Place`]
+    /// — today protocol 47 with a non-block item. It exists so a native
+    /// plugin's selection wand sees the click; the core itself does nothing
+    /// with it (matching the old "ignored" behaviour for such a click).
+    UseBlock { x: i32, y: i32, z: i32 },
     /// Arm swing.
     Swing { hand: u8 },
     /// Started or stopped sprinting.

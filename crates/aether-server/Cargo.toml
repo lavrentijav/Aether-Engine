@@ -16,6 +16,9 @@ default-run = "aether-server"
 # build without `zstd` cannot read blobs a build with it produced.
 aether-world = { workspace = true, default-features = false, features = ["fjall", "zstd"] }
 aether-api = { workspace = true, default-features = false, features = ["fjall", "zstd"] }
+# The shared region model/index/store. The native regions plugin depends on the
+# same crate, so both edit and consult one index instead of duplicating it.
+aether-region = { workspace = true }
 # Named directly so the server can choose between the vanilla generator and the
 # built-in noise one; `aether-api` re-exports only the latter.
 aether-worldgen = { workspace = true }
@@ -59,6 +62,9 @@ aether-voice-plugin = { path = "../../plugins/voice", optional = true }
 # The staff native plugin: vanish, admin spectate and per-admin anti-xray
 # control, driven through the core's `staff_*` host hooks.
 aether-staff-plugin = { path = "../../plugins/staff", optional = true }
+# The WorldGuard-style regions plugin: the model and `/rg` commands on the
+# shared `aether-region` index the protection hooks consult.
+aether-regions-plugin = { path = "../../plugins/regions", optional = true }
 # The claims native plugin (CMD-35): GriefPrevention-style player claims on the
 # core region index, owned through /claim and a golden shovel.
 aether-claims-plugin = { path = "../../plugins/claims", optional = true }
@@ -81,6 +87,10 @@ path = "src/main.rs"
 
 [dev-dependencies]
 criterion = { workspace = true }
+# The unit tests install a per-thread region store; the feature must be on for
+# the dependency's `install_test_store` to exist. Production builds do not
+# enable it, so the hot-path `store()` stays a plain static read.
+aether-region = { workspace = true, features = ["test-store"] }
 
 [[bench]]
 name = "visibility"
@@ -125,5 +135,5 @@ workspace = true
 # build that does not need Wasmtime (tests, a minimal deployment) can drop it
 # with `--no-default-features`.
 default = ["plugins"]
-plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-menus-plugin", "dep:aether-webadmin-plugin", "dep:aether-sidebar-plugin", "dep:aether-voice-plugin", "dep:aether-staff-plugin", "dep:aether-claims-plugin"]
+plugins = ["dep:aether-plugin", "dep:aether-sdk-plugin", "dep:aether-menus-plugin", "dep:aether-webadmin-plugin", "dep:aether-sidebar-plugin", "dep:aether-voice-plugin", "dep:aether-staff-plugin", "dep:aether-regions-plugin", "dep:aether-claims-plugin"]
 postgres = ["dep:postgres"]

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/aether-core",
+    "crates/aether-region",
     "crates/aether-telemetry",
     "crates/aether-world",
     "crates/aether-net",
@@ -45,6 +46,9 @@ members = [
     # plugin is a normal Rust crate linked in-process, so unlike the WASM
     # examples it is a workspace member and builds with `cargo test`.
     "plugins/examples/hello-native",
+    # The WorldGuard-style regions plugin (CMD-34a), a native (tier N) plugin:
+    # the region model and `/rg` commands on the shared core region index.
+    "plugins/regions",
     # The stats plugin (CMD-47), a WASM component for deployment. It is also a
     # workspace member so its pure aggregation/playtime model runs under
     # `cargo test` without a WebAssembly toolchain; the component glue is
@@ -82,6 +86,7 @@ too_many_arguments = "allow"
 
 [workspace.dependencies]
 aether-core = { path = "crates/aether-core", version = "0.1.0" }
+aether-region = { path = "crates/aether-region", version = "0.1.0" }
 aether-telemetry = { path = "crates/aether-telemetry", version = "0.1.0" }
 aether-world = { path = "crates/aether-world", version = "0.1.0", default-features = false }
 aether-net = { path = "crates/aether-net", version = "0.1.0" }

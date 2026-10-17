@@ -154,6 +154,19 @@ init_fuel = 100000000  # fuel for a plugin's instantiation and init
 # enabled = true
 # config = { persist = "true" }
 
+# The WorldGuard-style regions plugin (CMD-34a) is compiled in. It edits the
+# core region index the protection check reads; `/rg` (or `/region`) defines,
+# moves and removes cuboids. The internal wand is the configured item
+# (left click = point 1, right click = point 2); state lives in plugin KV.
+# [plugins.regions]
+# enabled = true
+# config = { wand-item = "minecraft:golden_axe" }
+# If the region KV cannot be read at startup, the plugin refuses to load
+# (`REGION PROTECTION IS NOT ACTIVE` in the log) rather than start with an
+# empty set. Set this only to accept that risk explicitly; the stored bytes
+# are never overwritten until a later successful edit.
+# config = { allow-empty-on-error = "false" }
+
 # The web admin is a compiled-in native plugin (no .wasm), read-only, and only
 # loads when `dir` above is set. See docs/webadmin.md.
 # [plugins.webadmin]

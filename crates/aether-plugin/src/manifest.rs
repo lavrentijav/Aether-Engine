@@ -32,6 +32,14 @@ pub enum PluginTier {
 /// same as the WIT exports so a plugin author has one vocabulary.
 pub const EVENT_BEFORE_BLOCK_BREAK: &str = "before-block-break";
 pub const EVENT_BEFORE_BLOCK_PLACE: &str = "before-block-place";
+/// A native-only event: right-click on a block, with the cell coordinates.
+/// The frozen WIT world has no such export, so only native plugins receive it
+/// (the regions plugin's internal wand is the first user).
+pub const EVENT_BEFORE_BLOCK_INTERACT: &str = "before-block-interact";
+/// A native-only event: the player started mining a block, before the region
+/// check and before a survival dig begins. The frozen WIT world has no such
+/// export, so only native plugins receive it.
+pub const EVENT_BEFORE_BLOCK_DIG: &str = "before-block-dig";
 pub const EVENT_BEFORE_USE_ITEM: &str = "before-use-item";
 /// A right-click on a **block** with an item, carrying the target cell and the
 /// clicked block. Native-only: the frozen WIT world has no matching export, and

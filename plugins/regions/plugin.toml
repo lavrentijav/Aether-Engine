@@ -1,21 +1,37 @@
-# Manifest for the WorldGuard-style regions plugin (CMD-34). See crates/aether-plugin/src/manifest.rs.
+# Manifest for the WorldGuard-style regions plugin (CMD-34a). See
+# crates/aether-plugin/src/manifest.rs.
+#
+# A native plugin is compiled into the server, so the host reads its manifest
+# from `manifest()` in src/lib.rs, not from this file. This copy exists so the
+# declaration is visible in one place; keep it in step with `manifest()`.
 id = "regions"
 name = "Regions"
 version = "0.1.0"
 api = "0.1"
 # native: a Rust crate in this workspace, linked in-process (CMD-00N).
 # No .wasm entry: the loader calls it directly, no WASM boundary.
+tier = "native"
 priority = 20
 
-capabilities = ["log", "config", "supports", "storage.kv", "world.read", "players"]
+# The core provides these through the host backend. `players` covers
+# `player_position` for `/rg info`; the plugin reads no blocks, so `world.read`
+# is not asked for (deny-by-default would leave it ungranted anyway).
+capabilities = ["log", "config", "supports", "storage.kv", "players"]
 
 subscribe = [
-    "before-block-break",
-    "before-block-place",
-    "before-use-item",
-    "before-attack",
+    # Native-only: the start of a left click, used for wand point 1 before the
+    # block can break or the region check run. No matching WASM export.
+    "before-block-dig",
+    # Native-only: right-click on a block, used for wand point 2. There is no
+    # matching export in the frozen WASM @0.1.0 world.
+    "before-block-interact",
+    "after-player-leave",
     "on-command",
-    "after-player-join",
 ]
 
+# `allow-empty-on-error = "true"` lets a corrupt/unreadable KV value start an
+# empty, UNPROTECTED set instead of refusing the load (the bytes stay intact).
+# The top-level command is public; the `worldguard.region.*` nodes gate the
+# individual subcommands inside the plugin, so a deny on `info` cannot block
+# `define` before the arguments are read.
 commands = ["rg", "region"]
