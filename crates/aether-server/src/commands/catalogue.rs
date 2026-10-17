@@ -534,30 +534,27 @@ pub const CATALOGUE: &[Command] = &[
         Category::Player,
         "/inv",
     ),
-    pend(
+    imp_node(
         "clear",
         &[],
         "minecraft.command.clear",
         2,
-        "CMD-10",
         Category::Player,
         "/clear [targets] [item] [max-count]",
     ),
-    pend(
+    imp_node(
         "effect",
         &[],
         "minecraft.command.effect",
         2,
-        "CMD-10",
         Category::Player,
-        "/effect <targets> <effect> [seconds] [amplifier]",
+        "/effect <give|clear> <targets> <effect> [seconds|infinite] [amplifier] [hideParticles]",
     ),
-    pend(
+    imp_node(
         "enchant",
         &[],
         "minecraft.command.enchant",
         2,
-        "CMD-10",
         Category::Player,
         "/enchant <targets> <enchantment> [level]",
     ),

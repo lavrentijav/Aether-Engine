@@ -2039,6 +2039,7 @@ fn resolve_creative_report(
             uid: aether_world::journal::ledger::mint_uid(),
             damage: 0,
             potion: None,
+            enchantments: Vec::new(),
             display: None,
         });
     }

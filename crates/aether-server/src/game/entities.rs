@@ -659,6 +659,82 @@ pub enum Interaction {
     Wear,
 }
 
+/// Every non-player entity, for the CMD-06b selector layer: `(id, uuid, type,
+/// position, alive)`.
+pub fn selector_snapshot() -> Vec<(i32, u128, &'static str, Vector3, bool)> {
+    entities()
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| (e.id, e.uuid, e.type_name(), e.pos(), !e.dead))
+        .collect()
+}
+
+/// Apply `effect` to mob `id`. Returns the effect now stored, or `None` when
+/// the mob is gone or the running one was already at least as strong.
+pub fn apply_mob_effect(id: i32, effect: super::effects::Effect) -> Option<super::effects::Effect> {
+    let mut all = entities().lock().unwrap();
+    let e = all.iter_mut().find(|e| e.id == id && !e.dead)?;
+    let Kind::Mob(m) = &mut e.kind else {
+        return None;
+    };
+    m.effects.apply(effect)
+}
+
+/// Remove one effect from mob `id`; whether it was running.
+pub fn remove_mob_effect(id: i32, effect: u8) -> bool {
+    let mut all = entities().lock().unwrap();
+    let Some(e) = all.iter_mut().find(|e| e.id == id && !e.dead) else {
+        return false;
+    };
+    let Kind::Mob(m) = &mut e.kind else {
+        return false;
+    };
+    m.effects.remove(effect).is_some()
+}
+
+/// Remove every effect from mob `id`, returning the ids that were running.
+pub fn clear_mob_effects(id: i32) -> Vec<u8> {
+    let mut all = entities().lock().unwrap();
+    let Some(e) = all.iter_mut().find(|e| e.id == id && !e.dead) else {
+        return Vec::new();
+    };
+    let Kind::Mob(m) = &mut e.kind else {
+        return Vec::new();
+    };
+    let ids: Vec<u8> = m.effects.iter().map(|e| e.id).collect();
+    m.effects.clear();
+    ids
+}
+
+/// Whether mob `id` has effect `effect`.
+pub fn mob_has_effect(id: i32, effect: u8) -> bool {
+    entities()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|e| e.id == id && !e.dead)
+        .and_then(|e| match &e.kind {
+            Kind::Mob(m) => Some(m.effects.active(effect)),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// Whether mob `id` has any effect at all.
+pub fn mob_has_effects(id: i32) -> bool {
+    entities()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|e| e.id == id && !e.dead)
+        .and_then(|e| match &e.kind {
+            Kind::Mob(m) => Some(!m.effects.is_empty()),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
 /// The entity type of `id`, if it exists.
 pub fn kind_of(id: i32) -> Option<&'static str> {
     entities()

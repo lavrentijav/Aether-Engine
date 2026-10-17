@@ -220,6 +220,51 @@ pub fn set_send_command_feedback(world: &DemoWorld, on: bool) {
 /// them. A string that is *not* in vanilla's file is marked `TODO verify`
 /// so the next reader knows it is this server's wording, not Mojang's.
 pub mod lang {
+    /// `commands.clear.success.single`.
+    pub const CLEAR_SUCCESS_SINGLE: &str = "Removed %s item(s) from player %s";
+    /// `commands.clear.success.multiple`.
+    pub const CLEAR_SUCCESS_MULTIPLE: &str = "Removed %s item(s) from %s players";
+    /// `clear.failed.single`.
+    pub const CLEAR_FAILED_SINGLE: &str = "No items were found on player %s";
+    /// `clear.failed.multiple`.
+    pub const CLEAR_FAILED_MULTIPLE: &str = "No items were found on %s players";
+    /// `commands.effect.give.success.single`.
+    pub const EFFECT_GIVE_SUCCESS_SINGLE: &str = "Applied effect %s to %s";
+    /// `commands.effect.give.success.multiple`.
+    pub const EFFECT_GIVE_SUCCESS_MULTIPLE: &str = "Applied effect %s to %s targets";
+    /// `commands.effect.give.failed`.
+    pub const EFFECT_GIVE_FAILED: &str =
+        "Unable to apply this effect (target is either immune to effects, or has something stronger)";
+    /// `commands.effect.clear.specific.success.single`.
+    pub const EFFECT_CLEAR_SPECIFIC_SUCCESS_SINGLE: &str = "Removed effect %s from %s";
+    /// `commands.effect.clear.specific.success.multiple`.
+    pub const EFFECT_CLEAR_SPECIFIC_SUCCESS_MULTIPLE: &str = "Removed effect %s from %s targets";
+    /// `commands.effect.clear.everything.success.single`.
+    pub const EFFECT_CLEAR_EVERYTHING_SUCCESS_SINGLE: &str = "Removed every effect from %s";
+    /// `commands.effect.clear.everything.success.multiple`.
+    pub const EFFECT_CLEAR_EVERYTHING_SUCCESS_MULTIPLE: &str =
+        "Removed every effect from %s targets";
+    /// `commands.effect.clear.specific.failed`.
+    pub const EFFECT_CLEAR_SPECIFIC_FAILED: &str = "Target doesn't have the requested effect";
+    /// `commands.effect.clear.everything.failed`.
+    pub const EFFECT_CLEAR_EVERYTHING_FAILED: &str = "Target has no effects to remove";
+    /// `commands.enchant.success.single`.
+    pub const ENCHANT_SUCCESS_SINGLE: &str = "Applied enchantment %s to %s's item";
+    /// `commands.enchant.success.multiple`.
+    pub const ENCHANT_SUCCESS_MULTIPLE: &str = "Applied enchantment %s to %s entities";
+    /// `commands.enchant.failed`.
+    pub const ENCHANT_FAILED: &str =
+        "Nothing changed. Targets either have no item in their hands or the enchantment could not be applied";
+    /// `commands.enchant.failed.itemless`.
+    pub const ENCHANT_FAILED_ITEMLESS: &str = "%s is not holding any item";
+    /// `commands.enchant.failed.incompatible`.
+    pub const ENCHANT_FAILED_INCOMPATIBLE: &str = "%s cannot support that enchantment";
+    /// `commands.enchant.failed.level`.
+    pub const ENCHANT_FAILED_LEVEL: &str =
+        "%s is higher than the maximum level of %s supported by that enchantment";
+    /// `commands.enchant.failed.entity`.
+    pub const ENCHANT_FAILED_ENTITY: &str = "%s is not a valid entity for this command";
+
     /// `commands.give.success.single`.
     pub const GIVE_SUCCESS_SINGLE: &str = "Gave %s %s to %s";
     /// `commands.teleport.success.location.single`.

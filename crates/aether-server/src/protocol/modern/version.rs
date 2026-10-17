@@ -281,6 +281,11 @@ pub struct Version {
     pub menu_brewing_stand: i32,
     pub component_damage: i32,
     pub component_custom_name: i32,
+    /// This version's id of the `minecraft:enchantments` data component.
+    /// `0` for the releases before 1.21.11, whose registry this build does
+    /// not carry; their stacks still store enchantments, they just do not get
+    /// the component on the wire yet.
+    pub component_enchantments: i32,
     /// This version's id of the `minecraft:potion_contents` data component.
     pub component_potion_contents: i32,
     /// This version's id of the `minecraft:lore` data component. A disguised
@@ -570,6 +575,7 @@ macro_rules! version {
             menu_brewing_stand: super::gen::$m::MENU_BREWING_STAND,
             component_damage: super::gen::$m::COMPONENT_DAMAGE,
             component_custom_name: super::gen::$m::COMPONENT_CUSTOM_NAME,
+            component_enchantments: super::gen::$m::COMPONENT_ENCHANTMENTS,
             component_potion_contents: super::gen::$m::COMPONENT_POTION_CONTENTS,
             component_lore: super::gen::$m::COMPONENT_LORE,
             component_glint_override: super::gen::$m::COMPONENT_ENCHANTMENT_GLINT_OVERRIDE,
@@ -639,6 +645,7 @@ macro_rules! legacy_version {
             menu_brewing_stand: super::legacy_gen::$m::MENU_BREWING_STAND,
             component_damage: super::legacy_gen::$m::COMPONENT_DAMAGE,
             component_custom_name: super::legacy_gen::$m::COMPONENT_CUSTOM_NAME,
+            component_enchantments: 0,
             component_lore: super::legacy_gen::$m::COMPONENT_LORE,
             component_potion_contents: super::legacy_gen::$m::COMPONENT_POTION_CONTENTS,
             component_glint_override: super::legacy_gen::$m::COMPONENT_ENCHANTMENT_GLINT_OVERRIDE,

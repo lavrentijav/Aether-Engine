@@ -52,6 +52,14 @@ pub const OFFHAND: usize = 45;
 /// [`crate::protocol::ContainerSlot::count`].
 pub const STACK: u8 = 64;
 
+/// One enchantment on a stack: a registry id and a level. Kept sorted by id
+/// so a list compares and serializes deterministically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Enchantment {
+    pub id: u8,
+    pub level: u8,
+}
+
 /// One stack in one slot.
 /// Client-side presentation overrides for a **virtual** menu item.
 ///
@@ -88,6 +96,9 @@ pub struct Stack {
     /// `minecraft:potion_contents` data component on the wire, which is what
     /// tells the client which potion it is.
     pub potion: Option<u16>,
+    /// The enchantments on this stack, sorted by registry id. The
+    /// `minecraft:enchantments` data component on 1.20.5+.
+    pub enchantments: Vec<Enchantment>,
     /// Display overrides for a plugin menu item; `None` for a real stack.
     pub display: Option<Box<ItemDisplay>>,
 }
@@ -101,6 +112,7 @@ impl Stack {
             uid: mint_uid(),
             damage: 0,
             potion: None,
+            enchantments: Vec::new(),
             display: None,
         }
     }
@@ -156,13 +168,35 @@ impl Stack {
         crate::game::tables::max_stack_id(self.item)
     }
 
-    /// Whether `other` could merge into this stack: same item, same wear, and
-    /// the same potion contents. Two different potions never merge.
+    /// Whether `other` could merge into this stack: same item, same wear,
+    /// the same potion contents and the same enchantments. Two different
+    /// potions or differently enchanted stacks never merge.
     pub fn stacks_with(&self, other: &Stack) -> bool {
         self.item == other.item
             && self.damage == other.damage
             && self.potion == other.potion
+            && self.enchantments == other.enchantments
             && self.max_stack() > 1
+    }
+
+    /// The level of `id` on this stack, `0` when it does not carry it.
+    pub fn enchant_level(&self, id: u8) -> u8 {
+        self.enchantments
+            .iter()
+            .find(|e| e.id == id)
+            .map_or(0, |e| e.level)
+    }
+
+    /// Add (or raise) an enchantment, keeping the list sorted by id.
+    pub fn add_enchantment(&mut self, id: u8, level: u8) {
+        match self.enchantments.binary_search_by_key(&id, |e| e.id) {
+            Ok(i) => {
+                if self.enchantments[i].level < level {
+                    self.enchantments[i].level = level;
+                }
+            }
+            Err(i) => self.enchantments.insert(i, Enchantment { id, level }),
+        }
     }
 
     /// Split `n` off this stack into a new instance, leaving the rest here.
@@ -175,6 +209,7 @@ impl Stack {
             uid: mint_uid(),
             damage: self.damage,
             potion: self.potion,
+            enchantments: self.enchantments.clone(),
             display: self.display.clone(),
         }
     }
@@ -543,17 +578,18 @@ impl SlotChange {
 /// this is refused rather than guessed at: a misread inventory would hand a
 /// player somebody else's items.
 ///
-/// Version 5 added the potion contents field; version 4 stores the item as a
-/// two-byte id rather than a length-prefixed name; version 3 narrowed item uids
-/// from 16 bytes to 8 (see [`aether_world::journal::event::ItemUid`]); version
-/// 2 added the wear field. A version 4 blob loads, its stacks holding no
+/// Version 6 append each stack's enchantments; version 5 added the potion
+/// contents field; version 4 stores the item as a two-byte id rather than a
+/// length-prefixed name; version 3 narrowed item uids from 16 bytes to 8 (see
+/// [`aether_world::journal::event::ItemUid`]); version 2 added the wear field.
+/// A version 5 blob loads with its stacks unenchanted; version 4 without a
 /// potion. A version 3 blob loads too: its only difference is the item stored
 /// as a name, which resolves to the same vanilla id losslessly (an unknown name
 /// refuses the whole inventory). Versions 1–2 carry 16-byte uids that have no
 /// 8-byte equivalent, so they are refused — handing a player the wrong items is
 /// worse than handing them none — unless they hold no stack at all: an empty
 /// inventory has nothing to misread, and refusing it locked players out.
-pub const FORMAT_VERSION: u8 = 5;
+pub const FORMAT_VERSION: u8 = 6;
 
 /// A potion field's "no potion" sentinel in the version 5 layout.
 const NO_POTION: u16 = u16::MAX;
@@ -570,6 +606,11 @@ pub fn encode(inv: &Inventory) -> Vec<u8> {
         out.extend_from_slice(&s.damage.to_be_bytes());
         out.extend_from_slice(&s.item.0.to_be_bytes());
         out.extend_from_slice(&s.potion.unwrap_or(NO_POTION).to_be_bytes());
+        out.push(s.enchantments.len().min(255) as u8);
+        for e in s.enchantments.iter().take(255) {
+            out.push(e.id);
+            out.push(e.level);
+        }
     }
     out
 }
@@ -617,6 +658,16 @@ pub fn decode(blob: &[u8]) -> Option<Inventory> {
         } else {
             None
         };
+        let mut enchantments = Vec::new();
+        if version >= 6 {
+            let n = take(1)?[0] as usize;
+            enchantments.reserve(n);
+            for _ in 0..n {
+                let id = take(1)?[0];
+                let level = take(1)?[0];
+                enchantments.push(Enchantment { id, level });
+            }
+        }
         if slot < SLOTS && count > 0 {
             inv.slots[slot] = Some(Stack {
                 item,
@@ -624,6 +675,7 @@ pub fn decode(blob: &[u8]) -> Option<Inventory> {
                 uid: ItemUid(uid),
                 damage,
                 potion,
+                enchantments,
                 // Display overrides are a menu's, never a saved inventory's:
                 // a persisted stack is something the player really holds.
                 display: None,
@@ -897,6 +949,26 @@ mod tests {
             crate::game::brewing::potion_id("minecraft:long_swiftness")
         );
         assert_eq!(back.get(37).unwrap().potion_id(), None);
+    }
+
+    #[test]
+    fn enchantments_survive_a_round_trip_and_a_v5_blob_loads_unenchanted() {
+        let mut inv = Inventory::new();
+        let mut s = Stack::named("minecraft:diamond_sword", 1);
+        s.add_enchantment(33, 3); // sharpness
+        s.add_enchantment(40, 2); // unbreaking
+        inv.put_slot(36, Some(s));
+        let back = decode(&encode(&inv)).expect("decodes");
+        assert_eq!(back, inv);
+        assert_eq!(back.get(36).unwrap().enchant_level(33), 3);
+        assert_eq!(back.get(36).unwrap().enchant_level(40), 2);
+
+        // A version 5 blob predates the enchantment field.
+        let mut b = encode(&inv);
+        b[0] = 5;
+        b.truncate(b.len() - 5); // count byte plus two (id, level) pairs
+        let back = decode(&b).expect("a version 5 blob loads");
+        assert_eq!(back.get(36).unwrap().enchant_level(33), 0);
     }
 
     #[test]

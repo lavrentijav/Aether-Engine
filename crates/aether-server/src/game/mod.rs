@@ -9,10 +9,12 @@ pub mod blockticks;
 pub mod brewing;
 pub mod combat;
 pub mod commands;
+pub mod commands_player;
 pub mod containers;
 #[rustfmt::skip]
 pub mod data;
 pub mod effects;
+pub mod enchantment;
 pub mod entities;
 pub mod fluids;
 pub mod interact;

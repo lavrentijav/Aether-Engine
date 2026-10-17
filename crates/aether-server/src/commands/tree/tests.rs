@@ -26,7 +26,7 @@ fn join(registry: &SharedRegistry, name: &str, entity_id: i32) -> Arc<PlayerHand
             name.into(),
             None,
             Vec::new(),
-            codec_for(763).unwrap(),
+            codec_for(774).unwrap(),
             &client,
             PosLook {
                 x: 0.5,
@@ -1531,4 +1531,286 @@ fn a_double_slash_command_falls_through_the_tree_to_the_plugin_registry() {
         vec![format!("/{name} is not available right now")],
         "the fallback reached the plugin registry, not a parse error"
     );
+}
+
+// ---------------------------------------------------------------------------
+// CMD-10a: /clear, /effect, /enchant
+// ---------------------------------------------------------------------------
+
+use crate::inventory::{Stack, FIRST_HOTBAR};
+use aether_world::journal::{DestroyReason, EventBody};
+
+fn clear_hand(handle: &PlayerHandle) {
+    let mut inv = handle.inventory();
+    for slot in 0..crate::inventory::SLOTS {
+        inv.put_slot(slot, None);
+    }
+}
+
+fn hold(handle: &PlayerHandle, slot: usize, name: &str, count: u8) {
+    let mut inv = handle.inventory();
+    inv.put_slot(slot, Some(Stack::named(name, count)));
+    if (FIRST_HOTBAR..FIRST_HOTBAR + 9).contains(&slot) {
+        inv.select((slot - FIRST_HOTBAR) as u8);
+    }
+}
+
+#[test]
+fn clear_reports_an_empty_inventory_as_a_failure() {
+    let env = env();
+    clear_hand(&env.tester);
+    assert_eq!(
+        one(&env, &env.tester, "/clear"),
+        "No items were found on player tester"
+    );
+}
+
+#[test]
+fn clear_honours_the_item_filter_and_max_count() {
+    let env = env();
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 10);
+    hold(&env.tester, FIRST_HOTBAR + 1, "minecraft:diamond", 5);
+
+    assert_eq!(
+        one(&env, &env.tester, "/clear @s minecraft:stone 4"),
+        "Removed 4 item(s) from player tester"
+    );
+    {
+        let inv = env.tester.inventory();
+        assert_eq!(
+            inv.get(FIRST_HOTBAR).map(|s| s.count),
+            Some(6),
+            "maxCount removes at most that many"
+        );
+        assert_eq!(
+            inv.get(FIRST_HOTBAR + 1).map(|s| s.count),
+            Some(5),
+            "the filter leaves the other item alone"
+        );
+    }
+
+    assert_eq!(
+        one(&env, &env.tester, "/clear @s diamond"),
+        "Removed 5 item(s) from player tester"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/clear @s diamond"),
+        "No items were found on player tester"
+    );
+}
+
+#[test]
+fn clear_journals_the_destruction_as_a_command() {
+    let env = env();
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 7);
+    assert_eq!(
+        one(&env, &env.tester, "/clear"),
+        "Removed 7 item(s) from player tester"
+    );
+    let events = env.world.journal().all_events().expect("journal reads");
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.body,
+            EventBody::ItemDestroy {
+                reason: DestroyReason::Command,
+                ..
+            }
+        )),
+        "the seven units must be journalled as a command destruction: {events:?}"
+    );
+}
+
+#[test]
+fn clear_journals_a_partial_stack_as_a_destruction_too() {
+    let env = env();
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 7);
+    assert_eq!(
+        one(&env, &env.tester, "/clear @s stone 3"),
+        "Removed 3 item(s) from player tester"
+    );
+    assert_eq!(
+        env.tester.inventory().get(FIRST_HOTBAR).map(|s| s.count),
+        Some(4)
+    );
+    let events = env.world.journal().all_events().expect("journal reads");
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.body,
+            EventBody::ItemDestroy {
+                reason: DestroyReason::Command,
+                ..
+            }
+        )),
+        "the three units must be journalled as a command destruction: {events:?}"
+    );
+}
+
+#[test]
+fn clear_accepts_several_targets() {
+    let env = env();
+    clear_hand(&env.tester);
+    clear_hand(&env.bob);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 3);
+    hold(&env.bob, FIRST_HOTBAR, "minecraft:dirt", 2);
+    assert_eq!(
+        one(&env, &env.tester, "/clear @a"),
+        "Removed 5 item(s) from 2 players"
+    );
+    assert!(env.tester.inventory().is_empty());
+    assert!(env.bob.inventory().is_empty());
+}
+
+#[test]
+fn effect_give_uses_the_default_duration_and_applies_to_every_target() {
+    let env = env();
+    for handle in [&env.tester, &env.bob] {
+        let mut st = handle.game();
+        st.effects.clear();
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/effect give @a speed"),
+        "Applied effect Speed to 2 targets"
+    );
+    for handle in [&env.tester, &env.bob] {
+        let st = handle.game();
+        let effect = st.effects.get(0).expect("speed is running");
+        assert_eq!(effect.duration, 600, "vanilla's default is thirty seconds");
+        assert_eq!(effect.amplifier, 0);
+        assert!(effect.visible && effect.show_icon);
+    }
+}
+
+#[test]
+fn effect_give_keeps_a_high_amplifier_and_honours_infinite_and_hide_particles() {
+    let env = env();
+    {
+        let mut st = env.tester.game();
+        st.effects.clear();
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/effect give tester speed 5 10"),
+        "Applied effect Speed to tester"
+    );
+    {
+        let st = env.tester.game();
+        let effect = st.effects.get(0).unwrap();
+        assert_eq!(effect.amplifier, 10, "beyond the normal cap still applies");
+        assert_eq!(effect.duration, 100);
+    }
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/effect give tester speed infinite 3 true"
+        ),
+        "Applied effect Speed to tester"
+    );
+    {
+        let st = env.tester.game();
+        let effect = st.effects.get(0).unwrap();
+        assert_eq!(effect.duration, -1, "infinite");
+        assert_eq!(effect.amplifier, 3);
+        assert!(!effect.visible && !effect.show_icon, "hideParticles");
+    }
+}
+
+#[test]
+fn effect_clear_removes_one_effect_or_all_of_them() {
+    let env = env();
+    {
+        let mut st = env.tester.game();
+        st.effects.clear();
+    }
+    one(&env, &env.tester, "/effect give tester speed");
+    one(&env, &env.tester, "/effect give tester poison");
+    assert_eq!(
+        one(&env, &env.tester, "/effect clear tester speed"),
+        "Removed effect Speed from tester"
+    );
+    assert!(env.tester.game().effects.active(18), "poison remains");
+    assert_eq!(
+        one(&env, &env.tester, "/effect clear tester"),
+        "Removed every effect from tester"
+    );
+    assert!(env.tester.game().effects.is_empty());
+    assert_eq!(
+        one(&env, &env.tester, "/effect clear tester"),
+        "Target has no effects to remove"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/effect clear tester speed"),
+        "Target doesn't have the requested effect"
+    );
+}
+
+#[test]
+fn enchant_requires_a_held_enchantable_item() {
+    let env = env();
+    clear_hand(&env.tester);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness"),
+        "tester is not holding any item"
+    );
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 1);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness"),
+        "Stone cannot support that enchantment"
+    );
+}
+
+#[test]
+fn enchant_applies_to_the_held_stack_and_checks_the_level_range() {
+    let env = env();
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_sword", 1);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness 3"),
+        "Applied enchantment Sharpness to tester's item"
+    );
+    assert_eq!(
+        env.tester
+            .inventory()
+            .get(FIRST_HOTBAR)
+            .unwrap()
+            .enchant_level(33),
+        3
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness 6"),
+        "6 is higher than the maximum level of 5 supported by that enchantment"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness 0"),
+        "Integer must not be less than 1: found 0"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness 256"),
+        "Integer must not be more than 255: found 256"
+    );
+}
+
+#[test]
+fn enchant_hits_every_target_holding_an_item() {
+    let env = env();
+    clear_hand(&env.tester);
+    clear_hand(&env.bob);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_sword", 1);
+    hold(&env.bob, FIRST_HOTBAR, "minecraft:iron_sword", 1);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant @a unbreaking 2"),
+        "Applied enchantment Unbreaking to 2 entities"
+    );
+    for handle in [&env.tester, &env.bob] {
+        assert_eq!(
+            handle
+                .inventory()
+                .get(FIRST_HOTBAR)
+                .unwrap()
+                .enchant_level(40),
+            2
+        );
+    }
 }
