@@ -2664,7 +2664,7 @@ fn cmd10a_selectors_see_tags_teams_and_levels() {
     hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_sword", 1);
     assert_eq!(
         one(&env, &env.tester, "/enchant @a[level=0] sharpness 2"),
-        "Applied enchantment Sharpness II to 1 entities"
+        "Applied enchantment Sharpness II to 2 entities"
     );
 }
 
@@ -2836,6 +2836,23 @@ fn effect_give_applies_instant_effects_without_storing_them() {
 }
 
 #[test]
+fn effect_give_reports_requested_targets_when_one_is_skipped() {
+    let env = env();
+    for handle in [&env.tester, &env.bob] {
+        let mut st = handle.game();
+        st.effects.clear();
+    }
+    // tester already carries a stronger infinite effect; bob is bare.
+    one(&env, &env.tester, "/effect give tester speed infinite 5");
+    assert_eq!(
+        one(&env, &env.tester, "/effect give @a speed 1 10"),
+        "Applied effect Speed to 2 targets",
+        "vanilla reports targets.size(), not the successes"
+    );
+    assert_eq!(env.bob.game().effects.get(0).map(|e| e.amplifier), Some(10));
+}
+
+#[test]
 fn effect_clear_removes_one_effect_or_all_of_them() {
     let env = env();
     {
@@ -2962,7 +2979,8 @@ fn enchant_skips_failing_targets_when_several_were_named() {
     // Bob holds nothing: vanilla skips him and reports the one success.
     assert_eq!(
         one(&env, &env.tester, "/enchant @a sharpness 2"),
-        "Applied enchantment Sharpness II to 1 entities"
+        "Applied enchantment Sharpness II to 2 entities",
+        "vanilla reports the requested targets, not the successes"
     );
     assert_eq!(
         env.tester
@@ -2973,6 +2991,19 @@ fn enchant_skips_failing_targets_when_several_were_named() {
         2
     );
     assert!(env.bob.inventory().is_empty());
+}
+
+#[test]
+fn enchant_omits_the_numeral_for_a_single_level_enchantment() {
+    let env = env();
+    one(&env, &env.tester, "/gamemode survival");
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_pickaxe", 1);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester mending"),
+        "Applied enchantment Mending to tester's item",
+        "vanilla's getFullname has no numeral when max level is 1"
+    );
 }
 
 #[test]

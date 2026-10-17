@@ -645,8 +645,8 @@ fn exec_effect_give_in(ctx: &mut Ctx, infinite: bool) -> Reply {
     if applied == 0 {
         return ctx.fail(lang::EFFECT_GIVE_FAILED);
     }
-    // Vanilla counts the successes, not the requested targets, when more than
-    // one was named.
+    // Vanilla reports the number of requested targets in the plural line,
+    // even when a target was skipped; `applied` is only the `==0` decision.
     let line = if targets.len() == 1 {
         lang::format(
             lang::EFFECT_GIVE_SUCCESS_SINGLE,
@@ -655,7 +655,7 @@ fn exec_effect_give_in(ctx: &mut Ctx, infinite: bool) -> Reply {
     } else {
         lang::format(
             lang::EFFECT_GIVE_SUCCESS_MULTIPLE,
-            &[display, &applied.to_string()],
+            &[display, &targets.len().to_string()],
         )
     };
     Reply::one(line)
@@ -892,10 +892,12 @@ fn exec_enchant(ctx: &mut Ctx) -> Reply {
         return ctx.fail(lang::ENCHANT_FAILED);
     }
     let full = enchantment::full_name(&def, level);
+    // Vanilla reports the number of requested targets in the plural line,
+    // even when a target was skipped; `enchanted` is only the `==0` decision.
     let line = if multiple {
         lang::format(
             lang::ENCHANT_SUCCESS_MULTIPLE,
-            &[&full, &enchanted.to_string()],
+            &[&full, &targets.len().to_string()],
         )
     } else {
         lang::format(lang::ENCHANT_SUCCESS_SINGLE, &[&full, targets[0].name()])

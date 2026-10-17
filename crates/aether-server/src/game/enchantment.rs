@@ -166,9 +166,14 @@ pub fn is_compatible(existing: &[u8], def: &Def) -> bool {
 }
 
 /// The vanilla `Enchantment.getFullname(level)`: the display name followed by
-/// the level numeral, e.g. `Sharpness III`. Levels above ten (which no vanilla
-/// enchantment has) fall back to the Arabic number.
+/// the level numeral, e.g. `Sharpness III`. A single-level enchantment has no
+/// numeral at all (`Mending`, not `Mending I`), exactly as vanilla's
+/// `getFullname` returns `getDisplayName()` when `getMaxLevel() == 1`. Levels
+/// above ten (which no vanilla enchantment has) fall back to the Arabic number.
 pub fn full_name(def: &Def, level: i32) -> String {
+    if def.max_level == 1 {
+        return def.display.to_string();
+    }
     format!("{} {}", def.display, numeral(level))
 }
 
@@ -379,11 +384,20 @@ mod tests {
     }
 
     #[test]
-    fn the_full_name_appends_the_level_numeral() {
+    fn the_full_name_appends_the_level_numeral_only_for_multi_level_enchantments() {
         let sharp = by_name("sharpness").unwrap();
         assert_eq!(full_name(&sharp, 1), "Sharpness I");
         assert_eq!(full_name(&sharp, 3), "Sharpness III");
         assert_eq!(full_name(&sharp, 5), "Sharpness V");
+        // Vanilla omits the numeral when max_level == 1.
+        let mending = by_name("mending").unwrap();
+        assert_eq!(mending.max_level, 1);
+        assert_eq!(full_name(&mending, 1), "Mending");
+        assert_eq!(full_name(&by_name("silk_touch").unwrap(), 1), "Silk Touch");
+        assert_eq!(
+            full_name(&by_name("vanishing_curse").unwrap(), 1),
+            "Curse of Vanishing"
+        );
         assert_eq!(numeral(9), "IX");
         assert_eq!(numeral(10), "X");
         assert_eq!(numeral(11), "11");
