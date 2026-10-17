@@ -548,6 +548,14 @@ fn describe_body(
                 e.seq
             ))
         }
+        // A bulk edit is one operation over many blocks; the summary says so
+        // rather than printing a line per block.
+        EventBody::BlockGroup { changes } => Some(format!(
+            "  {ago} {} edited {} block(s) in one operation  #{}",
+            actor_name(e.actor.0),
+            changes.len(),
+            e.seq
+        )),
         EventBody::ItemMint {
             item,
             count,

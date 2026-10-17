@@ -1427,3 +1427,129 @@ fn a_chat_body_is_not_a_plugin_custom_tag() {
         );
     }
 }
+
+#[test]
+fn a_block_group_round_trips_through_storage() {
+    // A bulk-edit revision: many changes, one event. Read back byte-for-byte,
+    // including negative and far coordinates.
+    let changes = vec![
+        BlockChange {
+            x: 1,
+            y: -4,
+            z: 3,
+            from: DIRT,
+            to: STONE,
+        },
+        BlockChange {
+            x: -300,
+            y: 70,
+            z: 4000,
+            from: BlockStateId::AIR,
+            to: DIAMOND,
+        },
+    ];
+    let e = Event {
+        seq: 42,
+        at_ms: 7,
+        actor: alice(),
+        cause: None,
+        body: EventBody::BlockGroup {
+            changes: changes.clone(),
+        },
+    };
+    assert_eq!(Event::decode(&e.encode()), Ok(e));
+}
+
+#[test]
+fn a_block_group_tag_under_an_older_version_is_refused() {
+    // Version 5 knows no tag 10, so a v5 blob carrying one must fail rather
+    // than be guessed at.
+    let e = Event {
+        seq: 1,
+        at_ms: 2,
+        actor: alice(),
+        cause: None,
+        body: EventBody::BlockGroup {
+            changes: vec![BlockChange {
+                x: 0,
+                y: 64,
+                z: 0,
+                from: DIRT,
+                to: STONE,
+            }],
+        },
+    };
+    let mut blob = e.encode();
+    blob[0] = 5;
+    assert_eq!(Event::decode(&blob), Err(DecodeError::UnknownTag(10)));
+}
+
+#[test]
+fn a_bulk_revision_rolls_back_every_block_it_touched() {
+    let store = MemStore::new();
+    let j = Journal::open(&store).unwrap();
+    // Two ordinary edits, then one revision over two more blocks.
+    j.append(alice(), set(0, 64, 0, DIRT, STONE)).unwrap();
+    j.append_block_group(
+        alice(),
+        vec![
+            BlockChange {
+                x: 1,
+                y: 64,
+                z: 0,
+                from: DIRT,
+                to: STONE,
+            },
+            BlockChange {
+                x: 2,
+                y: 64,
+                z: 0,
+                from: DIAMOND,
+                to: STONE,
+            },
+        ],
+    )
+    .unwrap();
+
+    let plan = j.plan_rollback(&Filter::everything().by(alice())).unwrap();
+    let mut got: Vec<(i32, i32, i32, BlockStateId)> =
+        plan.iter().map(|r| (r.x, r.y, r.z, r.block)).collect();
+    got.sort_unstable();
+    assert_eq!(
+        got,
+        vec![(0, 64, 0, DIRT), (1, 64, 0, DIRT), (2, 64, 0, DIAMOND),],
+        "the revision's own from-states are restored"
+    );
+}
+
+#[test]
+fn an_area_filter_selects_a_revision_that_reaches_into_it() {
+    let store = MemStore::new();
+    let j = Journal::open(&store).unwrap();
+    // One change inside a radius-5 cylinder, one far outside; the whole
+    // revision is selected because any part of it lands in the area.
+    j.append_block_group(
+        alice(),
+        vec![
+            BlockChange {
+                x: 1,
+                y: 64,
+                z: 0,
+                from: DIRT,
+                to: STONE,
+            },
+            BlockChange {
+                x: 400,
+                y: 64,
+                z: 0,
+                from: DIRT,
+                to: STONE,
+            },
+        ],
+    )
+    .unwrap();
+    let plan = j
+        .plan_rollback(&Filter::everything().near(0, 64, 0, 5))
+        .unwrap();
+    assert_eq!(plan.len(), 2, "the revision is selected whole");
+}

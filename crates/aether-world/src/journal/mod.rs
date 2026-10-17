@@ -59,7 +59,7 @@ pub mod sink;
 mod tests;
 
 pub use event::{
-    ActorId, ChatKind, DecodeError, DestroyReason, Event, EventBody, ItemUid, Place,
+    ActorId, BlockChange, ChatKind, DecodeError, DestroyReason, Event, EventBody, ItemUid, Place,
     DESTROY_REASONS, EVENT_KINDS, EVENT_KIND_UNKNOWN,
 };
 pub use history::{Area, Page, Window};
@@ -196,20 +196,32 @@ impl Filter {
             return false;
         }
         if let Some((cx, _cy, cz, r)) = self.area {
+            // A bulk-edit revision spans many positions, so "is it in this
+            // area?" means "does any of its changes land here?" — a revision
+            // that reaches into the area is selected whole, and its rollback
+            // restores every position it touched, not only the ones inside.
+            if let EventBody::BlockGroup { changes } = &e.body {
+                return changes.iter().any(|c| within(c.x, c.z, cx, cz, r));
+            }
             let Some((x, _y, z)) = e.position() else {
                 // Positionless events (an item moving between two inventory
                 // slots) belong to no area, so an area-restricted rollback
                 // leaves them alone rather than guessing.
                 return false;
             };
-            let (dx, dz) = ((x - cx) as i64, (z - cz) as i64);
-            let r = r as i64;
-            if dx * dx + dz * dz > r * r {
+            if !within(x, z, cx, cz, r) {
                 return false;
             }
         }
         true
     }
+}
+
+/// Whether `(x, z)` lies within `r` blocks horizontally of `(cx, cz)`.
+fn within(x: i32, z: i32, cx: i32, cz: i32, r: u32) -> bool {
+    let (dx, dz) = ((x - cx) as i64, (z - cz) as i64);
+    let r = r as i64;
+    dx * dx + dz * dz <= r * r
 }
 
 /// One block restoration produced by a rollback plan.
@@ -396,6 +408,24 @@ impl<B: KvBackend> Journal<B> {
         at_ms: u64,
     ) -> Result<u64, StorageError> {
         self.append_full(actor, body, None, at_ms)
+    }
+
+    /// Append one bulk-edit **revision**: many block changes under a single
+    /// sequence number, actor and timestamp.
+    ///
+    /// Returns the revision's sequence number, which is also its undo id: the
+    /// event carries both sides of every change, so undoing it is reading it
+    /// back and applying the inverse. An empty `changes` writes nothing and
+    /// returns the current head (no revision was recorded).
+    pub fn append_block_group(
+        &self,
+        actor: ActorId,
+        changes: Vec<BlockChange>,
+    ) -> Result<u64, StorageError> {
+        if changes.is_empty() {
+            return Ok(self.head());
+        }
+        self.append(actor, EventBody::BlockGroup { changes })
     }
 
     /// Append an event that happened because of event `cause` — a drop out of
@@ -753,28 +783,50 @@ impl<B: KvBackend> Journal<B> {
         let mut order: std::collections::HashMap<(i32, i32, i32), (usize, u64)> =
             std::collections::HashMap::new();
         let mut plan: Vec<Restore> = Vec::new();
+        // Fold one block change into the plan. A single `BlockSet` is one such
+        // change; a `BlockGroup` (a bulk edit revision) is many, all sharing
+        // the event's sequence and actor, so each is expanded here and a
+        // rollback of the revision restores every block it touched.
+        let record = |order: &mut std::collections::HashMap<(i32, i32, i32), (usize, u64)>,
+                      plan: &mut Vec<Restore>,
+                      x: i32,
+                      y: i32,
+                      z: i32,
+                      from: BlockStateId,
+                      to: BlockStateId,
+                      seq: u64| {
+            match order.get(&(x, y, z)) {
+                Some(&(i, _)) => {
+                    plan[i].removed = to;
+                    order.insert((x, y, z), (i, seq));
+                }
+                None => {
+                    order.insert((x, y, z), (plan.len(), seq));
+                    plan.push(Restore {
+                        x,
+                        y,
+                        z,
+                        block: from,
+                        removed: to,
+                        undoing: seq,
+                    });
+                }
+            }
+        };
         let mut visit = |e: &Event| -> Result<(), StorageError> {
             if !filter.matches(e) || !accept(e) {
                 return Ok(());
             }
-            if let EventBody::BlockSet { x, y, z, from, to } = &e.body {
-                match order.get(&(*x, *y, *z)) {
-                    Some(&(i, _)) => {
-                        plan[i].removed = *to;
-                        order.insert((*x, *y, *z), (i, e.seq));
-                    }
-                    None => {
-                        order.insert((*x, *y, *z), (plan.len(), e.seq));
-                        plan.push(Restore {
-                            x: *x,
-                            y: *y,
-                            z: *z,
-                            block: *from,
-                            removed: *to,
-                            undoing: e.seq,
-                        });
+            match &e.body {
+                EventBody::BlockSet { x, y, z, from, to } => {
+                    record(&mut order, &mut plan, *x, *y, *z, *from, *to, e.seq);
+                }
+                EventBody::BlockGroup { changes } => {
+                    for c in changes {
+                        record(&mut order, &mut plan, c.x, c.y, c.z, c.from, c.to, e.seq);
                     }
                 }
+                _ => {}
             }
             Ok(())
         };
@@ -782,6 +834,7 @@ impl<B: KvBackend> Journal<B> {
             Some(a) => self.for_each_actor_event(a, &mut visit)?,
             None => self.for_each_event(&mut visit)?,
         }
+        drop(visit);
         // The former newest-first walk pushed a position on its newest
         // sighting; keep that order for callers that read the plan.
         plan.sort_by_key(|r| std::cmp::Reverse(order.get(&(r.x, r.y, r.z)).map_or(0, |&(_, s)| s)));

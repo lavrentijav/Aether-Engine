@@ -433,6 +433,10 @@ pub fn row_values(e: &Event) -> Vec<Option<String>> {
         // columns for a payload it does not understand. The bytes stay in the
         // journal; the mirror records only that the tag happened.
         EventBody::Custom { .. } => {}
+        // A bulk revision: its kind is `block_group` (set above, from the
+        // tag). The mirror's single block columns have no room for the whole
+        // change set, which stays in the journal.
+        EventBody::BlockGroup { .. } => {}
         // Player text: the kind is the tag (chat/pm/command), the text is the
         // line and the peer is the private-message recipient. Public chat and
         // commands have no peer.

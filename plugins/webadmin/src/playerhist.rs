@@ -118,6 +118,9 @@ pub fn action(e: &Event) -> &'static str {
         EventBody::ItemDestroy { .. } => "destroy",
         EventBody::ItemMerge { .. } => "merge",
         EventBody::ItemDerive { .. } => "craft",
+        // A bulk edit is one operation; the page labels it as such rather than
+        // guessing place/break from a single change.
+        EventBody::BlockGroup { .. } => "bulk",
         EventBody::ChatMessage { kind, .. } => match kind {
             ChatKind::Public => "chat",
             ChatKind::Private => "message",
