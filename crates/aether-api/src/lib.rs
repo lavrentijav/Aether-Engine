@@ -46,7 +46,9 @@ pub mod keys;
 // Public re-exports: the pieces callers most often need alongside `World`.
 pub use aether_core::math::{Aabb, Vec3 as Vector3};
 pub use aether_physics::{Body, PhysicsParams};
-pub use aether_world::journal::{ActorId as JournalActor, Anomaly, Event, ItemUid, Ledger, Place};
+pub use aether_world::journal::{
+    ActorId as JournalActor, Anomaly, BlockChange, Event, ItemUid, Ledger, Place,
+};
 pub use aether_world::registry::ids as block_ids;
 pub use aether_world::storage::format::SubChunkKey;
 pub use aether_world::{BlockProperties, BlockStateId, FullBright, LightView, MemStore};
@@ -388,17 +390,27 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         match self.journal.column_events_from(cx, cz, from) {
             Ok(events) => {
                 for e in events {
-                    if let EventBody::BlockSet { x, y, z, to, .. } = e.body {
-                        let Some((key, lx, ly, lz)) = Self::key_of(x, y, z) else {
-                            continue;
-                        };
-                        let props = self.props_of(to);
-                        self.cache
-                            .write()
-                            .unwrap()
-                            .entry(key)
-                            .or_default()
-                            .set(lx, ly, lz, to, props);
+                    match &e.body {
+                        EventBody::BlockSet { x, y, z, to, .. } => {
+                            self.replay_block(*x, *y, *z, *to);
+                        }
+                        // A bulk-edit revision replays its changes for *this*
+                        // column. The group is stored sorted by column
+                        // (`append_block_group`), so the slice is found by
+                        // binary search: loading one column of a million-block
+                        // revision costs O(log N + its own changes), not a scan
+                        // of the whole revision per column.
+                        EventBody::BlockGroup { changes } => {
+                            let target = (cx, cz);
+                            let start = changes.partition_point(|c| (c.x >> 4, c.z >> 4) < target);
+                            for c in &changes[start..] {
+                                if (c.x >> 4, c.z >> 4) != target {
+                                    break;
+                                }
+                                self.replay_block(c.x, c.y, c.z, c.to);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -456,6 +468,21 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
             return None;
         }
         Some((SubChunkKey::new(cx, cy as i8, cz), lx, ly, lz))
+    }
+
+    /// Write one journalled block state back into the cache during a column
+    /// replay. Out-of-range positions are skipped, as in a live write.
+    fn replay_block(&self, x: i32, y: i32, z: i32, to: BlockStateId) {
+        let Some((key, lx, ly, lz)) = Self::key_of(x, y, z) else {
+            return;
+        };
+        let props = self.props_of(to);
+        self.cache
+            .write()
+            .unwrap()
+            .entry(key)
+            .or_default()
+            .set(lx, ly, lz, to, props);
     }
 
     /// The block id at world coordinates `(x, y, z)` (air if out of range).
@@ -601,6 +628,74 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
                 },
             )
             .ok()
+    }
+
+    /// Apply many block changes in one batch, writing **no** journal entry.
+    ///
+    /// The block half of a bulk edit: every column is materialized first, then
+    /// one cache lock and one dirty-set update cover the whole batch instead
+    /// of one each per block. The actor is the caller's business; see
+    /// [`World::commit_block_group`] for the journalled form.
+    pub fn apply_block_changes(&self, changes: &[BlockChange]) {
+        if changes.is_empty() {
+            return;
+        }
+        // Materialize every column first: `ensure_column` takes the cache
+        // write lock while generating, so it must not run under it.
+        for c in changes {
+            if let Some((key, _, _, _)) = Self::key_of(c.x, c.y, c.z) {
+                self.ensure_column(key.cx, key.cz);
+            }
+        }
+        // Group the changes by section, then hand each section its whole batch
+        // at once: one cache lock, one dirty insert per touched section, and
+        // one `set_many` pass instead of a `set` per block.
+        let mut by_section: HashMap<SubChunkKey, Vec<(usize, usize, usize, BlockStateId)>> =
+            HashMap::new();
+        for c in changes {
+            if let Some((key, lx, ly, lz)) = Self::key_of(c.x, c.y, c.z) {
+                by_section.entry(key).or_default().push((lx, ly, lz, c.to));
+            }
+        }
+        let mut cache = self.cache.write().unwrap();
+        let mut dirty = self.dirty.write().unwrap();
+        for (key, local) in by_section {
+            cache
+                .entry(key)
+                .or_default()
+                .set_many(&local, &|id| self.props_of(id));
+            dirty.insert(key);
+        }
+    }
+
+    /// Apply many block changes **and** record them as one journal revision.
+    ///
+    /// This is the write side of a bulk edit: one cache batch for the world,
+    /// one event — one sequence number, one actor — for the history. The
+    /// returned sequence number is the revision's undo id; `None` means the
+    /// batch was empty and nothing was written.
+    ///
+    /// **Atomic**: the revision is written to the journal *before* the world
+    /// is touched, so a journal failure leaves the world unchanged (the error
+    /// propagates, `?`) and the edit is never half-applied — no blocks changed
+    /// with no revision to undo them. The reverse order would be unrecoverable:
+    /// a block change with no event is invisible to rollback and to the
+    /// mirror, and cannot be told apart from a deliberate write.
+    pub fn commit_block_group(
+        &self,
+        actor: ActorId,
+        changes: &[BlockChange],
+    ) -> Result<Option<u64>, StorageError> {
+        // Append first: this is the fallible step, and doing it before any
+        // world mutation is what makes the commit all-or-nothing. The event's
+        // own replay guard is harmless here — `ensure_column` may apply it
+        // again below, which is idempotent.
+        let seq = self.journal.append_block_group(actor, changes.to_vec())?;
+        if seq.is_none() {
+            return Ok(None);
+        }
+        self.apply_block_changes(changes);
+        Ok(seq)
     }
 
     /// Borrow the world's history.

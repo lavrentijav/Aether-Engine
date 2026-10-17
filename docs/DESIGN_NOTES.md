@@ -543,7 +543,10 @@ hot store holds. In order:
    tick of fluid flow) under a revision: id, parent, actor, time, cause, and the
    per-block `from → to` changes, so it stays invertible. The natural unit of a rollback
    and of a Safe-Point merge. The format leaves room for several parents, but there is
-   one until regions actually branch and merge.
+   one until regions actually branch and merge. *Started (CMD-30a): a bulk block edit is
+   now one `EventBody::BlockGroup` revision (journal format v6), with a bounded,
+   journal-backed undo; see `docs/design/bulk-edit.md`. Grouping the other operations
+   (dig, craft, fluid tick) is still to come.*
 3. **Packed segments** — a background pass moves cold history into immutable pack files
    with their own indexes (column, actor, time, item) addressed by offset and length,
    published atomically at a Safe Point. A rollback consults the hot journal, then the

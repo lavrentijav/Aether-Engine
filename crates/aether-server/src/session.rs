@@ -1898,14 +1898,14 @@ fn on_block_broken(
 /// The scan is per column and runs only for blocks worth paying for, which are
 /// a small minority of what anyone breaks.
 fn was_ever_placed(world: &DemoWorld, x: i32, y: i32, z: i32) -> bool {
-    use aether_world::journal::EventBody;
+    // `block_to_at` covers both a single `BlockSet` and every change of a
+    // bulk revision, so a block a `/fill` placed counts as placed for the
+    // reward/economy path exactly as one placed by hand does.
     match world.journal().column_events(x >> 4, z >> 4) {
         Ok(events) => events.iter().any(|e| {
-            matches!(
-                &e.body,
-                EventBody::BlockSet { x: ex, y: ey, z: ez, to, .. }
-                    if (*ex, *ey, *ez) == (x, y, z) && *to != block_ids::AIR
-            )
+            e.body
+                .block_to_at(x, y, z)
+                .is_some_and(|to| to != block_ids::AIR)
         }),
         Err(_) => true,
     }

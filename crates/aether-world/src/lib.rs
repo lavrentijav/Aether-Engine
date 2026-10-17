@@ -38,7 +38,9 @@ pub mod visibility;
 
 pub use block::{BlockProperties, BlockStateId};
 pub use cell::AvxCell;
-pub use journal::{ActorId, Event, EventBody, Filter, ItemUid, Journal, Ledger, Place};
+pub use journal::{
+    ActorId, BlockChange, Event, EventBody, Filter, ItemUid, Journal, Ledger, Place,
+};
 pub use light::{FullBright, LightView, MAX_LIGHT};
 pub use palette::{PackedArray, Palette};
 pub use registry::items::{ItemRegistry, ItemTypeId};

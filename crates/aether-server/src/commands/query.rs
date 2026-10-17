@@ -17,7 +17,7 @@
 //! that quietly widened a rollback from one player to everybody would be the
 //! worst possible failure mode for this command set.
 
-use aether_world::journal::{Event, EventBody, Filter};
+use aether_world::journal::{Event, Filter};
 use aether_world::BlockStateId;
 
 /// What a command was asked to look at.
@@ -168,53 +168,44 @@ impl Query {
     /// `name_of` resolves a block id to its registry name; it is passed in
     /// rather than captured so this stays testable without a world.
     pub fn accepts(&self, e: &Event, name_of: &dyn Fn(BlockStateId) -> String) -> bool {
-        if !self.filter_matches(e) {
+        // The journal's own filter, *not* a re-implementation: an area filter
+        // must select a bulk revision exactly the way the journal's rollback
+        // does (any change inside the area selects the whole revision), or the
+        // two layers would silently disagree about what `/rollback radius:…`
+        // touches.
+        if !self.filter.matches(e) {
             return false;
         }
-        let EventBody::BlockSet { from, to, .. } = &e.body else {
-            // Item events carry no block, so a block/action filter excludes
-            // them rather than silently letting them through.
-            return self.block.is_none() && self.action.is_none();
+        if self.block.is_none() && self.action.is_none() {
+            // No per-block restriction: every event the journal selected
+            // passes, item events included.
+            return true;
+        }
+        // A `block:`/`action:` filter is per-block. A bulk revision is
+        // accepted when *any* of its changes matches, mirroring the area rule
+        // — the revision is atomic, so selecting it selects all of it. An
+        // event with no block change at all (an item event) is excluded.
+        let mut matched = false;
+        let mut check = |_x: i32, _y: i32, _z: i32, from: BlockStateId, to: BlockStateId| {
+            if matched {
+                return;
+            }
+            if let Some(want) = &self.block {
+                if &name_of(from) != want && &name_of(to) != want {
+                    return;
+                }
+            }
+            if let Some(a) = self.action {
+                let broke = to == BlockStateId::AIR;
+                match a {
+                    Action::Place if broke => return,
+                    Action::Break if !broke => return,
+                    _ => {}
+                }
+            }
+            matched = true;
         };
-        if let Some(want) = &self.block {
-            if &name_of(*from) != want && &name_of(*to) != want {
-                return false;
-            }
-        }
-        if let Some(a) = self.action {
-            let broke = *to == BlockStateId::AIR;
-            match a {
-                Action::Place if broke => return false,
-                Action::Break if !broke => return false,
-                _ => {}
-            }
-        }
-        true
-    }
-
-    /// The journal's own three conditions.
-    ///
-    /// Spelled out here because [`Filter::matches`] is private to the journal;
-    /// they are trivial, and duplicating them is cheaper than widening that
-    /// crate's public surface for one caller.
-    fn filter_matches(&self, e: &Event) -> bool {
-        if let Some(a) = self.filter.actor {
-            if e.actor != a {
-                return false;
-            }
-        }
-        if e.seq < self.filter.since_seq || e.at_ms < self.filter.since_ms {
-            return false;
-        }
-        if let Some((cx, _, cz, r)) = self.filter.area {
-            let Some((x, _, z)) = e.position() else {
-                return false;
-            };
-            let (dx, dz) = ((x - cx) as i64, (z - cz) as i64);
-            if dx * dx + dz * dz > (r as i64) * (r as i64) {
-                return false;
-            }
-        }
-        true
+        e.body.for_each_block_change(&mut check);
+        matched
     }
 }

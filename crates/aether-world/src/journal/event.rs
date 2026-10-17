@@ -213,6 +213,7 @@ pub const DESTROY_REASONS: &[DestroyReason] = &[
 /// store in its `kind` *text* column before it became a `smallint`.
 pub const EVENT_KINDS: &[(u8, &str)] = &[
     (TAG_BLOCK_SET, "block_set"),
+    (TAG_BLOCK_GROUP, "block_group"),
     (TAG_ITEM_MINT, "item_mint"),
     (TAG_ITEM_MOVE, "item_move"),
     (TAG_ITEM_DESTROY, "item_destroy"),
@@ -240,6 +241,21 @@ pub enum Place {
     Nowhere,
 }
 
+/// One block's change within a [`EventBody::BlockGroup`]: what stood at
+/// `(x, y, z)` before the operation (`from`) and what replaced it (`to`).
+///
+/// Both sides are kept for the same reason a single [`EventBody::BlockSet`]
+/// keeps them: the group is invertible without replaying the world, so its
+/// undo is a walk of its own changes and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockChange {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub from: BlockStateId,
+    pub to: BlockStateId,
+}
+
 /// What happened.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventBody {
@@ -252,6 +268,22 @@ pub enum EventBody {
         from: BlockStateId,
         to: BlockStateId,
     },
+    /// Many blocks changed as **one operation** — a journal *revision*.
+    ///
+    /// A bulk edit (a WorldEdit `//set`, a schematic paste, a large fill) is
+    /// one thing someone did, not ten thousand separate acts. Recording each
+    /// block as its own [`EventBody::BlockSet`] would say otherwise: it would
+    /// fill the history with per-block entries, number them individually, and
+    /// make "undo the last thing I did" a question about a count rather than
+    /// about an operation. A `BlockGroup` is that operation: one event, one
+    /// sequence number, one actor, and the per-block `from → to` changes that
+    /// make it invertible.
+    ///
+    /// `changes` carries both sides of every block, exactly as `BlockSet`
+    /// does for one, so the group is its own undo: reverse the vector and swap
+    /// `from`/`to`. The journal's column index records every touched position,
+    /// so a column replay still materializes the edit after a reload.
+    BlockGroup { changes: Vec<BlockChange> },
     /// An item instance came into existence — creative give, a block broken
     /// into a drop, a craft. Every uid in the world must have exactly one of
     /// these; a uid that appears without one is the signature of a dupe.
@@ -345,6 +377,7 @@ impl EventBody {
     pub fn tag(&self) -> u8 {
         match self {
             EventBody::BlockSet { .. } => TAG_BLOCK_SET,
+            EventBody::BlockGroup { .. } => TAG_BLOCK_GROUP,
             EventBody::ItemMint { .. } => TAG_ITEM_MINT,
             EventBody::ItemMove { .. } => TAG_ITEM_MOVE,
             EventBody::ItemDestroy { .. } => TAG_ITEM_DESTROY,
@@ -364,6 +397,7 @@ impl EventBody {
     pub fn kind_name(&self) -> &'static str {
         match self {
             EventBody::BlockSet { .. } => "block_set",
+            EventBody::BlockGroup { .. } => "block_group",
             EventBody::ItemMint { .. } => "item_mint",
             EventBody::ItemMove { .. } => "item_move",
             EventBody::ItemDestroy { .. } => "item_destroy",
@@ -397,6 +431,7 @@ impl EventBody {
                 v
             }
             EventBody::BlockSet { .. }
+            | EventBody::BlockGroup { .. }
             | EventBody::ChatMessage { .. }
             | EventBody::Custom { .. } => Vec::new(),
         }
@@ -418,8 +453,108 @@ impl EventBody {
             EventBody::ItemDerive { to, .. } => to.is_container_at(x, y, z),
             EventBody::ItemMerge { .. }
             | EventBody::BlockSet { .. }
+            | EventBody::BlockGroup { .. }
             | EventBody::ChatMessage { .. }
             | EventBody::Custom { .. } => false,
+        }
+    }
+
+    /// Call `f(x, y, z, from, to)` for every block change this event carries:
+    /// one pair for a [`EventBody::BlockSet`], every pair of a
+    /// [`EventBody::BlockGroup`], none for any other body.
+    ///
+    /// The single-entry point every "does this change a block?" consumer
+    /// (block history, worldgen-original, the mirror, `/inspect`) should use,
+    /// so a bulk revision is treated as the collection of block changes it is
+    /// and not as an opaque event.
+    pub fn for_each_block_change(
+        &self,
+        f: &mut dyn FnMut(i32, i32, i32, BlockStateId, BlockStateId),
+    ) {
+        match self {
+            EventBody::BlockSet { x, y, z, from, to } => f(*x, *y, *z, *from, *to),
+            EventBody::BlockGroup { changes } => {
+                for c in changes {
+                    f(c.x, c.y, c.z, c.from, c.to);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether this event **changes the block** at `(x, y, z)` — a `BlockSet`
+    /// there, or any change of a `BlockGroup` there.
+    ///
+    /// Distinct from [`Event::position`]: an item event merely *at* the
+    /// coordinates (a drop, a chest access) does not change the block.
+    pub fn changes_block_at(&self, x: i32, y: i32, z: i32) -> bool {
+        match self {
+            EventBody::BlockSet {
+                x: bx,
+                y: by,
+                z: bz,
+                ..
+            } => (*bx, *by, *bz) == (x, y, z),
+            EventBody::BlockGroup { changes } => {
+                changes.iter().any(|c| (c.x, c.y, c.z) == (x, y, z))
+            }
+            _ => false,
+        }
+    }
+
+    /// The state this event installs at `(x, y, z)`, if it changes that block.
+    ///
+    /// A group is stored sorted by column, not in application order (see
+    /// [`Journal::append_block_group`](super::Journal::append_block_group)).
+    /// That sort is stable, so a hand-built group that repeats a position keeps
+    /// its insertions together and the last one still wins — but a bulk-edit
+    /// builder never repeats a position, since it plans from a map keyed by
+    /// position. `None` when the event changes no block there.
+    pub fn block_to_at(&self, x: i32, y: i32, z: i32) -> Option<BlockStateId> {
+        match self {
+            EventBody::BlockSet {
+                x: bx,
+                y: by,
+                z: bz,
+                to,
+                ..
+            } if (*bx, *by, *bz) == (x, y, z) => Some(*to),
+            EventBody::BlockGroup { changes } => changes
+                .iter()
+                .rev()
+                .find(|c| (c.x, c.y, c.z) == (x, y, z))
+                .map(|c| c.to),
+            _ => None,
+        }
+    }
+
+    /// Whether this event "touches" `(x, y, z)` in the broad sense the radius
+    /// filter means: a block change there, or an item event whose place is
+    /// that block. A bulk revision touches every position it changes.
+    pub fn touches_position(&self, x: i32, y: i32, z: i32) -> bool {
+        self.position() == Some((x, y, z)) || self.changes_block_at(x, y, z)
+    }
+
+    /// The block coordinates this body concerns, if it concerns a single one.
+    ///
+    /// A bulk revision spans many positions, so it has none here; use
+    /// [`EventBody::for_each_block_change`] for those. Drives the radius
+    /// filter for single-position events.
+    pub fn position(&self) -> Option<(i32, i32, i32)> {
+        match self {
+            EventBody::BlockSet { x, y, z, .. } => Some((*x, *y, *z)),
+            EventBody::ItemMint { to, .. } => to.position(),
+            EventBody::ItemMove { to, from, .. } => to.position().or_else(|| from.position()),
+            EventBody::ItemDestroy { from, .. } => from.position(),
+            EventBody::ItemMerge { .. } => None,
+            EventBody::ItemDerive { to, .. } => to.position(),
+            // Where the speaker stood, so a radius filter can find what was
+            // said nearby.
+            EventBody::ChatMessage { x, y, z, .. } => Some((*x, *y, *z)),
+            // A plugin event carries no position the core understands.
+            EventBody::Custom { .. } => None,
+            // A revision spans many positions; see the method doc.
+            EventBody::BlockGroup { .. } => None,
         }
     }
 
@@ -449,6 +584,26 @@ impl EventBody {
             }
             EventBody::ItemDestroy { from, .. } => from.position().into_iter().collect(),
             EventBody::ItemDerive { to, .. } => to.position().into_iter().collect(),
+            // Every block a bulk edit touches, so a column replay materializes
+            // the whole revision wherever any part of it lands. Duplicates
+            // collapse: the index entry is idempotent, but dedup keeps the
+            // write list proportional to the distinct columns, not to the
+            // (possibly repeated) change count.
+            EventBody::BlockGroup { changes } => {
+                // The index key is per column, so one representative position
+                // per distinct column is enough: a million-block fill across a
+                // few hundred columns writes a few hundred entries, not a
+                // million. A `HashSet` keeps this linear in the change count.
+                let mut seen: std::collections::HashSet<(i32, i32)> =
+                    std::collections::HashSet::new();
+                let mut out: Vec<(i32, i32, i32)> = Vec::new();
+                for c in changes {
+                    if seen.insert((c.x >> 4, c.z >> 4)) {
+                        out.push((c.x, c.y, c.z));
+                    }
+                }
+                out
+            }
             // Where the speaker stood, so a radius filter can find nearby chat
             // in a column's index rather than scanning the whole journal.
             EventBody::ChatMessage { x, y, z, .. } => vec![(*x, *y, *z)],
@@ -479,19 +634,7 @@ impl Event {
     /// Drives the radius filter: an event with no position is global and is
     /// only ever swept up by an unrestricted rollback.
     pub fn position(&self) -> Option<(i32, i32, i32)> {
-        match &self.body {
-            EventBody::BlockSet { x, y, z, .. } => Some((*x, *y, *z)),
-            EventBody::ItemMint { to, .. } => to.position(),
-            EventBody::ItemMove { to, from, .. } => to.position().or_else(|| from.position()),
-            EventBody::ItemDestroy { from, .. } => from.position(),
-            EventBody::ItemMerge { .. } => None,
-            EventBody::ItemDerive { to, .. } => to.position(),
-            // Where the speaker stood, so a radius filter can find what was
-            // said nearby.
-            EventBody::ChatMessage { x, y, z, .. } => Some((*x, *y, *z)),
-            // A plugin event carries no position the core understands.
-            EventBody::Custom { .. } => None,
-        }
+        self.body.position()
     }
 }
 
@@ -531,7 +674,11 @@ impl Place {
 /// Version 5 added the player-text bodies ([`EventBody::ChatMessage`]: public
 /// chat, private message and command, tags 7–9), each carrying a position, an
 /// optional peer, and UTF-8 text.
-pub const FORMAT_VERSION: u8 = 5;
+/// Version 6 added the bulk-edit revision ([`EventBody::BlockGroup`], tag 10):
+/// many block `from → to` changes under one event, one sequence number and one
+/// actor — the grouping a `//set` needs so its history and undo are one
+/// operation rather than one per block.
+pub const FORMAT_VERSION: u8 = 6;
 
 /// Errors from [`Event::decode`].
 #[derive(Debug, PartialEq)]
@@ -567,6 +714,9 @@ const TAG_ITEM_MERGE: u8 = 6;
 const TAG_CHAT: u8 = 7;
 const TAG_PM: u8 = 8;
 const TAG_CMD: u8 = 9;
+/// A bulk edit recorded as one operation (a journal revision); see
+/// [`EventBody::BlockGroup`]. New in format version 6.
+const TAG_BLOCK_GROUP: u8 = 10;
 /// Optional trailer after the body: the cause. Absent in entries written
 /// before causes existed, which therefore decode with none.
 const TRAILER_CAUSE: u8 = 1;
@@ -708,6 +858,17 @@ impl Event {
                 out.extend_from_slice(&from.0.to_be_bytes());
                 out.extend_from_slice(&to.0.to_be_bytes());
             }
+            EventBody::BlockGroup { changes } => {
+                out.push(TAG_BLOCK_GROUP);
+                out.extend_from_slice(&(changes.len() as u32).to_be_bytes());
+                for c in changes {
+                    out.extend_from_slice(&c.x.to_be_bytes());
+                    out.extend_from_slice(&c.y.to_be_bytes());
+                    out.extend_from_slice(&c.z.to_be_bytes());
+                    out.extend_from_slice(&c.from.0.to_be_bytes());
+                    out.extend_from_slice(&c.to.0.to_be_bytes());
+                }
+            }
             EventBody::ItemMint {
                 uid,
                 item,
@@ -821,6 +982,22 @@ impl Event {
                 from: BlockStateId(c.u32()?),
                 to: BlockStateId(c.u32()?),
             },
+            // A bulk edit revision. New in v6; a tag 10 under an older version
+            // falls through to `UnknownTag`, which is the correct refusal.
+            TAG_BLOCK_GROUP if v >= 6 => {
+                let n = c.u32()? as usize;
+                let mut changes = Vec::with_capacity(n);
+                for _ in 0..n {
+                    changes.push(BlockChange {
+                        x: c.i32()?,
+                        y: c.i32()?,
+                        z: c.i32()?,
+                        from: BlockStateId(c.u32()?),
+                        to: BlockStateId(c.u32()?),
+                    });
+                }
+                EventBody::BlockGroup { changes }
+            }
             TAG_ITEM_MINT => EventBody::ItemMint {
                 uid: c.uid(v)?,
                 item: c.item(v)?,
