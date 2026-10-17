@@ -81,6 +81,19 @@ pub fn dispatch(
     tree::execute_feedback(text, handle, registry, world)
 }
 
+/// [`dispatch`] with a sink for progress a body reports before it finishes
+/// (`/save-all`). The sink receives plain text; the caller styles it as a
+/// success line.
+pub fn dispatch_streaming<'a>(
+    text: &str,
+    handle: &'a PlayerHandle,
+    registry: &'a SharedRegistry,
+    world: &'a DemoWorld,
+    progress: &'a mut dyn FnMut(&str),
+) -> Option<feedback::Feedback> {
+    tree::execute_feedback_streaming(text, Source::Player(handle), registry, world, progress)
+}
+
 /// Like [`dispatch`], but for any command source. This is how the console and
 /// RCON run a typed line through the same tree as a player.
 pub fn dispatch_source(

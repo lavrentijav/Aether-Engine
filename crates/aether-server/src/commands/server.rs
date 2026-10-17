@@ -224,18 +224,24 @@ fn exec_stop(_ctx: &mut Ctx) -> Reply {
 
 fn exec_save_all(ctx: &mut Ctx) -> Reply {
     // Vanilla reports the start before it writes and the result after. A
-    // command body returns one `Reply` when it is done, so both lines are
-    // delivered together here; the order is vanilla's.
-    let mut lines = vec![text::SAVING.to_string()];
+    // streaming caller gets the first line immediately; one that does not
+    // stream (tests, functions) gets both in the final reply.
+    let reported = ctx.report(text::SAVING);
     match save_all(ctx.world, ctx.registry) {
         Ok(()) => {
-            lines.push(text::SAVED.to_string());
-            Reply(lines)
+            if reported {
+                Reply::one(text::SAVED)
+            } else {
+                Reply(vec![text::SAVING.to_string(), text::SAVED.to_string()])
+            }
         }
         Err(e) => {
             crate::log::error(&format!("save-all failed: {e}"));
-            lines.push(text::SAVE_FAILED.to_string());
-            ctx.fail_lines(lines)
+            // The progress line is informational and already went out on the
+            // streaming path; only the failure is an error. A non-streaming
+            // caller gets the failure alone rather than an error-coloured
+            // "Saving…" line.
+            ctx.fail(text::SAVE_FAILED)
         }
     }
 }
@@ -444,7 +450,7 @@ fn text_arg(ctx: &Ctx, index: usize) -> Option<String> {
 mod tests {
     use super::*;
     use crate::commands::feedback::FeedbackKind;
-    use crate::commands::tree::execute_feedback_from;
+    use crate::commands::tree::{execute_feedback_from, execute_feedback_streaming};
     use crate::commands::tree::{ServerKind, Source};
     use crate::players::{PosLook, Registry, SharedRegistry};
     use crate::proto::Conn;
@@ -604,6 +610,39 @@ mod tests {
                 .is_some(),
             "the player state was saved"
         );
+    }
+
+    #[test]
+    fn save_all_reports_the_start_before_it_writes_and_the_result_after() {
+        let env = env(774);
+        let key = crate::game::player::key(env.tester.uuid);
+        assert!(env.world.get_meta(&key).unwrap().is_none());
+        let mut progress = Vec::new();
+        let mut saved_not_yet_written = None;
+        let feedback = execute_feedback_streaming(
+            "/save-all",
+            Source::Player(&env.tester),
+            &env.registry,
+            &env.world,
+            &mut |line| {
+                if line == text::SAVING {
+                    // The progress line must arrive before the player record
+                    // (written by the save) exists.
+                    saved_not_yet_written = Some(env.world.get_meta(&key).unwrap().is_none());
+                }
+                progress.push(line.to_string());
+            },
+        )
+        .expect("a command");
+        assert_eq!(
+            saved_not_yet_written,
+            Some(true),
+            "SAVING precedes the write"
+        );
+        assert_eq!(progress, vec![text::SAVING.to_string()]);
+        assert_eq!(feedback.kind, FeedbackKind::Success);
+        assert_eq!(feedback.lines, vec![text::SAVED.to_string()]);
+        assert!(env.world.get_meta(&key).unwrap().is_some());
     }
 
     #[test]

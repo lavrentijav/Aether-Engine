@@ -13,7 +13,8 @@
 
 use std::io::{self, BufRead};
 
-use crate::commands::{dispatch_source, tree::ServerKind, tree::Source};
+use crate::commands::tree::execute_feedback_streaming;
+use crate::commands::{tree::ServerKind, tree::Source};
 use crate::players::SharedRegistry;
 use crate::session::DemoWorld;
 
@@ -23,7 +24,40 @@ pub fn run_line(line: &str, registry: &SharedRegistry, world: &DemoWorld) -> Vec
     if line.trim().is_empty() {
         return Vec::new();
     }
-    dispatch_source(line, Source::Server(ServerKind::Console), registry, world).0
+    let mut lines = Vec::new();
+    run_line_streaming(line, registry, world, &mut |line| lines.push(line));
+    lines
+}
+
+/// Run one console line, handing each line to `emit` **as it is produced**.
+///
+/// `/save-all` reports `Saving the game …` before it writes and `Saved the
+/// game` after, so a console shows the same progress a vanilla one does.
+fn run_line_streaming(
+    line: &str,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    emit: &mut dyn FnMut(String),
+) {
+    if line.trim().is_empty() {
+        return;
+    }
+    let source = Source::Server(ServerKind::Console);
+    // The console types commands without a slash; the streaming entry point
+    // (like the player one) expects one.
+    let text = if line.trim_start().starts_with('/') {
+        line.to_string()
+    } else {
+        format!("/{}", line.trim_start())
+    };
+    let mut progress = |line: &str| emit(line.to_string());
+    if let Some(feedback) =
+        execute_feedback_streaming(&text, source, registry, world, &mut progress)
+    {
+        for line in feedback.lines {
+            emit(line);
+        }
+    }
 }
 
 /// Read lines from `reader` until EOF, running each as a console command and
@@ -39,9 +73,7 @@ pub fn serve<R: BufRead>(
 ) -> io::Result<()> {
     for line in reader.lines() {
         let line = line?;
-        for reply in run_line(&line, registry, world) {
-            emit(reply);
-        }
+        run_line_streaming(&line, registry, world, &mut emit);
     }
     Ok(())
 }

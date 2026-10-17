@@ -146,6 +146,11 @@ pub struct Ctx<'a, 'e> {
     /// an argument after the tree parsed it (`/pardon` on a name that is not
     /// banned) call [`Ctx::fail`]; everything else stays a success.
     pub reply_kind: FeedbackKind,
+    /// A sink for a body that must report progress **before** it finishes
+    /// (`/save-all`), rather than only in the final [`Reply`]. `None` when the
+    /// caller does not stream (tests, functions), in which case the body falls
+    /// back to one reply.
+    pub progress: Option<&'a mut dyn FnMut(&str)>,
 }
 
 impl<'a> Ctx<'a, '_> {
@@ -175,6 +180,19 @@ impl<'a> Ctx<'a, '_> {
     pub fn fail_lines(&mut self, lines: Vec<String>) -> Reply {
         self.reply_kind = FeedbackKind::Error;
         Reply(lines)
+    }
+
+    /// Report a progress line to the source right now, when the caller streams
+    /// output. Returns whether it was sent; a body that gets `false` must put
+    /// the line in its final reply instead.
+    pub fn report(&mut self, line: impl Into<String>) -> bool {
+        match self.progress.as_deref_mut() {
+            Some(sink) => {
+                sink(&line.into());
+                true
+            }
+            None => false,
+        }
     }
 
     /// The reply a player-only command gives a server source: there is no
@@ -1148,7 +1166,25 @@ pub fn execute_feedback_from(
 ) -> Option<Feedback> {
     let trimmed = text.trim();
     let body = trimmed.strip_prefix('/')?;
-    run_body(body, source, registry, world)
+    run_body(body, source, registry, world, None)
+}
+
+/// [`execute_feedback_from`] with a sink for a body's progress lines.
+///
+/// The sink is called as the body runs (`/save-all` reports that it is saving
+/// before it starts), and the returned reply carries only what is left, so a
+/// progress line is never repeated and never inherits the final reply's error
+/// styling.
+pub fn execute_feedback_streaming<'a>(
+    text: &str,
+    source: Source<'a>,
+    registry: &'a SharedRegistry,
+    world: &'a DemoWorld,
+    progress: &'a mut dyn FnMut(&str),
+) -> Option<Feedback> {
+    let trimmed = text.trim();
+    let body = trimmed.strip_prefix('/')?;
+    run_body(body, source, registry, world, Some(progress))
 }
 
 /// Run one console/RCON line as a command, with or without a leading slash.
@@ -1166,18 +1202,32 @@ pub fn run_command(
         return Reply(Vec::new());
     }
     let body = trimmed.strip_prefix('/').unwrap_or(trimmed);
-    match run_body(body, source, registry, world) {
-        Some(feedback) => Reply(feedback.lines),
-        None => Reply(Vec::new()),
+    // Console/RCON output is one body; collect the progress lines in front of
+    // the final reply so a streaming body still reads in vanilla's order.
+    let mut progress = Vec::new();
+    let feedback = run_body(
+        body,
+        source,
+        registry,
+        world,
+        Some(&mut |line: &str| progress.push(line.to_string())),
+    );
+    match feedback {
+        Some(feedback) => {
+            progress.extend(feedback.lines);
+            Reply(progress)
+        }
+        None => Reply(progress),
     }
 }
 
 /// Parse and run one command body (no leading slash), for any source.
-fn run_body(
+fn run_body<'a>(
     body: &str,
-    source: Source,
-    registry: &SharedRegistry,
-    world: &DemoWorld,
+    source: Source<'a>,
+    registry: &'a SharedRegistry,
+    world: &'a DemoWorld,
+    progress: Option<&'a mut dyn FnMut(&str)>,
 ) -> Option<Feedback> {
     match tree().parse_source(body, &source) {
         Ok(m) => {
@@ -1188,6 +1238,7 @@ fn run_body(
                 econ: crate::economy::get(),
                 args: m.args,
                 reply_kind: FeedbackKind::Success,
+                progress,
             };
             let reply = m.node.run(&mut ctx).unwrap_or_else(|| Reply(Vec::new()));
             Some(Feedback {
