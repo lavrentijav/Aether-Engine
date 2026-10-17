@@ -713,6 +713,113 @@ fn the_public_suggest_uses_the_global_tree() {
     assert!(!suggest("/ga", &bob, &ctx).contains(&"gamemode".to_string()));
 }
 
+#[cfg(feature = "plugins")]
+#[test]
+fn a_plugin_command_completes_through_the_plugin_host() {
+    use aether_plugin::manifest::{CommandDecl, Manifest, PluginTier};
+    use aether_plugin::{
+        HostBackend, HostConfig, LogLevel, ManifestFile, NativeContext, NativePlugin, Player,
+        PluginHost,
+    };
+
+    #[derive(Default)]
+    struct Backend;
+
+    impl HostBackend for Backend {
+        fn kv_get(&self, _plugin: &str, _key: &str) -> Option<Vec<u8>> {
+            None
+        }
+        fn kv_put(&self, _plugin: &str, _key: &str, _value: &[u8]) {}
+        fn kv_delete(&self, _plugin: &str, _key: &str) {}
+        fn kv_list(&self, _plugin: &str, _prefix: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn log(&self, _plugin: &str, _level: LogLevel, _message: &str) {}
+        fn config(&self, _plugin: &str, _key: &str) -> Option<String> {
+            None
+        }
+        fn supports(&self, _plugin: &str, _feature: &str) -> bool {
+            true
+        }
+    }
+
+    struct CompletePlugin;
+
+    impl NativePlugin for CompletePlugin {
+        fn init(&mut self, _ctx: &mut NativeContext) -> Result<(), String> {
+            Ok(())
+        }
+        fn on_complete(
+            &mut self,
+            _ctx: &mut NativeContext,
+            _p: &Player,
+            _name: &str,
+            args: &[String],
+        ) -> Vec<String> {
+            let partial = args.last().map(String::as_str).unwrap_or("");
+            ["alpha", "beta", "gamma"]
+                .into_iter()
+                .filter(|word| word.starts_with(partial))
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    let _guard = crate::permissions::test_lock();
+    install_config();
+    let mut host = PluginHost::new(HostConfig::default(), Arc::new(Backend)).unwrap();
+    let file = ManifestFile {
+        dir: std::path::PathBuf::new(),
+        manifest: Manifest {
+            id: "complete_test_plugin".to_string(),
+            version: "0.1.0".to_string(),
+            api: "0.1".to_string(),
+            entry: String::new(),
+            name: "Complete Test".to_string(),
+            priority: 0,
+            capabilities: Vec::new(),
+            subscribe: vec!["on-command".to_string()],
+            commands: vec![CommandDecl::Detailed {
+                name: "complete_test_cmd".to_string(),
+                node: "plugin.complete_test.cmd".to_string(),
+                op: 0,
+            }],
+            tick_period: 1,
+            deny_on_fault: false,
+            tier: PluginTier::Native,
+            requires: Vec::new(),
+        },
+    };
+    host.add_native(&file, &[], &Default::default(), Box::new(CompletePlugin))
+        .unwrap();
+    crate::plugins::install_test_host(host);
+    crate::commands::registry::register_plugin(
+        "complete_test_cmd",
+        "complete_test_plugin",
+        "plugin.complete_test.cmd",
+        0,
+    )
+    .unwrap();
+
+    let registry: SharedRegistry = Arc::new(Registry::default());
+    let handle = join(&registry, "completer", 1);
+    let ctx = SuggestCtx {
+        registry: &registry,
+        world: None,
+    };
+    // The core tree does not own `complete_test_cmd`; the plugin answers the
+    // token through `plugins::on_complete`, so the core fallback (which would
+    // return nothing for an unknown name) is not reached.
+    assert_eq!(
+        suggest("/complete_test_cmd al", &handle, &ctx),
+        vec!["alpha"]
+    );
+    assert_eq!(
+        suggest("/complete_test_cmd ", &handle, &ctx),
+        vec!["alpha", "beta", "gamma"]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The built tree
 // ---------------------------------------------------------------------------

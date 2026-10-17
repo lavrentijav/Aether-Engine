@@ -74,6 +74,23 @@ pub trait NativePlugin: Send {
         None
     }
 
+    /// Tab-completion for one of this plugin's commands. `args` are the
+    /// tokens after the command name, with the last token possibly empty
+    /// (the player typed a space). The neutral default completes nothing.
+    ///
+    /// Native-only: the frozen WIT world has no completion export. The core
+    /// routes completion for a plugin-owned command here, so `/lp` can offer
+    /// users, groups and nodes from the live store.
+    fn on_complete(
+        &mut self,
+        _ctx: &mut NativeContext,
+        _p: &Player,
+        _name: &str,
+        _args: &[String],
+    ) -> Vec<String> {
+        Vec::new()
+    }
+
     /// A plugin-channel (custom payload) message from a player. Only called
     /// when the manifest subscribes to `on-plugin-message`. Native-only: the
     /// frozen WIT world has no such callback, and a WASM plugin cannot reach

@@ -438,6 +438,12 @@ mod imp {
                 .collect()
         }
 
+        fn player_address(&self, _plugin: &str, player: u64) -> Option<String> {
+            self.by_session(player)
+                .and_then(|h| h.ip)
+                .map(|ip| ip.to_string())
+        }
+
         /// The core command registry, so a command registered through the SDK's
         /// builder is dispatched and permission-checked like a core one. The
         /// ownership and duplicate rules live in the registry.
@@ -866,6 +872,25 @@ mod imp {
             }
         }
 
+        fn permissions_journal(&self, _plugin: &str, actor: u64, action: &str, detail: &str) {
+            let uuid = self
+                .registry
+                .by_entity(actor as i32)
+                .map(|h| h.uuid)
+                .unwrap_or(0);
+            let mut bytes = Vec::with_capacity(action.len() + detail.len() + 1);
+            bytes.extend_from_slice(action.as_bytes());
+            bytes.push(0x1f);
+            bytes.extend_from_slice(detail.as_bytes());
+            let _ = self.world.journal().append(
+                aether_api::JournalActor(uuid),
+                aether_world::journal::EventBody::Custom {
+                    tag: PERMISSIONS_JOURNAL_TAG,
+                    bytes,
+                },
+            );
+        }
+
         fn staff_journal(&self, _plugin: &str, actor: u64, action: &str, detail: &str) {
             // `actor` is the acting player's entity id; the journal keys by
             // UUID, so resolve it here. An unknown player (gone already) is the
@@ -1020,6 +1045,9 @@ mod imp {
 
     /// The custom journal tag the staff plugin's audit events use.
     pub const STAFF_JOURNAL_TAG: u8 = aether_world::journal::event::TAG_CUSTOM_MIN;
+
+    /// The custom journal tag the permissions plugin's audit events use.
+    pub const PERMISSIONS_JOURNAL_TAG: u8 = aether_world::journal::event::TAG_CUSTOM_MIN + 1;
 
     /// Dispatch every command a host callback deferred, once no host lock is
     /// held. Player commands go through the core dispatcher (the same gate as
@@ -1312,6 +1340,15 @@ mod imp {
         {
             crate::log::warn(&format!("ops service not registered: {e}"));
         }
+        // The `/lp` plugin needs the full admin store, not just the SDK's
+        // read-only permission helpers. Publish the core adapter before native
+        // plugins load so a disabled/failed registration refuses `/lp` loudly
+        // rather than loading a plugin that cannot answer a single edit.
+        let permissions_admin: Arc<dyn aether_plugin::permissions::PermissionsAdmin> =
+            Arc::new(crate::permissions::AdminService);
+        if let Err(e) = aether_plugin::permissions::register(host.services(), permissions_admin) {
+            crate::log::warn(&format!("permissions admin service not registered: {e}"));
+        }
         // The operator may lower the bulk-edit cap for their server. The
         // plugin's own pre-check reads the same value through the host
         // service, so both the refusal message and the `BulkEdit` limit agree.
@@ -1451,6 +1488,15 @@ mod imp {
             grant_sink,
             aether_staff_plugin::registration(),
             "native staff",
+        );
+        // The permissions UI (CMD-33a) fronts the core permission store
+        // through the `permissions.admin` service registered above.
+        install_native_one(
+            host,
+            cfg,
+            grant_sink,
+            aether_permissions_plugin::registration(),
+            "native permissions",
         );
         // The regions plugin edits the process-wide `aether-region` store the
         // protection hooks read, so it is independent of the SDK as well.
@@ -1828,6 +1874,16 @@ mod imp {
             h.on_command_for(&entry.plugin, &player(handle), name, args)
                 .map(|r| r.lines)
         })
+    }
+
+    /// Tab-completion for a plugin command, if one is registered. `None` lets
+    /// the core tree answer; an empty `Some` means the plugin owns the name
+    /// and offers nothing for this prefix.
+    pub fn on_complete(handle: &PlayerHandle, name: &str, args: &[String]) -> Option<Vec<String>> {
+        let entry = crate::commands::registry::plugin_command(name)?;
+        Some(with(Vec::new(), |h| {
+            h.on_complete_for(&entry.plugin, &player(handle), name, args)
+        }))
     }
 
     /// A plugin-channel message from a player, forwarded to every native plugin
@@ -2464,6 +2520,9 @@ mod imp {
     #[allow(dead_code)]
     pub fn after_enchant(_h: &PlayerHandle, _i: &str, _l: u32) {}
     pub fn on_command(_h: &PlayerHandle, _n: &str, _a: &[String]) -> Option<Vec<String>> {
+        None
+    }
+    pub fn on_complete(_h: &PlayerHandle, _n: &str, _a: &[String]) -> Option<Vec<String>> {
         None
     }
     pub fn on_plugin_message(_h: &PlayerHandle, _c: &str, _d: &[u8]) {}

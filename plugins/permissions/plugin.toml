@@ -7,8 +7,14 @@ api = "0.1"
 # No .wasm entry: the loader calls it directly, no WASM boundary.
 priority = 50
 
-capabilities = ["log", "config", "supports", "storage.kv", "players"]
+capabilities = ["log", "players"]
 
-subscribe = ["on-command", "after-player-join", "after-player-leave"]
+subscribe = ["on-command"]
 
-commands = ["lp"]
+requires = ["permissions.admin@0.1"]
+
+commands = [
+    { name = "lp", node = "luckperms.command", op = 4 },
+    { name = "luckperms", node = "luckperms.command", op = 4 },
+    { name = "perms", node = "luckperms.command", op = 4 },
+]

@@ -7,6 +7,7 @@ Parent/umbrella: `docs/tasks/CMD-33-permissions-ui.md`
 ## Commands (LuckPerms reference)
 | command | syntax | node |
 |---|---|---|
+| temp nodes | `/lp user\|group <t> permission settemp <node> <true\|false> <duration> [world=<world>]` / `unsettemp <node>` (expiry restores the previous value) | `luckperms.user.permission.settemp` / `.unsettemp` |
 | meta | `/lp user\|group <t> meta info\|set\|add\|remove\|settemp <prefix\|suffix\|weight> …` | `luckperms.meta.*` |
 | tracks | `/lp track <track> info\|create\|delete\|append\|insert\|remove` | `luckperms.track.*` |
 | context | `/lp user <u> permission set <node> true world=<world>` | `luckperms.context.*` |
@@ -20,6 +21,8 @@ Parent/umbrella: `docs/tasks/CMD-33-permissions-ui.md`
 
 ## Edge cases to test explicitly
 - meta prefix/suffix/weight reflect in chat; a weight that is not an integer errors.
+- a temporary node expires and the previous value (explicit, inherited or default) returns; the
+  remaining duration survives a restart, and `unsettemp` removes only the temporary entry.
 - context-specific node then a global node; the context one wins in that world.
 - the editor URL is one-time and expires; disabled without PA3.
 - concurrent editor and command-line edits cannot lose data (ledger/transaction).

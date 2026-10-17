@@ -122,6 +122,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-permissions-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-plugin",
+]
+
+[[package]]
 name = "aether-physics"
 version = "0.1.0"
 dependencies = [
@@ -184,6 +191,7 @@ dependencies = [
  "aether-essentials-teleport-plugin",
  "aether-menus-plugin",
  "aether-ops",
+ "aether-permissions-plugin",
  "aether-physics",
  "aether-plugin",
  "aether-region",

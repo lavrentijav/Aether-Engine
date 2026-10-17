@@ -1,0 +1,21 @@
+[package]
+name = "aether-permissions-plugin"
+description = "LuckPerms-style /lp permission management for Aether Engine: users, groups, nodes, parents and wildcards over the core permission store."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "aether_permissions_plugin"
+
+[dependencies]
+# The host trait, the typed `permissions.admin` service and the shared
+# `Player`/`CommandResult` types.
+aether-plugin = { workspace = true }
+
+[lints]
+workspace = true
