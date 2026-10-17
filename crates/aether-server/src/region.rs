@@ -367,6 +367,10 @@ pub struct Region {
     pub members: BTreeSet<String>,
     /// Player names added as owners (full rights).
     pub owners: BTreeSet<String>,
+    /// The plugin that owns this region (`claims`, `regions`), or `None` for a
+    /// region created directly in the core. The host stamps it on a plugin
+    /// write, so one plugin cannot delete another's region.
+    pub source: Option<String>,
 }
 
 impl Region {
@@ -381,12 +385,19 @@ impl Region {
             flags: FlagSet::new(),
             members: BTreeSet::new(),
             owners: BTreeSet::new(),
+            source: None,
         }
     }
 
     /// Set the priority, builder-style.
     pub fn with_priority(mut self, priority: i32) -> Self {
         self.priority = priority;
+        self
+    }
+
+    /// Set the owning plugin, builder-style.
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
         self
     }
 

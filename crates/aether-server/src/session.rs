@@ -943,7 +943,16 @@ fn play_loop(
                             let tool = held_item
                                 .and_then(|id| id.vanilla_name())
                                 .unwrap_or_default();
-                            if let Some(to) = interact::item_on_block(tool, &clicked) {
+                            // A plugin gets the right-click on the block first (the
+                            // golden-shovel claim needs the target cell, which the
+                            // air-use event does not carry).
+                            if let Some(reason) =
+                                crate::plugins::before_use_block(handle, tx, ty, tz, tool, &clicked)
+                            {
+                                if !reason.is_empty() {
+                                    handle.emit(&ServerEvent::Chat(reason), world);
+                                }
+                            } else if let Some(to) = interact::item_on_block(tool, &clicked) {
                                 till_block(handle, registry, world, tx, ty, tz, to);
                             } else if tool == "minecraft:flint_and_steel"
                                 && world.get_block(x, y, z) == block_ids::AIR

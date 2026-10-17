@@ -117,6 +117,24 @@ pub trait NativePlugin: Send {
         Decision::Allow
     }
 
+    /// A right-click **on a block** with `item`, at the clicked cell
+    /// `(x, y, z)` whose block is `block`. Native-only: the frozen WASM world
+    /// has no export for this, and a golden shovel needs the coordinates the
+    /// air-use event does not carry. Returning `Cancel` consumes the click.
+    #[allow(clippy::too_many_arguments)]
+    fn before_use_block(
+        &mut self,
+        _ctx: &mut NativeContext,
+        _p: &Player,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _item: &str,
+        _block: &str,
+    ) -> Decision {
+        Decision::Allow
+    }
+
     fn before_attack(&mut self, _ctx: &mut NativeContext, _p: &Player, _target: u64) -> Decision {
         Decision::Allow
     }

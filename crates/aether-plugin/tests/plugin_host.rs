@@ -560,6 +560,27 @@ impl NativePlugin for TestNative {
         }
     }
 
+    fn before_use_block(
+        &mut self,
+        ctx: &mut NativeContext,
+        _p: &Player,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        item: &str,
+        _block: &str,
+    ) -> Decision {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("use-block:{}:{item}", ctx.id));
+        if item == "minecraft:golden_shovel" {
+            Decision::Cancel("claimed".to_string())
+        } else {
+            Decision::Allow
+        }
+    }
+
     fn on_command(
         &mut self,
         _ctx: &mut NativeContext,
@@ -628,6 +649,37 @@ fn a_native_plugin_loads_runs_and_registers_a_service() {
 
     h.shutdown();
     let _ = backend;
+}
+
+#[test]
+fn a_native_block_use_hook_is_dispatched_by_the_host() {
+    let (mut h, _backend) = host();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let m = native_manifest("native-use", 0, &["before-use-block"], &[]);
+    h.add_native(&m, &[], &Default::default(), native(Arc::clone(&calls)))
+        .unwrap();
+
+    let decision = h.before_use_block(
+        &player(),
+        1,
+        64,
+        2,
+        "minecraft:golden_shovel",
+        "minecraft:stone",
+    );
+    assert!(matches!(decision, Decision::Cancel(_)));
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "use-block:native-use:minecraft:golden_shovel"),
+        "{:?}",
+        calls.lock().unwrap()
+    );
+
+    let decision = h.before_use_block(&player(), 1, 64, 2, "minecraft:stone", "minecraft:stone");
+    assert!(matches!(decision, Decision::Allow));
 }
 
 #[test]
