@@ -786,10 +786,35 @@ impl NativePlugin for LoggingNative {
     fn after_player_join(&mut self, ctx: &mut NativeContext, _p: &Player) {
         ctx.log(LogLevel::Info, &format!("{}:after-player-join", ctx.id));
     }
+
+    fn after_block_place(
+        &mut self,
+        ctx: &mut NativeContext,
+        _p: &Player,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _block: &str,
+    ) {
+        ctx.log(LogLevel::Info, &format!("{}:after-block-place", ctx.id));
+    }
 }
 
 fn logging_native(cancel: bool) -> Box<dyn NativePlugin> {
     Box::new(LoggingNative { cancel })
+}
+
+#[test]
+fn a_native_plugin_receives_after_block_place() {
+    // The bulk publish path (CMD-30b) fires this per changed block. The WASM
+    // world is frozen and has no such export, so this is a native-only event;
+    // the host must still route it to a native subscriber.
+    let (mut h, backend) = host();
+    let m = native_manifest("placer", 0, &["after-block-place"], &[]);
+    h.add_native(&m, &[], &Default::default(), logging_native(false))
+        .unwrap();
+    h.after_block_place(&player(), 1, 64, 2, "minecraft:stone");
+    assert_eq!(backend.ending_with(":after-block-place"), vec!["placer"]);
 }
 
 /// A native plugin whose `init` refuses, to prove one bad native plugin never

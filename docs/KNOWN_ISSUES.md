@@ -179,7 +179,7 @@ These are **not bugs** in Phase 1 — they are documented, temporary compatibili
 | **Update order** | Simultaneous redstone updates ordered by the parallel graph | Strict deterministic directional-priority queue |
 | **Entity spawn** | Batched async spawn every N ticks (every 40 ticks, per-player caps, sky/darkness test without light levels) | Per-tick precise spawner |
 | **Mob AI** | Cached A\* over the block grid with a per-tick node budget and straight-line fallback; no doors, no spider climbing, no jumping gaps | Flow-Field navigation |
-| **Lighting** | Real block/sky light by mask dilation, but recomputed per chunk send and per column only: no incremental relight on a block change, no cross-column propagation, no caching. The demo and the 1.8.9 codec still read `FullBright` | Incremental relight off journal events, cross-column propagation, caching |
+| **Lighting** | Real block/sky light by mask dilation, but recomputed per chunk send and per column only: no incremental relight on a block change, no cross-column propagation, no caching. A bulk edit re-sends each touched column, so its light is up to date within that column. The demo and the 1.8.9 codec still read `FullBright` | Incremental relight off journal events, cross-column propagation, caching |
 
 ### C. Engineering risks & trade-offs
 - **RAM overhead: +15–25%.** SoA masks, Morton order, and redstone graphs cost more memory than classic structures. Accepted for cache-locality and SIMD wins.

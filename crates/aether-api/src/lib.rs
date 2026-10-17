@@ -549,6 +549,43 @@ impl<B: KvBackend, G: ChunkGenerator> World<B, G> {
         }
     }
 
+    /// Copy every section of column `(cx, cz)` from `cy_min` to `cy_max`
+    /// (inclusive), **all under one cache read lock**.
+    ///
+    /// This is the batch form of [`World::copy_section`] for a whole-column
+    /// reader (a chunk encoder). Copying section by section takes the read lock
+    /// per section, so a write batch that lands between two of them yields a
+    /// column whose lower half is before the edit and whose upper half is
+    /// after — a torn column. Here the materialisation happens first, then one
+    /// read lock covers every section, so the reader sees one consistent state.
+    /// Sections outside the stored range read as air.
+    pub fn copy_column_sections(
+        &self,
+        cx: i32,
+        cz: i32,
+        cy_min: i32,
+        cy_max: i32,
+    ) -> Vec<Box<[BlockStateId; 4096]>> {
+        if cy_min > cy_max {
+            return Vec::new();
+        }
+        self.ensure_column(cx, cz);
+        let cache = self.cache.read().unwrap();
+        (cy_min..=cy_max)
+            .map(|cy| {
+                let mut out = Box::new([BlockStateId::AIR; 4096]);
+                if (i8::MIN as i32..=i8::MAX as i32).contains(&cy) {
+                    if let Some(sc) = cache.get(&SubChunkKey::new(cx, cy as i8, cz)) {
+                        for (i, slot) in out.iter_mut().enumerate() {
+                            *slot = sc.get(i & 15, i >> 8, (i >> 4) & 15);
+                        }
+                    }
+                }
+                out
+            })
+            .collect()
+    }
+
     /// The full state name of a block id — properties and all.
     pub fn block_name_of(&self, id: BlockStateId) -> Option<String> {
         self.registry.read().unwrap().name_of(id)

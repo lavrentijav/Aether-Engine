@@ -1418,6 +1418,12 @@ mod imp {
         with((), |h| h.after_block_break(&player(handle), x, y, z, block));
     }
 
+    /// A block was placed by a bulk edit (native plugins only: the frozen
+    /// WASM world has no `after-block-place` export).
+    pub fn after_block_place(handle: &PlayerHandle, x: i32, y: i32, z: i32, block: &str) {
+        with((), |h| h.after_block_place(&player(handle), x, y, z, block));
+    }
+
     pub fn before_block_place(
         handle: &PlayerHandle,
         x: i32,
@@ -1818,6 +1824,7 @@ mod imp {
         None
     }
     pub fn after_block_break(_h: &PlayerHandle, _x: i32, _y: i32, _z: i32, _b: &str) {}
+    pub fn after_block_place(_h: &PlayerHandle, _x: i32, _y: i32, _z: i32, _b: &str) {}
     pub fn before_block_place(
         _h: &PlayerHandle,
         _x: i32,

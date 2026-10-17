@@ -43,6 +43,8 @@ pub const EVENT_BEFORE_CONTAINER_CLICK: &str = "before-container-click";
 pub const EVENT_AFTER_PLAYER_JOIN: &str = "after-player-join";
 pub const EVENT_AFTER_PLAYER_LEAVE: &str = "after-player-leave";
 pub const EVENT_AFTER_BLOCK_BREAK: &str = "after-block-break";
+/// Observe-only, native-only (the frozen 0.1 WIT world has no export for it).
+pub const EVENT_AFTER_BLOCK_PLACE: &str = "after-block-place";
 pub const EVENT_AFTER_ENTITY_DEATH: &str = "after-entity-death";
 pub const EVENT_AFTER_DAMAGE: &str = "after-damage";
 pub const EVENT_AFTER_CRAFT: &str = "after-craft";

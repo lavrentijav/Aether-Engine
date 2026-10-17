@@ -174,6 +174,19 @@ dir = "world-cache"     # empty disables the cache
 ttl_hours = 24          # entries older than this are regenerated
 max_entries = 20000     # above this the oldest are swept away, hourly
 
+[bulk]
+# Publishing a committed bulk edit (CMD-30b). The world write is one atomic
+# revision; the follow-up shape settling and chunk re-sends are spread over
+# ticks so a one-million-block fill's publication does not stall a tick. The
+# atomic commit itself is synchronous (~0.8 s for 1M blocks) and must be run
+# off the game/plugin tick thread; it also holds the world cache write lock for
+# its batch, a one-off pause for concurrent reads. Each value below is a
+# per-tick safety cap; a job resumes on the next tick. See
+# docs/design/bulk-edit.md.
+cells_per_tick = 4096     # changed cells whose neighbours are settled per tick
+columns_per_tick = 4      # chunk column sends per tick (encoded per viewer)
+hooks_per_tick = 8192     # after-block-break/place calls per tick
+
 [anti_xray]
 # Anti-xray. Off by default until it is proven.
 # "engine" (cheap): an ore-like block fully enclosed by opaque blocks is sent

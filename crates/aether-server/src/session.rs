@@ -52,6 +52,25 @@ impl BlockSource for DemoWorld {
         World::copy_section(self, cx, cy, cz, out)
     }
 
+    fn section_y_range(&self) -> (i32, i32) {
+        (WORLD_BOTTOM >> 4, (WORLD_TOP - 1) >> 4)
+    }
+
+    fn copy_column(
+        &self,
+        cx: i32,
+        cz: i32,
+        cy_min: i32,
+        cy_max: i32,
+    ) -> Option<Vec<Box<[BlockStateId; 4096]>>> {
+        let (lo, hi) = self.section_y_range();
+        let (lo, hi) = (cy_min.max(lo), cy_max.min(hi));
+        if lo > hi {
+            return Some(Vec::new());
+        }
+        Some(World::copy_column_sections(self, cx, cz, lo, hi))
+    }
+
     fn column_biomes(
         &self,
         cx: i32,
@@ -1384,6 +1403,15 @@ fn place_block(
         let _ = u;
     }
     set_and_broadcast(world, registry, handle, x, y, z, state);
+    // A normal placement fires the same observe-only event a bulk edit does, so
+    // a native plugin sees one vocabulary rather than a bulk-only callback.
+    crate::plugins::after_block_place(
+        handle,
+        x,
+        y,
+        z,
+        &crate::game::block_name(world, state).unwrap_or_default(),
+    );
     // And the blocks it was built against have to notice it.
     settle_neighbours(world, registry, handle, x, y, z);
     // A door is two blocks that depend on each other, so the second one is
@@ -1391,6 +1419,13 @@ fn place_block(
     // exist.
     if let Some(upper) = upper {
         set_and_broadcast(world, registry, handle, x, y + 1, z, upper);
+        crate::plugins::after_block_place(
+            handle,
+            x,
+            y + 1,
+            z,
+            &crate::game::block_name(world, upper).unwrap_or_default(),
+        );
     }
     true
 }

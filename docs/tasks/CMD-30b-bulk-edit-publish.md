@@ -9,7 +9,8 @@ Publishing a committed bulk edit: batched chunk resends, neighbour updates and l
 affected region, and a per-tick budget so a million-block fill never stalls the tick.
 
 ## Behaviour
-- Chunk resends are batched **per chunk** (one packet per changed section), not per block, and
+- Chunk resends are batched **per chunk** (one packet per changed section; on this wire that is
+  one packet per touched **column**, since the protocol has no section packet), not per block, and
   published only after all writes are applied — viewers see the before or the after, never a
   half-filled wall.
 - Neighbour updates and lighting run once per affected region after commit, reusing the existing
