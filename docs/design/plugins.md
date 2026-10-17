@@ -132,7 +132,10 @@ A plugin subscribes in its manifest; unsubscribed events cost nothing (no call).
   instances and threads.
   `regions_overlapping` is the chunk-index box query, not a full scan. A block right-click carries a
   matching native-only `before-use-block` event (the golden shovel needs a target cell, which the
-  air-use event does not have).
+  air-use event does not have). `RegionInfo.trusted` carries per-player action grants (player →
+  core action flag names such as `use`/`build`/`entry`), which the check consults after an explicit
+  flag and before membership; CMD-35b uses them for claim container/build/manage trust without
+  making a container trustee a member who could break.
 
 **Limits (sandbox).** Per call: wasmtime epoch interruption (default 5 ms budget, configurable) and
 fuel for `init`; per plugin: memory cap (default 64 MiB), no WASI sockets/filesystem unless the

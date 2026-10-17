@@ -11,7 +11,7 @@
 //! [`crate::HostBackend::region_upsert`]. The server stamps the plugin id as
 //! the region's source, so one plugin can never remove another's region.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -40,6 +40,10 @@ pub struct RegionInfo {
     pub members: Vec<String>,
     /// Player names with full rights when no flag is set.
     pub owners: Vec<String>,
+    /// Per-player action grants: player name → the core action flag names
+    /// (`build`, `use`, `entry`, …) that player may perform despite not being
+    /// a member. This is how the claims plugin writes trust levels.
+    pub trusted: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl RegionInfo {
@@ -55,6 +59,7 @@ impl RegionInfo {
             flags: BTreeMap::new(),
             members: Vec::new(),
             owners: Vec::new(),
+            trusted: BTreeMap::new(),
         }
     }
 

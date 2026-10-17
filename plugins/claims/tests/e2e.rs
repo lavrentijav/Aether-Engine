@@ -3,17 +3,18 @@
 //! and are covered by `aether-server`; these tests check the plugin's policy:
 //! limits, overlap refusal, ownership, persistence and the shovel state.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use aether_plugin::{
     Decision, HostBackend, LogLevel, NativeContext, NativePlugin, Player, RegionInfo,
     RegionWriteError, ServiceRegistry,
 };
+use aether_region::{Action, Actor, BlockPos, Region, RegionId, RegionIndex, Verdict};
 
 use aether_claims_plugin::{
     registration, CLAIM_ID_MASK, CLAIM_ID_NAMESPACE, NODE_ABANDON, NODE_ABANDON_ALL, NODE_ADMIN,
-    NODE_CLAIM, NODE_LIST, NODE_LIST_OTHERS, PLUGIN_ID,
+    NODE_CLAIM, NODE_LIST, NODE_LIST_OTHERS, NODE_TRUST, PLUGIN_ID,
 };
 
 const OVERWORLD: &str = "minecraft:overworld";
@@ -46,6 +47,7 @@ impl Mock {
             NODE_LIST,
             NODE_LIST_OTHERS,
             NODE_ADMIN,
+            NODE_TRUST,
         ] {
             perms.insert((id, node.to_string()));
         }
@@ -100,6 +102,45 @@ impl Mock {
 fn same_world(a: &str, b: &str) -> bool {
     a.trim_start_matches("minecraft:")
         .eq_ignore_ascii_case(b.trim_start_matches("minecraft:"))
+}
+
+/// The same core protection check the server runs, over the claims as the
+/// plugin wrote them.
+fn core_index(backend: &Mock) -> RegionIndex {
+    RegionIndex::from_regions(backend.claim_regions().into_iter().map(|info| {
+        let mut region = Region::new(
+            RegionId(info.id),
+            info.world,
+            BlockPos::new(info.min[0], info.min[1], info.min[2]),
+            BlockPos::new(info.max[0], info.max[1], info.max[2]),
+        )
+        .with_priority(info.priority);
+        region.source = info.source;
+        for (name, allowed) in info.flags {
+            region.flags.set(name, allowed);
+        }
+        region.members = info.members.into_iter().collect();
+        region.owners = info.owners.into_iter().collect();
+        region.trusted = info
+            .trusted
+            .into_iter()
+            .map(|(name, flags)| (name, flags.into_iter().collect()))
+            .collect();
+        region
+    }))
+}
+
+fn verdict(index: &RegionIndex, who: &str, action: Action) -> Verdict {
+    index.check(OVERWORLD, BlockPos::new(0, 64, 0), action, &Actor::new(who))
+}
+
+fn trusted_levels(backend: &Mock, claim_id: u64) -> BTreeMap<String, BTreeSet<String>> {
+    backend
+        .claim_regions()
+        .into_iter()
+        .find(|region| region.id == claim_id)
+        .map(|region| region.trusted)
+        .unwrap_or_default()
 }
 
 impl HostBackend for Mock {
@@ -380,6 +421,7 @@ fn a_worldguard_region_overlap_is_allowed_and_claims_keep_their_priority() {
         flags: BTreeMap::new(),
         members: Vec::new(),
         owners: vec!["Staff".to_string()],
+        trusted: BTreeMap::new(),
     };
     backend.add_region(station);
 
@@ -770,6 +812,7 @@ fn a_claim_id_owned_by_another_plugin_is_skipped_not_overwritten() {
         flags: BTreeMap::new(),
         members: Vec::new(),
         owners: vec!["Staff".to_string()],
+        trusted: BTreeMap::new(),
     });
     let alice = player(1, "Alice");
     let mut plugin = new_plugin(&backend);
@@ -903,4 +946,239 @@ fn invalid_config_is_reported_and_the_default_is_kept() {
     assert!(lines[0].contains("created"), "{lines:?}");
     assert_eq!(backend.claim_regions().len(), 1);
     assert_eq!(backend.claim_regions()[0].priority, 10);
+}
+
+#[test]
+fn container_trust_opens_chests_but_cannot_break() {
+    let backend = Arc::new(Mock::default());
+    backend.add_player(1, "Alice", 0.0, 0.0);
+    backend.add_player(2, "Bob", 0.0, 0.0);
+    backend.grant_all(1);
+    backend.grant_all(2);
+    let alice = player(1, "Alice");
+    let mut plugin = new_plugin(&backend);
+
+    let lines = command(&mut plugin, &backend, &alice, "claim", &[]);
+    assert!(lines[0].contains("created"), "{lines:?}");
+    let claim_id = backend.claim_regions()[0].id;
+
+    let lines = command(&mut plugin, &backend, &alice, "containertrust", &["Bob"]);
+    assert!(lines[0].contains("container trust"), "{lines:?}");
+    let levels = trusted_levels(&backend, claim_id);
+    assert_eq!(
+        levels.get("Bob").cloned().unwrap_or_default(),
+        BTreeSet::from(["entry".to_string(), "use".to_string()])
+    );
+
+    let index = core_index(&backend);
+    for action in [Action::Interact, Action::UseItem, Action::Entry] {
+        assert_eq!(
+            verdict(&index, "Bob", action),
+            Verdict::Allow,
+            "container trust must allow {action:?}"
+        );
+    }
+    for action in [Action::Break, Action::Place] {
+        assert_eq!(
+            verdict(&index, "Bob", action),
+            Verdict::Deny,
+            "container trust must not allow {action:?}"
+        );
+        assert_eq!(
+            verdict(&index, "Alice", action),
+            Verdict::Allow,
+            "the owner may {action:?}"
+        );
+    }
+    assert_eq!(verdict(&index, "Guest", Action::Interact), Verdict::Deny);
+
+    // The documented misspelling is accepted as an alias.
+    let lines = command(&mut plugin, &backend, &alice, "containerstrust", &["Carol"]);
+    assert!(lines[0].contains("container trust"), "{lines:?}");
+    assert!(trusted_levels(&backend, claim_id).contains_key("Carol"));
+}
+
+#[test]
+fn trust_levels_and_untrust_are_case_insensitive_and_remove_all_levels() {
+    let backend = Arc::new(Mock::default());
+    backend.add_player(1, "Alice", 0.0, 0.0);
+    backend.grant_all(1);
+    let alice = player(1, "Alice");
+    let mut plugin = new_plugin(&backend);
+
+    command(&mut plugin, &backend, &alice, "claim", &[]);
+    let claim_id = backend.claim_regions()[0].id;
+
+    command(&mut plugin, &backend, &alice, "trust", &["Bob"]);
+    let lines = command(&mut plugin, &backend, &alice, "accesstrust", &["bob"]);
+    assert!(lines[0].contains("access trust"), "{lines:?}");
+    let levels = trusted_levels(&backend, claim_id);
+    assert_eq!(levels.len(), 1, "one level per player: {levels:?}");
+    assert_eq!(
+        levels.get("Bob").cloned().unwrap_or_default(),
+        BTreeSet::from(["entry".to_string()])
+    );
+
+    let lines = command(&mut plugin, &backend, &alice, "untrust", &["BOB"]);
+    assert!(lines[0].contains("Removed all trust"), "{lines:?}");
+    assert!(trusted_levels(&backend, claim_id).is_empty());
+    assert_eq!(
+        verdict(&core_index(&backend), "Bob", Action::Entry),
+        Verdict::Deny
+    );
+}
+
+#[test]
+fn untrust_all_clears_every_trustee_and_persists() {
+    let backend = Arc::new(Mock::default());
+    backend.add_player(1, "Alice", 0.0, 0.0);
+    backend.grant_all(1);
+    let alice = player(1, "Alice");
+    let mut plugin = new_plugin(&backend);
+
+    command(&mut plugin, &backend, &alice, "claim", &[]);
+    let claim_id = backend.claim_regions()[0].id;
+    command(&mut plugin, &backend, &alice, "trust", &["Bob"]);
+    command(&mut plugin, &backend, &alice, "containertrust", &["Carol"]);
+    command(&mut plugin, &backend, &alice, "managetrust", &["Dave"]);
+    assert_eq!(trusted_levels(&backend, claim_id).len(), 3);
+
+    let lines = command(&mut plugin, &backend, &alice, "untrust", &["all"]);
+    assert!(lines[0].contains("3 player"), "{lines:?}");
+    assert!(trusted_levels(&backend, claim_id).is_empty());
+
+    // The cleared list survives a restart.
+    let mut restarted = new_plugin(&backend);
+    let lines = command(&mut restarted, &backend, &alice, "claim", &[]);
+    assert!(lines[0].contains("owned by you"), "{lines:?}");
+    assert!(trusted_levels(&backend, claim_id).is_empty());
+}
+
+#[test]
+fn only_the_owner_or_a_manager_may_change_trust() {
+    let backend = Arc::new(Mock::default());
+    backend.add_player(1, "Alice", 0.0, 0.0);
+    backend.add_player(2, "Bob", 0.0, 0.0);
+    backend.add_player(3, "Carol", 0.0, 0.0);
+    backend.grant_all(1);
+    backend.grant_all(2);
+    backend.grant_all(3);
+    let alice = player(1, "Alice");
+    let bob = player(2, "Bob");
+    let mut plugin = new_plugin(&backend);
+
+    command(&mut plugin, &backend, &alice, "claim", &[]);
+    let claim_id = backend.claim_regions()[0].id;
+
+    // A plain non-owner cannot trust anyone, even with the permission node.
+    let lines = command(&mut plugin, &backend, &bob, "trust", &["Carol"]);
+    assert!(lines[0].contains("owner or a manager"), "{lines:?}");
+    assert!(trusted_levels(&backend, claim_id).is_empty());
+
+    // The owner may appoint a manager, and the manager may then trust/untrust.
+    let lines = command(&mut plugin, &backend, &alice, "managetrust", &["Bob"]);
+    assert!(lines[0].contains("manage trust"), "{lines:?}");
+    let lines = command(&mut plugin, &backend, &bob, "trust", &["Carol"]);
+    assert!(lines[0].contains("build trust"), "{lines:?}");
+    assert!(trusted_levels(&backend, claim_id).contains_key("Carol"));
+    let lines = command(&mut plugin, &backend, &bob, "untrust", &["Carol"]);
+    assert!(lines[0].contains("Removed all trust"), "{lines:?}");
+    assert!(!trusted_levels(&backend, claim_id).contains_key("Carol"));
+
+    // A trusted builder without manage cannot change the list.
+    command(&mut plugin, &backend, &alice, "trust", &["Carol"]);
+    let carol = player(3, "Carol");
+    let lines = command(&mut plugin, &backend, &carol, "untrust", &["Bob"]);
+    assert!(lines[0].contains("owner or a manager"), "{lines:?}");
+    assert!(trusted_levels(&backend, claim_id).contains_key("Bob"));
+}
+
+#[test]
+fn trust_persists_across_restart_and_still_grants_build() {
+    let backend = Arc::new(Mock::default());
+    backend.add_player(1, "Alice", 0.0, 0.0);
+    backend.add_player(2, "Bob", 0.0, 0.0);
+    backend.grant_all(1);
+    {
+        let alice = player(1, "Alice");
+        let mut first = new_plugin(&backend);
+        command(&mut first, &backend, &alice, "claim", &[]);
+        let lines = command(&mut first, &backend, &alice, "trust", &["Bob"]);
+        assert!(lines[0].contains("build trust"), "{lines:?}");
+    }
+
+    let alice = player(1, "Alice");
+    let mut second = new_plugin(&backend);
+    let claim_id = backend.claim_regions()[0].id;
+    let levels = trusted_levels(&backend, claim_id);
+    assert_eq!(
+        levels.get("Bob").cloned().unwrap_or_default(),
+        BTreeSet::from(["build".to_string(), "entry".to_string(), "use".to_string()])
+    );
+    let index = core_index(&backend);
+    assert_eq!(verdict(&index, "Bob", Action::Break), Verdict::Allow);
+    assert_eq!(verdict(&index, "Bob", Action::Place), Verdict::Allow);
+    assert_eq!(verdict(&index, "Guest", Action::Break), Verdict::Deny);
+
+    let lines = command(&mut second, &backend, &alice, "claim", &[]);
+    assert!(lines.join("\n").contains("Bob (build)"), "{lines:?}");
+}
+
+#[test]
+fn a_claim_over_the_total_allowance_is_refused_with_the_shortfall_and_a_smaller_one_succeeds() {
+    let backend = Arc::new(Mock::default());
+    backend.add_player(1, "Alice", 0.0, 0.0);
+    backend.grant_all(1);
+    let mut config = BTreeMap::new();
+    config.insert("max-claim-blocks".to_string(), "400".to_string());
+    *backend.config.lock().unwrap() = config;
+    let alice = player(1, "Alice");
+    let mut plugin = new_plugin(&backend);
+
+    // 21 x 21 = 441 blocks, 41 over the 400 block allowance.
+    let lines = command(&mut plugin, &backend, &alice, "claim", &["10"]);
+    assert!(lines[0].contains("441 blocks"), "{lines:?}");
+    assert!(lines[0].contains("41 over"), "{lines:?}");
+    assert_eq!(backend.claim_regions().len(), 0);
+
+    // A smaller 11 x 11 = 121 block claim still fits.
+    let lines = command(&mut plugin, &backend, &alice, "claim", &["5"]);
+    assert!(lines[0].contains("121 blocks"), "{lines:?}");
+    assert_eq!(backend.claim_regions().len(), 1);
+}
+
+#[test]
+fn concurrent_trust_commands_keep_every_trustee() {
+    // Two plugin instances (as two command threads would) edit the same
+    // persisted claim; neither may overwrite the other's trustee.
+    for round in 0..20 {
+        let backend = Arc::new(Mock::default());
+        backend.add_player(1, "Alice", 0.0, 0.0);
+        backend.grant_all(1);
+        let alice = player(1, "Alice");
+        {
+            let mut plugin = new_plugin(&backend);
+            command(&mut plugin, &backend, &alice, "claim", &[]);
+        }
+        let claim_id = backend.claim_regions()[0].id;
+
+        let run = |target: &'static str| {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                let mut plugin = new_plugin(&backend);
+                let who = player(1, "Alice");
+                command(&mut plugin, &backend, &who, "trust", &[target]).join("\n")
+            })
+        };
+        let bob = run("Bob");
+        let carol = run("Carol");
+        let bob = bob.join().unwrap();
+        let carol = carol.join().unwrap();
+        assert!(bob.contains("build trust"), "round {round}: {bob}");
+        assert!(carol.contains("build trust"), "round {round}: {carol}");
+
+        let levels = trusted_levels(&backend, claim_id);
+        assert!(levels.contains_key("Bob"), "round {round}: {levels:?}");
+        assert!(levels.contains_key("Carol"), "round {round}: {levels:?}");
+    }
 }

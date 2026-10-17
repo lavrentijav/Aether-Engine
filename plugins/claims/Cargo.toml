@@ -20,5 +20,10 @@ aether-plugin = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+# The e2e trust tests run the written regions through the same core protection
+# check the server uses (CMD-29b), not a second copy of its rules.
+aether-region = { workspace = true }
+
 [lints]
 workspace = true

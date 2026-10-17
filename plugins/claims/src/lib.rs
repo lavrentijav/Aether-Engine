@@ -12,9 +12,20 @@
 //! /abandonclaim             give up the claim you stand in
 //! /abandonallclaims         give up every claim (run twice to confirm)
 //! /claimslist [player]      list your claims (a moderator may name another player)
+//! /trust <player>           build trust in the claim you stand in
+//! /containertrust <player>  container trust: opening/using, but no breaking
+//! /accesstrust <player>     access trust: entering only
+//! /managetrust <player>     build trust plus changing this claim's trust list
+//! /untrust <player>|all     remove one trustee, or every trustee of this claim
 //! golden shovel             right-click corner A, then corner B; inspecting an existing claim
 //!                           with it just reports the owner
 //! ```
+//!
+//! Trust levels are written to the core region as per-player action grants
+//! (`use` for container trust, `use` + `build` for build/manage), which the
+//! CMD-29b check consults after an explicit flag and before membership. The
+//! grant is narrower than membership, so a container trustee can open a chest
+//! but still cannot break.
 //!
 //! Claims are full-height columns (the core region's `-64..=383` band), stored
 //! one compact JSON record per claim in the plugin KV. On startup every claim is
@@ -25,6 +36,7 @@
 //! and decided by priority; overlapping another **claim** is refused.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use aether_plugin::manifest::{CommandDecl, Manifest, PluginTier};
@@ -42,6 +54,18 @@ pub const COMMAND_ABANDON: &str = "abandonclaim";
 pub const COMMAND_ABANDON_ALL: &str = "abandonallclaims";
 /// `/claimslist`.
 pub const COMMAND_LIST: &str = "claimslist";
+/// `/trust <player>` (build trust).
+pub const COMMAND_TRUST: &str = "trust";
+/// `/containertrust <player>`.
+pub const COMMAND_CONTAINER_TRUST: &str = "containertrust";
+/// The misspelt alias some GriefPrevention builds document.
+pub const COMMAND_CONTAINER_TRUST_ALIAS: &str = "containerstrust";
+/// `/accesstrust <player>`.
+pub const COMMAND_ACCESS_TRUST: &str = "accesstrust";
+/// `/managetrust <player>`.
+pub const COMMAND_MANAGE_TRUST: &str = "managetrust";
+/// `/untrust <player>|all`.
+pub const COMMAND_UNTRUST: &str = "untrust";
 
 /// Permission for creating and inspecting a claim.
 pub const NODE_CLAIM: &str = "griefprevention.claim";
@@ -51,6 +75,8 @@ pub const NODE_ABANDON: &str = "griefprevention.abandonclaim";
 pub const NODE_ABANDON_ALL: &str = "griefprevention.abandonallclaims";
 /// Permission for `/claimslist`.
 pub const NODE_LIST: &str = "griefprevention.claimslist";
+/// Permission for every `/trust` and `/untrust` command.
+pub const NODE_TRUST: &str = "griefprevention.trust";
 /// Permission to list another player's claims.
 pub const NODE_LIST_OTHERS: &str = "griefprevention.claimslist.others";
 /// Moderator node that also allows the cross-player listing.
@@ -66,6 +92,11 @@ const CONFIRM_WINDOW: Duration = Duration::from_secs(30);
 
 const WORLD_MIN_Y: i32 = -64;
 const WORLD_MAX_Y: i32 = 383;
+
+/// Serialises claim-record read-modify-write cycles across plugin instances in
+/// the same process, so two `/trust` commands racing on one claim cannot lose
+/// one trustee to a stale read.
+static TRUST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Claim ids live in a plugin-namespaced high range, so the claims plugin and
 /// the WorldGuard-style `regions` plugin cannot collide by both counting from
@@ -124,6 +155,36 @@ pub fn manifest() -> Manifest {
                 node: NODE_LIST.to_string(),
                 op: 0,
             },
+            CommandDecl::Detailed {
+                name: COMMAND_TRUST.to_string(),
+                node: NODE_TRUST.to_string(),
+                op: 0,
+            },
+            CommandDecl::Detailed {
+                name: COMMAND_CONTAINER_TRUST.to_string(),
+                node: NODE_TRUST.to_string(),
+                op: 0,
+            },
+            CommandDecl::Detailed {
+                name: COMMAND_CONTAINER_TRUST_ALIAS.to_string(),
+                node: NODE_TRUST.to_string(),
+                op: 0,
+            },
+            CommandDecl::Detailed {
+                name: COMMAND_ACCESS_TRUST.to_string(),
+                node: NODE_TRUST.to_string(),
+                op: 0,
+            },
+            CommandDecl::Detailed {
+                name: COMMAND_MANAGE_TRUST.to_string(),
+                node: NODE_TRUST.to_string(),
+                op: 0,
+            },
+            CommandDecl::Detailed {
+                name: COMMAND_UNTRUST.to_string(),
+                node: NODE_TRUST.to_string(),
+                op: 0,
+            },
         ],
         tick_period: 1,
         deny_on_fault: true,
@@ -145,6 +206,7 @@ pub fn registration() -> NativeRegistration {
 struct Settings {
     max_claims: usize,
     max_claim_size: i64,
+    max_claim_blocks: i64,
     max_radius: i32,
     priority: i32,
 }
@@ -154,8 +216,48 @@ impl Default for Settings {
         Settings {
             max_claims: 10,
             max_claim_size: 10_000,
+            max_claim_blocks: 100_000,
             max_radius: 64,
             priority: 10,
+        }
+    }
+}
+
+/// A GriefPrevention trust level.
+///
+/// The levels are hierarchical: build includes container and access, container
+/// includes access, and manage includes build plus the right to change trust.
+/// Each claim stores one level per player.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrustLevel {
+    /// May enter the claim.
+    Access,
+    /// May enter, open containers and use interactive blocks.
+    Container,
+    /// May enter, use and break/place blocks.
+    Build,
+    /// Build trust plus the right to manage the claim's trust list.
+    Manage,
+}
+
+impl TrustLevel {
+    /// The name shown to players and stored in JSON.
+    pub const fn label(self) -> &'static str {
+        match self {
+            TrustLevel::Access => "access",
+            TrustLevel::Container => "container",
+            TrustLevel::Build => "build",
+            TrustLevel::Manage => "manage",
+        }
+    }
+
+    /// The core action flags this level grants.
+    const fn actions(self) -> &'static [&'static str] {
+        match self {
+            TrustLevel::Access => &["entry"],
+            TrustLevel::Container => &["entry", "use"],
+            TrustLevel::Build | TrustLevel::Manage => &["entry", "use", "build"],
         }
     }
 }
@@ -170,6 +272,10 @@ struct Claim {
     min_z: i32,
     max_x: i32,
     max_z: i32,
+    /// Trusted players and their level. Missing in records written by CMD-35a,
+    /// so it defaults to an empty map on load.
+    #[serde(default)]
+    trusted: BTreeMap<String, TrustLevel>,
 }
 
 impl Claim {
@@ -193,6 +299,47 @@ impl Claim {
         self.owner.eq_ignore_ascii_case(name)
     }
 
+    /// The trust level `name` holds, matched case-insensitively.
+    fn trust_of(&self, name: &str) -> Option<TrustLevel> {
+        self.trusted
+            .iter()
+            .find(|(trusted, _)| trusted.eq_ignore_ascii_case(name.trim()))
+            .map(|(_, level)| *level)
+    }
+
+    /// Give `name` `level`, replacing any level they already had.
+    fn set_trust(&mut self, name: &str, level: TrustLevel) {
+        if let Some(key) = self
+            .trusted
+            .keys()
+            .find(|trusted| trusted.eq_ignore_ascii_case(name))
+            .cloned()
+        {
+            self.trusted.insert(key, level);
+        } else {
+            self.trusted.insert(name.to_string(), level);
+        }
+    }
+
+    /// Remove every trust level from `name`. Returns whether anything changed.
+    fn remove_trust(&mut self, name: &str) -> bool {
+        let Some(key) = self
+            .trusted
+            .keys()
+            .find(|trusted| trusted.eq_ignore_ascii_case(name))
+            .cloned()
+        else {
+            return false;
+        };
+        self.trusted.remove(&key);
+        true
+    }
+
+    /// Whether `name` may change this claim's trust list.
+    fn may_manage_trust(&self, name: &str) -> bool {
+        self.is_owned_by(name) || self.trust_of(name) == Some(TrustLevel::Manage)
+    }
+
     fn region(&self, priority: i32) -> RegionInfo {
         RegionInfo {
             id: self.id,
@@ -204,6 +351,20 @@ impl Claim {
             flags: BTreeMap::new(),
             members: Vec::new(),
             owners: vec![self.owner.clone()],
+            trusted: self
+                .trusted
+                .iter()
+                .map(|(name, level)| {
+                    (
+                        name.clone(),
+                        level
+                            .actions()
+                            .iter()
+                            .map(|flag| (*flag).to_string())
+                            .collect(),
+                    )
+                })
+                .collect(),
         }
     }
 
@@ -307,10 +468,11 @@ impl NativePlugin for ClaimsPlugin {
         ctx.log(
             LogLevel::Info,
             &format!(
-                "claims ready: {} claim(s), limits {}/{} blocks, priority {}",
+                "claims ready: {} claim(s), limits {} claims, {}/claim, {} blocks total, priority {}",
                 self.claims.len(),
                 self.settings.max_claims,
                 self.settings.max_claim_size,
+                self.settings.max_claim_blocks,
                 self.settings.priority
             ),
         );
@@ -402,6 +564,13 @@ impl NativePlugin for ClaimsPlugin {
             COMMAND_ABANDON => self.abandon_command(ctx, p, args),
             COMMAND_ABANDON_ALL => self.abandon_all_command(ctx, p, args),
             COMMAND_LIST => self.list_command(ctx, p, args),
+            COMMAND_TRUST => self.trust_command(ctx, p, args, TrustLevel::Build),
+            COMMAND_CONTAINER_TRUST | COMMAND_CONTAINER_TRUST_ALIAS => {
+                self.trust_command(ctx, p, args, TrustLevel::Container)
+            }
+            COMMAND_ACCESS_TRUST => self.trust_command(ctx, p, args, TrustLevel::Access),
+            COMMAND_MANAGE_TRUST => self.trust_command(ctx, p, args, TrustLevel::Manage),
+            COMMAND_UNTRUST => self.untrust_command(ctx, p, args),
             _ => return None,
         };
         Some(aether_plugin::CommandResult {
@@ -586,15 +755,29 @@ impl ClaimsPlugin {
                 self.settings.max_claim_size
             )];
         }
-        let owned = self
+        let mut owned = 0usize;
+        let mut owned_area = 0i64;
+        for claim in self
             .claims
             .values()
             .filter(|claim| claim.is_owned_by(&p.name))
-            .count();
+        {
+            owned += 1;
+            owned_area = owned_area.saturating_add(claim.area());
+        }
         if owned >= self.settings.max_claims {
             return vec![format!(
                 "Claim limit reached: {owned} of {} claims.",
                 self.settings.max_claims
+            )];
+        }
+        let total = owned_area.saturating_add(area);
+        if total > self.settings.max_claim_blocks {
+            return vec![format!(
+                "Claim is too large: {area} blocks would put you {} over your {} block claim \
+                 allowance ({owned_area} blocks already claimed).",
+                total - self.settings.max_claim_blocks,
+                self.settings.max_claim_blocks
             )];
         }
 
@@ -622,6 +805,7 @@ impl ClaimsPlugin {
             min_z,
             max_x,
             max_z,
+            trusted: BTreeMap::new(),
         };
         let mut installed = false;
         for _ in 0..ID_ATTEMPTS {
@@ -812,6 +996,155 @@ impl ClaimsPlugin {
         lines
     }
 
+    /// `/trust`, `/containertrust`, `/accesstrust`, `/managetrust`.
+    fn trust_command(
+        &mut self,
+        ctx: &mut NativeContext,
+        p: &Player,
+        args: &[String],
+        level: TrustLevel,
+    ) -> Vec<String> {
+        if !permitted(ctx, p, NODE_TRUST) {
+            return vec!["You do not have permission to manage claim trust.".to_string()];
+        }
+        if args.len() != 1 || args[0].trim().is_empty() {
+            return vec![format!("Usage: /{} <player>", trust_command_name(level))];
+        }
+        let target = args[0].trim();
+        let Some((world, x, _, z)) = position(ctx, p) else {
+            return vec!["Could not read your position.".to_string()];
+        };
+        let (x, z) = (x.floor() as i32, z.floor() as i32);
+        let Some(found) = self.claim_at(&world, x, z).cloned() else {
+            return vec!["You are not standing in a claim.".to_string()];
+        };
+        if !found.may_manage_trust(&p.name) {
+            return vec!["Only the claim's owner or a manager can change trust.".to_string()];
+        }
+        if found.is_owned_by(target) {
+            return vec!["The claim owner already has full access.".to_string()];
+        }
+
+        // Re-read the record under the process-wide trust lock so two plugins
+        // (or two command threads) editing the same claim cannot lose an
+        // update to a stale in-memory copy.
+        let _guard = TRUST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let claim = load_claim(ctx, found.id).unwrap_or(found);
+        if !claim.may_manage_trust(&p.name) {
+            return vec!["Only the claim's owner or a manager can change trust.".to_string()];
+        }
+        if claim.is_owned_by(target) {
+            return vec!["The claim owner already has full access.".to_string()];
+        }
+        if claim.trust_of(target) == Some(level) {
+            return vec![format!(
+                "{target} already has {} trust in claim #{}.",
+                level.label(),
+                claim.id
+            )];
+        }
+
+        let mut updated = claim.clone();
+        updated.set_trust(target, level);
+        match self.publish_claim(ctx, &claim, updated) {
+            Ok(()) => vec![format!(
+                "{target} now has {} trust in claim #{}.",
+                level.label(),
+                claim.id
+            )],
+            Err(e) => vec![e],
+        }
+    }
+
+    /// `/untrust <player>` or `/untrust all`.
+    fn untrust_command(
+        &mut self,
+        ctx: &mut NativeContext,
+        p: &Player,
+        args: &[String],
+    ) -> Vec<String> {
+        if !permitted(ctx, p, NODE_TRUST) {
+            return vec!["You do not have permission to manage claim trust.".to_string()];
+        }
+        if args.len() != 1 || args[0].trim().is_empty() {
+            return vec!["Usage: /untrust <player>|all".to_string()];
+        }
+        let target = args[0].trim();
+        let Some((world, x, _, z)) = position(ctx, p) else {
+            return vec!["Could not read your position.".to_string()];
+        };
+        let (x, z) = (x.floor() as i32, z.floor() as i32);
+        let Some(found) = self.claim_at(&world, x, z).cloned() else {
+            return vec!["You are not standing in a claim.".to_string()];
+        };
+        if !found.may_manage_trust(&p.name) {
+            return vec!["Only the claim's owner or a manager can change trust.".to_string()];
+        }
+
+        let _guard = TRUST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let claim = load_claim(ctx, found.id).unwrap_or(found);
+        if !claim.may_manage_trust(&p.name) {
+            return vec!["Only the claim's owner or a manager can change trust.".to_string()];
+        }
+
+        if target.eq_ignore_ascii_case("all") {
+            if claim.trusted.is_empty() {
+                return vec!["No players are trusted in this claim.".to_string()];
+            }
+            let removed = claim.trusted.len();
+            let mut updated = claim.clone();
+            updated.trusted.clear();
+            return match self.publish_claim(ctx, &claim, updated) {
+                Ok(()) => vec![format!(
+                    "Removed all trust from {removed} player(s) in claim #{}.",
+                    claim.id
+                )],
+                Err(e) => vec![e],
+            };
+        }
+
+        if claim.trust_of(target).is_none() {
+            return vec![format!(
+                "{target} does not have trust in claim #{}.",
+                claim.id
+            )];
+        }
+        let mut updated = claim.clone();
+        updated.remove_trust(target);
+        match self.publish_claim(ctx, &claim, updated) {
+            Ok(()) => vec![format!(
+                "Removed all trust from {target} in claim #{}.",
+                claim.id
+            )],
+            Err(e) => vec![e],
+        }
+    }
+
+    /// Publish a changed claim to the core region index first, then persist it.
+    /// A failed save rolls the region back so a claim is never protected by a
+    /// state the KV does not hold.
+    fn publish_claim(
+        &mut self,
+        ctx: &mut NativeContext,
+        old: &Claim,
+        updated: Claim,
+    ) -> Result<(), String> {
+        if let Err(e) = ctx
+            .backend
+            .region_upsert(ctx.id, &updated.region(self.settings.priority))
+        {
+            return Err(format!("Could not update the claim protection: {e}"));
+        }
+        if let Err(e) = save_claim(ctx, &updated) {
+            let _ = ctx
+                .backend
+                .region_upsert(ctx.id, &old.region(self.settings.priority));
+            return Err(format!("Could not save the claim trust: {e}"));
+        }
+        self.claims.insert(updated.id, updated);
+        Ok(())
+    }
+
     fn claim_at(&self, world: &str, x: i32, z: i32) -> Option<&Claim> {
         self.claims
             .values()
@@ -839,13 +1172,22 @@ fn send(ctx: &NativeContext, p: &Player, line: String) {
     ctx.backend.send_message(ctx.id, p.id, &line);
 }
 
+fn trust_command_name(level: TrustLevel) -> &'static str {
+    match level {
+        TrustLevel::Access => COMMAND_ACCESS_TRUST,
+        TrustLevel::Container => COMMAND_CONTAINER_TRUST,
+        TrustLevel::Build => COMMAND_TRUST,
+        TrustLevel::Manage => COMMAND_MANAGE_TRUST,
+    }
+}
+
 fn inspect_lines(claim: &Claim, p: &Player) -> Vec<String> {
     let owner = if claim.is_owned_by(&p.name) {
         "you".to_string()
     } else {
         claim.owner.clone()
     };
-    vec![
+    let mut lines = vec![
         format!("Claim #{} owned by {owner}.", claim.id),
         format!(
             "Bounds {} in {}, {} blocks.",
@@ -853,7 +1195,23 @@ fn inspect_lines(claim: &Claim, p: &Player) -> Vec<String> {
             claim.world,
             claim.area()
         ),
-    ]
+    ];
+    if !claim.trusted.is_empty() {
+        let trusted = claim
+            .trusted
+            .iter()
+            .map(|(name, level)| format!("{name} ({})", level.label()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("Trusted: {trusted}."));
+    }
+    lines
+}
+
+/// The persisted record for `id`, if the KV still has a readable one.
+fn load_claim(ctx: &NativeContext, id: u64) -> Option<Claim> {
+    let bytes = ctx.backend.kv_get(ctx.id, &format!("{KEY_PREFIX}{id}"))?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Persist one claim under its current id.
@@ -871,6 +1229,12 @@ fn config_value(ctx: &NativeContext, key: &str) -> Option<String> {
         .get(key)
         .cloned()
         .or_else(|| ctx.backend.config(ctx.id, key))
+}
+
+/// The first configured key from `keys`, with the key name that matched.
+fn config_first(ctx: &NativeContext, keys: &[&str]) -> Option<(String, String)> {
+    keys.iter()
+        .find_map(|key| config_value(ctx, key).map(|value| ((*key).to_string(), value)))
 }
 
 /// Read the settings, warning loudly on every value that is not usable instead
@@ -901,6 +1265,19 @@ fn load_settings(ctx: &mut NativeContext) -> Settings {
                     "invalid `max-claim-size` value `{raw}`: expected a positive whole number; \
                      using {}",
                     settings.max_claim_size
+                ),
+            ),
+        }
+    }
+
+    if let Some((key, raw)) = config_first(ctx, &["max-claim-blocks", "max-accrued-blocks"]) {
+        match raw.trim().parse::<i64>() {
+            Ok(value) if value > 0 => settings.max_claim_blocks = value,
+            _ => ctx.log(
+                LogLevel::Warn,
+                &format!(
+                    "invalid `{key}` value `{raw}`: expected a positive whole number; using {}",
+                    settings.max_claim_blocks
                 ),
             ),
         }
