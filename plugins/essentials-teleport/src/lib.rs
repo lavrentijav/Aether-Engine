@@ -427,12 +427,14 @@ impl EssentialsTeleportPlugin {
         if let Some(denied) = require(ctx, p, NODE_DEL_HOME) {
             return denied;
         }
-        if args.len() > 1 {
+        // Unlike `/sethome`/`/home`, `/delhome` has no default: deleting the
+        // wrong home because an argument was forgotten is not recoverable.
+        if args.len() != 1 {
             return vec!["Usage: /delhome <name>".to_string()];
         }
-        let name = match home_name(args.first()) {
-            Ok(name) => name,
-            Err(line) => return vec![line],
+        let name = match sanitize_name(&args[0]) {
+            Some(name) => name,
+            None => return vec!["Invalid home name.".to_string()],
         };
         let owner = owner_key(ctx, p);
         let mut next = self.homes.clone();
@@ -752,9 +754,16 @@ fn home_name(raw: Option<&String>) -> Result<String, String> {
     }
 }
 
-/// Lower-case a name, turn every run of other characters into one `_`, trim
-/// separators and cap the length. The same input always yields the same name,
-/// so `/warp MY_WARP` finds `/setwarp "My Warp!"`.
+/// Lower-case a name, turn every run of other characters into one `_`, cap the
+/// length and trim separators. The result is **idempotent**: sanitising it
+/// again yields the same name, so every stored key can be typed back into
+/// `/warp`/`/delwarp` or `/home`/`/delhome` and found. Trimming happens *after*
+/// the cut, otherwise a name whose 32nd character is `_` would be stored with
+/// a trailing separator that a later lookup removes.
+///
+/// Names are single command tokens: the server splits plugin-command arguments
+/// on whitespace, so a space-containing name cannot be entered in game. The
+/// sanitiser still handles them for API callers and for stored keys.
 fn sanitize_name(raw: &str) -> Option<String> {
     let mut out = String::new();
     let mut separator = false;
@@ -767,11 +776,16 @@ fn sanitize_name(raw: &str) -> Option<String> {
             separator = true;
         }
     }
-    let trimmed = out.trim_matches(|c| c == '_' || c == '-');
-    if trimmed.is_empty() {
+    let capped = out
+        .trim_matches(|c| c == '_' || c == '-')
+        .chars()
+        .take(MAX_NAME)
+        .collect::<String>();
+    let capped = capped.trim_matches(|c| c == '_' || c == '-');
+    if capped.is_empty() {
         return None;
     }
-    Some(trimmed.chars().take(MAX_NAME).collect())
+    Some(capped.to_string())
 }
 
 fn permitted(ctx: &NativeContext, p: &Player, node: &str) -> bool {
@@ -798,6 +812,27 @@ mod tests {
         assert_eq!(sanitize_name("!!!"), None);
         assert_eq!(sanitize_name(""), None);
         assert_eq!(sanitize_name(&"x".repeat(80)).unwrap().len(), MAX_NAME);
+    }
+
+    #[test]
+    fn a_name_cut_on_a_separator_is_still_round_trippable() {
+        // 31 letters then `-b`: the 32nd sanitised character is `_`, which a
+        // trim-before-cut implementation would store and a later lookup would
+        // remove, so `/warps` would list a name `/warp` cannot find.
+        let raw = format!("{}-b", "a".repeat(31));
+        let stored = sanitize_name(&raw).expect("a valid name");
+        assert_eq!(stored, "a".repeat(31), "the cut must not leave a `_`");
+        assert_eq!(
+            sanitize_name(&stored).as_deref(),
+            Some(stored.as_str()),
+            "sanitising a sanitised name must be a fixed point"
+        );
+        // Truncation can also land on an internal separator run; still stable.
+        let raw = format!("{}-{}", "b".repeat(40), "c".repeat(40));
+        assert_eq!(
+            sanitize_name(&sanitize_name(&raw).unwrap()),
+            sanitize_name(&raw)
+        );
     }
 
     #[test]

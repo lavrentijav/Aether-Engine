@@ -24,7 +24,8 @@ spot search is what refuses lava, fire, cactus and the void.
 | | `/warps` | `essentials.warps` |
 | spawn | `/setspawn` | `essentials.setspawn` |
 
-`/sethome` and `/home` without a name use `home`. A home needs **no bed or
+`/sethome` and `/home` without a name use `home`; `/delhome` always requires a
+name (there is no "delete my default home" shortcut). A home needs **no bed or
 anchor**: it records the player's current position. All command names are new;
 the core names are never touched.
 
@@ -75,10 +76,16 @@ carries `TeleportCause::Plugin` and goes through CMD-31's safe-spot search.
 ## Names
 
 Warp (and home) names are sanitised deterministically: ASCII letters/digits are
-lower-cased, runs of other characters become `_`, leading/trailing separators
-are trimmed and the result is capped at 32 characters. `"  My Warp!! "` is
-stored as `my_warp`, and `/warp MY_WARP` finds it. An empty result is an error.
-The sanitised name is what `/warps` lists.
+lower-cased, runs of other characters become `_`, the result is capped at 32
+characters and leading/trailing separators are trimmed **after** the cap, so
+the stored key is a fixed point and can always be typed back in. For example
+`/setwarp My_Warp!!` stores `my_warp`, and `/warp MY_WARP` finds it. An empty
+result is an error. The sanitised name is what `/warps` lists.
+
+A name is a **single command token**: the server splits plugin-command
+arguments on whitespace, so a space-containing name cannot be entered in game
+(`/setwarp "My Warp!"` arrives as two tokens and is rejected). Use letters,
+digits, `_` and `-`; anything else is folded to `_`.
 
 ## Persistence and ownership
 
@@ -135,12 +142,15 @@ cargo-locked test -p aether-essentials-teleport-plugin
 ```
 
 The suite covers: no bed/anchor requirement, multiple homes up to the
-permission limit (and refusal above it), unknown `/delhome`, unknown `/warp`,
-`/setwarp` permission gating, sanitised and ordered warp listings, warmup
-movement and damage cancellation, the safe teleport request to CMD-31 (and a
-reported safe-spot failure), another world being refused, one player not
-overwriting another's home, rename-by-UUID, and homes/warps/spawn persistence
-across a restart.
+permission limit (and refusal above it), replacing an existing home while at
+the limit, a nameless `/delhome` showing usage, unknown `/delhome`/`/warp`/
+`/delwarp`, `/setwarp`/`/delwarp`/`/setspawn` permission gating, sanitised and
+ordered warp listings (including a name capped on a separator), warmup
+cancellation on movement, damage, death and leaving, interleaved players with
+separate pending moves, the safe teleport request to CMD-31 (and a reported
+safe-spot failure), another world being refused, one player not overwriting
+another's home, rename-by-UUID, and homes/warps/spawn persistence across a
+restart.
 
 ## Wiring
 

@@ -238,6 +238,30 @@ impl Fixture {
         self.plugin.after_damage(&mut ctx, entity, 1.0, "test");
     }
 
+    fn death(&mut self, entity: u64) {
+        let backend: Arc<dyn HostBackend> = self.backend.clone();
+        let mut ctx = NativeContext {
+            id: ID,
+            capabilities: &[],
+            config: &self.config,
+            services: &self.services,
+            backend: &backend,
+        };
+        self.plugin.after_entity_death(&mut ctx, entity, None);
+    }
+
+    fn leave(&mut self, p: &Player) {
+        let backend: Arc<dyn HostBackend> = self.backend.clone();
+        let mut ctx = NativeContext {
+            id: ID,
+            capabilities: &[],
+            config: &self.config,
+            services: &self.services,
+            backend: &backend,
+        };
+        self.plugin.after_player_leave(&mut ctx, p);
+    }
+
     fn teleports(&self) -> Vec<(u64, f64, f64, f64, TeleportCause)> {
         self.backend.teleports.lock().unwrap().clone()
     }
@@ -322,6 +346,20 @@ fn delhome_unknown_is_an_error() {
     let steve = player(7, "Steve");
     let lines = fixture.run(&steve, "delhome", &["missing"]);
     assert!(text(&lines).contains("do not have a home"), "{lines:?}");
+}
+
+#[test]
+fn delhome_without_a_name_asks_for_one_and_deletes_nothing() {
+    let mut fixture = Fixture::new();
+    let steve = player(7, "Steve");
+    fixture.set_position("overworld", 1.0, 64.0, 1.0);
+    fixture.run(&steve, "sethome", &[]);
+
+    let lines = fixture.run(&steve, "delhome", &[]);
+    assert!(text(&lines).contains("Usage: /delhome <name>"), "{lines:?}");
+
+    let lines = fixture.run(&steve, "homes", &[]);
+    assert!(text(&lines).contains("home"), "the default home survives");
 }
 
 #[test]
@@ -534,5 +572,132 @@ fn a_uuid_keeps_homes_after_a_rename() {
     fixture.restart();
     let renamed = player(7, "Steven");
     let lines = fixture.run(&renamed, "homes", &[]);
+    assert!(text(&lines).contains("base"), "{lines:?}");
+}
+
+#[test]
+fn warmup_cancels_on_death_and_leave() {
+    let mut fixture = Fixture::with_config(warmup(10));
+    let steve = player(7, "Steve");
+    let alex = player(8, "Alex");
+    fixture.set_position("overworld", 0.0, 64.0, 0.0);
+    fixture.run(&steve, "sethome", &[]);
+    fixture.run(&alex, "sethome", &[]);
+
+    fixture.run(&steve, "home", &[]);
+    fixture.death(7);
+    fixture.tick(10);
+    assert!(fixture
+        .messages()
+        .iter()
+        .any(|line| line.contains("you died")));
+
+    fixture.run(&alex, "home", &[]);
+    fixture.leave(&alex);
+    fixture.tick(30);
+    assert!(
+        fixture.teleports().is_empty(),
+        "dead and disconnected players are not moved"
+    );
+}
+
+#[test]
+fn setspawn_is_permission_gated() {
+    let mut fixture = Fixture::new();
+    let steve = player(7, "Steve");
+    fixture.revoke(7, NODE_SET_SPAWN);
+
+    let lines = fixture.run(&steve, "setspawn", &[]);
+    assert!(text(&lines).contains("do not have permission"), "{lines:?}");
+    assert_eq!(fixture.plugin.spawn_point(), None);
+
+    fixture.grant(7, NODE_SET_SPAWN);
+    fixture.set_position("overworld", 7.0, 71.0, 7.0);
+    let lines = fixture.run(&steve, "setspawn", &[]);
+    assert!(text(&lines).contains("Plugin spawn set"), "{lines:?}");
+    assert_eq!(
+        fixture.plugin.spawn_point(),
+        Some(("overworld".to_string(), 7.0, 71.0, 7.0))
+    );
+}
+
+#[test]
+fn delwarp_is_permission_gated_and_unknown_is_an_error() {
+    let mut fixture = Fixture::new();
+    let steve = player(7, "Steve");
+    fixture.set_position("overworld", 1.0, 64.0, 1.0);
+    fixture.run(&steve, "setwarp", &["market"]);
+
+    let lines = fixture.run(&steve, "delwarp", &["nowhere"]);
+    assert!(text(&lines).contains("no warp"), "{lines:?}");
+
+    fixture.revoke(7, NODE_DEL_WARP);
+    let lines = fixture.run(&steve, "delwarp", &["market"]);
+    assert!(text(&lines).contains("do not have permission"), "{lines:?}");
+    let lines = fixture.run(&steve, "warps", &[]);
+    assert!(text(&lines).contains("market"), "the warp survives");
+
+    fixture.grant(7, NODE_DEL_WARP);
+    let lines = fixture.run(&steve, "delwarp", &["market"]);
+    assert!(text(&lines).contains("deleted"), "{lines:?}");
+    let lines = fixture.run(&steve, "warps", &[]);
+    assert!(text(&lines).contains("no warps"), "{lines:?}");
+}
+
+#[test]
+fn replacing_an_existing_home_is_allowed_at_the_limit() {
+    let mut fixture = Fixture::new();
+    let steve = player(7, "Steve");
+    fixture.set_position("overworld", 1.0, 64.0, 1.0);
+    fixture.run(&steve, "sethome", &[]);
+    // The cap is 1, but moving the home the player already owns is not a new
+    // name and must not be refused.
+    fixture.set_position("overworld", 8.0, 65.0, 8.0);
+    let lines = fixture.run(&steve, "sethome", &[]);
+    assert!(text(&lines).contains("set"), "{lines:?}");
+
+    fixture.set_position("overworld", 0.0, 64.0, 0.0);
+    fixture.run(&steve, "home", &[]);
+    let teleports = fixture.teleports();
+    assert_eq!(
+        (teleports[0].1, teleports[0].2, teleports[0].3),
+        (8.0, 65.0, 8.0),
+        "the replacement location is what `/home` uses"
+    );
+}
+
+#[test]
+fn interleaved_players_keep_separate_warmups_and_homes() {
+    let mut fixture = Fixture::with_config(warmup(5));
+    let steve = player(7, "Steve");
+    let alex = player(8, "Alex");
+
+    fixture.set_position("overworld", 1.0, 64.0, 1.0);
+    fixture.run(&steve, "sethome", &["base"]);
+    fixture.set_position("overworld", 2.0, 64.0, 2.0);
+    fixture.run(&alex, "sethome", &["base"]);
+
+    // Both start a warmup; then they interleave unrelated commands and ticks.
+    fixture.set_position("overworld", 0.0, 64.0, 0.0);
+    fixture.run(&steve, "home", &["base"]);
+    fixture.run(&alex, "home", &["base"]);
+    fixture.run(&alex, "setwarp", &["shared"]);
+    fixture.tick(5);
+
+    let teleports = fixture.teleports();
+    assert_eq!(teleports.len(), 2, "both pending moves land");
+    let find = |player: u64| {
+        teleports
+            .iter()
+            .find(|t| t.0 == player)
+            .map(|t| (t.1, t.2, t.3))
+            .expect("that player's move landed")
+    };
+    assert_eq!(find(7), (1.0, 64.0, 1.0));
+    assert_eq!(find(8), (2.0, 64.0, 2.0));
+
+    // Deleting one player's home does not remove the other's same-named one.
+    fixture.run(&steve, "delhome", &["base"]);
+    let lines = fixture.run(&alex, "homes", &[]);
     assert!(text(&lines).contains("base"), "{lines:?}");
 }
