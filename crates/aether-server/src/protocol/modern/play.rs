@@ -8,7 +8,7 @@ use super::{angle, encode_position, inventory};
 use crate::inventory::Stack;
 use crate::proto::PacketOut;
 use crate::protocol::nbt::Nbt;
-use crate::protocol::{GameMode, Menu, MetaValue, ServerEvent};
+use crate::protocol::{GameMode, Menu, MetaValue, ParticleOptions, ServerEvent};
 
 /// `minecraft:menu` registry ids.
 fn menu_id(v: &Version, m: Menu) -> i32 {
@@ -463,51 +463,103 @@ fn stop_sound_packet_id(protocol: i32) -> Option<i32> {
 
 /// Append a particle's type-specific payload.
 ///
-/// `/particle` names only the particle id; vanilla's argument parser lets a
-/// caller spell the options too, but the command layer carries only the id.
-/// Each release still requires the fields its options encode, so the common
-/// ones get their neutral value (white dust, stone block, an empty item) and
-/// every other particle has none. Unknown names never reach here: the
-/// command layer validates them against the 1.21.11 registry.
-fn write_particle_data(v: &Version, p: &mut PacketOut, name: &str) {
-    match name {
-        "minecraft:block"
-        | "minecraft:block_marker"
-        | "minecraft:falling_dust"
-        | "minecraft:dust_pillar"
-        | "minecraft:block_crumble" => {
-            p.var_int(v.state(aether_world::registry::ids::STONE) as i32);
+/// The command layer parses vanilla's options object and carries it as a
+/// [`ParticleOptions`]; this writes the shape the release expects. The two
+/// shapes that moved are the dust colours (four floats through 1.21.3, one
+/// int from 1.21.4) and the vibration source kind (a registry string through
+/// 1.21.3, a VarInt from 1.21.4). A field a release does not have (an
+/// `entity_effect` colour before 1.20.5, the newer `effect` fields before
+/// 1.21.9) is simply not written.
+fn write_particle_options(v: &Version, p: &mut PacketOut, options: &ParticleOptions) {
+    let rgb = |color: i32| {
+        (
+            ((color >> 16) & 0xFF) as f32 / 255.0,
+            ((color >> 8) & 0xFF) as f32 / 255.0,
+            (color & 0xFF) as f32 / 255.0,
+        )
+    };
+    match options {
+        ParticleOptions::None => {}
+        ParticleOptions::Block(state) => {
+            p.var_int(v.state(*state) as i32);
         }
-        "minecraft:dust" => {
-            p.i32(0xFFFF_FFFFu32 as i32).f32(1.0);
+        ParticleOptions::Dust { color, scale } => {
+            if v.protocol <= 768 {
+                let (r, g, b) = rgb(*color);
+                p.f32(r).f32(g).f32(b).f32(*scale);
+            } else {
+                p.i32(*color).f32(*scale);
+            }
         }
-        "minecraft:dust_color_transition" => {
-            p.i32(0xFFFF_FFFFu32 as i32)
-                .i32(0xFFFF_FFFFu32 as i32)
-                .f32(1.0);
+        ParticleOptions::DustColorTransition { from, to, scale } => {
+            if v.protocol <= 768 {
+                let (fr, fg, fb) = rgb(*from);
+                let (tr, tg, tb) = rgb(*to);
+                p.f32(fr)
+                    .f32(fg)
+                    .f32(fb)
+                    .f32(*scale)
+                    .f32(tr)
+                    .f32(tg)
+                    .f32(tb);
+            } else {
+                p.i32(*from).i32(*to).f32(*scale);
+            }
         }
-        "minecraft:entity_effect" | "minecraft:tinted_leaves" | "minecraft:flash" => {
-            p.i32(-1);
+        ParticleOptions::EntityEffect { color } => {
+            // 1.20.2-1.20.4's particle payload has no entity-effect entry.
+            if v.protocol >= 766 {
+                p.i32(*color);
+            }
         }
-        "minecraft:item" => write_stack(v, p, None),
-        "minecraft:sculk_charge" | "minecraft:dragon_breath" => {
-            p.f32(0.0);
+        ParticleOptions::Item { item, count } => {
+            let stack = crate::inventory::Stack::new(*item, *count);
+            write_stack(v, p, Some(&stack));
         }
-        "minecraft:effect" | "minecraft:instant_effect" => {
-            p.i32(-1).f32(0.0);
+        ParticleOptions::SculkCharge { roll } => {
+            p.f32(*roll);
         }
-        "minecraft:shriek" => {
-            p.var_int(0);
+        ParticleOptions::Shriek { delay } => {
+            p.var_int(*delay);
         }
-        "minecraft:vibration" => {
-            p.var_int(0) // block position source
-                .i64(0) // packed block position
-                .var_int(0); // arrival ticks
+        ParticleOptions::VibrationBlock { x, y, z, ticks } => {
+            if v.protocol <= 768 {
+                p.string("minecraft:block")
+                    .i64(encode_position(*x as i64, *y as i64, *z as i64))
+                    .var_int(*ticks);
+            } else {
+                p.var_int(0) // block position source
+                    .i64(encode_position(*x as i64, *y as i64, *z as i64))
+                    .var_int(*ticks);
+            }
         }
-        "minecraft:trail" => {
-            p.f64(0.0).f64(0.0).f64(0.0).i32(-1).var_int(0);
+        ParticleOptions::Trail {
+            x,
+            y,
+            z,
+            color,
+            duration,
+        } => {
+            // The trail particle arrived in 1.21.4 together with its fields.
+            p.f64(*x).f64(*y).f64(*z).i32(*color).var_int(*duration);
         }
-        _ => {}
+        ParticleOptions::TintedLeaves { color } | ParticleOptions::Flash { color } => {
+            if v.protocol >= 773 {
+                p.i32(*color);
+            }
+        }
+        ParticleOptions::DragonBreath { power } => {
+            // The power field arrived in 1.21.9; before that the payload is void.
+            if v.protocol >= 773 {
+                p.f32(*power);
+            }
+        }
+        ParticleOptions::Effect { color, power }
+        | ParticleOptions::InstantEffect { color, power } => {
+            if v.protocol >= 773 {
+                p.i32(*color).f32(*power);
+            }
+        }
     }
 }
 
@@ -1211,6 +1263,7 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
             speed,
             count,
             force,
+            options,
         } => {
             let Some(id) = crate::protocol::resources::particle_id(v.protocol, name) else {
                 // This release has no particle by that name. It is cosmetic;
@@ -1233,6 +1286,7 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
                     .f32(*dz)
                     .f32(*speed)
                     .i32(*count);
+                write_particle_options(v, &mut p, options);
             } else {
                 p.bool(*force);
                 // 1.21.4 added `alwaysShow`; 1.20.5-1.21.3 have only the
@@ -1249,7 +1303,7 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
                     .f32(*speed)
                     .i32(*count)
                     .var_int(id);
-                write_particle_data(v, &mut p, name);
+                write_particle_options(v, &mut p, options);
             }
             vec![p]
         }
@@ -2157,6 +2211,7 @@ mod tests {
             speed: 0.1,
             count: 4,
             force: true,
+            options: ParticleOptions::None,
         };
         // 1.21.11: longDistance, alwaysShow, position, offsets, count, id.
         let v = &crate::protocol::modern::version::V1_21_11;
@@ -2188,6 +2243,97 @@ mod tests {
         assert_eq!(pin.var_int().unwrap(), 41);
         assert!(pin.bool().unwrap());
         assert_eq!(pin.f64().unwrap(), 1.5);
+    }
+
+    #[test]
+    fn particle_options_follow_each_release_payload() {
+        let dust = ServerEvent::Particle {
+            name: "minecraft:dust".into(),
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            dz: 0.0,
+            speed: 0.0,
+            count: 1,
+            force: false,
+            options: ParticleOptions::Dust {
+                color: 0xFFFF_0000u32 as i32,
+                scale: 2.0,
+            },
+        };
+        // 1.21.11 writes the colour as one int and the scale as a float.
+        let v = &crate::protocol::modern::version::V1_21_11;
+        let pkts = encode(v, &dust).unwrap();
+        let mut pin = crate::proto::PacketIn::new(pkts[0].body());
+        let _ = pin.var_int().unwrap();
+        let _ = pin.bool().unwrap();
+        let _ = pin.bool().unwrap();
+        for _ in 0..3 {
+            let _ = pin.f64().unwrap();
+        }
+        for _ in 0..3 {
+            let _ = pin.f32().unwrap();
+        }
+        let _ = pin.f32().unwrap(); // speed
+        let _ = pin.i32().unwrap(); // count
+        assert_eq!(pin.var_int().unwrap(), 14);
+        assert_eq!(pin.i32().unwrap(), 0xFFFF_0000u32 as i32);
+        assert_eq!(pin.f32().unwrap(), 2.0);
+
+        // 1.21.1 wrote red, green, blue and scale as four floats.
+        let v = &crate::protocol::modern::version::V1_21_1;
+        let pkts = encode(v, &dust).unwrap();
+        let mut pin = crate::proto::PacketIn::new(pkts[0].body());
+        let _ = pin.var_int().unwrap();
+        let _ = pin.bool().unwrap();
+        for _ in 0..3 {
+            let _ = pin.f64().unwrap();
+        }
+        for _ in 0..3 {
+            let _ = pin.f32().unwrap();
+        }
+        let _ = pin.f32().unwrap();
+        let _ = pin.i32().unwrap();
+        assert_eq!(pin.var_int().unwrap(), 13);
+        assert_eq!(pin.f32().unwrap(), 1.0);
+        assert_eq!(pin.f32().unwrap(), 0.0);
+        assert_eq!(pin.f32().unwrap(), 0.0);
+        assert_eq!(pin.f32().unwrap(), 2.0);
+
+        let block = ServerEvent::Particle {
+            name: "minecraft:block".into(),
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            dz: 0.0,
+            speed: 0.0,
+            count: 1,
+            force: false,
+            options: ParticleOptions::Block(aether_world::registry::ids::STONE),
+        };
+        let v = &crate::protocol::modern::version::V1_21_11;
+        let pkts = encode(v, &block).unwrap();
+        let mut pin = crate::proto::PacketIn::new(pkts[0].body());
+        let _ = pin.var_int().unwrap();
+        let _ = pin.bool().unwrap();
+        let _ = pin.bool().unwrap();
+        for _ in 0..3 {
+            let _ = pin.f64().unwrap();
+        }
+        for _ in 0..3 {
+            let _ = pin.f32().unwrap();
+        }
+        let _ = pin.f32().unwrap();
+        let _ = pin.i32().unwrap();
+        assert_eq!(pin.var_int().unwrap(), 1);
+        assert_eq!(
+            pin.var_int().unwrap(),
+            v.state(aether_world::registry::ids::STONE) as i32
+        );
     }
 
     #[test]

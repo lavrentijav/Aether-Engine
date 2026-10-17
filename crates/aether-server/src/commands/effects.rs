@@ -6,22 +6,33 @@
 //! sends one neutral [`ServerEvent`] per recipient; each codec renders it in
 //! its own release's packet shape.
 //!
+//! `/particle`'s name is vanilla's `minecraft:particle` argument: a particle
+//! type followed, for the types whose codec has fields, by a JSON options
+//! object — `dust{color:[1.0,0.0,0.0],scale:1.0}`,
+//! `block{block_state:"minecraft:stone"}`, `item{item:{id:"minecraft:stone"}}`.
+//! The object is parsed here against the 1.21.11 schemas and carried as
+//! [`ParticleOptions`]; the codec writes the field shape its own release
+//! expects (the dust colour was four floats through 1.21.3 and one int from
+//! 1.21.4).
+//!
 //! Resource names are validated against the 1.21.11 registries. A particle
 //! name another release does not have is a no-op for that client (cosmetic,
 //! never a malformed packet); a sound id is sent inline, as vanilla does.
 
 use std::sync::Arc;
 
-use aether_api::Vector3;
-
+use super::args;
 use super::coordinates::{CoordinateSource, Coordinates, Rotation};
 use super::feedback::lang;
 use super::selector::{EntityRef, Gamemode, LcgRng, Selector, SelectorSource};
+use super::snbt;
 use super::tree::{ArgKind, Builder, Ctx, Node, Requirement, Source, Value};
 use super::Reply;
 use crate::players::{PlayerHandle, SharedRegistry};
 use crate::protocol::nbt::Nbt;
-use crate::protocol::{resources, ServerEvent};
+use crate::protocol::{resources, ParticleOptions, ServerEvent};
+use aether_api::Vector3;
+use aether_world::ItemTypeId;
 
 /// Vanilla's particle distance limit when `force` is not given, in blocks.
 const PARTICLE_RANGE: f64 = 32.0;
@@ -107,6 +118,19 @@ fn normalize(name: &str) -> String {
     } else {
         format!("minecraft:{name}")
     }
+}
+
+fn sound_resource(name: &str) -> Result<String, String> {
+    let name = normalize(name);
+    if !args::valid_resource(&name) {
+        return Err(format!("Invalid resource location '{name}'"));
+    }
+    if !resources::sound_exists(&name) {
+        return Err(format!(
+            "Can't find element '{name}' of type 'minecraft:sound_event'"
+        ));
+    }
+    Ok(name)
 }
 
 fn source_name(source: u8) -> &'static str {
@@ -221,6 +245,260 @@ fn resolve_players(
 }
 
 // ---------------------------------------------------------------------------
+// Particle options
+// ---------------------------------------------------------------------------
+
+/// The 1.21.11 particles whose argument carries an options object.
+///
+/// Everything else is a `SimpleParticleType`, whose argument ends after the
+/// id. The set is the one whose codec has fields, not the set whose wire
+/// payload is non-empty: some of these had no wire fields on older releases
+/// (`entity_effect` before 1.20.5, `effect` before 1.21.9), and the codec
+/// writes the fields its own release has.
+const PARTICLE_OPTION_NAMES: &[&str] = &[
+    "minecraft:block",
+    "minecraft:block_marker",
+    "minecraft:falling_dust",
+    "minecraft:dust_pillar",
+    "minecraft:block_crumble",
+    "minecraft:dust",
+    "minecraft:dust_color_transition",
+    "minecraft:entity_effect",
+    "minecraft:item",
+    "minecraft:sculk_charge",
+    "minecraft:shriek",
+    "minecraft:vibration",
+    "minecraft:trail",
+    "minecraft:tinted_leaves",
+    "minecraft:dragon_breath",
+    "minecraft:effect",
+    "minecraft:instant_effect",
+    "minecraft:flash",
+];
+
+fn particle_has_options(name: &str) -> bool {
+    PARTICLE_OPTION_NAMES.contains(&name)
+}
+
+/// The error `CommandSyntaxException` body for a bad options object.
+fn invalid_options(detail: impl std::fmt::Display) -> String {
+    lang::format(lang::PARTICLE_INVALID_OPTIONS, &[&detail.to_string()])
+}
+
+fn field<'a>(obj: &'a [(String, Nbt)], key: &str) -> Result<&'a Nbt, String> {
+    obj.iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value)
+        .ok_or_else(|| format!("missing field `{key}`"))
+}
+
+fn number(value: &Nbt) -> Option<f64> {
+    Some(match value {
+        Nbt::Byte(v) => f64::from(*v),
+        Nbt::Short(v) => f64::from(*v),
+        Nbt::Int(v) => f64::from(*v),
+        Nbt::Long(v) => *v as f64,
+        Nbt::Float(v) => f64::from(*v),
+        Nbt::Double(v) => *v,
+        _ => return None,
+    })
+}
+
+fn integer(value: &Nbt) -> Option<i64> {
+    match value {
+        Nbt::Byte(v) => Some(i64::from(*v)),
+        Nbt::Short(v) => Some(i64::from(*v)),
+        Nbt::Int(v) => Some(i64::from(*v)),
+        Nbt::Long(v) => Some(*v),
+        Nbt::Float(v) if v.fract() == 0.0 => Some(*v as i64),
+        Nbt::Double(v) if v.fract() == 0.0 => Some(*v as i64),
+        _ => None,
+    }
+}
+
+fn as_f32(value: &Nbt, key: &str) -> Result<f32, String> {
+    number(value)
+        .map(|v| v as f32)
+        .ok_or_else(|| format!("expected a float for `{key}`"))
+}
+
+fn as_i32(value: &Nbt, key: &str) -> Result<i32, String> {
+    let n = integer(value).ok_or_else(|| format!("expected an integer for `{key}`"))?;
+    i32::try_from(n).map_err(|_| format!("`{key}` is out of range"))
+}
+
+fn as_str<'a>(value: &'a Nbt, key: &str) -> Result<&'a str, String> {
+    match value {
+        Nbt::Str(text) => Ok(text),
+        _ => Err(format!("expected a string for `{key}`")),
+    }
+}
+
+/// An RGB colour: an integer (`-1`, `0xFF0000`) or three floats (`[1.0,0,0]`).
+///
+/// Vanilla's `ExtraCodecs.RGB_COLOR_CODEC` accepts either form; the float
+/// list is packed as opaque ARGB, exactly as `FastColor.ARGB32.colorFromFloat`
+/// does.
+fn as_color(value: &Nbt) -> Result<i32, String> {
+    if let Some(n) = integer(value) {
+        return Ok(n as i32);
+    }
+    let Nbt::List(list) = value else {
+        return Err("expected an integer or a list of three floats".into());
+    };
+    if list.len() != 3 {
+        return Err("expected a list of three floats".into());
+    }
+    let mut rgb = [0u8; 3];
+    for (slot, value) in rgb.iter_mut().zip(list) {
+        let f = number(value).ok_or_else(|| "expected a number in a colour list".to_string())?;
+        *slot = (f.clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    Ok(i32::from_be_bytes([0xFF, rgb[0], rgb[1], rgb[2]]))
+}
+
+fn as_vec3(value: &Nbt, key: &str) -> Result<(f64, f64, f64), String> {
+    let Nbt::List(list) = value else {
+        return Err(format!("expected a list of three numbers for `{key}`"));
+    };
+    if list.len() != 3 {
+        return Err(format!("expected a list of three numbers for `{key}`"));
+    }
+    let mut out = [0.0; 3];
+    for (slot, value) in out.iter_mut().zip(list) {
+        *slot = number(value).ok_or_else(|| format!("expected a number in `{key}`"))?;
+    }
+    Ok((out[0], out[1], out[2]))
+}
+
+fn as_block_pos(value: &Nbt, key: &str) -> Result<(i32, i32, i32), String> {
+    let (x, y, z) = as_vec3(value, key)?;
+    let int = |v: f64| {
+        if v.fract() == 0.0 {
+            Ok(v as i32)
+        } else {
+            Err(format!("expected whole numbers in `{key}`"))
+        }
+    };
+    Ok((int(x)?, int(y)?, int(z)?))
+}
+
+fn parse_item(value: &Nbt) -> Result<(ItemTypeId, u8), String> {
+    let Nbt::Compound(stack) = value else {
+        return Err("expected an item stack object".into());
+    };
+    let id = as_str(field(stack, "id")?, "id")?;
+    let id = normalize(id);
+    if !args::valid_resource(&id) {
+        return Err(format!("invalid item id '{id}'"));
+    }
+    let item = ItemTypeId::vanilla(&id).ok_or_else(|| format!("unknown item '{id}'"))?;
+    let count = match stack.iter().find(|(name, _)| name == "count") {
+        None => 1,
+        Some((_, value)) => {
+            let n = integer(value).ok_or_else(|| "expected an integer for `count`".to_string())?;
+            if !(1..=99).contains(&n) {
+                return Err(format!("item count {n} is out of range 1..=99"));
+            }
+            n as u8
+        }
+    };
+    Ok((item, count))
+}
+
+/// Parse the options object of a particle argument.
+fn parse_particle_options(name: &str, text: Option<&str>) -> Result<ParticleOptions, String> {
+    let Some(text) = text else {
+        return Err("Expected particle options".into());
+    };
+    // Vanilla parses the object with Gson's lenient reader, which accepts
+    // bare keys; SNBT is the same shape and the tree already carries a
+    // strict, panic-free parser for it.
+    let value = snbt::parse(text).map_err(|e| e.to_string())?;
+    let Nbt::Compound(obj) = value else {
+        return Err("Expected particle options".into());
+    };
+    Ok(match name {
+        "minecraft:block"
+        | "minecraft:block_marker"
+        | "minecraft:falling_dust"
+        | "minecraft:dust_pillar"
+        | "minecraft:block_crumble" => {
+            let text = as_str(field(&obj, "block_state")?, "block_state")?;
+            let state = args::parse_block_state(text).map_err(|e| e.message())?;
+            if state.nbt.is_some() {
+                return Err("a particle block state cannot carry block-entity data".into());
+            }
+            ParticleOptions::Block(state.id)
+        }
+        "minecraft:dust" => ParticleOptions::Dust {
+            color: as_color(field(&obj, "color")?)?,
+            scale: as_f32(field(&obj, "scale")?, "scale")?,
+        },
+        "minecraft:dust_color_transition" => ParticleOptions::DustColorTransition {
+            from: as_color(field(&obj, "from_color")?)?,
+            to: as_color(field(&obj, "to_color")?)?,
+            scale: as_f32(field(&obj, "scale")?, "scale")?,
+        },
+        "minecraft:entity_effect" => ParticleOptions::EntityEffect {
+            color: as_color(field(&obj, "color")?)?,
+        },
+        "minecraft:item" => {
+            let (item, count) = parse_item(field(&obj, "item")?)?;
+            ParticleOptions::Item { item, count }
+        }
+        "minecraft:sculk_charge" => ParticleOptions::SculkCharge {
+            roll: as_f32(field(&obj, "roll")?, "roll")?,
+        },
+        "minecraft:shriek" => ParticleOptions::Shriek {
+            delay: as_i32(field(&obj, "delay")?, "delay")?,
+        },
+        "minecraft:vibration" => {
+            let destination = field(&obj, "destination")?;
+            let Nbt::Compound(destination) = destination else {
+                return Err("expected an object for `destination`".into());
+            };
+            let kind = as_str(field(destination, "type")?, "type")?;
+            let kind = kind.strip_prefix("minecraft:").unwrap_or(kind);
+            if kind != "block" {
+                return Err(format!("unsupported vibration destination type '{kind}'"));
+            }
+            let (x, y, z) = as_block_pos(field(destination, "pos")?, "pos")?;
+            let ticks = as_i32(field(&obj, "arrival_in_ticks")?, "arrival_in_ticks")?;
+            ParticleOptions::VibrationBlock { x, y, z, ticks }
+        }
+        "minecraft:trail" => {
+            let (x, y, z) = as_vec3(field(&obj, "target")?, "target")?;
+            ParticleOptions::Trail {
+                x,
+                y,
+                z,
+                color: as_color(field(&obj, "color")?)?,
+                duration: as_i32(field(&obj, "duration")?, "duration")?,
+            }
+        }
+        "minecraft:tinted_leaves" => ParticleOptions::TintedLeaves {
+            color: as_color(field(&obj, "color")?)?,
+        },
+        "minecraft:dragon_breath" => ParticleOptions::DragonBreath {
+            power: as_f32(field(&obj, "power")?, "power")?,
+        },
+        "minecraft:effect" => ParticleOptions::Effect {
+            color: as_color(field(&obj, "color")?)?,
+            power: as_f32(field(&obj, "power")?, "power")?,
+        },
+        "minecraft:instant_effect" => ParticleOptions::InstantEffect {
+            color: as_color(field(&obj, "color")?)?,
+            power: as_f32(field(&obj, "power")?, "power")?,
+        },
+        "minecraft:flash" => ParticleOptions::Flash {
+            color: as_color(field(&obj, "color")?)?,
+        },
+        _ => ParticleOptions::None,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // /particle
 // ---------------------------------------------------------------------------
 
@@ -245,7 +523,7 @@ fn particle_node() -> Node {
     let delta = Builder::arg("delta", ArgKind::Vec3(false))
         .executable(|ctx| exec_particle(ctx, false))
         .then(speed);
-    let pos = Builder::arg("pos", ArgKind::Vec3(false))
+    let pos = Builder::arg("pos", ArgKind::Vec3(true))
         .executable(|ctx| exec_particle(ctx, false))
         .then(delta);
     let name = Builder::arg("name", ArgKind::Particle)
@@ -270,10 +548,29 @@ fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
             "/particle <name> [<pos>] [<delta>] [<speed>] [<count>] [force|normal] [<viewers>]",
         );
     };
-    let name = normalize(raw);
+    let (id, options_text) = match raw.find('{') {
+        Some(index) => (&raw[..index], Some(&raw[index..])),
+        None => (raw, None),
+    };
+    let name = normalize(id.trim());
+    if !args::valid_resource(&name) {
+        return ctx.fail(format!("Invalid resource location '{name}'"));
+    }
     if !resources::particle_exists(&name) {
         return ctx.fail(lang::format(lang::PARTICLE_NOT_FOUND, &[&name]));
     }
+    let options = if particle_has_options(&name) {
+        match parse_particle_options(&name, options_text) {
+            Ok(options) => options,
+            Err(detail) => return ctx.fail(invalid_options(detail)),
+        }
+    } else {
+        if options_text.is_some() {
+            return ctx.fail(invalid_options("this particle has no options"));
+        }
+        ParticleOptions::None
+    };
+
     let count = int_arg(ctx, 4).unwrap_or(1);
     if count < 0 {
         return ctx.fail(lang::format(
@@ -341,6 +638,7 @@ fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
         speed,
         count,
         force,
+        options,
     };
     for handle in recipients {
         handle.emit(&event, ctx.world);
@@ -365,7 +663,7 @@ fn playsound_tail(source: u8) -> Builder {
     let volume = Builder::arg("volume", ArgKind::Float)
         .executable(move |ctx| exec_playsound(ctx, source))
         .then(pitch);
-    let pos = Builder::arg("pos", ArgKind::Vec3(false))
+    let pos = Builder::arg("pos", ArgKind::Vec3(true))
         .executable(move |ctx| exec_playsound(ctx, source))
         .then(volume);
     Builder::arg("targets", ArgKind::Entities)
@@ -374,6 +672,9 @@ fn playsound_tail(source: u8) -> Builder {
 }
 
 fn playsound_node() -> Node {
+    // The source is a literal in 1.21.11, so `targets` is only reachable once
+    // a source has been named; the sound argument itself plays to the caller
+    // at `master`.
     let mut sound =
         Builder::arg("sound", ArgKind::ResourceLocation).executable(|ctx| exec_playsound(ctx, 0));
     for (name, source) in [
@@ -395,9 +696,6 @@ fn playsound_node() -> Node {
                 .then(playsound_tail(source)),
         );
     }
-    // The brief's grammar allows targets without spelling a source. It is
-    // added after the source literals so `master` means the category.
-    sound = sound.then(playsound_tail(0));
 
     Builder::literal("playsound")
         .requires(gate("minecraft.command.playsound"))
@@ -415,12 +713,10 @@ fn exec_playsound(ctx: &mut Ctx, source: u8) -> Reply {
             "/playsound <sound> [<source>] [<targets>] [<pos>] [<volume>] [<pitch>] [<minVolume>]",
         );
     };
-    let sound = normalize(raw);
-    if !resources::sound_exists(&sound) {
-        return ctx.fail(format!(
-            "Can't find element '{sound}' in registry 'minecraft:sound_event'"
-        ));
-    }
+    let sound = match sound_resource(raw) {
+        Ok(sound) => sound,
+        Err(e) => return ctx.fail(e),
+    };
     let targets = match text_arg(ctx, 1) {
         Some(text) => match resolve_players(ctx.registry, ctx.source, text) {
             Ok(players) => players,
@@ -478,9 +774,9 @@ fn exec_playsound(ctx: &mut Ctx, source: u8) -> Reply {
             &["1", &min_volume.to_string()],
         ));
     }
-    // Vanilla clamps the minimum volume to the actual volume: a sound cannot
-    // be guaranteed louder than it is.
-    let _min_volume = min_volume.min(volume);
+    // Vanilla swaps volume and minVolume when minVolume is larger, so the
+    // packet's volume is the larger of the two.
+    let volume = volume.max(min_volume);
 
     let event = ServerEvent::Sound {
         name: sound.clone().into(),
@@ -520,12 +816,12 @@ fn stopsound_node() -> Node {
     let mut targets = Builder::arg("targets", ArgKind::Entities)
         .executable(|ctx| exec_stopsound(ctx, None))
         .then(
-            Builder::literal("*")
-                .executable(|ctx| exec_stopsound(ctx, None))
-                .then(
-                    Builder::arg("sound", ArgKind::ResourceLocation)
-                        .executable(|ctx| exec_stopsound(ctx, None)),
-                ),
+            // `*` names no source but still needs a sound; vanilla does not
+            // make the literal itself executable.
+            Builder::literal("*").then(
+                Builder::arg("sound", ArgKind::ResourceLocation)
+                    .executable(|ctx| exec_stopsound(ctx, None)),
+            ),
         );
     for (name, source) in [
         ("master", 0),
@@ -566,7 +862,13 @@ fn exec_stopsound(ctx: &mut Ctx, source: Option<u8>) -> Reply {
         Ok(players) => players,
         Err(e) => return ctx.fail(e),
     };
-    let sound = text_arg(ctx, 1).map(normalize);
+    let sound = match text_arg(ctx, 1) {
+        Some(raw) => match sound_resource(raw) {
+            Ok(sound) => Some(sound),
+            Err(e) => return ctx.fail(e),
+        },
+        None => None,
+    };
     let event = ServerEvent::StopSound {
         source,
         sound: sound.clone().map(Into::into),

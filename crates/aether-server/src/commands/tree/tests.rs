@@ -1548,6 +1548,15 @@ fn particle_and_sound_commands_route_through_the_tree() {
         "/particle minecraft:flame",
         "/particle flame 0 64 0 0 0 0 0 4 force",
         "/particle flame 0 64 0 0.1 0.2 0.3 0 0 normal @a",
+        "/particle dust{color:[1.0,0.0,0.0],scale:1.0}",
+        "/particle minecraft:block{block_state:\"minecraft:stone\"}",
+        "/particle item{item:{id:\"minecraft:stone\",count:1}}",
+        "/particle vibration{destination:{type:\"minecraft:block\",pos:[1,2,3]},arrival_in_ticks:10}",
+        // Vanilla allows whitespace before the options object, and an
+        // integer colour instead of a float list.
+        "/particle dust {color:16711680,scale:1.0}",
+        // count 0 means "as many as the client can render".
+        "/particle flame 0 64 0 0.5 0.5 0.5 0 0",
     ] {
         assert_eq!(run(&env, who, text), Vec::<String>::new(), "`{text}`");
     }
@@ -1555,6 +1564,31 @@ fn particle_and_sound_commands_route_through_the_tree() {
         one(&env, who, "/particle minecraft:not_a_particle"),
         "Unknown particle: minecraft:not_a_particle"
     );
+    // Vanilla's `particle.invalidOptions`, for a missing or bad object.
+    assert_eq!(
+        one(&env, who, "/particle dust"),
+        "Can't parse particle options: Expected particle options"
+    );
+    assert!(
+        one(&env, who, "/particle dust{color:[1.0],scale:1.0}")
+            .starts_with("Can't parse particle options:"),
+        "a bad colour list is an options error"
+    );
+    assert_eq!(
+        one(&env, who, "/particle flame{color:1}"),
+        "Can't parse particle options: this particle has no options"
+    );
+    for bad in [
+        "/particle block{block_state:\"minecraft:not_a_block\"}",
+        "/particle item{item:{id:\"minecraft:not_an_item\"}}",
+        "/particle dust{color:[1",
+        "/particle vibration{destination:{type:\"minecraft:entity\",pos:[1,2,3]},arrival_in_ticks:1}",
+    ] {
+        assert!(
+            one(&env, who, bad).starts_with("Can't parse particle options:"),
+            "`{bad}`"
+        );
+    }
     assert_eq!(
         one(&env, who, "/particle flame 0 64 0 0 0 0 0 -1"),
         "Integer must not be less than 0: found -1"
@@ -1604,6 +1638,16 @@ fn particle_and_sound_commands_route_through_the_tree() {
     assert_eq!(
         one(&env, who, "/stopsound @a * minecraft:block.note_block.harp"),
         "Stopped sound 'minecraft:block.note_block.harp'"
+    );
+    // `*` with no sound is not a complete command in vanilla.
+    assert_eq!(
+        one(&env, who, "/stopsound @a *"),
+        "Unknown or incomplete command"
+    );
+    // A target list requires a source literal in 1.21.11's grammar.
+    assert_eq!(
+        one(&env, who, "/playsound block.note_block.harp @a"),
+        "Unknown or incomplete command"
     );
 
     // Op level 2: a non-operator is refused by the tree.

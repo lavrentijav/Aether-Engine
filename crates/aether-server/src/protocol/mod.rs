@@ -316,6 +316,55 @@ impl ContainerSlot {
     }
 }
 
+/// The type-specific payload of a `/particle` argument.
+///
+/// Vanilla names a particle and then, for the particles whose codec has
+/// fields, an options object: `dust{color:[1.0,0.0,0.0],scale:1.0}`,
+/// `block{block_state:"minecraft:stone"}`, `item{item:{id:"minecraft:stone"}}`.
+/// The command layer parses that object against the 1.21.11 schemas; a codec
+/// writes the fields its own release expects (the dust colour, for one, was
+/// four floats through 1.21.3 and one int from 1.21.4).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParticleOptions {
+    /// A particle whose codec has no fields.
+    None,
+    /// `block`, `block_marker`, `falling_dust`, `dust_pillar`, `block_crumble`.
+    Block(BlockStateId),
+    /// `dust`: an ARGB colour and a scale.
+    Dust { color: i32, scale: f32 },
+    /// `dust_color_transition`: the starting and ending ARGB colours and a scale.
+    DustColorTransition { from: i32, to: i32, scale: f32 },
+    /// `entity_effect`: an ARGB colour.
+    EntityEffect { color: i32 },
+    /// `item`: an item and a count.
+    Item { item: ItemTypeId, count: u8 },
+    /// `sculk_charge`: the roll angle in radians.
+    SculkCharge { roll: f32 },
+    /// `shriek`: the delay in ticks.
+    Shriek { delay: i32 },
+    /// `vibration` with a block destination.
+    VibrationBlock { x: i32, y: i32, z: i32, ticks: i32 },
+    /// `trail`: the target point, colour and duration.
+    Trail {
+        x: f64,
+        y: f64,
+        z: f64,
+        color: i32,
+        duration: i32,
+    },
+    /// `tinted_leaves`: an ARGB colour.
+    TintedLeaves { color: i32 },
+    /// `dragon_breath`: the power.
+    DragonBreath { power: f32 },
+    /// `effect` and `instant_effect`: colour and power.
+    Effect { color: i32, power: f32 },
+    /// `instant_effect` (kept apart so an encoder can tell them where a release
+    /// gives them different ids, as none does today).
+    InstantEffect { color: i32, power: f32 },
+    /// `flash`: an ARGB colour.
+    Flash { color: i32 },
+}
+
 pub enum ServerEvent<'a> {
     /// Liveness ping; clients drop the connection without one every ~30s.
     KeepAlive(i64),
@@ -637,6 +686,9 @@ pub enum ServerEvent<'a> {
         speed: f32,
         count: i32,
         force: bool,
+        /// The type-specific options the particle argument carried
+        /// (`dust{color:…,scale:…}`, `block{block_state:"…"}`, …).
+        options: ParticleOptions,
     },
     /// Stop one sound, all sounds from a category, or every sound, on the
     /// receiving client. `source` is the sound category (`None` = every
