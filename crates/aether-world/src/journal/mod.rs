@@ -456,6 +456,21 @@ impl<B: KvBackend> Journal<B> {
     ) -> Result<u64, StorageError> {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         self.reserve(seq)?;
+        // Enforce the column-sorted invariant for a bulk revision here, at the
+        // one place every event passes through — not only in
+        // `append_block_group`. A caller may append a `BlockGroup` directly
+        // (`append`/`append_at`/`append_caused`), and the replay in
+        // `World::ensure_column` binary-searches the stored list on the
+        // assumption it is sorted; an unsorted group would silently lose
+        // columns. Sorting is idempotent, so the builder's own sort is left
+        // where it is.
+        let body = match body {
+            EventBody::BlockGroup { mut changes } => {
+                changes.sort_by_key(|c| (c.x >> 4, c.z >> 4, c.y, c.x, c.z));
+                EventBody::BlockGroup { changes }
+            }
+            other => other,
+        };
         let e = Event {
             seq,
             at_ms,

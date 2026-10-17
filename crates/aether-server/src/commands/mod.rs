@@ -796,7 +796,11 @@ pub fn inspect_block(
     let lines: Vec<String> = events
         .iter()
         .rev()
-        .filter(|e| e.position() == Some((x, y, z)))
+        // A bulk revision has no single `position()`, so match the block it
+        // actually changed: `touches_position` covers a `BlockSet` and any
+        // change of a `BlockGroup` at this position, while still allowing the
+        // item events at the coordinates that `/inspect` has always shown.
+        .filter(|e| e.body.touches_position(x, y, z))
         .filter_map(|e| describe(e, world, &actor_name))
         .collect();
     let current = world

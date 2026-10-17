@@ -504,8 +504,12 @@ impl EventBody {
 
     /// The state this event installs at `(x, y, z)`, if it changes that block.
     ///
-    /// A later duplicate inside one group wins, matching a sequential
-    /// application. `None` when the event changes no block there.
+    /// A group is stored sorted by column, not in application order (see
+    /// [`Journal::append_block_group`](super::Journal::append_block_group)).
+    /// That sort is stable, so a hand-built group that repeats a position keeps
+    /// its insertions together and the last one still wins — but a bulk-edit
+    /// builder never repeats a position, since it plans from a map keyed by
+    /// position. `None` when the event changes no block there.
     pub fn block_to_at(&self, x: i32, y: i32, z: i32) -> Option<BlockStateId> {
         match self {
             EventBody::BlockSet {

@@ -1553,3 +1553,52 @@ fn an_area_filter_selects_a_revision_that_reaches_into_it() {
         .unwrap();
     assert_eq!(plan.len(), 2, "the revision is selected whole");
 }
+
+#[test]
+fn a_block_group_appended_directly_is_stored_sorted_by_column() {
+    // The column replay binary-searches a group for its own column, so the
+    // sorted invariant must hold for every append route, not only
+    // `append_block_group`. `append` is public; a direct caller must not be
+    // able to write a group the replay would silently mis-slice.
+    let store = MemStore::new();
+    let j = Journal::open(&store).unwrap();
+    let seq = j
+        .append(
+            alice(),
+            EventBody::BlockGroup {
+                changes: vec![
+                    BlockChange {
+                        x: 40,
+                        y: 64,
+                        z: 0,
+                        from: DIRT,
+                        to: STONE,
+                    },
+                    BlockChange {
+                        x: 1,
+                        y: 64,
+                        z: 0,
+                        from: DIRT,
+                        to: STONE,
+                    },
+                    BlockChange {
+                        x: -20,
+                        y: 64,
+                        z: 0,
+                        from: DIRT,
+                        to: STONE,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+    match j.get(seq).unwrap().unwrap().body {
+        EventBody::BlockGroup { changes } => {
+            let cols: Vec<i32> = changes.iter().map(|c| c.x >> 4).collect();
+            let mut sorted = cols.clone();
+            sorted.sort_unstable();
+            assert_eq!(cols, sorted, "stored sorted by column");
+        }
+        other => panic!("expected a block group, got {other:?}"),
+    }
+}

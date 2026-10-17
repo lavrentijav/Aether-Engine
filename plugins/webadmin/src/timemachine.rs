@@ -167,9 +167,17 @@ impl TimeMachine {
         let (cz0, cz1) = ((z as i64 - r) >> 4, (z as i64 + r) >> 4);
         let mut out = Vec::new();
         let mut scanned = 0usize;
+        // A bulk revision is indexed under **every** column it touches, so a
+        // multi-column revision is met once per column in this scan. Expand it
+        // only on the first sighting: otherwise each in-radius change would be
+        // returned k times and the scan budget spent k times over.
+        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
         'scan: for ccx in cx0..=cx1 {
             for ccz in cz0..=cz1 {
                 for e in self.history.column_events(ccx as i32, ccz as i32)? {
+                    if !seen.insert(e.seq) {
+                        continue;
+                    }
                     if scanned >= budget {
                         break 'scan;
                     }
@@ -492,13 +500,24 @@ mod tests {
             .append(
                 ALICE,
                 EventBody::BlockGroup {
-                    changes: vec![aether_world::journal::BlockChange {
-                        x: 0,
-                        y: 3,
-                        z: 0,
-                        from: ids::GRASS_BLOCK,
-                        to: ids::STONE,
-                    }],
+                    changes: vec![
+                        aether_world::journal::BlockChange {
+                            x: 0,
+                            y: 3,
+                            z: 0,
+                            from: ids::GRASS_BLOCK,
+                            to: ids::STONE,
+                        },
+                        // A second column, so the revision is indexed under
+                        // both and an area scan meets it twice.
+                        aether_world::journal::BlockChange {
+                            x: 20,
+                            y: 3,
+                            z: 0,
+                            from: ids::GRASS_BLOCK,
+                            to: ids::DIRT,
+                        },
+                    ],
                 },
             )
             .unwrap();
@@ -508,9 +527,12 @@ mod tests {
         assert_eq!(h[0].to, ids::STONE);
         assert_eq!(t.block_at(0, 3, 0, AtSeq(0)).unwrap(), ids::GRASS_BLOCK);
         assert_eq!(t.block_at(0, 3, 0, AtSeq(seq)).unwrap(), ids::STONE);
-        let ch = t.changes_in_area(0, 0, 8, 0, u64::MAX, 100).unwrap();
-        assert_eq!(ch.len(), 1);
-        assert_eq!(ch[0].to, ids::STONE);
+        // The multi-column revision must be expanded once, not once per
+        // column it is indexed under.
+        let ch = t.changes_in_area(10, 0, 32, 0, u64::MAX, 100).unwrap();
+        assert_eq!(ch.len(), 2, "both changes, no duplicates: {ch:?}");
+        let xs: Vec<i32> = ch.iter().map(|c| c.x).collect();
+        assert_eq!(xs, vec![0, 20]);
     }
 
     #[test]
