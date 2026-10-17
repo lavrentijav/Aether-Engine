@@ -167,6 +167,16 @@ init_fuel = 100000000  # fuel for a plugin's instantiation and init
 # are never overwritten until a later successful edit.
 # config = { allow-empty-on-error = "false" }
 
+# The essentials-teleport plugin (CMD-37a) is compiled in: `/sethome`, `/home`,
+# `/delhome`, `/homes`, `/setwarp`, `/warp`, `/delwarp`, `/warps` and
+# `/setspawn`. `/spawn` stays core and is never overridden. Moves go through
+# the core CMD-31 safe-spot teleport; homes/warps/spawn live in plugin KV.
+# `players.teleport` must be granted for a move to be allowed.
+# [plugins.essentials-teleport]
+# enabled = true
+# capabilities = ["log", "config", "supports", "storage.kv", "players", "players.teleport", "scheduler"]
+# config = { max-homes = "1", warmup = "0" }   # or warmup-ticks = "60"
+
 # The web admin is a compiled-in native plugin (no .wasm), read-only, and only
 # loads when `dir` above is set. See docs/webadmin.md.
 # [plugins.webadmin]

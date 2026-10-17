@@ -1309,6 +1309,16 @@ mod imp {
             aether_claims_plugin::registration(),
             "native claims",
         );
+        // Essentials homes/warps/spawn: no core mechanism of its own, every
+        // move goes through the CMD-31 teleport service and state lives in
+        // plugin KV. `/spawn` remains core, so this registers only new names.
+        install_native_one(
+            host,
+            cfg,
+            grant_sink,
+            aether_essentials_teleport_plugin::registration(),
+            "native essentials-teleport",
+        );
 
         // The admin web interface is the one native plugin that needs the live
         // world, which the server attaches here — the plugin host gives a

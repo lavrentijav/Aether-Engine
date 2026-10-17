@@ -1,16 +1,21 @@
-# Manifest for the essentials-teleport plugin (CMD-37). See crates/aether-plugin/src/manifest.rs.
+# Manifest for the essentials-teleport plugin (CMD-37a).
+# Native (tier N): compiled into the server, so this file is documentation and
+# the server's build-time `registration()` is the source of truth. It is still
+# parsed by `discover`; `tier = "native"` makes the loader skip the `.wasm`
+# path. See crates/aether-plugin/src/manifest.rs.
 id = "essentials-teleport"
 name = "Essentials Teleport"
 version = "0.1.0"
 api = "0.1"
-# native: a Rust crate in this workspace, linked in-process (CMD-00N).
-# No .wasm entry: the loader calls it directly, no WASM boundary.
+tier = "native"
 priority = 30
 
 capabilities = ["log", "config", "supports", "storage.kv", "players", "players.teleport", "scheduler"]
 
-subscribe = ["on-command", "after-entity-death"]
+subscribe = ["on-command", "on-tick", "after-damage", "after-entity-death", "after-player-leave"]
 
+# CMD-37a. CMD-37b adds /tpa, /back, /rtp and the vertical helpers.
+# `/spawn` is deliberately absent: it stays core (CMD-11).
 commands = [
     "sethome",
     "home",
@@ -20,18 +25,5 @@ commands = [
     "warp",
     "delwarp",
     "warps",
-    "tpa",
-    "tpahere",
-    "tpaccept",
-    "tpdeny",
-    "tpcancel",
-    "tpall",
-    "tphere",
-    "tppos",
-    "back",
-    "top",
-    "jump",
-    "up",
-    "rtp",
     "setspawn",
 ]

@@ -41,6 +41,10 @@ members = [
     # The claims plugin (CMD-35), a native plugin on the core region index:
     # GriefPrevention-style player claims, a golden shovel and /claim.
     "plugins/claims",
+    # The essentials-teleport plugin (CMD-37a), a native plugin on the core
+    # teleport/safe-spot service (CMD-31) and plugin KV: homes, warps and the
+    # plugin spawn. `/spawn` stays core.
+    "plugins/essentials-teleport",
     # The reference native plugin (CMD-00N): the smallest complete tier-N
     # plugin, and the template the native-plugin guide walks through. A native
     # plugin is a normal Rust crate linked in-process, so unlike the WASM
