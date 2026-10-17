@@ -41,6 +41,7 @@ pub mod session;
 pub mod staff;
 pub mod stash;
 pub mod stored;
+pub mod teleport;
 pub mod visibility;
 pub mod web;
 pub mod worldgen;

@@ -510,6 +510,11 @@ fn parse_mode(s: &str) -> Option<GameMode> {
 }
 
 /// Move a player, telling their client and everyone watching.
+///
+/// The move itself is the core teleport service
+/// ([`crate::teleport::teleport`]); this keeps the old command-facing shape
+/// (three coordinates, current look preserved) so `/tp`, `/spawn` and staff
+/// spectate stay byte-for-byte what they were.
 pub fn teleport(
     handle: &PlayerHandle,
     registry: &SharedRegistry,
@@ -518,21 +523,12 @@ pub fn teleport(
     y: f64,
     z: f64,
 ) {
-    let mut pos = handle.pos();
-    pos.x = x;
-    pos.y = y;
-    pos.z = z;
-    handle.set_pos(pos);
-    handle.game().fall_peak = None;
-    handle.emit(
-        &ServerEvent::Teleport {
-            x,
-            y,
-            z,
-            yaw: pos.yaw,
-            pitch: pos.pitch,
-        },
+    let pos = handle.pos();
+    let _ = crate::teleport::teleport(
+        handle,
+        registry,
         world,
+        crate::teleport::TeleportTarget::Exact(Vector3::new(x, y, z), pos.yaw, pos.pitch),
+        crate::teleport::TeleportCause::Command,
     );
-    registry.broadcast_except(handle.entity_id, &ServerEvent::EntityMove(handle), world);
 }

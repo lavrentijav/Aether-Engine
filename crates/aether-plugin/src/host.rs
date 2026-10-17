@@ -70,6 +70,22 @@ pub trait HostBackend: Send + Sync {
         None
     }
 
+    /// Move a player to `(x, y, z)`, searching for a safe spot. The default
+    /// refuses, so a host with no world (a test, a stripped build) does not
+    /// pretend the move happened. The server overrides it to front the core
+    /// teleport service (CMD-31).
+    fn teleport_player(
+        &self,
+        _plugin: &str,
+        _player: u64,
+        _x: f64,
+        _y: f64,
+        _z: f64,
+        _cause: crate::sdk::TeleportCause,
+    ) -> std::result::Result<(), String> {
+        Err("teleport is not supported by this host".to_string())
+    }
+
     /// Disconnect a player with `reason`. The default does nothing.
     fn disconnect_player(&self, _plugin: &str, _player: u64, _reason: &str) {}
 
