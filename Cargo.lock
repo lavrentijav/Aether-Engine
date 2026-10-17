@@ -48,6 +48,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-claims-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-plugin",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aether-convert"
 version = "0.1.0"
 dependencies = [
@@ -161,6 +170,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "aether-api",
+ "aether-claims-plugin",
  "aether-menus-plugin",
  "aether-ops",
  "aether-physics",

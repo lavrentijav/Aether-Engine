@@ -41,12 +41,18 @@ pub const EVENT_BEFORE_BLOCK_INTERACT: &str = "before-block-interact";
 /// export, so only native plugins receive it.
 pub const EVENT_BEFORE_BLOCK_DIG: &str = "before-block-dig";
 pub const EVENT_BEFORE_USE_ITEM: &str = "before-use-item";
+/// A right-click on a **block** with an item, carrying the target cell and the
+/// clicked block. Native-only: the frozen WIT world has no matching export, and
+/// a golden-shovel claim needs the coordinates the air-use event lacks.
+pub const EVENT_BEFORE_USE_BLOCK: &str = "before-use-block";
 pub const EVENT_BEFORE_ATTACK: &str = "before-attack";
 pub const EVENT_BEFORE_CHAT: &str = "before-chat";
 pub const EVENT_BEFORE_CONTAINER_CLICK: &str = "before-container-click";
 pub const EVENT_AFTER_PLAYER_JOIN: &str = "after-player-join";
 pub const EVENT_AFTER_PLAYER_LEAVE: &str = "after-player-leave";
 pub const EVENT_AFTER_BLOCK_BREAK: &str = "after-block-break";
+/// Observe-only, native-only (the frozen 0.1 WIT world has no export for it).
+pub const EVENT_AFTER_BLOCK_PLACE: &str = "after-block-place";
 pub const EVENT_AFTER_ENTITY_DEATH: &str = "after-entity-death";
 pub const EVENT_AFTER_DAMAGE: &str = "after-damage";
 pub const EVENT_AFTER_CRAFT: &str = "after-craft";

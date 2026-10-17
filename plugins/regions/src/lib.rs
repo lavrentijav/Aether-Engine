@@ -64,6 +64,10 @@ pub const COMMAND_LONG: &str = "region";
 /// The KV key holding the serialized region set.
 pub const KV_REGIONS: &str = "regions";
 
+/// The core region `source` this plugin stamps on every region it writes, so
+/// one plugin's load/edit cannot touch another plugin's regions.
+pub const SOURCE: &str = "regions";
+
 /// Permission nodes, mirroring WorldGuard's.
 pub const NODE_DEFINE: &str = "worldguard.region.define";
 /// Permission node for `/rg redefine`.
@@ -161,7 +165,8 @@ impl StoredRegion {
             BlockPos::new(self.min[0], self.min[1], self.min[2]),
             BlockPos::new(self.max[0], self.max[1], self.max[2]),
         )
-        .with_priority(self.priority);
+        .with_priority(self.priority)
+        .with_source(SOURCE);
         for (name, allowed) in &self.flags {
             region.flags.set(name.clone(), *allowed);
         }
@@ -349,11 +354,21 @@ impl Regions {
         Ok(())
     }
 
-    /// Publish the whole model into the core store. Used on load; edits publish
-    /// one region at a time, through the same store.
+    /// Publish this plugin's model into the core store on load.
+    ///
+    /// The store is shared with every other region plugin (claims), so a load
+    /// must not replace the whole index: it removes only this plugin's stale
+    /// regions (ones no longer in the persisted state) and upserts its own.
     fn rebuild(&self) {
-        self.store
-            .replace_all(self.state.regions.values().map(|r| r.region().handle()));
+        let index = self.store.snapshot();
+        for handle in index.regions() {
+            if handle.source.as_deref() == Some(SOURCE) && self.by_id(handle.id.get()).is_none() {
+                self.store.remove(handle.id);
+            }
+        }
+        for region in self.state.regions.values() {
+            self.store.upsert(region.region());
+        }
     }
 
     fn publish(&self, region: &StoredRegion) {

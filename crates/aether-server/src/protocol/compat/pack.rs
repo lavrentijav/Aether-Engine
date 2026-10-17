@@ -148,6 +148,26 @@ impl super::super::BlockSource for CarrierView<'_> {
         }
     }
 
+    fn section_y_range(&self) -> (i32, i32) {
+        self.inner.section_y_range()
+    }
+
+    fn copy_column(
+        &self,
+        cx: i32,
+        cz: i32,
+        cy_min: i32,
+        cy_max: i32,
+    ) -> Option<Vec<Box<[BlockStateId; 4096]>>> {
+        let mut sections = self.inner.copy_column(cx, cz, cy_min, cy_max)?;
+        for section in &mut sections {
+            for slot in section.iter_mut() {
+                *slot = self.table.display(*slot);
+            }
+        }
+        Some(sections)
+    }
+
     fn column_biomes(
         &self,
         cx: i32,
@@ -253,5 +273,43 @@ mod tests {
         let stone = One(aether_api::block_ids::STONE);
         let plain = CarrierView::new(&stone, table);
         assert_eq!(plain.block_at(0, 0, 0), aether_api::block_ids::STONE);
+    }
+    #[test]
+    fn the_carrier_view_forwards_the_whole_column_snapshot_and_remaps_it() {
+        // A compat-pack client wraps the world in `CarrierView`; if that
+        // wrapper did not forward `copy_column`, `ColumnView` would fall back
+        // to per-section copies for exactly these viewers and could tear.
+        use crate::protocol::BlockSource;
+        struct Sheet(BlockStateId);
+        impl BlockSource for Sheet {
+            fn block_at(&self, _: i32, _: i32, _: i32) -> BlockStateId {
+                self.0
+            }
+            fn section_y_range(&self) -> (i32, i32) {
+                (-1, 1)
+            }
+            fn copy_column(
+                &self,
+                _cx: i32,
+                _cz: i32,
+                cy_min: i32,
+                cy_max: i32,
+            ) -> Option<Vec<Box<[BlockStateId; 4096]>>> {
+                Some(
+                    (cy_min..=cy_max)
+                        .map(|_| Box::new([self.0; 4096]))
+                        .collect(),
+                )
+            }
+        }
+        let table = table_for(763).unwrap();
+        let block = default_state("minecraft:pale_oak_planks").unwrap();
+        let carrier = table.carrier(block).unwrap();
+        let sheet = Sheet(block);
+        let view = CarrierView::new(&sheet, table);
+        assert_eq!(view.section_y_range(), (-1, 1));
+        let sections = view.copy_column(0, 0, -1, 1).expect("forwarded");
+        assert_eq!(sections.len(), 3);
+        assert!(sections.iter().all(|sec| sec.iter().all(|s| *s == carrier)));
     }
 }

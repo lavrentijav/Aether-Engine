@@ -759,3 +759,56 @@ fn an_operator_may_explicitly_allow_starting_empty_after_a_read_error() {
         b"not json"
     );
 }
+
+#[test]
+fn a_shared_store_keeps_another_plugins_regions() {
+    let mut f = Fixture::new();
+    let owner = player(1, "Steve", true);
+    f.define(&owner, "spawn", (0, 0, 0), (15, 64, 15));
+
+    // A claims region in the same index, and a stale regions-sourced one the
+    // persisted state no longer names (as if it was deleted while disabled).
+    f.store.upsert(
+        Region::new(
+            RegionId(0x434C_4149_0000_0001),
+            OVERWORLD,
+            pos(100, -64, 100),
+            pos(115, 383, 115),
+        )
+        .with_source("claims"),
+    );
+    f.store.upsert(
+        Region::new(
+            RegionId(999),
+            OVERWORLD,
+            pos(200, 0, 200),
+            pos(215, 64, 215),
+        )
+        .with_source(SOURCE),
+    );
+
+    // A reload republishes only this plugin's model.
+    f.plugin.regions.rebuild();
+    let index = f.store.snapshot();
+    assert!(index.get(RegionId(1)).is_some(), "spawn survives a reload");
+    assert!(
+        index.get(RegionId(0x434C_4149_0000_0001)).is_some(),
+        "another plugin's region is not wiped by a reload"
+    );
+    assert!(
+        index.get(RegionId(999)).is_none(),
+        "a stale region of this plugin is pruned"
+    );
+
+    // Removing one of our regions leaves the other plugin's alone.
+    let lines = f.command(&owner, &["remove", "spawn"]);
+    assert!(
+        lines.iter().any(|l| l.contains("Removed region")),
+        "{lines:?}"
+    );
+    assert!(f
+        .store
+        .snapshot()
+        .get(RegionId(0x434C_4149_0000_0001))
+        .is_some());
+}

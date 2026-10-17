@@ -154,6 +154,24 @@ pub trait NativePlugin: Send {
         Decision::Allow
     }
 
+    /// A right-click **on a block** with `item`, at the clicked cell
+    /// `(x, y, z)` whose block is `block`. Native-only: the frozen WASM world
+    /// has no export for this, and a golden shovel needs the coordinates the
+    /// air-use event does not carry. Returning `Cancel` consumes the click.
+    #[allow(clippy::too_many_arguments)]
+    fn before_use_block(
+        &mut self,
+        _ctx: &mut NativeContext,
+        _p: &Player,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _item: &str,
+        _block: &str,
+    ) -> Decision {
+        Decision::Allow
+    }
+
     fn before_attack(&mut self, _ctx: &mut NativeContext, _p: &Player, _target: u64) -> Decision {
         Decision::Allow
     }
@@ -200,6 +218,19 @@ pub trait NativePlugin: Send {
     fn after_player_join(&mut self, _ctx: &mut NativeContext, _p: &Player) {}
     fn after_player_leave(&mut self, _ctx: &mut NativeContext, _p: &Player) {}
     fn after_block_break(
+        &mut self,
+        _ctx: &mut NativeContext,
+        _p: &Player,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _block: &str,
+    ) {
+    }
+    /// A bulk edit (or any server-side write) placed a block. Native-only:
+    /// the frozen `@0.1.0` WIT world has no matching export, so a WASM plugin
+    /// cannot subscribe to it.
+    fn after_block_place(
         &mut self,
         _ctx: &mut NativeContext,
         _p: &Player,

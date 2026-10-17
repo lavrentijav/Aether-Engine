@@ -52,6 +52,25 @@ impl BlockSource for DemoWorld {
         World::copy_section(self, cx, cy, cz, out)
     }
 
+    fn section_y_range(&self) -> (i32, i32) {
+        (WORLD_BOTTOM >> 4, (WORLD_TOP - 1) >> 4)
+    }
+
+    fn copy_column(
+        &self,
+        cx: i32,
+        cz: i32,
+        cy_min: i32,
+        cy_max: i32,
+    ) -> Option<Vec<Box<[BlockStateId; 4096]>>> {
+        let (lo, hi) = self.section_y_range();
+        let (lo, hi) = (cy_min.max(lo), cy_max.min(hi));
+        if lo > hi {
+            return Some(Vec::new());
+        }
+        Some(World::copy_column_sections(self, cx, cz, lo, hi))
+    }
+
     fn column_biomes(
         &self,
         cx: i32,
@@ -963,7 +982,16 @@ fn play_loop(
                             let tool = held_item
                                 .and_then(|id| id.vanilla_name())
                                 .unwrap_or_default();
-                            if let Some(to) = interact::item_on_block(tool, &clicked) {
+                            // A plugin gets the right-click on the block first (the
+                            // golden-shovel claim needs the target cell, which the
+                            // air-use event does not carry).
+                            if let Some(reason) =
+                                crate::plugins::before_use_block(handle, tx, ty, tz, tool, &clicked)
+                            {
+                                if !reason.is_empty() {
+                                    handle.emit(&ServerEvent::Chat(reason), world);
+                                }
+                            } else if let Some(to) = interact::item_on_block(tool, &clicked) {
                                 till_block(handle, registry, world, tx, ty, tz, to);
                             } else if tool == "minecraft:flint_and_steel"
                                 && world.get_block(x, y, z) == block_ids::AIR
@@ -1317,13 +1345,20 @@ pub(crate) fn handle_use_block(
     y: i32,
     z: i32,
 ) {
-    if let Some(reason) = crate::plugins::before_block_interact(
-        handle,
-        x,
-        y,
-        z,
-        &crate::game::block_name(world, world.get_block(x, y, z)).unwrap_or_default(),
-    ) {
+    let clicked = crate::game::block_name(world, world.get_block(x, y, z)).unwrap_or_default();
+    if let Some(reason) = crate::plugins::before_block_interact(handle, x, y, z, &clicked) {
+        if !reason.is_empty() {
+            handle.emit(&ServerEvent::Chat(reason), world);
+        }
+        return;
+    }
+    // The older protocol has no `Place` for a non-block item, so the claims
+    // golden shovel's item-on-block hook is dispatched here as well.
+    let item = handle
+        .held_item()
+        .and_then(|id| id.vanilla_name())
+        .unwrap_or_default();
+    if let Some(reason) = crate::plugins::before_use_block(handle, x, y, z, item, &clicked) {
         if !reason.is_empty() {
             handle.emit(&ServerEvent::Chat(reason), world);
         }
@@ -1459,6 +1494,15 @@ fn place_block(
         let _ = u;
     }
     set_and_broadcast(world, registry, handle, x, y, z, state);
+    // A normal placement fires the same observe-only event a bulk edit does, so
+    // a native plugin sees one vocabulary rather than a bulk-only callback.
+    crate::plugins::after_block_place(
+        handle,
+        x,
+        y,
+        z,
+        &crate::game::block_name(world, state).unwrap_or_default(),
+    );
     // And the blocks it was built against have to notice it.
     settle_neighbours(world, registry, handle, x, y, z);
     // A door is two blocks that depend on each other, so the second one is
@@ -1466,6 +1510,13 @@ fn place_block(
     // exist.
     if let Some(upper) = upper {
         set_and_broadcast(world, registry, handle, x, y + 1, z, upper);
+        crate::plugins::after_block_place(
+            handle,
+            x,
+            y + 1,
+            z,
+            &crate::game::block_name(world, upper).unwrap_or_default(),
+        );
     }
     true
 }

@@ -78,6 +78,10 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
     // (reveal) newly visible columns, capped per tick. A no-op unless
     // `[anti_xray] enabled`.
     crate::visibility::tick(&players, world);
+    // Publish a bounded slice of any committed bulk edits: settle derived
+    // shapes, re-send touched columns, then fire the after-* hooks. Empty on
+    // a server that never bulk-edits (CMD-30b).
+    crate::bulk::publish_tick(registry, world);
     for p in &players {
         // Eating finishes here, in the tick: journal what it used up. Only
         // while eating, so a capture is not taken every tick for nothing.

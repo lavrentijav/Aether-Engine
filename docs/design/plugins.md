@@ -100,6 +100,11 @@ thread at a safe point:
   `before-use-item`, `before-attack`, `before-chat`, `before-container-click`);
 - `after-*` events are observe-only (`after-player-join/leave`, `after-block-break`,
   `after-entity-death`, `after-damage`, `after-craft`, `after-enchant`).
+- `after-block-place` is a **native-only** observe-only event (CMD-30b): the frozen
+  `@0.1.0` WIT world has no export for it, and adding one would change the package
+  identity every compiled component matches. It fires once per placed block for a normal
+  placement (both halves of a two-block placement) and once per changed non-air block
+  when a bulk edit is published.
 - `on-tick(n)` only if the plugin subscribed, at most every N ticks (manifest).
 - `on-command(player, name, args) -> command-result` for commands it registered.
 A plugin subscribes in its manifest; unsubscribed events cost nothing (no call).
@@ -116,6 +121,18 @@ A plugin subscribes in its manifest; unsubscribed events cost nothing (no call).
   world KV store. This replaces `SELECT … FOR UPDATE` that a sandboxed plugin cannot do.
 - `log`, `config`, `supports(feature) -> bool` (capability/feature probing, versioned names like
   `economy.v1`, `enchantments.custom.v1`).
+- `regions` (native-only, added with CMD-35a): `region_upsert` / `region_insert` / `region_remove` /
+  `region_get` / `regions_overlapping` let a trusted native model plugin (`regions`, `claims`) feed
+  and query the core region index (CMD-29) without depending on `aether-server`. Writes are atomic
+  in the store: the host stamps the plugin id as the region source, refuses to replace a
+  core-created (`source: None`) or another plugin's region, and `region_insert` is a *fresh* insert
+  that refuses any occupied id (even the caller's own) plus an overlap with the caller's own
+  regions under the same lock (the claim-insert guarantee). Startup replay uses the idempotent
+  `region_upsert` instead, and `region_allocate_serial` hands out collision-free ids across plugin
+  instances and threads.
+  `regions_overlapping` is the chunk-index box query, not a full scan. A block right-click carries a
+  matching native-only `before-use-block` event (the golden shovel needs a target cell, which the
+  air-use event does not have).
 
 **Limits (sandbox).** Per call: wasmtime epoch interruption (default 5 ms budget, configurable) and
 fuel for `init`; per plugin: memory cap (default 64 MiB), no WASI sockets/filesystem unless the

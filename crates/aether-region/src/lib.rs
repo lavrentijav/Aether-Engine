@@ -367,6 +367,10 @@ pub struct Region {
     pub members: BTreeSet<String>,
     /// Player names added as owners (full rights).
     pub owners: BTreeSet<String>,
+    /// The plugin that owns this region (`claims`, `regions`), or `None` for a
+    /// region created directly in the core. The host stamps it on a plugin
+    /// write, so one plugin cannot delete another's region.
+    pub source: Option<String>,
 }
 
 impl Region {
@@ -381,12 +385,19 @@ impl Region {
             flags: FlagSet::new(),
             members: BTreeSet::new(),
             owners: BTreeSet::new(),
+            source: None,
         }
     }
 
     /// Set the priority, builder-style.
     pub fn with_priority(mut self, priority: i32) -> Self {
         self.priority = priority;
+        self
+    }
+
+    /// Set the owning plugin, builder-style.
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
         self
     }
 
@@ -549,6 +560,59 @@ impl RegionIndex {
         self.buckets.get(&chunk).into_iter().flat_map(|b| b.iter())
     }
 
+    /// Every region in `world` whose box overlaps the inclusive box
+    /// `min..=max`, in id order (not priority order — callers that need the
+    /// protection order run the regular priority chain).
+    ///
+    /// This is the box query a plugin model uses to refuse an overlapping
+    /// claim. It walks only the chunk columns the box covers and deduplicates
+    /// the regions that span several of them, so a query costs `O(chunks + k)`
+    /// rather than a scan of every region in the process. A region that merely
+    /// touches the box on a face is adjacent, not overlapping, and is not
+    /// returned.
+    ///
+    /// A pathologically large box (more than a million chunk columns, which no
+    /// gameplay claim is) falls back to scanning the region map so a bad caller
+    /// cannot make the query spin over billions of empty buckets.
+    pub fn overlapping_box(&self, world: &str, min: BlockPos, max: BlockPos) -> Vec<&RegionHandle> {
+        let x0 = min.x.div_euclid(16);
+        let x1 = max.x.div_euclid(16);
+        let z0 = min.z.div_euclid(16);
+        let z1 = max.z.div_euclid(16);
+        let columns =
+            (i64::from(x1) - i64::from(x0) + 1).saturating_mul(i64::from(z1) - i64::from(z0) + 1);
+
+        let hits = |handle: &&RegionHandle| {
+            same_world(&handle.world, world)
+                && handle.min.x <= max.x
+                && min.x <= handle.max.x
+                && handle.min.y <= max.y
+                && min.y <= handle.max.y
+                && handle.min.z <= max.z
+                && min.z <= handle.max.z
+        };
+
+        let mut found: BTreeMap<RegionId, &RegionHandle> = BTreeMap::new();
+        if columns <= 1_048_576 {
+            for cx in x0..=x1 {
+                for cz in z0..=z1 {
+                    for handle in self.overlapping_chunk(ChunkPos::new(cx, cz)) {
+                        if hits(&handle) {
+                            found.entry(handle.id).or_insert(handle);
+                        }
+                    }
+                }
+            }
+        } else {
+            for handle in self.regions.values() {
+                if hits(&handle) {
+                    found.entry(handle.id).or_insert(handle);
+                }
+            }
+        }
+        found.into_values().collect()
+    }
+
     /// Decide `action` at `pos` in `world` for `actor`.
     ///
     /// Regions are considered in the index's `(priority desc, id asc)` order.
@@ -637,6 +701,57 @@ pub struct RegionStore {
 /// The message a denial reports until a plugin configures another.
 pub const DEFAULT_DENY_MESSAGE: &str = "You do not have permission to do that here.";
 
+/// The ownership rule shared by the atomic writers: `None` when `plugin` may
+/// write this id, otherwise the reason it may not.
+fn ownership_error(
+    regions: &HashMap<RegionId, RegionHandle>,
+    plugin: &str,
+    id: RegionId,
+) -> Option<RegionEditError> {
+    match regions.get(&id) {
+        None => None,
+        Some(region) => match region.source.as_deref() {
+            Some(source) if source == plugin => None,
+            Some(source) => Some(RegionEditError::OwnedByOther(source.to_string())),
+            None => Some(RegionEditError::OwnedByCore),
+        },
+    }
+}
+
+/// Why an atomic region write was refused.
+///
+/// A plugin may only replace or remove a region it owns; a core-created region
+/// (`source: None`) and another plugin's region are both protected. The
+/// ownership test and the write happen under the store's builder lock, so two
+/// writers cannot both pass a check for the same id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegionEditError {
+    /// The id belongs to a region created directly in the core.
+    OwnedByCore,
+    /// The id belongs to another plugin's region.
+    OwnedByOther(String),
+    /// The id belongs to a region by the same plugin. A *fresh* insert never
+    /// reuses an occupied id; only an idempotent replay may replace its own.
+    IdTaken,
+    /// The new box overlaps an existing region the caller asked to avoid.
+    Overlap,
+}
+
+impl std::fmt::Display for RegionEditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegionEditError::OwnedByCore => {
+                write!(f, "the region is owned by the core, not by the plugin")
+            }
+            RegionEditError::OwnedByOther(source) => {
+                write!(f, "the region id belongs to `{source}`")
+            }
+            RegionEditError::IdTaken => write!(f, "the region id is already in use"),
+            RegionEditError::Overlap => write!(f, "the region overlaps an existing region"),
+        }
+    }
+}
+
 impl Default for RegionStore {
     fn default() -> Self {
         RegionStore {
@@ -690,6 +805,99 @@ impl RegionStore {
     /// says what the caller means.
     pub fn move_region(&self, region: Region) {
         self.upsert(region);
+    }
+
+    /// Replace the region with the same id, but only when `plugin` already
+    /// owns it. A free id is inserted. A core-owned region (`source: None`) or
+    /// another plugin's region is refused.
+    ///
+    /// The ownership test and the swap run under the builder lock, so two
+    /// writers of the same id cannot both pass it.
+    pub fn upsert_owned(&self, plugin: &str, mut region: Region) -> Result<(), RegionEditError> {
+        let _builder = self.builder.lock().unwrap_or_else(|e| e.into_inner());
+        let current = self
+            .current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(error) = ownership_error(&current.regions, plugin, region.id) {
+            return Err(error);
+        }
+        region.source = Some(plugin.to_string());
+        let mut regions = current.regions.clone();
+        regions.insert(region.id, Arc::new(region));
+        let next = Arc::new(RegionIndex::from_map(regions));
+        *self.current.write().unwrap_or_else(|e| e.into_inner()) = next;
+        Ok(())
+    }
+
+    /// Insert a **fresh** region owned by `plugin`. The id must be completely
+    /// free: any existing region with that id — including one this plugin
+    /// already owns — is refused with [`RegionEditError::IdTaken`]. The box must
+    /// also not overlap an existing region matching `conflict`.
+    ///
+    /// This is the atomic claim insert: the id and overlap tests and the insert
+    /// share the builder lock, so two callers cannot both claim the same land or
+    /// the same id. `conflict` sees an existing region and decides whether it
+    /// blocks the new one — claims pass "same plugin", so a claim may still
+    /// overlap a WorldGuard-style region from another plugin and let the
+    /// priority chain decide.
+    ///
+    /// Unlike [`RegionStore::upsert_owned`], this never replaces anything. Use
+    /// `upsert_owned` for an idempotent startup replay.
+    pub fn insert_new_owned(
+        &self,
+        plugin: &str,
+        mut region: Region,
+        conflict: impl Fn(&Region) -> bool,
+    ) -> Result<(), RegionEditError> {
+        let _builder = self.builder.lock().unwrap_or_else(|e| e.into_inner());
+        let current = self
+            .current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if current.regions.contains_key(&region.id) {
+            return Err(RegionEditError::IdTaken);
+        }
+        if current
+            .overlapping_box(&region.world, region.min, region.max)
+            .into_iter()
+            .any(|handle| conflict(handle))
+        {
+            return Err(RegionEditError::Overlap);
+        }
+        region.source = Some(plugin.to_string());
+        let mut regions = current.regions.clone();
+        regions.insert(region.id, Arc::new(region));
+        let next = Arc::new(RegionIndex::from_map(regions));
+        *self.current.write().unwrap_or_else(|e| e.into_inner()) = next;
+        Ok(())
+    }
+
+    /// Remove the region with `id` only when `plugin` owns it. Returns whether
+    /// anything was removed; a core-owned or another plugin's region is left
+    /// untouched.
+    pub fn remove_owned(&self, plugin: &str, id: RegionId) -> bool {
+        let _builder = self.builder.lock().unwrap_or_else(|e| e.into_inner());
+        let current = self
+            .current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if current
+            .regions
+            .get(&id)
+            .and_then(|region| region.source.as_deref())
+            != Some(plugin)
+        {
+            return false;
+        }
+        let mut regions = current.regions.clone();
+        regions.remove(&id);
+        let next = Arc::new(RegionIndex::from_map(regions));
+        *self.current.write().unwrap_or_else(|e| e.into_inner()) = next;
+        true
     }
 
     /// Remove the region with `id`, if present. A missing id is a no-op.
@@ -1284,6 +1492,128 @@ mod tests {
         assert_eq!(&*store.deny_message(), DEFAULT_DENY_MESSAGE);
         store.set_deny_message("This area is protected.");
         assert_eq!(&*store.deny_message(), "This area is protected.");
+    }
+
+    #[test]
+    fn overlapping_box_finds_only_the_box_and_deduplicates_spans() {
+        let store = RegionStore::new();
+        // Spans four chunks; must be reported once.
+        store.upsert(region(1, (0, 0, 0), (16, 255, 16)).with_source("claims"));
+        store.upsert(region(2, (100, 0, 100), (115, 255, 115)).with_source("claims"));
+        // Adjacent to the queried box on a face, not overlapping.
+        store.upsert(region(3, (16, 0, 0), (31, 255, 15)).with_source("claims"));
+
+        let index = store.snapshot();
+        let found = index.overlapping_box(
+            "overworld",
+            BlockPos::new(0, 64, 0),
+            BlockPos::new(15, 64, 15),
+        );
+        let ids: Vec<u64> = found.iter().map(|handle| handle.id.get()).collect();
+        assert_eq!(
+            ids,
+            vec![1],
+            "far and merely adjacent regions must not match"
+        );
+    }
+
+    #[test]
+    fn upsert_owned_refuses_core_and_foreign_regions() {
+        let store = RegionStore::new();
+        store.upsert(region(1, (0, 0, 0), (15, 255, 15))); // core-owned, source None
+        assert_eq!(
+            store.upsert_owned("claims", region(1, (0, 0, 0), (15, 255, 15))),
+            Err(RegionEditError::OwnedByCore)
+        );
+        // The core region is untouched.
+        assert_eq!(store.snapshot().get(RegionId(1)).unwrap().source, None);
+
+        store.upsert(region(2, (0, 0, 0), (15, 255, 15)).with_source("regions"));
+        assert_eq!(
+            store.upsert_owned("claims", region(2, (0, 0, 0), (15, 255, 15))),
+            Err(RegionEditError::OwnedByOther("regions".to_string()))
+        );
+
+        // The owner may replace its own region.
+        store.upsert(region(3, (0, 0, 0), (15, 255, 15)).with_source("claims"));
+        store
+            .upsert_owned("claims", region(3, (0, 0, 0), (7, 255, 7)))
+            .unwrap();
+        assert_eq!(
+            store.snapshot().get(RegionId(3)).unwrap().max,
+            BlockPos::new(7, 255, 7)
+        );
+        assert!(!store.remove_owned("regions", RegionId(3)));
+        assert!(store.remove_owned("claims", RegionId(3)));
+    }
+
+    #[test]
+    fn insert_owned_if_free_is_atomic_across_threads() {
+        // Ten competing claims for the same box: the overlap test and the
+        // insert share the writer lock, so exactly one may succeed.
+        let store = Arc::new(RegionStore::new());
+        let workers: Vec<_> = (0..10u64)
+            .map(|id| {
+                let store = Arc::clone(&store);
+                std::thread::spawn(move || {
+                    store.insert_new_owned(
+                        "claims",
+                        region(id, (0, 0, 0), (15, 255, 15)).with_source("claims"),
+                        |existing| existing.source.as_deref() == Some("claims"),
+                    )
+                })
+            })
+            .collect();
+        let results: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "{results:?}"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| **r == Err(RegionEditError::Overlap))
+                .count(),
+            9,
+            "{results:?}"
+        );
+        assert_eq!(store.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn insert_new_owned_refuses_the_same_id_even_for_the_same_plugin() {
+        // The same-id race: several attempts pick one fresh id before either
+        // insert lands. A fresh insert must refuse every occupied id, so
+        // exactly one may succeed and no earlier claim is silently replaced.
+        let store = Arc::new(RegionStore::new());
+        let workers: Vec<_> = (0..10u64)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                std::thread::spawn(move || {
+                    store.insert_new_owned(
+                        "claims",
+                        region(42, (0, 0, 0), (15, 255, 15)).with_source("claims"),
+                        |existing| existing.source.as_deref() == Some("claims"),
+                    )
+                })
+            })
+            .collect();
+        let results: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "{results:?}"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| **r == Err(RegionEditError::IdTaken))
+                .count(),
+            9,
+            "{results:?}"
+        );
+        assert_eq!(store.snapshot().len(), 1);
     }
 
     #[test]

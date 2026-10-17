@@ -753,6 +753,123 @@ mod imp {
                 },
             );
         }
+
+        // --- Regions and claims ---------------------------------------------
+
+        /// Insert or replace a region owned by `plugin`.
+        ///
+        /// The host stamps `plugin` as the source. The ownership test and the
+        /// write are atomic in the store, so a plugin can never overwrite a
+        /// core-created region (`source: None`) or another plugin's region,
+        /// even if the numeric id collides.
+        fn region_upsert(
+            &self,
+            plugin: &str,
+            info: &aether_plugin::RegionInfo,
+        ) -> std::result::Result<(), aether_plugin::RegionWriteError> {
+            let region = core_region(plugin, info);
+            crate::region::store()
+                .upsert_owned(plugin, region)
+                .map_err(map_region_error)
+        }
+
+        /// Atomically insert a claim-style region: refuses when a region from
+        /// the same plugin already overlaps the box. Regions from other plugins
+        /// may overlap and are decided by the core's priority chain.
+        fn region_insert(
+            &self,
+            plugin: &str,
+            info: &aether_plugin::RegionInfo,
+        ) -> std::result::Result<(), aether_plugin::RegionWriteError> {
+            let region = core_region(plugin, info);
+            crate::region::store()
+                .insert_new_owned(plugin, region, |existing| {
+                    existing.source.as_deref() == Some(plugin)
+                })
+                .map_err(map_region_error)
+        }
+
+        /// Remove a region, but only when `plugin` owns it. Atomic in the
+        /// store; a missing, core-owned or foreign region is left alone.
+        fn region_remove(&self, plugin: &str, id: u64) {
+            crate::region::store().remove_owned(plugin, crate::region::RegionId(id));
+        }
+
+        fn region_get(&self, _plugin: &str, id: u64) -> Option<aether_plugin::RegionInfo> {
+            crate::region::store()
+                .snapshot()
+                .get(crate::region::RegionId(id))
+                .map(|region| region_info(region))
+        }
+
+        fn regions_overlapping(
+            &self,
+            _plugin: &str,
+            world: &str,
+            min: [i32; 3],
+            max: [i32; 3],
+        ) -> Vec<aether_plugin::RegionInfo> {
+            let index = crate::region::store().snapshot();
+            index
+                .overlapping_box(
+                    world,
+                    crate::region::BlockPos::new(min[0], min[1], min[2]),
+                    crate::region::BlockPos::new(max[0], max[1], max[2]),
+                )
+                .into_iter()
+                .map(|region| region_info(region))
+                .collect()
+        }
+    }
+
+    /// The core region a plugin write describes, with the caller as its source.
+    fn core_region(plugin: &str, info: &aether_plugin::RegionInfo) -> crate::region::Region {
+        let mut region = crate::region::Region::new(
+            crate::region::RegionId(info.id),
+            info.world.clone(),
+            crate::region::BlockPos::new(info.min[0], info.min[1], info.min[2]),
+            crate::region::BlockPos::new(info.max[0], info.max[1], info.max[2]),
+        );
+        region.priority = info.priority;
+        region.source = Some(plugin.to_string());
+        for (name, allowed) in &info.flags {
+            region.flags.set(name.clone(), *allowed);
+        }
+        region.members = info.members.iter().cloned().collect();
+        region.owners = info.owners.iter().cloned().collect();
+        region
+    }
+
+    /// The plugin-facing error for a refused core write.
+    fn map_region_error(error: crate::region::RegionEditError) -> aether_plugin::RegionWriteError {
+        use crate::region::RegionEditError;
+        match error {
+            RegionEditError::OwnedByCore => aether_plugin::RegionWriteError::OwnedByCore,
+            RegionEditError::OwnedByOther(source) => {
+                aether_plugin::RegionWriteError::OwnedByOther(source)
+            }
+            RegionEditError::IdTaken => aether_plugin::RegionWriteError::IdTaken,
+            RegionEditError::Overlap => aether_plugin::RegionWriteError::Overlap,
+        }
+    }
+
+    /// The plugin-facing view of a core region.
+    fn region_info(region: &crate::region::Region) -> aether_plugin::RegionInfo {
+        aether_plugin::RegionInfo {
+            id: region.id.get(),
+            source: region.source.clone(),
+            world: region.world.clone(),
+            min: [region.min.x, region.min.y, region.min.z],
+            max: [region.max.x, region.max.y, region.max.z],
+            priority: region.priority,
+            flags: region
+                .flags
+                .iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+            members: region.members.iter().cloned().collect(),
+            owners: region.owners.iter().cloned().collect(),
+        }
     }
 
     /// The custom journal tag the staff plugin's audit events use.
@@ -1052,6 +1169,13 @@ mod imp {
         install_native(&mut host, cfg, &grant_sink, world);
         for file in discover(Path::new(&cfg.plugins.dir)) {
             let id = file.manifest.id.clone();
+            // A native plugin is compiled in and loaded from its build-time
+            // registration above; a plugin.toml beside its source is only
+            // documentation. Discovering it again would look like a duplicate.
+            if file.manifest.tier == aether_plugin::PluginTier::Native {
+                crate::log::info(&format!("plugin `{id}` is native; loaded from the build"));
+                continue;
+            }
             let entry = cfg.plugins.plugins.get(&id).cloned().unwrap_or_default();
             if !entry.enabled() {
                 crate::log::info(&format!("plugin `{id}` disabled by config"));
@@ -1165,6 +1289,15 @@ mod imp {
             grant_sink,
             aether_regions_plugin::registration(),
             "native regions",
+        );
+        // Claims fill the same core region index through the `region_*` host
+        // hooks; the protection check itself stays in the core (CMD-29b).
+        install_native_one(
+            host,
+            cfg,
+            grant_sink,
+            aether_claims_plugin::registration(),
+            "native claims",
         );
 
         // The admin web interface is the one native plugin that needs the live
@@ -1352,6 +1485,12 @@ mod imp {
         with((), |h| h.after_block_break(&player(handle), x, y, z, block));
     }
 
+    /// A block was placed by a bulk edit (native plugins only: the frozen
+    /// WASM world has no `after-block-place` export).
+    pub fn after_block_place(handle: &PlayerHandle, x: i32, y: i32, z: i32, block: &str) {
+        with((), |h| h.after_block_place(&player(handle), x, y, z, block));
+    }
+
     pub fn before_block_place(
         handle: &PlayerHandle,
         x: i32,
@@ -1396,6 +1535,21 @@ mod imp {
     ) -> Option<String> {
         with(None, |h| {
             cancelled(h.before_block_interact(&player(handle), x, y, z, block))
+        })
+    }
+
+    /// A right-click on a block with `item`: the native golden-shovel hook.
+    #[allow(clippy::too_many_arguments)]
+    pub fn before_use_block(
+        handle: &PlayerHandle,
+        x: i32,
+        y: i32,
+        z: i32,
+        item: &str,
+        block: &str,
+    ) -> Option<String> {
+        with(None, |h| {
+            cancelled(h.before_use_block(&player(handle), x, y, z, item, block))
         })
     }
 
@@ -1522,6 +1676,33 @@ mod imp {
             );
             // A grant the manifest never asked for is not forced on it.
             assert!(effective_capabilities(&[], &["log".to_string()]).is_empty());
+        }
+
+        #[test]
+        fn a_core_region_round_trips_through_the_plugin_shape() {
+            use crate::region::{BlockPos, Region, RegionId};
+
+            let region = Region::new(
+                RegionId(7),
+                "minecraft:overworld",
+                BlockPos::new(-1, -64, 2),
+                BlockPos::new(16, 383, 18),
+            )
+            .with_priority(20)
+            .with_source("claims")
+            .with_flag("build", false)
+            .owner("Alice")
+            .member("Bob");
+
+            let info = super::region_info(&region);
+            assert_eq!(info.id, 7);
+            assert_eq!(info.source.as_deref(), Some("claims"));
+            assert_eq!(info.min, [-1, -64, 2]);
+            assert_eq!(info.max, [16, 383, 18]);
+            assert_eq!(info.priority, 20);
+            assert_eq!(info.flags.get("build"), Some(&false));
+            assert_eq!(info.owners, vec!["Alice".to_string()]);
+            assert_eq!(info.members, vec!["Bob".to_string()]);
         }
 
         #[test]
@@ -1894,6 +2075,7 @@ mod imp {
         None
     }
     pub fn after_block_break(_h: &PlayerHandle, _x: i32, _y: i32, _z: i32, _b: &str) {}
+    pub fn after_block_place(_h: &PlayerHandle, _x: i32, _y: i32, _z: i32, _b: &str) {}
     pub fn before_block_place(
         _h: &PlayerHandle,
         _x: i32,
@@ -1920,6 +2102,17 @@ mod imp {
         _x: i32,
         _y: i32,
         _z: i32,
+        _b: &str,
+    ) -> Option<String> {
+        None
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn before_use_block(
+        _h: &PlayerHandle,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _i: &str,
         _b: &str,
     ) -> Option<String> {
         None
