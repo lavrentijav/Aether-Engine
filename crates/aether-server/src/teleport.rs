@@ -40,6 +40,10 @@ use crate::game::tables::Rng;
 use crate::players::{PlayerHandle, PosLook, SharedRegistry};
 use crate::protocol::{BlockSource, ServerEvent};
 
+/// How far [`TeleportTarget::Safe`] searches from the requested block for a
+/// spot an entity can actually stand on.
+const SAFE_RADIUS: u32 = 8;
+
 /// An integer block coordinate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockPos {
@@ -234,8 +238,9 @@ fn is_safe_spot_with<W: TeleportWorld + ?Sized>(
 ) -> bool {
     // Feet at `pos.y`, head at `pos.y + 1`; both must be addressable, and a
     // floor must exist below the feet (so `pos.y` needs at least one more
-    // block of room under it).
-    if pos.y <= config.min_y || pos.y + 1 > config.max_y {
+    // block of room under it). `pos.y >= max_y` is `pos.y + 1 > max_y` without
+    // the addition, which is what keeps a near-`i32::MAX` coordinate panic-free.
+    if pos.y <= config.min_y || pos.y >= config.max_y {
         return false;
     }
     // A solid floor to stand on.
@@ -267,8 +272,8 @@ fn safe_y_in_column<W: TeleportWorld + ?Sized>(
     config: &SafeSpotConfig,
 ) -> Option<i32> {
     // Feet need a floor below (`min_y`) and a head cell above (`max_y`).
-    let lo = config.min_y + 1;
-    let hi = config.max_y - 1;
+    let lo = config.min_y.saturating_add(1);
+    let hi = config.max_y.saturating_sub(1);
     if hi < lo {
         return None;
     }
@@ -290,19 +295,19 @@ fn safe_y_in_column<W: TeleportWorld + ?Sized>(
     }
     let mut d = 1;
     loop {
-        let up = start + d;
         let down = start - d;
+        let up = start + d;
         let mut any = false;
-        if up <= hi {
-            any = true;
-            if is_safe_spot_with(world, BlockPos::new(x, up, z), config, &mut scratch) {
-                return Some(up);
-            }
-        }
         if down >= lo {
             any = true;
             if is_safe_spot_with(world, BlockPos::new(x, down, z), config, &mut scratch) {
                 return Some(down);
+            }
+        }
+        if up <= hi {
+            any = true;
+            if is_safe_spot_with(world, BlockPos::new(x, up, z), config, &mut scratch) {
+                return Some(up);
             }
         }
         if !any {
@@ -354,10 +359,12 @@ pub fn find_safe_spot<W: TeleportWorld + ?Sized>(
     radius: u32,
     config: SafeSpotConfig,
 ) -> Option<BlockPos> {
-    let r = radius as i32;
+    let r = radius.min(i32::MAX as u32) as i32;
     for ring in 0..=r {
         let found = scan_ring(ring, |dx, dz| {
-            let (x, z) = (around.x + dx, around.z + dz);
+            // A near-`i32::MAX` origin plus a ring delta must not overflow.
+            let x = around.x.checked_add(dx)?;
+            let z = around.z.checked_add(dz)?;
             safe_y_in_column(world, x, z, around.y, &config).map(|y| BlockPos::new(x, y, z))
         });
         if found.is_some() {
@@ -389,15 +396,22 @@ pub fn random_safe_spot<W: TeleportWorld + ?Sized>(
     let span = max_r.saturating_sub(min_r);
     for _ in 0..config.max_attempts.max(1) {
         let angle = rng.f64() * TAU;
+        // Draw the radius in `u64` so a span near `u32::MAX` cannot overflow
+        // the arithmetic (and is not silently narrowed to the minimum).
         let radius = min_r
             + if span == 0 {
                 0
             } else {
-                rng.range(0, span as i32) as u32
+                (rng.next_u64() % (span as u64 + 1)) as u32
             };
         let dx = (angle.cos() * radius as f64).round() as i32;
         let dz = (angle.sin() * radius as f64).round() as i32;
-        let (x, z) = (center.x + dx, center.z + dz);
+        let Some(x) = center.x.checked_add(dx) else {
+            continue;
+        };
+        let Some(z) = center.z.checked_add(dz) else {
+            continue;
+        };
         if let Some(y) = safe_y_in_column(world, x, z, center.y, &config) {
             return Some(BlockPos::new(x, y, z));
         }
@@ -465,7 +479,16 @@ pub fn teleport_with<W: TeleportWorld + BlockSource>(
     let (to, yaw, pitch) = match target {
         TeleportTarget::Exact(pos, yaw, pitch) => (pos, yaw, pitch),
         TeleportTarget::Safe(block) => {
-            let found = find_safe_spot(world, block, 8, SafeSpotConfig::default())
+            // A `Safe` target means "stand at this block if it is safe, else at
+            // the nearest safe spot". Surface preference is for the `/rtp` and
+            // `/spawn` searches (they call `find_safe_spot` with their own
+            // config); here it would drag a plugin teleport to an elevated home
+            // back down to the natural surface, so it is off.
+            let config = SafeSpotConfig {
+                prefer_surface: false,
+                ..SafeSpotConfig::default()
+            };
+            let found = find_safe_spot(world, block, SAFE_RADIUS, config)
                 .ok_or(TeleportError::NoSafeSpot)?;
             (found.feet(), before.yaw, before.pitch)
         }
@@ -860,5 +883,122 @@ mod tests {
             world.resident_sections() > before,
             "the far column should have been materialised"
         );
+    }
+
+    #[test]
+    fn a_safe_target_stays_where_asked_not_on_the_surface() {
+        // A floating platform over ground, with the world reporting a surface
+        // hint. A `Safe` teleport must honour the requested Y instead of being
+        // dragged down to the natural surface (the surface preference belongs
+        // to `/rtp`/`/spawn`, not to a plugin's chosen home).
+        let mut w = TestWorld::default();
+        w.set(0, 3, 0, "minecraft:grass_block");
+        w.set(0, 10, 0, "minecraft:stone");
+        w.surface = Some(4);
+        let handle = handle();
+        let registry = registry_with(&handle);
+        let out = teleport(
+            &handle,
+            &registry,
+            &w,
+            TeleportTarget::Safe(BlockPos::new(0, 11, 0)),
+            TeleportCause::Plugin,
+        )
+        .unwrap();
+        assert_eq!(out, BlockPos::new(0, 11, 0).feet());
+    }
+
+    #[test]
+    fn a_safe_target_passes_the_resolved_position_to_the_hook() {
+        struct Checker {
+            seen: Mutex<Option<Vector3>>,
+        }
+        impl TeleportHooks for Checker {
+            fn allow_entry(&self, _h: &PlayerHandle, to: Vector3, _c: TeleportCause) -> bool {
+                *self.seen.lock().unwrap() = Some(to);
+                true
+            }
+        }
+        let handle = handle();
+        let registry = registry_with(&handle);
+        let world = cave();
+        let checker = Checker {
+            seen: Mutex::new(None),
+        };
+        teleport_with(
+            &handle,
+            &registry,
+            &world,
+            TeleportTarget::Safe(BlockPos::new(0, 15, 0)),
+            TeleportCause::Plugin,
+            &checker,
+        )
+        .unwrap();
+        assert_eq!(
+            checker.seen.lock().unwrap().unwrap(),
+            BlockPos::new(0, 11, 0).feet()
+        );
+    }
+
+    #[test]
+    fn a_search_near_the_coordinate_limit_does_not_overflow() {
+        // Public API, so a near-`i32::MAX`/`i32::MIN` origin must not panic in a
+        // debug build when the ring deltas are added.
+        let world = TestWorld::default();
+        let config = SafeSpotConfig {
+            prefer_surface: false,
+            ..SafeSpotConfig::default()
+        };
+        assert_eq!(
+            find_safe_spot(
+                &world,
+                BlockPos::new(i32::MAX - 1, 64, i32::MIN + 1),
+                3,
+                config,
+            ),
+            None
+        );
+        // A minimal radius span, so the random path takes the coordinate-add
+        // branch without a huge loop.
+        let mut rng = Rng::new(1);
+        assert_eq!(
+            random_safe_spot(
+                &world,
+                BlockPos::new(i32::MAX - 1, 64, i32::MIN + 1),
+                u32::MAX,
+                u32::MAX,
+                config,
+                &mut rng,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_random_spot_respects_the_radius_band() {
+        // Ground everywhere in a wide square, so every sampled column resolves.
+        let mut w = TestWorld::default();
+        for x in -200..=200 {
+            for z in -200..=200 {
+                w.set(x, 3, z, "minecraft:grass_block");
+            }
+        }
+        let config = SafeSpotConfig {
+            prefer_surface: false,
+            ..SafeSpotConfig::default()
+        };
+        let mut rng = Rng::new(3);
+        for _ in 0..20 {
+            let spot =
+                random_safe_spot(&w, BlockPos::new(0, 64, 0), 100, 150, config, &mut rng).unwrap();
+            let dist = (spot.x as f64).hypot(spot.z as f64);
+            assert!(
+                (99.0..=151.0).contains(&dist),
+                "distance {dist} left the [100, 150] band"
+            );
+        }
+        // A radius span past `i32::MAX` must not panic or wrap.
+        let mut rng = Rng::new(7);
+        let _ = random_safe_spot(&w, BlockPos::new(0, 64, 0), 0, u32::MAX, config, &mut rng);
     }
 }

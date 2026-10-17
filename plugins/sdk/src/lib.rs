@@ -12,10 +12,11 @@
 //! mechanisms through the [`HostBackend`] the host hands it. It never
 //! implements the game itself. Permission **reads** front the core store
 //! (CMD-01) through the backend and fail closed when there is none; the
-//! permission **write** model (CMD-02) and teleport/give (CMD-31/32) are not
-//! on this branch, so those calls return the neutral answer rather than
-//! guessing. That is the approved design: facades, not a second
-//! implementation.
+//! permission **write** model (CMD-02) fronts the core store, `players`
+//! teleport goes through the core CMD-31 service (capability-gated on
+//! `players.teleport`), and `players.give` (CMD-32) still returns the neutral
+//! answer rather than guessing. That is the approved design: facades, not a
+//! second implementation.
 //!
 //! It is a plugin like any other: the server adds it through the build-time
 //! native registry, its manifest can disable it, and a dependent that
@@ -33,7 +34,7 @@ use aether_plugin::placeholders::{
 use aether_plugin::sdk::{
     self, ArgKind, CommandSpec, CommandsService, ConfirmService, CooldownsService, HistoryPage,
     HistoryService, HistoryWindow, MessagesService, PermissionsService, PlayersService, Pos,
-    Resolution, SchedulerService, TeleportCause, TitleTimes,
+    Resolution, SchedulerService, TeleportCause, TitleTimes, CAP_PLAYERS_TELEPORT,
 };
 use aether_plugin::{
     HostBackend, LogLevel, NativeContext, NativePlugin, NativeRegistration, Player,
@@ -718,6 +719,15 @@ impl Players {
             .map(|b| b.online_players(caller))
             .unwrap_or_default()
     }
+
+    /// Whether `caller` was granted `players.teleport`.
+    fn may_teleport(&self, caller: &str) -> bool {
+        self.backend.get().is_some_and(|b| {
+            b.capabilities(caller)
+                .iter()
+                .any(|c| c == CAP_PLAYERS_TELEPORT)
+        })
+    }
 }
 
 impl PlayersService for Players {
@@ -747,10 +757,23 @@ impl PlayersService for Players {
         to: Pos,
         cause: TeleportCause,
     ) -> Result<(), String> {
-        match self.backend.get() {
-            Some(b) => b.teleport_player(caller, p.id, to.x, to.y, to.z, cause),
-            None => Err("player service unavailable".to_string()),
+        let Some(b) = self.backend.get() else {
+            return Err("player service unavailable".to_string());
+        };
+        // The capability gate lives here, in the service layer, for native and
+        // WASM callers alike — the same shape as `history.read`. Moving a
+        // player is a write, so an ungranted caller must not reach the host.
+        if !self.may_teleport(caller) {
+            b.log(
+                caller,
+                LogLevel::Warn,
+                &format!("lacks `{CAP_PLAYERS_TELEPORT}`; teleport refused"),
+            );
+            return Err(format!(
+                "caller `{caller}` lacks the `{CAP_PLAYERS_TELEPORT}` capability"
+            ));
         }
+        b.teleport_player(caller, p.id, to.x, to.y, to.z, cause)
     }
 
     fn give(&self, _caller: &str, _p: &Player, _item: &str, count: u32) -> u64 {
@@ -1906,6 +1929,96 @@ mod tests {
                 TeleportCause::Plugin
             )
             .is_err());
+    }
+
+    #[test]
+    fn player_teleport_is_capability_gated_and_forwards_the_call() {
+        // A backend that grants one caller `players.teleport` and records the
+        // coordinates a teleport reaches the host with.
+        #[derive(Default)]
+        struct Rec {
+            calls: StdMutex<Vec<(String, u64, f64, f64, f64)>>,
+        }
+        impl HostBackend for Rec {
+            fn kv_get(&self, _: &str, _: &str) -> Option<Vec<u8>> {
+                None
+            }
+            fn kv_put(&self, _: &str, _: &str, _: &[u8]) {}
+            fn kv_delete(&self, _: &str, _: &str) {}
+            fn kv_list(&self, _: &str, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn log(&self, _: &str, _: LogLevel, _: &str) {}
+            fn config(&self, _: &str, _: &str) -> Option<String> {
+                None
+            }
+            fn supports(&self, _: &str, _: &str) -> bool {
+                false
+            }
+            fn capabilities(&self, plugin: &str) -> Vec<String> {
+                if plugin == "essentials" {
+                    vec![CAP_PLAYERS_TELEPORT.to_string()]
+                } else {
+                    Vec::new()
+                }
+            }
+            fn teleport_player(
+                &self,
+                plugin: &str,
+                player: u64,
+                x: f64,
+                y: f64,
+                z: f64,
+                _cause: TeleportCause,
+            ) -> Result<(), String> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((plugin.to_string(), player, x, y, z));
+                Ok(())
+            }
+        }
+        let rec = Arc::new(Rec::default());
+        let slot = Arc::new(OnceLock::new());
+        let players = Players::new(Arc::clone(&slot));
+        let _ = slot.set(rec.clone() as Arc<dyn HostBackend>);
+        let p = Player {
+            id: 7,
+            name: "Steve".to_string(),
+            operator: false,
+        };
+        // Granted: the caller id and the exact coordinates reach the host.
+        players
+            .teleport(
+                "essentials",
+                &p,
+                Pos {
+                    x: 1.5,
+                    y: 64.0,
+                    z: -2.5,
+                },
+                TeleportCause::Plugin,
+            )
+            .unwrap();
+        assert_eq!(
+            rec.calls.lock().unwrap().as_slice(),
+            [("essentials".to_string(), 7u64, 1.5, 64.0, -2.5)]
+        );
+        // Ungranted: refused before the host is reached; nobody is moved.
+        let err = players
+            .teleport(
+                "nobody",
+                &p,
+                Pos {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                TeleportCause::Plugin,
+            )
+            .unwrap_err();
+        assert!(err.contains(CAP_PLAYERS_TELEPORT), "{err}");
+        assert_eq!(rec.calls.lock().unwrap().len(), 1);
     }
 
     #[test]
