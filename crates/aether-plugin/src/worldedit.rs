@@ -34,6 +34,13 @@ pub trait WorldEditHost: Send + Sync {
         min: [i32; 3],
         max: [i32; 3],
     ) -> Result<(), String>;
+    /// The region check over exactly the cells an operation will touch.
+    ///
+    /// A paste with `-a`, a move and a brush change a subset of their bounding
+    /// box, so checking the box would refuse a legal edit that merely shares a
+    /// corner with a protected region. The core still owns the verdict and the
+    /// bypass nodes; the plugin only names the cells.
+    fn check_cells(&self, caller: &str, player: u64, cells: &[[i32; 3]]) -> Result<(), String>;
     fn begin_edit(&self, caller: &str, player: u64, expected_volume: usize) -> Result<u64, String>;
     fn set_block(
         &self,
@@ -56,6 +63,25 @@ pub trait WorldEditHost: Send + Sync {
     fn abort(&self, caller: &str, edit: u64);
     fn undo(&self, caller: &str, player: u64, undo_id: u64) -> Result<EditOutcome, String>;
     fn resolve_position(&self, caller: &str, player: u64, text: &str) -> Result<[i32; 3], String>;
+
+    /// Persist a schematic's bytes under `name`. The host owns the directory
+    /// and the file extension; the plugin owns the `.schem` encoding.
+    fn save_schematic(&self, caller: &str, name: &str, bytes: &[u8]) -> Result<(), String>;
+    /// Read a schematic's bytes, or `None` when no schematic has that name.
+    fn load_schematic(&self, caller: &str, name: &str) -> Result<Option<Vec<u8>>, String>;
+    /// The schematic names visible to the caller, sorted.
+    fn list_schematics(&self, caller: &str) -> Vec<String>;
+}
+
+/// A schematic name is a single file stem: ASCII letters, digits, `_` and `-`.
+/// The host applies the same rule, so neither a plugin nor a file on disk can
+/// escape the schematic directory.
+pub fn valid_schematic_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 pub struct WorldEditHostProvider(pub Arc<dyn WorldEditHost>);

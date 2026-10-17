@@ -23,6 +23,21 @@ use crate::native::{NativeContext, NativePlugin};
 use crate::service::ServiceRegistry;
 use crate::{Error, Result};
 
+/// A read-only block description for a plugin's vertical helpers.
+///
+/// `solid` is the same collision answer the core uses for a safe spot (a slab
+/// is still solid, an open gate is not), and `hazard` names the blocks
+/// CMD-31 refuses to put a body in (lava, fire, cactus, campfire).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldBlock {
+    /// The full block-state name, properties and all (`minecraft:oak_stairs[...]`).
+    pub name: String,
+    /// Whether the state has any collision box.
+    pub solid: bool,
+    /// Whether the state is a CMD-31 hazard.
+    pub hazard: bool,
+}
+
 /// Host services a plugin may call. The server implements this over the world
 /// store and its own log; tests implement it in memory.
 pub trait HostBackend: Send + Sync {
@@ -90,6 +105,62 @@ pub trait HostBackend: Send + Sync {
         None
     }
 
+    /// A player's yaw and pitch, in degrees. Used by `/jump` (the block the
+    /// player is looking at). The default is `None`; a command that needs a
+    /// facing refuses rather than guessing one.
+    fn player_look(&self, _plugin: &str, _player: u64) -> Option<(f32, f32)> {
+        None
+    }
+
+    /// `world.read`: one block state, or `None` when the host cannot read the
+    /// world (ungranted capability, stripped build, no world).
+    ///
+    /// Additive on the host trait: the default answers "unknown", so a test
+    /// backend that only exercises commands keeps working.
+    fn world_block(&self, _plugin: &str, _x: i32, _y: i32, _z: i32) -> Option<WorldBlock> {
+        None
+    }
+
+    /// `world.read`: the inclusive block-Y range of the current world.
+    fn world_height(&self, _plugin: &str) -> Option<(i32, i32)> {
+        None
+    }
+
+    /// The CMD-31 nearest-safe-spot search, exposed so a plugin command
+    /// (`/top`, `/jump`, `/up`) never re-derives collision itself.
+    ///
+    /// `around` is a block coordinate, `radius` a Chebyshev radius in blocks,
+    /// and `prefer_surface` asks for the world's natural surface hint first.
+    fn find_safe_spot(
+        &self,
+        _plugin: &str,
+        _around: (i32, i32, i32),
+        _radius: u32,
+        _prefer_surface: bool,
+    ) -> Option<(i32, i32, i32)> {
+        None
+    }
+
+    /// The CMD-31 random safe-spot search, bounded by the core's attempt
+    /// budget; `None` means no spot was found and nothing is teleported.
+    fn random_safe_spot(
+        &self,
+        _plugin: &str,
+        _center: (i32, i32, i32),
+        _min_radius: u32,
+        _max_radius: u32,
+    ) -> Option<(i32, i32, i32)> {
+        None
+    }
+
+    /// Whether `player` has ignored `other` for incoming teleport requests.
+    ///
+    /// The ignore list itself is CMD-40's; the host hook keeps the two plugins
+    /// independent. The default is `false` (nobody ignores anybody).
+    fn player_ignores(&self, _plugin: &str, _player: u64, _other: u64) -> bool {
+        false
+    }
+
     /// The item in a player's main hand (a `minecraft:` name), for a plugin
     /// that must tell its own tool from an ordinary block click. The default
     /// is `None`, so a host without inventories answers "nothing held".
@@ -111,6 +182,25 @@ pub trait HostBackend: Send + Sync {
         _cause: crate::sdk::TeleportCause,
     ) -> std::result::Result<(), String> {
         Err("teleport is not supported by this host".to_string())
+    }
+
+    /// Move a player to an **exact** position, without the safe-spot search.
+    ///
+    /// Only for a command that has already validated the destination against
+    /// the same collision and hazard rules the core uses (`/up`, whose target
+    /// body cells the plugin checks before asking). Every other plugin move
+    /// must use [`Self::teleport_player`], the safe search. The default
+    /// refuses, so a host without a world never pretends the move happened.
+    fn teleport_player_exact(
+        &self,
+        _plugin: &str,
+        _player: u64,
+        _x: f64,
+        _y: f64,
+        _z: f64,
+        _cause: crate::sdk::TeleportCause,
+    ) -> std::result::Result<(), String> {
+        Err("exact teleport is not supported by this host".to_string())
     }
 
     /// Disconnect a player with `reason`. The default does nothing.

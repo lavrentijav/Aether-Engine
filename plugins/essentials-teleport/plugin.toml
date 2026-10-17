@@ -1,4 +1,4 @@
-# Manifest for the essentials-teleport plugin (CMD-37a).
+# Manifest for the essentials-teleport plugin (CMD-37a + CMD-37b).
 # Native (tier N): compiled into the server, so this file is documentation and
 # the server's build-time `registration()` is the source of truth. It is still
 # parsed by `discover`; `tier = "native"` makes the loader skip the `.wasm`
@@ -10,11 +10,11 @@ api = "0.1"
 tier = "native"
 priority = 30
 
-capabilities = ["log", "config", "supports", "storage.kv", "players", "players.teleport", "scheduler"]
+capabilities = ["log", "config", "supports", "storage.kv", "players", "players.teleport", "world.read", "scheduler"]
 
 subscribe = ["on-command", "on-tick", "after-damage", "after-entity-death", "after-player-leave"]
 
-# CMD-37a. CMD-37b adds /tpa, /back, /rtp and the vertical helpers.
+# CMD-37a homes/warps/spawn and CMD-37b requests, /back, vertical and /rtp.
 # `/spawn` is deliberately absent: it stays core (CMD-11).
 commands = [
     "sethome",
@@ -26,4 +26,17 @@ commands = [
     "delwarp",
     "warps",
     "setspawn",
+    "tpa",
+    "tpahere",
+    "tpaccept",
+    "tpdeny",
+    "tpcancel",
+    "tpall",
+    "tphere",
+    "tppos",
+    "back",
+    "top",
+    "jump",
+    "up",
+    "rtp",
 ]

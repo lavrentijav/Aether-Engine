@@ -14,6 +14,7 @@ name = "aether_worldedit_plugin"
 
 [dependencies]
 aether-plugin = { workspace = true }
+miniz_oxide = { workspace = true }
 
 [lints]
 workspace = true
