@@ -526,7 +526,15 @@ pub fn respawn(
 }
 
 /// Blow up at `pos`: break blocks, hurt and push everyone nearby.
+///
+/// The region `explosion` flag is consulted per block: a protected block is
+/// skipped while the rest of the blast still breaks. Entity damage is not
+/// region-gated (the brief scopes the flag to block damage).
 pub fn explode(pos: Vector3, radius: f32, registry: &SharedRegistry, world: &DemoWorld) {
+    // One snapshot for the whole blast; the check itself is lock-free and
+    // allocates nothing. Protected blocks are skipped, unprotected ones in
+    // the same blast still break.
+    let regions = crate::region::store().snapshot();
     let r = radius as f64;
     let ri = radius.ceil() as i32;
     let (cx, cy, cz) = (
@@ -544,6 +552,15 @@ pub fn explode(pos: Vector3, radius: f32, registry: &SharedRegistry, world: &Dem
                     continue;
                 }
                 let (x, y, z) = (cx + dx, cy + dy, cz + dz);
+                let verdict = regions.check(
+                    crate::region::OVERWORLD,
+                    crate::region::BlockPos::new(x, y, z),
+                    crate::region::Action::Explosion,
+                    &crate::region::Actor::server(),
+                );
+                if !verdict.allows() {
+                    continue;
+                }
                 let b = world.get_block(x, y, z);
                 if b == block_ids::AIR {
                     continue;
@@ -653,6 +670,50 @@ pub fn explode(pos: Vector3, radius: f32, registry: &SharedRegistry, world: &Dem
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_world(seed: u64) -> DemoWorld {
+        use aether_api::{FjallStore, World};
+        let dir = std::env::temp_dir().join(format!("aether-region-{}-{seed}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FjallStore::open(&dir).expect("temp store");
+        let generator = crate::worldgen::Generator::load("", "", seed).expect("noise generator");
+        let revision = generator.revision();
+        let cfg = crate::gencache::CacheConfig {
+            root: String::new(),
+            ..Default::default()
+        };
+        let generator = crate::gencache::Cached::with_revision(generator, seed, revision, &cfg);
+        World::new(store, generator)
+    }
+
+    #[test]
+    fn an_explosion_skips_protected_blocks_and_breaks_the_rest() {
+        let regions = crate::region::install_test_store(crate::region::RegionStore::new());
+        let region = crate::region::Region::new(
+            crate::region::RegionId(1),
+            "overworld",
+            crate::region::BlockPos::new(0, 0, 0),
+            crate::region::BlockPos::new(7, 255, 7),
+        )
+        .with_flag("explosion", false);
+        regions.replace_all([region.handle()]);
+
+        let world = test_world(29);
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        world.set_block(4, 200, 2, "minecraft:stone");
+        world.set_block(12, 200, 2, "minecraft:stone");
+        explode(Vector3::new(8.0, 200.0, 2.0), 6.0, &registry, &world);
+        assert_ne!(
+            world.get_block(4, 200, 2),
+            block_ids::AIR,
+            "the protected block survived"
+        );
+        assert_eq!(
+            world.get_block(12, 200, 2),
+            block_ids::AIR,
+            "the unprotected block in the same blast broke"
+        );
+    }
 
     #[test]
     fn a_full_charge_hits_full_and_spam_hits_a_fifth() {

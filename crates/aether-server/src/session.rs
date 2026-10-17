@@ -884,12 +884,7 @@ fn play_loop(
                     // block in front of it: the client predicted the
                     // opening, the server placed a block, and the ack
                     // reverted the prediction.
-                    set_and_broadcast(world, registry, handle, tx, ty, tz, next);
-                    // A door is two blocks and they must agree, or the top
-                    // half stays shut while the bottom swings.
-                    if let Some((oy, other)) = crate::placement::other_half(next) {
-                        set_and_broadcast(world, registry, handle, tx, ty + oy, tz, other);
-                    }
+                    toggle_block(handle, registry, world, tx, ty, tz, next);
                 } else {
                     // The placement packet names only the hand, so the codec
                     // can only guess. What the player actually holds is known
@@ -949,21 +944,11 @@ fn play_loop(
                                 .and_then(|id| id.vanilla_name())
                                 .unwrap_or_default();
                             if let Some(to) = interact::item_on_block(tool, &clicked) {
-                                if let Some(state) =
-                                    aether_world::registry::blocks::default_state(to)
-                                {
-                                    set_and_broadcast(world, registry, handle, tx, ty, tz, state);
-                                    crate::game::combat::wear_held(handle, world, 1);
-                                }
+                                till_block(handle, registry, world, tx, ty, tz, to);
                             } else if tool == "minecraft:flint_and_steel"
                                 && world.get_block(x, y, z) == block_ids::AIR
                             {
-                                if let Some(fire) =
-                                    aether_world::registry::blocks::default_state("minecraft:fire")
-                                {
-                                    set_and_broadcast(world, registry, handle, x, y, z, fire);
-                                    crate::game::combat::wear_held(handle, world, 1);
-                                }
+                                ignite_block(handle, registry, world, x, y, z);
                             } else {
                                 let now = world.get_block(x, y, z);
                                 handle.emit(
@@ -1076,6 +1061,10 @@ fn play_loop(
                     .held_item()
                     .and_then(|id| id.vanilla_name())
                     .unwrap_or_default();
+                // A region's `use` flag is checked at the cell the item
+                // changes (a bucket's raycast target), not at the player's
+                // feet: standing outside a claim must not drain a source
+                // inside it. `interact::use_item` does that check.
                 if let Some(reason) = crate::plugins::before_use_item(handle, item) {
                     if !reason.is_empty() {
                         handle.emit(&ServerEvent::Chat(reason), world);
@@ -1087,7 +1076,9 @@ fn play_loop(
             }
             ClientEvent::Interact { target, attack, .. } => {
                 if attack {
-                    if let Some(reason) = crate::plugins::before_attack(handle, target as u64) {
+                    let veto = pvp_denial(handle, registry, target)
+                        .or_else(|| crate::plugins::before_attack(handle, target as u64));
+                    if let Some(reason) = veto {
                         if !reason.is_empty() {
                             handle.emit(&ServerEvent::Chat(reason), world);
                         }
@@ -1158,6 +1149,103 @@ fn play_loop(
 /// The window id the recovery stash opens under.
 const STASH_WINDOW: u8 = 1;
 
+/// Toggle a door, trapdoor or fence gate, after the region's interaction
+/// check on the clicked cell. A refused toggle leaves both halves as they were
+/// and does not fall through to a placement.
+fn toggle_block(
+    handle: &crate::players::PlayerHandle,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    x: i32,
+    y: i32,
+    z: i32,
+    next: BlockStateId,
+) {
+    let upper = crate::placement::other_half(next);
+    let veto =
+        crate::region::denial_at(handle, x, y, z, crate::region::Action::Interact).or_else(|| {
+            upper.and_then(|(oy, _)| {
+                crate::region::denial_at(handle, x, y + oy, z, crate::region::Action::Interact)
+            })
+        });
+    if let Some(reason) = veto {
+        if !reason.is_empty() {
+            handle.emit(&ServerEvent::Chat(reason), world);
+        }
+        return;
+    }
+    set_and_broadcast(world, registry, handle, x, y, z, next);
+    // A door is two blocks and they must agree, or the top half stays shut
+    // while the bottom swings.
+    if let Some((oy, other)) = upper {
+        set_and_broadcast(world, registry, handle, x, y + oy, z, other);
+    }
+}
+
+/// A hoe or shovel turns the clicked block into `to`, after the region's build
+/// check on that cell.
+fn till_block(
+    handle: &crate::players::PlayerHandle,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    x: i32,
+    y: i32,
+    z: i32,
+    to: &str,
+) {
+    if let Some(reason) = crate::region::denial_at(handle, x, y, z, crate::region::Action::Place) {
+        if !reason.is_empty() {
+            handle.emit(&ServerEvent::Chat(reason), world);
+        }
+        return;
+    }
+    if let Some(state) = aether_world::registry::blocks::default_state(to) {
+        set_and_broadcast(world, registry, handle, x, y, z, state);
+        crate::game::combat::wear_held(handle, world, 1);
+    }
+}
+
+/// Flint and steel lights a fire in the empty cell `(x, y, z)`, after the
+/// region's build check on that cell.
+fn ignite_block(
+    handle: &crate::players::PlayerHandle,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    x: i32,
+    y: i32,
+    z: i32,
+) {
+    if let Some(reason) = crate::region::denial_at(handle, x, y, z, crate::region::Action::Place) {
+        if !reason.is_empty() {
+            handle.emit(&ServerEvent::Chat(reason), world);
+        }
+        return;
+    }
+    if let Some(fire) = aether_world::registry::blocks::default_state("minecraft:fire") {
+        set_and_broadcast(world, registry, handle, x, y, z, fire);
+        crate::game::combat::wear_held(handle, world, 1);
+    }
+}
+
+/// The region veto for a player attack: the `pvp` flag at the victim's cell.
+/// Only a player target has a region; a mob is never subject to the flag.
+fn pvp_denial(
+    handle: &crate::players::PlayerHandle,
+    registry: &SharedRegistry,
+    target: i32,
+) -> Option<String> {
+    registry.by_entity(target).and_then(|victim| {
+        let p = victim.pos();
+        crate::region::denial_at(
+            handle,
+            p.x.floor() as i32,
+            p.y.floor() as i32,
+            p.z.floor() as i32,
+            crate::region::Action::Pvp,
+        )
+    })
+}
+
 /// Break the block at `(x, y, z)` on a player's behalf.
 fn break_block(
     handle: &crate::players::PlayerHandle,
@@ -1172,9 +1260,11 @@ fn break_block(
         return;
     }
     let name = crate::game::block_name(world, broken).unwrap_or_default();
-    // A plugin may veto the break; the client predicted it, so put the block
-    // back on their screen and say why.
-    if let Some(reason) = crate::plugins::before_block_break(handle, x, y, z, &name) {
+    // A region protects the block before a plugin gets a say. The client
+    // predicted the break, so put the block back on their screen and say why.
+    let veto = crate::region::denial_at(handle, x, y, z, crate::region::Action::Break)
+        .or_else(|| crate::plugins::before_block_break(handle, x, y, z, &name));
+    if let Some(reason) = veto {
         if !reason.is_empty() {
             handle.emit(&ServerEvent::Chat(reason), world);
         }
@@ -1215,6 +1305,12 @@ fn place_block(
     if !(WORLD_BOTTOM..WORLD_TOP).contains(&y) {
         return false;
     }
+    if let Some(reason) = crate::region::denial_at(handle, x, y, z, crate::region::Action::Place) {
+        if !reason.is_empty() {
+            handle.emit(&ServerEvent::Chat(reason), world);
+        }
+        return false;
+    }
     let here = world.get_block(x, y, z);
     if handle.full() && !crate::placement::rules::is_replaceable(here) {
         return false;
@@ -1250,9 +1346,21 @@ fn place_block(
             return false;
         }
     }
-    // A door is two blocks; if either would land in somebody, the whole
-    // placement is refused, the way vanilla refuses it.
+    // A door is two blocks, so the region check covers both cells: a claim
+    // with a ceiling at this y must not let its upper half through.
     let upper = crate::placement::upper_half_of(state);
+    if upper.is_some() {
+        if let Some(reason) =
+            crate::region::denial_at(handle, x, y + 1, z, crate::region::Action::Place)
+        {
+            if !reason.is_empty() {
+                handle.emit(&ServerEvent::Chat(reason), world);
+            }
+            return false;
+        }
+    }
+    // If either would land in somebody, the whole placement is refused, the
+    // way vanilla refuses it.
     let buried = would_bury_a_player(registry, x, y, z, state)
         || upper.is_some_and(|u| would_bury_a_player(registry, x, y + 1, z, u));
     if buried {
@@ -2138,10 +2246,13 @@ mod placement_tests {
         assert_eq!(parse_pack_status(&[0x80, 0x80]), PackStatus::Unknown);
     }
 
-    /// A throwaway world on a temp store, for the placement-rule tests.
-    fn test_world(seed: u64) -> DemoWorld {
+    /// A throwaway world on a temp store, for the placement-rule tests. The
+    /// `tag` keeps every test's directory unique: tests run in parallel and
+    /// the store's `flock` refuses a second open of the same path.
+    fn test_world(seed: u64, tag: &str) -> DemoWorld {
         use aether_api::{FjallStore, World};
-        let dir = std::env::temp_dir().join(format!("aether-blk-{}-{seed}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aether-blk-{}-{seed}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = FjallStore::open(&dir).expect("temp store");
         let generator = crate::worldgen::Generator::load("", "", seed).expect("noise generator");
@@ -2154,11 +2265,198 @@ mod placement_tests {
         World::new(store, generator)
     }
 
+    #[test]
+    fn a_region_blocks_break_and_place() {
+        let regions = crate::region::install_test_store(crate::region::RegionStore::new());
+        let region = crate::region::Region::new(
+            crate::region::RegionId(1),
+            "overworld",
+            crate::region::BlockPos::new(0, 0, 0),
+            crate::region::BlockPos::new(15, 255, 15),
+        )
+        .with_flag("build", false);
+        regions.replace_all([region.handle()]);
+
+        let world = test_world(29, "break-place");
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(1, "RegionGuest");
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+
+        world.set_block(0, 100, 0, "minecraft:stone");
+        break_block(&handle, &registry, &world, 0, 100, 0);
+        assert_eq!(
+            world.get_block(0, 100, 0),
+            aether_world::registry::blocks::default_state("minecraft:stone").unwrap(),
+            "the break hook must leave a protected block in place"
+        );
+
+        let stone = aether_world::registry::blocks::default_state("minecraft:stone").unwrap();
+        let placed = place_block(
+            &handle,
+            &registry,
+            &world,
+            1,
+            100,
+            0,
+            stone,
+            1,
+            (0.5, 1.0, 0.5),
+        );
+        assert!(!placed, "the place hook must refuse a protected cell");
+        assert_eq!(
+            world.get_block(1, 100, 0),
+            block_ids::AIR,
+            "a refused placement writes nothing"
+        );
+    }
+
+    #[test]
+    fn a_region_boundary_between_door_halves_protects_the_upper_half() {
+        // Only the upper cell is claimed. Breaking the unprotected lower half
+        // must not delete the protected upper half: the break hook checks the
+        // pair before removing it.
+        let regions = crate::region::install_test_store(crate::region::RegionStore::new());
+        let region = crate::region::Region::new(
+            crate::region::RegionId(1),
+            "overworld",
+            crate::region::BlockPos::new(0, 101, 0),
+            crate::region::BlockPos::new(0, 101, 0),
+        )
+        .with_flag("build", false);
+        regions.replace_all([region.handle()]);
+
+        let world = test_world(29, "door-break-boundary");
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(1, "DoorBreakGuest");
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+
+        let lower = aether_world::registry::blocks::default_state("minecraft:oak_door").unwrap();
+        let (dy, upper) = crate::placement::other_half(lower).expect("a door has two halves");
+        assert_eq!(dy, 1);
+        world.set_block_id(0, 100, 0, lower, world.props_of(lower));
+        world.set_block_id(0, 101, 0, upper, world.props_of(upper));
+
+        break_block(&handle, &registry, &world, 0, 100, 0);
+
+        assert_eq!(
+            world.get_block(0, 100, 0),
+            block_ids::AIR,
+            "the unprotected lower half breaks"
+        );
+        assert_eq!(
+            world.get_block(0, 101, 0),
+            upper,
+            "the protected upper half must survive a break of its pair"
+        );
+    }
+
+    /// A region with `build = deny` over `(0..=15, y)` in the overworld, plus
+    /// a guest handle. Every test below starts from this fixture.
+    fn protected_fixture(
+        seed: u64,
+        tag: &str,
+    ) -> (
+        DemoWorld,
+        SharedRegistry,
+        std::sync::Arc<crate::players::PlayerHandle>,
+    ) {
+        let regions = crate::region::install_test_store(crate::region::RegionStore::new());
+        let region = crate::region::Region::new(
+            crate::region::RegionId(1),
+            "overworld",
+            crate::region::BlockPos::new(0, 0, 0),
+            crate::region::BlockPos::new(15, 255, 15),
+        )
+        .with_flag("build", false)
+        .with_flag("use", false);
+        regions.replace_all([region.handle()]);
+
+        let world = test_world(seed, tag);
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(1, tag);
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+        (world, registry, handle)
+    }
+
+    #[test]
+    fn a_region_blocks_a_door_toggle() {
+        let (world, registry, handle) = protected_fixture(29, "DoorGuest");
+        world.set_block(0, 100, 0, "minecraft:oak_door");
+        let shut = world.get_block(0, 100, 0);
+        let Some(crate::placement::Interaction::Toggle(next)) =
+            crate::placement::interact(shut, false)
+        else {
+            panic!("an oak door must toggle");
+        };
+        toggle_block(&handle, &registry, &world, 0, 100, 0, next);
+        assert_eq!(
+            world.get_block(0, 100, 0),
+            shut,
+            "a non-member must not open a door in a protected region"
+        );
+    }
+
+    #[test]
+    fn a_region_blocks_tilling_and_igniting() {
+        let (world, registry, handle) = protected_fixture(29, "ToolGuest");
+        world.set_block(0, 100, 0, "minecraft:grass_block");
+        let grass = world.get_block(0, 100, 0);
+        till_block(&handle, &registry, &world, 0, 100, 0, "minecraft:farmland");
+        assert_eq!(
+            world.get_block(0, 100, 0),
+            grass,
+            "a hoe must not till a protected cell"
+        );
+        world.set_block(1, 100, 0, "minecraft:air");
+        ignite_block(&handle, &registry, &world, 1, 100, 0);
+        assert_eq!(
+            world.get_block(1, 100, 0),
+            block_ids::AIR,
+            "flint and steel must not light a protected cell"
+        );
+    }
+
+    #[test]
+    fn a_region_denies_pvp_at_the_victim_not_at_the_attacker() {
+        let (_world, registry, attacker) = protected_fixture(29, "PvpAttacker");
+        let victim = crate::players::PlayerHandle::for_test(2, "PvpVictim");
+        registry.insert_for_test(std::sync::Arc::clone(&victim));
+        let mut p = victim.pos();
+        p.x = 8.5;
+        p.y = 100.0;
+        p.z = 8.5;
+        victim.set_pos(p);
+        assert!(
+            pvp_denial(&attacker, &registry, victim.entity_id).is_some(),
+            "the victim's protected cell must veto the attack"
+        );
+
+        let mut outside = victim.pos();
+        outside.x = 500.5;
+        victim.set_pos(outside);
+        assert!(
+            pvp_denial(&attacker, &registry, victim.entity_id).is_none(),
+            "a victim outside every region is not vetoed"
+        );
+    }
+
+    #[test]
+    fn a_region_blocks_opening_a_protected_container() {
+        let (world, _registry, handle) = protected_fixture(29, "ChestGuest");
+        world.set_block(2, 100, 2, "minecraft:chest");
+        let used = crate::game::interact::use_block(&handle, &world, 2, 100, 2);
+        assert!(used, "a refused interaction is consumed, not a placement");
+        assert!(
+            handle.game().window.is_none(),
+            "the chest must not open for a non-member"
+        );
+    }
+
     /// The placement rules are enforced inside `place_block`, before anything
     /// is written: a plant on the wrong soil leaves the world untouched.
     #[test]
     fn a_plant_refused_by_the_rule_writes_nothing() {
-        let world = test_world(7);
+        let world = test_world(7, "plant-rule");
         let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
         let handle = crate::players::PlayerHandle::for_test(1, "Steve");
         registry.insert_for_test(std::sync::Arc::clone(&handle));
@@ -2205,7 +2503,7 @@ mod placement_tests {
     /// this test fails on the sand half.
     #[test]
     fn place_block_refuses_grass_on_sand() {
-        let world = test_world(8);
+        let world = test_world(8, "grass-sand");
         let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
         let handle = crate::players::PlayerHandle::for_test(1, "Steve");
         registry.insert_for_test(std::sync::Arc::clone(&handle));
@@ -2247,7 +2545,7 @@ mod placement_tests {
     /// the refusal half fails.
     #[test]
     fn place_block_refuses_leaf_litter_on_a_wall() {
-        let world = test_world(9);
+        let world = test_world(9, "leaf-wall");
         let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
         let handle = crate::players::PlayerHandle::for_test(1, "Steve");
         registry.insert_for_test(std::sync::Arc::clone(&handle));
@@ -2290,7 +2588,7 @@ mod placement_tests {
     /// water it is refused. On a pre-change tree this fails.
     #[test]
     fn place_block_refuses_leaf_litter_under_water() {
-        let world = test_world(10);
+        let world = test_world(10, "leaf-water");
         let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
         let handle = crate::players::PlayerHandle::for_test(1, "Steve");
         registry.insert_for_test(std::sync::Arc::clone(&handle));

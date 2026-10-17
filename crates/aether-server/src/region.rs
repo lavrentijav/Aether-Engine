@@ -193,6 +193,157 @@ impl FlagSet {
     }
 }
 
+/// The action a protection check is deciding.
+///
+/// The variants map onto the WorldGuard-style flags the regions plugin
+/// (CMD-34) writes: build for [`Action::Break`] and [`Action::Place`], use for
+/// [`Action::Interact`] and [`Action::UseItem`], and the action's own name for
+/// pvp and explosions. The mapping is data ([`Action::flag`]), not a match in
+/// the hot path, so a plugin can add flags without changing the core enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Action {
+    /// A player breaks a block.
+    Break,
+    /// A player places a block.
+    Place,
+    /// A player right-clicks a block or entity (open a chest, use a door).
+    Interact,
+    /// A player uses an item in the air (eat, drink, throw).
+    UseItem,
+    /// A player attacks another player.
+    Pvp,
+    /// An explosion damages blocks.
+    Explosion,
+    /// A player enters a region (reserved for the teleport `entry` seam).
+    Entry,
+}
+
+impl Action {
+    /// The flag name this action consults.
+    pub const fn flag(self) -> &'static str {
+        match self {
+            Action::Break | Action::Place => "build",
+            Action::Interact | Action::UseItem => "use",
+            Action::Pvp => "pvp",
+            Action::Explosion => "explosion",
+            Action::Entry => "entry",
+        }
+    }
+
+    /// The built-in answer when no covering region states the flag.
+    ///
+    /// A region is protection by default: with no flag set, breaking, placing,
+    /// using and explosions are denied for a non-member, and pvp is denied for
+    /// everyone. A region that wants to be permissive sets the flag.
+    pub const fn default_allowed(self) -> bool {
+        match self {
+            Action::Break
+            | Action::Place
+            | Action::Interact
+            | Action::UseItem
+            | Action::Pvp
+            | Action::Explosion
+            | Action::Entry => false,
+        }
+    }
+
+    /// Whether region membership grants this action when its flag is unset.
+    ///
+    /// Members and owners may build and use their region; membership is not a
+    /// licence to pvp or to explode inside it.
+    pub const fn membership_grants(self) -> bool {
+        matches!(
+            self,
+            Action::Break | Action::Place | Action::Interact | Action::UseItem
+        )
+    }
+}
+
+/// The answer to a protection check.
+///
+/// [`Verdict::Defer`] is a per-region answer meaning "this region has no policy
+/// for the action; let the next region decide". [`RegionIndex::check`] resolves
+/// the chain and returns only `Allow` or `Deny`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The action may proceed.
+    Allow,
+    /// The action is cancelled.
+    Deny,
+    /// This region does not decide; consult the next one.
+    Defer,
+}
+
+impl Verdict {
+    /// Whether the action may proceed.
+    pub const fn allows(self) -> bool {
+        matches!(self, Verdict::Allow)
+    }
+}
+
+/// Who is asking.
+///
+/// `name` is the player name region membership is matched against (case
+/// insensitively); `bypass` is the resolved `aether.region.bypass` permission.
+/// A server actor has no name and never bypasses.
+#[derive(Clone, Copy, Debug)]
+pub struct Actor<'a> {
+    /// The player name, empty for the server.
+    pub name: &'a str,
+    /// Whether the actor holds the bypass permission.
+    pub bypass: bool,
+}
+
+impl<'a> Actor<'a> {
+    /// A player who does not bypass.
+    pub const fn new(name: &'a str) -> Self {
+        Actor {
+            name,
+            bypass: false,
+        }
+    }
+
+    /// A player with an already-resolved bypass decision.
+    pub const fn with_bypass(name: &'a str, bypass: bool) -> Self {
+        Actor { name, bypass }
+    }
+
+    /// The server acting on its own behalf (explosions).
+    pub const fn server() -> Self {
+        Actor {
+            name: "",
+            bypass: false,
+        }
+    }
+}
+
+/// The permission node that skips region protection.
+pub const BYPASS_PERMISSION: &str = "aether.region.bypass";
+
+/// The dimension key the core's one world uses.
+///
+/// [`crate::region`] compares world keys with the `minecraft:` namespace
+/// ignored, so a plugin may store either `overworld` or `minecraft:overworld`.
+pub const OVERWORLD: &str = "minecraft:overworld";
+
+/// Whether two world keys name the same dimension.
+///
+/// The comparison ignores the `minecraft:` namespace, case and surrounding
+/// whitespace, so the core's `minecraft:overworld` matches a plugin's
+/// `overworld` / `OVERWORLD`. An empty key matches only an empty key.
+pub fn same_world(a: &str, b: &str) -> bool {
+    fn normal(world: &str) -> &str {
+        let world = world.trim();
+        // The namespace is ASCII, so only slice when those bytes really are
+        // the prefix: a UTF-8 world key must not be split mid-character.
+        match world.get(..10) {
+            Some(prefix) if prefix.eq_ignore_ascii_case("minecraft:") => &world[10..],
+            _ => world,
+        }
+    }
+    normal(a).eq_ignore_ascii_case(normal(b))
+}
+
 /// A cuboid region in one world.
 ///
 /// `min`/`max` are inclusive cells; a point is inside when it lies within all
@@ -245,6 +396,18 @@ impl Region {
         self
     }
 
+    /// Add an owner, builder-style.
+    pub fn owner(mut self, name: impl Into<String>) -> Self {
+        self.owners.insert(name.into());
+        self
+    }
+
+    /// Add a member, builder-style.
+    pub fn member(mut self, name: impl Into<String>) -> Self {
+        self.members.insert(name.into());
+        self
+    }
+
     /// Put this region behind an `Arc` — the form the index stores.
     pub fn handle(self) -> RegionHandle {
         Arc::new(self)
@@ -260,6 +423,30 @@ impl Region {
             && pos.y <= self.max.y
             && self.min.z <= pos.z
             && pos.z <= self.max.z
+    }
+
+    /// This region's answer for `action`, or [`Verdict::Defer`] when it has no
+    /// policy for it.
+    ///
+    /// An explicit flag decides for everyone; a bypassing actor is handled by
+    /// [`RegionIndex::check`] before this is called. With the flag absent a
+    /// member or owner is allowed to build/use, and everything else defers to
+    /// the next region (with the action's built-in default as the final
+    /// fallback).
+    pub fn verdict(&self, action: Action, actor: &Actor<'_>) -> Verdict {
+        match self.flags.get(action.flag()) {
+            Some(true) => Verdict::Allow,
+            Some(false) => Verdict::Deny,
+            None if action.membership_grants() && self.is_member(actor.name) => Verdict::Allow,
+            None => Verdict::Defer,
+        }
+    }
+
+    /// Whether `name` is this region's owner or a member.
+    pub fn is_member(&self, name: &str) -> bool {
+        !name.is_empty()
+            && (self.owners.iter().any(|n| n.eq_ignore_ascii_case(name))
+                || self.members.iter().any(|n| n.eq_ignore_ascii_case(name)))
     }
 
     /// Every chunk column this region touches, in row-major order.
@@ -362,6 +549,47 @@ impl RegionIndex {
         self.buckets.get(&chunk).into_iter().flat_map(|b| b.iter())
     }
 
+    /// Decide `action` at `pos` in `world` for `actor`.
+    ///
+    /// Regions are considered in the index's `(priority desc, id asc)` order.
+    /// The first one with an explicit flag (or a membership grant) decides;
+    /// [`Verdict::Defer`] moves on to the next. If every covering region
+    /// defers, the action's built-in default applies; if no region covers the
+    /// position at all, the action is allowed. Only regions whose [`world`]
+    /// matches are considered, so the world-agnostic index cannot leak a
+    /// protection from another dimension.
+    ///
+    /// The return is always [`Verdict::Allow`] or [`Verdict::Deny`];
+    /// [`Verdict::Defer`] is only a per-region answer (see
+    /// [`Region::verdict`]) that this method consumes to move down the chain.
+    ///
+    /// [`world`]: Region::world
+    pub fn check(&self, world: &str, pos: BlockPos, action: Action, actor: &Actor<'_>) -> Verdict {
+        if actor.bypass {
+            return Verdict::Allow;
+        }
+        let mut covered = false;
+        for region in self.overlapping(pos) {
+            if !same_world(&region.world, world) {
+                continue;
+            }
+            covered = true;
+            match region.verdict(action, actor) {
+                Verdict::Defer => continue,
+                verdict => return verdict,
+            }
+        }
+        if covered {
+            if action.default_allowed() {
+                Verdict::Allow
+            } else {
+                Verdict::Deny
+            }
+        } else {
+            Verdict::Allow
+        }
+    }
+
     /// The region with this id, if any.
     pub fn get(&self, id: RegionId) -> Option<&RegionHandle> {
         self.regions.get(&id)
@@ -396,13 +624,27 @@ impl RegionIndex {
 /// index off the read lock and swap it in. There is no window in which a reader
 /// sees a partially updated index, and the hot path never holds a lock across
 /// the query.
-#[derive(Default)]
 pub struct RegionStore {
     /// Serialises builders so two updates cannot base their rebuild on the same
     /// stale snapshot and lose one. Held only by writers.
     builder: Mutex<()>,
     /// The current index. The read lock is held only to clone the `Arc`.
     current: RwLock<Arc<RegionIndex>>,
+    /// The line a denied check reports. A plugin may replace it.
+    deny_message: RwLock<Arc<str>>,
+}
+
+/// The message a denial reports until a plugin configures another.
+pub const DEFAULT_DENY_MESSAGE: &str = "You do not have permission to do that here.";
+
+impl Default for RegionStore {
+    fn default() -> Self {
+        RegionStore {
+            builder: Mutex::new(()),
+            current: RwLock::new(Arc::new(RegionIndex::empty())),
+            deny_message: RwLock::new(Arc::from(DEFAULT_DENY_MESSAGE)),
+        }
+    }
 }
 
 impl RegionStore {
@@ -418,6 +660,22 @@ impl RegionStore {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Decide `action` against a fresh snapshot. The snapshot lock is released
+    /// before the query, so the check never nests with another module's lock.
+    pub fn check(&self, world: &str, pos: BlockPos, action: Action, actor: &Actor<'_>) -> Verdict {
+        self.snapshot().check(world, pos, action, actor)
+    }
+
+    /// The line a denied check reports.
+    pub fn deny_message(&self) -> Arc<str> {
+        Arc::clone(&self.deny_message.read().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Replace the denial line (a plugin's `[regions] deny-message`).
+    pub fn set_deny_message(&self, message: impl Into<Arc<str>>) {
+        *self.deny_message.write().unwrap_or_else(|e| e.into_inner()) = message.into();
     }
 
     /// Add a region, or replace the one with the same id (this is also how a
@@ -467,6 +725,80 @@ impl RegionStore {
         let next = Arc::new(RegionIndex::from_map(regions));
         *self.current.write().unwrap_or_else(|e| e.into_inner()) = next;
     }
+}
+
+/// The process-wide region set the protection hooks consult.
+///
+/// The regions plugin (CMD-34) fills it through [`RegionStore::upsert`]; with
+/// no plugin the store is empty and every check allows, which is the CMD-29
+/// contract that the core carries no policy of its own.
+pub fn store() -> &'static RegionStore {
+    #[cfg(test)]
+    if let Some(store) = TEST_STORE.with(|slot| *slot.borrow()) {
+        return store;
+    }
+    static STORE: std::sync::OnceLock<RegionStore> = std::sync::OnceLock::new();
+    STORE.get_or_init(RegionStore::new)
+}
+
+// A per-test-thread store override, so a unit test can install a region
+// without leaking it into another test running in parallel. Production has
+// only the process-wide `store`.
+#[cfg(test)]
+thread_local! {
+    static TEST_STORE: std::cell::RefCell<Option<&'static RegionStore>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install a store for this test thread only. The caller keeps filling it via
+/// the returned handle; other tests and production keep the real store.
+#[cfg(test)]
+pub(crate) fn install_test_store(store: RegionStore) -> &'static RegionStore {
+    let store: &'static RegionStore = Box::leak(Box::new(store));
+    TEST_STORE.with(|slot| *slot.borrow_mut() = Some(store));
+    store
+}
+
+/// Whether `handle` holds [`BYPASS_PERMISSION`].
+///
+/// Resolution goes through the permission store (CMD-01): an undeclared node
+/// is operator-only, so an op bypasses and a non-op does not unless granted
+/// the node explicitly.
+pub fn bypass(handle: &crate::players::PlayerHandle) -> bool {
+    crate::permissions::check_for(&handle.name, handle.ip, BYPASS_PERMISSION, 0)
+}
+
+/// The actor a player's action is checked as.
+pub fn actor(handle: &crate::players::PlayerHandle) -> Actor<'_> {
+    Actor::with_bypass(&handle.name, bypass(handle))
+}
+
+/// The denial message for `action` at `pos`, or `None` when it is allowed.
+///
+/// This is the hook helper: it resolves the player's bypass and returns the
+/// store's configured line for a [`Verdict::Deny`]. A [`Verdict::Defer`] is
+/// already resolved by [`RegionStore::check`].
+pub fn denial(
+    handle: &crate::players::PlayerHandle,
+    pos: BlockPos,
+    action: Action,
+) -> Option<String> {
+    let store = store();
+    match store.check(OVERWORLD, pos, action, &actor(handle)) {
+        Verdict::Deny => Some(store.deny_message().to_string()),
+        _ => None,
+    }
+}
+
+/// [`denial`] in block coordinates.
+pub fn denial_at(
+    handle: &crate::players::PlayerHandle,
+    x: i32,
+    y: i32,
+    z: i32,
+    action: Action,
+) -> Option<String> {
+    denial(handle, BlockPos::new(x, y, z), action)
 }
 
 #[cfg(test)]
@@ -670,6 +1002,286 @@ mod tests {
             Some(&RegionId(999_999)),
             "highest priority first"
         );
+    }
+
+    fn at(x: i32, y: i32, z: i32) -> BlockPos {
+        BlockPos::new(x, y, z)
+    }
+
+    #[test]
+    fn priority_decides_overlapping_regions() {
+        // The higher priority's explicit allow wins over the lower deny.
+        let index = RegionIndex::from_regions([
+            region(1, (0, 0, 0), (15, 255, 15))
+                .with_priority(1)
+                .with_flag("build", false),
+            region(2, (0, 0, 0), (15, 255, 15))
+                .with_priority(5)
+                .with_flag("build", true),
+        ]);
+        assert_eq!(
+            index.check(
+                "overworld",
+                at(8, 64, 8),
+                Action::Break,
+                &Actor::new("steve")
+            ),
+            Verdict::Allow
+        );
+
+        // ...and the higher priority's deny wins over the lower allow.
+        let index = RegionIndex::from_regions([
+            region(1, (0, 0, 0), (15, 255, 15))
+                .with_priority(1)
+                .with_flag("build", true),
+            region(2, (0, 0, 0), (15, 255, 15))
+                .with_priority(5)
+                .with_flag("build", false),
+        ]);
+        assert_eq!(
+            index.check(
+                "overworld",
+                at(8, 64, 8),
+                Action::Break,
+                &Actor::new("steve")
+            ),
+            Verdict::Deny
+        );
+    }
+
+    #[test]
+    fn equal_priority_is_broken_by_id_deterministically() {
+        // The index orders equal priorities by ascending id; the smaller id is
+        // the one the check sees first, regardless of insertion order.
+        let index = RegionIndex::from_regions([
+            region(9, (0, 0, 0), (15, 255, 15)).with_flag("build", false),
+            region(2, (0, 0, 0), (15, 255, 15)).with_flag("build", true),
+        ]);
+        assert_eq!(
+            index.check(
+                "overworld",
+                at(8, 64, 8),
+                Action::Break,
+                &Actor::new("steve")
+            ),
+            Verdict::Allow,
+            "id 2 decides before id 9"
+        );
+
+        let index = RegionIndex::from_regions([
+            region(2, (0, 0, 0), (15, 255, 15)).with_flag("build", false),
+            region(9, (0, 0, 0), (15, 255, 15)).with_flag("build", true),
+        ]);
+        assert_eq!(
+            index.check(
+                "overworld",
+                at(8, 64, 8),
+                Action::Break,
+                &Actor::new("steve")
+            ),
+            Verdict::Deny,
+            "the same id order, whatever the insertion order"
+        );
+    }
+
+    #[test]
+    fn an_unset_flag_defers_to_the_next_region() {
+        // The top region has a flag for another action, so it defers on build;
+        // the middle region allows build; the bottom deny is never reached.
+        let top = region(3, (0, 0, 0), (15, 255, 15))
+            .with_priority(10)
+            .with_flag("pvp", false);
+        assert_eq!(
+            top.verdict(Action::Break, &Actor::new("steve")),
+            Verdict::Defer
+        );
+        let index = RegionIndex::from_regions([
+            top,
+            region(2, (0, 0, 0), (15, 255, 15))
+                .with_priority(5)
+                .with_flag("build", true),
+            region(1, (0, 0, 0), (15, 255, 15))
+                .with_priority(0)
+                .with_flag("build", false),
+        ]);
+        assert_eq!(
+            index.check(
+                "overworld",
+                at(8, 64, 8),
+                Action::Break,
+                &Actor::new("steve")
+            ),
+            Verdict::Allow
+        );
+
+        // With the middle region also deferring, the bottom deny decides.
+        let index = RegionIndex::from_regions([
+            region(3, (0, 0, 0), (15, 255, 15))
+                .with_priority(10)
+                .with_flag("pvp", true),
+            region(2, (0, 0, 0), (15, 255, 15)).with_priority(5),
+            region(1, (0, 0, 0), (15, 255, 15))
+                .with_priority(0)
+                .with_flag("build", false),
+        ]);
+        assert_eq!(
+            index.check(
+                "overworld",
+                at(8, 64, 8),
+                Action::Break,
+                &Actor::new("steve")
+            ),
+            Verdict::Deny
+        );
+    }
+
+    #[test]
+    fn only_regions_in_the_queried_world_apply() {
+        let index = RegionIndex::from_regions([
+            region(1, (0, 0, 0), (15, 255, 15)).with_flag("build", false),
+            Region::new(
+                RegionId(2),
+                "the_nether",
+                BlockPos::new(0, 0, 0),
+                BlockPos::new(15, 255, 15),
+            )
+            .with_flag("build", true),
+        ]);
+        assert_eq!(
+            index.check(
+                "overworld",
+                at(8, 64, 8),
+                Action::Break,
+                &Actor::new("steve")
+            ),
+            Verdict::Deny
+        );
+        assert_eq!(
+            index.check(
+                "the_nether",
+                at(8, 64, 8),
+                Action::Break,
+                &Actor::new("steve")
+            ),
+            Verdict::Allow
+        );
+        // The namespace is not part of the identity.
+        assert!(same_world(OVERWORLD, "overworld"));
+        assert!(same_world("minecraft:overworld", "OVERWORLD"));
+        assert!(same_world("Minecraft:overworld", "overworld"));
+        assert!(!same_world(OVERWORLD, "the_nether"));
+        assert!(!same_world("", OVERWORLD));
+    }
+
+    #[test]
+    fn a_position_no_region_covers_is_allowed() {
+        let index = RegionIndex::from_regions([region(1, (0, 0, 0), (15, 255, 15))]);
+        assert_eq!(
+            index.check(
+                "overworld",
+                at(10_000, 64, 10_000),
+                Action::Break,
+                &Actor::new("steve")
+            ),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn a_protected_position_denies_even_when_its_chunk_is_not_loaded() {
+        // The index is world-agnostic and does not read the world, so a
+        // chunked-out block is still protected: the answer comes from the
+        // region, never from a failed block read.
+        let far = at(1_000_000, 64, -1_000_000);
+        let index = RegionIndex::from_regions([region(
+            1,
+            (far.x - 4, 0, far.z - 4),
+            (far.x + 4, 255, far.z + 4),
+        )
+        .with_flag("build", false)]);
+        assert_eq!(
+            index.check("overworld", far, Action::Break, &Actor::new("steve")),
+            Verdict::Deny
+        );
+        assert_eq!(
+            index.check(
+                "overworld",
+                at(far.x + 100, 64, far.z),
+                Action::Break,
+                &Actor::new("steve")
+            ),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn members_and_owners_may_build_but_an_explicit_deny_still_wins() {
+        let region = region(1, (0, 0, 0), (15, 255, 15))
+            .owner("Owner")
+            .member("Builder");
+        let index = RegionIndex::from_regions([region.clone()]);
+        for name in ["Owner", "Builder", "builder"] {
+            assert_eq!(
+                index.check("overworld", at(8, 64, 8), Action::Break, &Actor::new(name)),
+                Verdict::Allow,
+                "{name} is a member"
+            );
+        }
+        assert_eq!(
+            index.check(
+                "overworld",
+                at(8, 64, 8),
+                Action::Break,
+                &Actor::new("guest")
+            ),
+            Verdict::Deny
+        );
+        // Membership is not a pvp licence.
+        assert_eq!(
+            index.check("overworld", at(8, 64, 8), Action::Pvp, &Actor::new("Owner")),
+            Verdict::Deny
+        );
+        // An explicit deny applies to members too.
+        let index = RegionIndex::from_regions([region.with_flag("build", false)]);
+        assert_eq!(
+            index.check(
+                "overworld",
+                at(8, 64, 8),
+                Action::Break,
+                &Actor::new("Owner")
+            ),
+            Verdict::Deny
+        );
+    }
+
+    #[test]
+    fn bypass_allows_an_op_and_denies_a_non_op() {
+        let _guard = crate::permissions::test_lock();
+        crate::permissions::seed_operators(&["RegionOp".to_string()]);
+        let op = crate::players::PlayerHandle::for_test(1, "RegionOp");
+        let guest = crate::players::PlayerHandle::for_test(2, "RegionGuest");
+        assert!(bypass(&op), "an operator holds the undeclared bypass node");
+        assert!(!bypass(&guest), "a non-op does not");
+
+        let index = RegionIndex::from_regions([
+            region(1, (0, 0, 0), (15, 255, 15)).with_flag("build", false)
+        ]);
+        assert_eq!(
+            index.check("overworld", at(8, 64, 8), Action::Break, &actor(&op)),
+            Verdict::Allow
+        );
+        assert_eq!(
+            index.check("overworld", at(8, 64, 8), Action::Break, &actor(&guest)),
+            Verdict::Deny
+        );
+    }
+
+    #[test]
+    fn the_denial_message_is_configurable() {
+        let store = RegionStore::new();
+        assert_eq!(&*store.deny_message(), DEFAULT_DENY_MESSAGE);
+        store.set_deny_message("This area is protected.");
+        assert_eq!(&*store.deny_message(), "This area is protected.");
     }
 
     #[test]
