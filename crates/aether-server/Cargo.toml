@@ -19,6 +19,9 @@ aether-api = { workspace = true, default-features = false, features = ["fjall", 
 # Named directly so the server can choose between the vanilla generator and the
 # built-in noise one; `aether-api` re-exports only the latter.
 aether-worldgen = { workspace = true }
+# The collision [`BlockView`] the safe-spot search reads. `aether-api` re-exports
+# the physics `Body`/`PhysicsParams` but not the view trait, and CMD-31 names it.
+aether-physics = { workspace = true }
 toml = { workspace = true }
 serde = { workspace = true }
 # The live-ops shape shared with the web admin plugin: the server implements
@@ -98,6 +101,11 @@ test = false
 
 [[bench]]
 name = "region_index"
+harness = false
+test = false
+
+[[bench]]
+name = "rtp"
 harness = false
 test = false
 

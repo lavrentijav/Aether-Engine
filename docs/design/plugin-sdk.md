@@ -375,7 +375,9 @@ players().inventory(p) -> InventoryView
 ```
 
 Wraps core player APIs (CMD-31/32). Safe teleport runs CMD-31's search host-side; the SDK does not
-reimplement collision. `online()`/`inventory()` allocate and are documented as such.
+reimplement collision, and a teleport is gated on the caller's `players.teleport` capability (the
+SDK refuses it before the host is reached, and the host re-checks). `online()`/`inventory()`
+allocate and are documented as such.
 
 ### 7.5 Config and data
 

@@ -15,7 +15,7 @@ mod imp {
     use std::path::Path;
     use std::sync::{Arc, Mutex, OnceLock};
 
-    use aether_plugin::sdk::{HistoryEvent, HistoryPage, HistoryPos, HistoryWindow};
+    use aether_plugin::sdk::{HistoryEvent, HistoryPage, HistoryPos, HistoryWindow, TeleportCause};
     use aether_plugin::{
         discover, Decision, HostBackend, HostConfig, LogLevel, ManifestFile, Player, PluginHost,
     };
@@ -205,6 +205,64 @@ mod imp {
             let handle = self.registry.by_entity(player as i32)?;
             let pos = handle.pos();
             Some(("minecraft:overworld".to_string(), pos.x, pos.y, pos.z))
+        }
+
+        /// A plugin asked to move a player. Resolved through the core
+        /// safe-spot search (CMD-31) rather than an exact move, so a plugin
+        /// cannot drop a player into lava, fire or the void — the design
+        /// contract is that a plugin teleport is a *safe* teleport
+        /// (`docs/design/plugin-sdk.md` §7.4).
+        ///
+        /// The SDK service layer already gates this on the caller's
+        /// `players.teleport` capability; the check is repeated here as
+        /// defense in depth, because a native plugin holds the backend and can
+        /// call this directly.
+        ///
+        /// No [`crate::teleport::TeleportHooks`] impl is wired (the region
+        /// index is unlanded and the WASM event world is frozen), so the region
+        /// `entry` veto and the after-teleport observer are the extension
+        /// point, not live behaviour — see KI 27.
+        fn teleport_player(
+            &self,
+            plugin: &str,
+            player: u64,
+            x: f64,
+            y: f64,
+            z: f64,
+            cause: TeleportCause,
+        ) -> Result<(), String> {
+            if !self
+                .capabilities(plugin)
+                .iter()
+                .any(|c| c == aether_plugin::sdk::CAP_PLAYERS_TELEPORT)
+            {
+                return Err(format!(
+                    "caller `{plugin}` lacks the `{}` capability",
+                    aether_plugin::sdk::CAP_PLAYERS_TELEPORT
+                ));
+            }
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return Err("no such player".to_string());
+            };
+            let cause = match cause {
+                TeleportCause::Command => crate::teleport::TeleportCause::Command,
+                TeleportCause::Plugin => crate::teleport::TeleportCause::Plugin,
+                TeleportCause::Portal => crate::teleport::TeleportCause::Portal,
+            };
+            let block = crate::teleport::BlockPos::new(
+                x.floor() as i32,
+                y.floor() as i32,
+                z.floor() as i32,
+            );
+            crate::teleport::teleport(
+                &handle,
+                &self.registry,
+                &*self.world,
+                crate::teleport::TeleportTarget::Safe(block),
+                cause,
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
         }
 
         fn disconnect_player(&self, _plugin: &str, player: u64, reason: &str) {
