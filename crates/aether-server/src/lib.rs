@@ -15,6 +15,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod bulk;
 pub mod chatlog;
 pub mod commands;
 pub mod config;

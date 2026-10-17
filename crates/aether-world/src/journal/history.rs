@@ -35,7 +35,7 @@
 
 use std::collections::HashSet;
 
-use super::{column_prefix, item_prefix, ActorId, Event, ItemUid, Journal};
+use super::{column_prefix, item_prefix, ActorId, Event, EventBody, ItemUid, Journal};
 use crate::storage::{KvBackend, StorageError};
 
 /// One page of events, **newest first**.
@@ -199,6 +199,12 @@ impl Window {
             return false;
         }
         if let Some(area) = &self.area {
+            // A bulk revision spans many positions, so it is in the area when
+            // any of its changes is; the revision is atomic, matching the
+            // journal's own rollback filter.
+            if let EventBody::BlockGroup { changes } = &e.body {
+                return changes.iter().any(|c| area.contains(c.x, c.y, c.z));
+            }
             let Some((x, y, z)) = e.position() else {
                 // Positionless events belong to no area, so an area query
                 // leaves them out rather than guessing.
@@ -286,8 +292,11 @@ impl<B: KvBackend> Journal<B> {
     ) -> Result<Page, StorageError> {
         let limit = clamp_limit(limit);
         let cursor = before.unwrap_or(u64::MAX);
+        // `changes_block_at` accepts a single `BlockSet` and every change of a
+        // bulk revision, so a block a `/fill` changed appears in its own
+        // timeline alongside hand-placed edits.
         self.reverse_index_page(&column_prefix(x >> 4, z >> 4), 9, cursor, limit, &|e| {
-            matches!(e.body, super::EventBody::BlockSet { .. }) && e.position() == Some((x, y, z))
+            e.body.changes_block_at(x, y, z)
         })
     }
 
@@ -560,7 +569,7 @@ fn linked_uids(e: &Event, uid: ItemUid) -> Vec<ItemUid> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::{ActorId, EventBody, Place};
+    use crate::journal::{ActorId, BlockChange, EventBody, Place};
     use crate::storage::MemStore;
     use crate::{BlockStateId, ItemTypeId};
 
@@ -691,6 +700,41 @@ mod tests {
         let page = j.history_page(&w, None, 10).unwrap();
         assert_eq!(page.events.len(), 1);
         assert_eq!(page.events[0].body, block(0, 10, 0, DIRT, STONE));
+    }
+
+    #[test]
+    fn an_area_window_selects_a_bulk_revision_that_reaches_into_it() {
+        // A bulk revision is in an area when any of its changes is; the
+        // command layer and the web history rely on this agreeing with the
+        // journal's rollback filter.
+        let j = journal();
+        j.append_at(
+            alice(),
+            EventBody::BlockGroup {
+                changes: vec![
+                    BlockChange {
+                        x: 0,
+                        y: 10,
+                        z: 0,
+                        from: DIRT,
+                        to: STONE,
+                    },
+                    BlockChange {
+                        x: 400,
+                        y: 10,
+                        z: 0,
+                        from: DIRT,
+                        to: STONE,
+                    },
+                ],
+            },
+            1,
+        )
+        .unwrap();
+        let w = Window::new().area(Area::between((0, 0, 0), (0, 15, 0)));
+        assert_eq!(j.history_page(&w, None, 10).unwrap().events.len(), 1);
+        let far = Window::new().area(Area::between((800, 0, 0), (800, 15, 0)));
+        assert!(j.history_page(&far, None, 10).unwrap().is_empty());
     }
 
     #[test]

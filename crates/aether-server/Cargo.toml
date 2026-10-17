@@ -100,6 +100,11 @@ harness = false
 test = false
 
 [[bench]]
+name = "bulk_edit"
+harness = false
+test = false
+
+[[bench]]
 name = "region_index"
 harness = false
 test = false

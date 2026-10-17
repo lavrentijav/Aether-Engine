@@ -956,6 +956,10 @@ mod imp {
             // A player-text event carries no block/item side; its `kind`
             // (chat/pm/command) and position are already on the record.
             EventBody::ChatMessage { .. } => {}
+            // A bulk revision is many block changes under one event. The
+            // plugin record has a single block/item side, so it carries none;
+            // the touched positions are in the journal, not this summary.
+            EventBody::BlockGroup { .. } => {}
             EventBody::Custom { .. } => {}
         }
         out

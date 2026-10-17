@@ -59,7 +59,7 @@ pub mod sink;
 mod tests;
 
 pub use event::{
-    ActorId, ChatKind, DecodeError, DestroyReason, Event, EventBody, ItemUid, Place,
+    ActorId, BlockChange, ChatKind, DecodeError, DestroyReason, Event, EventBody, ItemUid, Place,
     DESTROY_REASONS, EVENT_KINDS, EVENT_KIND_UNKNOWN,
 };
 pub use history::{Area, Page, Window};
@@ -186,7 +186,11 @@ impl Filter {
     }
 
     /// Whether `e` is selected.
-    fn matches(&self, e: &Event) -> bool {
+    ///
+    /// Public so a caller that has its own extra conditions (the command
+    /// layer's `block:` / `action:` filters) ANDs them with the journal's
+    /// exact selection instead of re-implementing — and drifting from — it.
+    pub fn matches(&self, e: &Event) -> bool {
         if let Some(a) = self.actor {
             if e.actor != a {
                 return false;
@@ -196,20 +200,32 @@ impl Filter {
             return false;
         }
         if let Some((cx, _cy, cz, r)) = self.area {
+            // A bulk-edit revision spans many positions, so "is it in this
+            // area?" means "does any of its changes land here?" — a revision
+            // that reaches into the area is selected whole, and its rollback
+            // restores every position it touched, not only the ones inside.
+            if let EventBody::BlockGroup { changes } = &e.body {
+                return changes.iter().any(|c| within(c.x, c.z, cx, cz, r));
+            }
             let Some((x, _y, z)) = e.position() else {
                 // Positionless events (an item moving between two inventory
                 // slots) belong to no area, so an area-restricted rollback
                 // leaves them alone rather than guessing.
                 return false;
             };
-            let (dx, dz) = ((x - cx) as i64, (z - cz) as i64);
-            let r = r as i64;
-            if dx * dx + dz * dz > r * r {
+            if !within(x, z, cx, cz, r) {
                 return false;
             }
         }
         true
     }
+}
+
+/// Whether `(x, z)` lies within `r` blocks horizontally of `(cx, cz)`.
+fn within(x: i32, z: i32, cx: i32, cz: i32, r: u32) -> bool {
+    let (dx, dz) = ((x - cx) as i64, (z - cz) as i64);
+    let r = r as i64;
+    dx * dx + dz * dz <= r * r
 }
 
 /// One block restoration produced by a rollback plan.
@@ -398,6 +414,28 @@ impl<B: KvBackend> Journal<B> {
         self.append_full(actor, body, None, at_ms)
     }
 
+    /// Append one bulk-edit **revision**: many block changes under a single
+    /// sequence number, actor and timestamp.
+    ///
+    /// Returns the revision's sequence number — which is also its undo id,
+    /// because the event carries both sides of every change — or `None` when
+    /// `changes` is empty, so nothing was written and there is no id to hand
+    /// back mistaken for the previous event's. The changes are stored sorted
+    /// by column, which lets a column replay binary-search its own slice
+    /// rather than scan a whole million-block revision per column.
+    pub fn append_block_group(
+        &self,
+        actor: ActorId,
+        mut changes: Vec<BlockChange>,
+    ) -> Result<Option<u64>, StorageError> {
+        if changes.is_empty() {
+            return Ok(None);
+        }
+        changes.sort_by_key(|c| (c.x >> 4, c.z >> 4, c.y, c.x, c.z));
+        self.append(actor, EventBody::BlockGroup { changes })
+            .map(Some)
+    }
+
     /// Append an event that happened because of event `cause` — a drop out of
     /// the block break that produced it.
     pub fn append_caused(
@@ -418,6 +456,21 @@ impl<B: KvBackend> Journal<B> {
     ) -> Result<u64, StorageError> {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         self.reserve(seq)?;
+        // Enforce the column-sorted invariant for a bulk revision here, at the
+        // one place every event passes through — not only in
+        // `append_block_group`. A caller may append a `BlockGroup` directly
+        // (`append`/`append_at`/`append_caused`), and the replay in
+        // `World::ensure_column` binary-searches the stored list on the
+        // assumption it is sorted; an unsorted group would silently lose
+        // columns. Sorting is idempotent, so the builder's own sort is left
+        // where it is.
+        let body = match body {
+            EventBody::BlockGroup { mut changes } => {
+                changes.sort_by_key(|c| (c.x >> 4, c.z >> 4, c.y, c.x, c.z));
+                EventBody::BlockGroup { changes }
+            }
+            other => other,
+        };
         let e = Event {
             seq,
             at_ms,
@@ -500,7 +553,7 @@ impl<B: KvBackend> Journal<B> {
     /// access at its coordinates). A caller that means strictly "was this
     /// block changed" wants [`Self::last_block_change_at`].
     pub fn last_change_at(&self, x: i32, y: i32, z: i32) -> Result<Option<Event>, StorageError> {
-        self.first_column_hit(x, z, &|e| e.position() == Some((x, y, z)))
+        self.first_column_hit(x, z, &|e| e.body.touches_position(x, y, z))
     }
 
     /// The most recent **block change** at `(x, y, z)`, if the block there was
@@ -517,9 +570,7 @@ impl<B: KvBackend> Journal<B> {
         y: i32,
         z: i32,
     ) -> Result<Option<Event>, StorageError> {
-        self.first_column_hit(x, z, &|e| {
-            matches!(e.body, EventBody::BlockSet { .. }) && e.position() == Some((x, y, z))
-        })
+        self.first_column_hit(x, z, &|e| e.body.changes_block_at(x, y, z))
     }
 
     /// The newest event in `(x, z)`'s column for which `accept` holds, walking
@@ -753,28 +804,50 @@ impl<B: KvBackend> Journal<B> {
         let mut order: std::collections::HashMap<(i32, i32, i32), (usize, u64)> =
             std::collections::HashMap::new();
         let mut plan: Vec<Restore> = Vec::new();
+        // Fold one block change into the plan. A single `BlockSet` is one such
+        // change; a `BlockGroup` (a bulk edit revision) is many, all sharing
+        // the event's sequence and actor, so each is expanded here and a
+        // rollback of the revision restores every block it touched.
+        let record = |order: &mut std::collections::HashMap<(i32, i32, i32), (usize, u64)>,
+                      plan: &mut Vec<Restore>,
+                      x: i32,
+                      y: i32,
+                      z: i32,
+                      from: BlockStateId,
+                      to: BlockStateId,
+                      seq: u64| {
+            match order.get(&(x, y, z)) {
+                Some(&(i, _)) => {
+                    plan[i].removed = to;
+                    order.insert((x, y, z), (i, seq));
+                }
+                None => {
+                    order.insert((x, y, z), (plan.len(), seq));
+                    plan.push(Restore {
+                        x,
+                        y,
+                        z,
+                        block: from,
+                        removed: to,
+                        undoing: seq,
+                    });
+                }
+            }
+        };
         let mut visit = |e: &Event| -> Result<(), StorageError> {
             if !filter.matches(e) || !accept(e) {
                 return Ok(());
             }
-            if let EventBody::BlockSet { x, y, z, from, to } = &e.body {
-                match order.get(&(*x, *y, *z)) {
-                    Some(&(i, _)) => {
-                        plan[i].removed = *to;
-                        order.insert((*x, *y, *z), (i, e.seq));
-                    }
-                    None => {
-                        order.insert((*x, *y, *z), (plan.len(), e.seq));
-                        plan.push(Restore {
-                            x: *x,
-                            y: *y,
-                            z: *z,
-                            block: *from,
-                            removed: *to,
-                            undoing: e.seq,
-                        });
+            match &e.body {
+                EventBody::BlockSet { x, y, z, from, to } => {
+                    record(&mut order, &mut plan, *x, *y, *z, *from, *to, e.seq);
+                }
+                EventBody::BlockGroup { changes } => {
+                    for c in changes {
+                        record(&mut order, &mut plan, c.x, c.y, c.z, c.from, c.to, e.seq);
                     }
                 }
+                _ => {}
             }
             Ok(())
         };
@@ -782,6 +855,7 @@ impl<B: KvBackend> Journal<B> {
             Some(a) => self.for_each_actor_event(a, &mut visit)?,
             None => self.for_each_event(&mut visit)?,
         }
+        drop(visit);
         // The former newest-first walk pushed a position on its newest
         // sighting; keep that order for callers that read the plan.
         plan.sort_by_key(|r| std::cmp::Reverse(order.get(&(r.x, r.y, r.z)).map_or(0, |&(_, s)| s)));
