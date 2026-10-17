@@ -180,16 +180,29 @@ pub fn on_broken(
         world,
     );
     if let Some((dy, _)) = crate::placement::other_half(broken) {
-        if world.get_block(x, y + dy, z) != block_ids::AIR {
-            crate::session::set_and_broadcast(
-                world,
-                registry,
-                handle,
-                x,
-                y + dy,
-                z,
-                block_ids::AIR,
-            );
+        let other_y = y + dy;
+        if world.get_block(x, other_y, z) != block_ids::AIR {
+            // A door or a tall plant is two cells, and the break hook checked
+            // only the clicked one. A region whose boundary runs between them
+            // must keep its half: a claim with a ceiling at `y + 1` does not
+            // lose it because the other half stands outside.
+            if let Some(reason) =
+                crate::region::denial_at(handle, x, other_y, z, crate::region::Action::Break)
+            {
+                if !reason.is_empty() {
+                    handle.emit(&ServerEvent::Chat(reason), world);
+                }
+            } else {
+                crate::session::set_and_broadcast(
+                    world,
+                    registry,
+                    handle,
+                    x,
+                    other_y,
+                    z,
+                    block_ids::AIR,
+                );
+            }
         }
     }
     if let Some(kind) = ContainerKind::of_block(&name) {
@@ -250,6 +263,21 @@ pub fn use_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i3
         return false;
     }
     let short = name.strip_prefix("minecraft:").unwrap_or(&name);
+    let interactive = short == "crafting_table"
+        || ContainerKind::of_block(&name).is_some()
+        || short.ends_with("_bed");
+    if interactive {
+        if let Some(reason) =
+            crate::region::denial_at(handle, x, y, z, crate::region::Action::Interact)
+        {
+            if !reason.is_empty() {
+                handle.emit(&ServerEvent::Chat(reason), world);
+            }
+            // Consumed: a refused interaction must not fall through to a
+            // placement against the protected block.
+            return true;
+        }
+    }
     if short == "crafting_table" {
         window::open(
             handle,
@@ -453,6 +481,16 @@ pub fn use_item(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWo
             "minecraft:lava" => "minecraft:lava_bucket",
             _ => return,
         };
+        // The `use` flag is checked at the cell the bucket drains, not where
+        // the player stands: the ray reaches up to five blocks.
+        if let Some(reason) =
+            crate::region::denial_at(handle, x, y, z, crate::region::Action::UseItem)
+        {
+            if !reason.is_empty() {
+                handle.emit(&ServerEvent::Chat(reason), world);
+            }
+            return;
+        }
         crate::session::set_and_broadcast(world, registry, handle, x, y, z, block_ids::AIR);
         if handle.game().survival() {
             let mut inv = handle.inventory();
@@ -487,6 +525,16 @@ pub fn use_item(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWo
         let Some(((x, y, z), _)) = hit else { return };
         let state = world.get_block(x, y, z);
         if !source_water(state) && !waterlogged(state) {
+            return;
+        }
+        // As with a bucket, the region's `use` flag is checked at the target
+        // cell the bottle reaches, not at the player's feet.
+        if let Some(reason) =
+            crate::region::denial_at(handle, x, y, z, crate::region::Action::UseItem)
+        {
+            if !reason.is_empty() {
+                handle.emit(&ServerEvent::Chat(reason), world);
+            }
             return;
         }
         if handle.game().survival() {
@@ -835,6 +883,20 @@ pub fn pick_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i
 
 /// Right-click on an entity.
 pub fn use_entity(handle: &PlayerHandle, world: &DemoWorld, target: i32) {
+    if let Some(p) = entities::position(target) {
+        if let Some(reason) = crate::region::denial_at(
+            handle,
+            p.x.floor() as i32,
+            p.y.floor() as i32,
+            p.z.floor() as i32,
+            crate::region::Action::Interact,
+        ) {
+            if !reason.is_empty() {
+                handle.emit(&ServerEvent::Chat(reason), world);
+            }
+            return;
+        }
+    }
     let held = handle.held_item();
     match entities::interact(target, held) {
         Some(entities::Interaction::Replace(with)) => {
@@ -991,6 +1053,74 @@ pub fn set_mode(handle: &PlayerHandle, world: &DemoWorld, mode: GameMode) {
 mod tests {
     use super::*;
     use aether_world::registry::blocks;
+
+    fn test_world(seed: u64) -> DemoWorld {
+        use aether_api::{FjallStore, World};
+        let dir = std::env::temp_dir().join(format!("aether-use-{}-{seed}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FjallStore::open(&dir).expect("temp store");
+        let generator = crate::worldgen::Generator::load("", "", seed).expect("noise generator");
+        let revision = generator.revision();
+        let cfg = crate::gencache::CacheConfig {
+            root: String::new(),
+            ..Default::default()
+        };
+        let generator = crate::gencache::Cached::with_revision(generator, seed, revision, &cfg);
+        World::new(store, generator)
+    }
+
+    #[test]
+    fn a_region_blocks_draining_a_source_from_outside() {
+        // The player stands outside the claim and looks down at a source
+        // inside it: the `use` flag must be checked at the bucket's target,
+        // not at the player's feet.
+        let regions = crate::region::install_test_store(crate::region::RegionStore::new());
+        let region = crate::region::Region::new(
+            crate::region::RegionId(1),
+            "overworld",
+            crate::region::BlockPos::new(0, 71, 0),
+            crate::region::BlockPos::new(0, 71, 0),
+        )
+        .with_flag("use", false);
+        regions.replace_all([region.handle()]);
+
+        let world = test_world(29);
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(1, "BucketGuest");
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+        {
+            let mut inv = handle.inventory();
+            inv.put_slot(0, Some(Stack::named("minecraft:bucket", 1)));
+        }
+        handle.set_held_slot(0);
+        let mut p = handle.pos();
+        p.x = 0.5;
+        p.y = 74.0;
+        p.z = 0.5;
+        p.yaw = 0.0;
+        p.pitch = 90.0;
+        handle.set_pos(p);
+        for y in 72..=74 {
+            world.set_block(0, y, 0, "minecraft:air");
+        }
+        world.set_block(0, 71, 0, "minecraft:water");
+
+        use_item(&handle, &registry, &world, 0);
+
+        assert!(
+            source_water(world.get_block(0, 71, 0)),
+            "the protected source must survive a bucket used from outside"
+        );
+        let held = handle
+            .inventory()
+            .slot(0)
+            .and_then(|s| s.item.vanilla_name());
+        assert_eq!(
+            held,
+            Some("minecraft:bucket"),
+            "the bucket must not fill from a protected source"
+        );
+    }
 
     #[test]
     fn a_bottle_fills_only_from_a_source() {
