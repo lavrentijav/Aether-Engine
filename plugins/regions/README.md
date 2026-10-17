@@ -1,4 +1,4 @@
-# regions — WorldGuard-style regions (CMD-34a)
+# regions — WorldGuard-style regions (CMD-34a/34b)
 
 A **native** (tier N) Aether plugin: a Rust crate linked into the server
 in-process. It owns the region model, the `/rg` commands and persistence. The
@@ -6,9 +6,9 @@ hot-path cuboid lookup and priority/flag check are the **core** implementation
 (`aether-region`, built for CMD-29a/29b) — the plugin edits the one shared
 `RegionStore` the protection hooks read and never keeps a second spatial index.
 
-- Task: [`docs/tasks/CMD-34a-regions-model.md`](../../docs/tasks/CMD-34a-regions-model.md)
+- Model/commands: [`docs/tasks/CMD-34a-regions-model.md`](../../docs/tasks/CMD-34a-regions-model.md)
+- Flags/members/bypass: [`docs/tasks/CMD-34b-regions-flags-members.md`](../../docs/tasks/CMD-34b-regions-flags-members.md)
 - Umbrella: [`docs/tasks/CMD-34-regions-plugin.md`](../../docs/tasks/CMD-34-regions-plugin.md)
-- Next slice: CMD-34b (`/rg flag`, members/owners, per-world bypass)
 
 ## Commands
 
@@ -20,9 +20,13 @@ hot-path cuboid lookup and priority/flag check are the **core** implementation
 | redefine | `/rg redefine <id>` | `worldguard.region.redefine` |
 | remove | `/rg remove <id>` | `worldguard.region.remove` |
 | priority | `/rg priority <id> <n>` | `worldguard.region.priority` |
+| flags | `/rg flag <id> <flag> [value]` | `worldguard.region.flag` |
+| members | `/rg addmember <id> <player>` / `/rg removemember <id> <player>` | `worldguard.region.member` |
+| owners | `/rg addowner <id> <player>` / `/rg removeowner <id> <player>` | `worldguard.region.owner` |
 | info | `/rg info [<id>]` | `worldguard.region.info` |
 | list | `/rg list [<player>]` | `worldguard.region.list` |
 | cancel | `/rg cancel` | none |
+| bypass | (permission) | `worldguard.region.bypass.<world>` |
 
 `/rg` itself is a public top-level command; the `worldguard.region.*` nodes
 gate the individual subcommands inside the plugin. A deny on `info` therefore
@@ -45,9 +49,43 @@ cannot block `define` before the arguments are read.
   it shows the region under the player (highest priority first).
 - `list` groups every region by world; an optional player name filters to
   regions that player owns.
+- `flag` sets a **typed** flag from the core registry (CMD-29b).
+  Boolean flags accept `allow`/`deny` (also `true`/`false`, `yes`/`no`,
+  `on`/`off`); `greeting`, `farewell` and the other text flags take the rest of
+  the line; integer flags such as `heal-amount` take a whole number.
+  `none`/`unset` clears a flag, and no value shows its current setting. An
+  unknown flag or a value of the wrong type is an error and changes nothing.
+
+  The registry is a **fixed built-in set for 1.0** (there is no plugin flag
+  registration yet). Of the boolean names, only the ones the core check
+  consults are effective: **`build`** (break/place), **`use`**
+  (interaction/item use), **`pvp`**, **`explosion`** and **`entry`**.
+  `entry` is **stored-only** for now: the flag is validated, persisted and
+  honoured by an explicit `Action::Entry` check, but the server has no
+  teleport/entry hook yet. `interact`, `item-use`, `construct`, `chest-access`,
+  `other-explosion`, `mob-damage` and the other compatibility boolean names are
+  accepted and persisted but **inert** — `/rg flag <id> interact deny` reports
+  success and changes nothing. Text and integer flags are likewise stored and
+  shown by `info` only. An SDK/WASM reader sees only the boolean flags through
+  `RegionInfo`; `greeting`/`heal-amount` are not exposed there yet.
+- `addmember`/`removemember` and `addowner`/`removeowner` edit the persisted
+  membership. Members and owners may build/use a region while the corresponding
+  flag is unset; an explicit `deny` still wins. A stranger is denied unless a
+  flag explicitly allows the action.
 
 A non-op may edit only a region they own. A region with **no owner** is
 therefore operator-only. Operators bypass this plugin-side gate.
+
+## Bypass
+
+Region protection itself is the core check. The server hook resolves the
+player's current session world and checks the region in that same world. A
+player with `worldguard.region.bypass.<world>` (or the core
+`aether.region.bypass`) skips it in that world; operators hold the undeclared
+node by default. The node is per-world: a grant for `overworld` does not bypass
+`the_nether`, and the hook's per-world resolution is covered by
+`crates/aether-server/src/region.rs` tests. Without the node a non-operator
+remains subject to the flags, member or not.
 
 ## Selection: the internal wand
 
@@ -84,12 +122,14 @@ cell, which the wand needs.
 ## Persistence
 
 The whole region set is one JSON value in the plugin KV under the key
-`regions`. Every mutation writes the new value **first** and only then adopts
-it in memory and publishes one core snapshot, so a failed write leaves the
-previous, still-persisted state in place and the command reports the error. On
-`init` the plugin loads the key, rebuilds the core store from it, and keeps the
-stable numeric ids (the priority tie-break) and the next id counter. State
-therefore survives a server restart.
+`regions`: bounds, priority, typed flags, members and owners. Every mutation
+writes the new value **first** and only then adopts it in memory and publishes
+one core snapshot, so a failed write leaves the previous, still-persisted state
+in place and the command reports the error. On `init` the plugin loads the key,
+rebuilds the core store from it, and keeps the stable numeric ids (the priority
+tie-break) and the next id counter. Flags/members/owners therefore survive a
+server restart. Boolean flags written by CMD-34a still load (the typed value is
+`untagged`), so the upgrade needs no migration.
 
 Loading is fail-closed: an unreadable value or a failed KV read refuses the
 plugin load rather than starting with an empty set and overwriting recoverable
@@ -125,10 +165,14 @@ checked against the **new** store, deterministic priorities and equal-priority
 ties, the two-click wand (including its start-of-dig hook), selection reset and
 cancel, world preservation on redefine, failed-write rollback, fail-closed load,
 and that the plugin edits the same core `RegionStore`/`RegionIndex` the check
-uses. The 1.8.9 codec has its own test that a tool right-click becomes the
-selection event.
+uses. CMD-34b adds: `build` deny blocking break/place and `use`/`entry`/`pvp`
+following their actions, the next-safe-point snapshot behavior of a flag edit,
+members/owners gaining and losing rights, member/owner add/remove, typed
+flag/member persistence across restart, invalid flag/value errors, and the
+per-world bypass node. The 1.8.9 codec has its own test that a tool right-click
+becomes the selection event.
 
 ## Not in this slice
 
-`/rg flag`, `/rg addmember`/`addowner` and per-world bypass are CMD-34b. Polygon
-regions are later; this slice is cuboids only.
+Polygon regions, region groups and the runtime greeting/farewell delivery are
+later; this slice is cuboids, typed flags, membership and per-world bypass.

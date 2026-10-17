@@ -1,6 +1,6 @@
 [package]
 name = "aether-regions-plugin"
-description = "WorldGuard-style regions for Aether Engine: a native plugin with /rg define/redefine/remove/priority/info/list over the core region index."
+description = "WorldGuard-style regions for Aether Engine: a native plugin with /rg define/redefine/remove/priority/flag/members/owners/info/list over the core region index."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

@@ -30,32 +30,69 @@
 
 pub use aether_region::*;
 
-/// Whether `handle` holds [`BYPASS_PERMISSION`].
+/// Whether `handle` holds the bypass for `world`.
 ///
-/// Resolution goes through the permission store (CMD-01): an undeclared node
-/// is operator-only, so an op bypasses and a non-op does not unless granted
-/// the node explicitly.
-pub fn bypass(handle: &crate::players::PlayerHandle) -> bool {
+/// Two nodes are accepted: the core [`BYPASS_PERMISSION`] and WorldGuard's
+/// per-world `worldguard.region.bypass.<world>`. Resolution goes through the
+/// permission store (CMD-01); an undeclared node is operator-only, so an
+/// operator bypasses both and a non-operator only when granted one of them.
+/// The per-world node is deliberately distinct from the global one, so a
+/// grant in `overworld` does not also bypass `the_nether`.
+pub fn bypass_in(handle: &crate::players::PlayerHandle, world: &str) -> bool {
     crate::permissions::check_for(&handle.name, handle.ip, BYPASS_PERMISSION, 0)
+        || crate::permissions::check_for(
+            &handle.name,
+            handle.ip,
+            &worldguard_bypass_permission(world),
+            0,
+        )
+}
+
+/// Whether `handle` holds the bypass for the engine's world.
+///
+/// The server currently serves one dimension ([`OVERWORLD`]); the hook call
+/// sites that know a world use [`bypass_in`].
+pub fn bypass(handle: &crate::players::PlayerHandle) -> bool {
+    bypass_in(handle, OVERWORLD)
 }
 
 /// The actor a player's action is checked as.
 pub fn actor(handle: &crate::players::PlayerHandle) -> Actor<'_> {
-    Actor::with_bypass(&handle.name, bypass(handle))
+    actor_in(handle, OVERWORLD)
+}
+
+/// The actor for an action in `world`.
+pub fn actor_in<'a>(handle: &'a crate::players::PlayerHandle, world: &str) -> Actor<'a> {
+    Actor::with_bypass(&handle.name, bypass_in(handle, world))
 }
 
 /// The denial message for `action` at `pos`, or `None` when it is allowed.
 ///
-/// This is the hook helper: it resolves the player's bypass and returns the
-/// store's configured line for a [`Verdict::Deny`]. A [`Verdict::Defer`] is
-/// already resolved by [`RegionStore::check`].
+/// This is the hook helper: it takes the world from the player's session (the
+/// same key the region was stored under), resolves that world's bypass and
+/// returns the store's configured line for a [`Verdict::Deny`]. A
+/// [`Verdict::Defer`] is already resolved by [`RegionStore::check`].
 pub fn denial(
     handle: &crate::players::PlayerHandle,
     pos: BlockPos,
     action: Action,
 ) -> Option<String> {
+    denial_in(handle, handle.world(), pos, action)
+}
+
+/// [`denial`] for an explicit `world`.
+///
+/// A hook that knows the dimension uses this directly; the per-world bypass
+/// node is resolved against the same `world` that is passed to the check, so a
+/// grant for one dimension cannot leak into another.
+pub fn denial_in(
+    handle: &crate::players::PlayerHandle,
+    world: &str,
+    pos: BlockPos,
+    action: Action,
+) -> Option<String> {
     let store = store();
-    match store.check(OVERWORLD, pos, action, &actor(handle)) {
+    match store.check(world, pos, action, &actor_in(handle, world)) {
         Verdict::Deny => Some(store.deny_message().to_string()),
         _ => None,
     }
@@ -70,6 +107,18 @@ pub fn denial_at(
     action: Action,
 ) -> Option<String> {
     denial(handle, BlockPos::new(x, y, z), action)
+}
+
+/// [`denial_in`] in block coordinates.
+pub fn denial_at_in(
+    handle: &crate::players::PlayerHandle,
+    world: &str,
+    x: i32,
+    y: i32,
+    z: i32,
+    action: Action,
+) -> Option<String> {
+    denial_in(handle, world, BlockPos::new(x, y, z), action)
 }
 
 #[cfg(test)]
@@ -128,5 +177,93 @@ mod tests {
         );
         // No region covers this cell: the hook allows.
         assert_eq!(denial_at(&guest, 1_000, 64, 1_000, Action::Break), None);
+    }
+    #[test]
+    fn the_bypass_node_is_per_world_and_an_operator_still_bypasses() {
+        let _guard = crate::permissions::test_lock();
+        let mut store = crate::permissions::Store::new();
+        store
+            .set_player_node(
+                "NetherHolder",
+                "worldguard.region.bypass.the_nether",
+                None,
+                Some(true),
+            )
+            .unwrap();
+        store
+            .set_player_node(
+                "OverworldHolder",
+                "worldguard.region.bypass.overworld",
+                None,
+                Some(true),
+            )
+            .unwrap();
+        crate::permissions::install_store_for_test(store);
+
+        let nether = crate::players::PlayerHandle::for_test(11, "NetherHolder");
+        let overworld = crate::players::PlayerHandle::for_test(12, "OverworldHolder");
+        let guest = crate::players::PlayerHandle::for_test(13, "RegionGuest");
+        let op = crate::players::PlayerHandle::for_test(14, "RegionOp");
+        crate::permissions::seed_operators(&["RegionOp".to_string()]);
+
+        assert!(bypass_in(&nether, "the_nether"));
+        assert!(!bypass_in(&nether, OVERWORLD));
+
+        assert!(bypass_in(&overworld, OVERWORLD));
+        assert!(!bypass_in(&overworld, "the_nether"));
+
+        assert!(!bypass_in(&guest, OVERWORLD));
+        assert!(
+            bypass_in(&op, "the_nether"),
+            "an operator bypasses each world"
+        );
+    }
+    #[test]
+    fn the_denial_hook_uses_the_players_world_and_its_per_world_bypass() {
+        let _guard = crate::permissions::test_lock();
+        let mut perms = crate::permissions::Store::new();
+        perms
+            .set_player_node(
+                "WorldHolder",
+                "worldguard.region.bypass.overworld",
+                None,
+                Some(true),
+            )
+            .unwrap();
+        crate::permissions::install_store_for_test(perms);
+
+        let _store = install_test_store(RegionStore::new());
+        store().upsert(region(1, (0, 0, 0), (15, 255, 15)).with_flag("build", false));
+        store().upsert(
+            Region::new(
+                RegionId(2),
+                "the_nether",
+                BlockPos::new(0, 0, 0),
+                BlockPos::new(15, 255, 15),
+            )
+            .with_flag("build", false),
+        );
+
+        let at = BlockPos::new(8, 64, 8);
+        let in_overworld =
+            crate::players::PlayerHandle::for_test_in_world(1, "WorldHolder", OVERWORLD);
+        let in_nether =
+            crate::players::PlayerHandle::for_test_in_world(2, "WorldHolder", "the_nether");
+        let guest = crate::players::PlayerHandle::for_test(3, "RegionGuest");
+
+        // The hook takes the world from the session, and the grant is scoped to
+        // that same world: overworld passes, the nether does not.
+        assert_eq!(denial(&in_overworld, at, Action::Break), None);
+        assert_eq!(
+            denial(&in_nether, at, Action::Break).as_deref(),
+            Some(DEFAULT_DENY_MESSAGE)
+        );
+
+        // An explicit world resolves the same way, and a non-holder is denied
+        // in either dimension.
+        assert_eq!(denial_in(&in_overworld, OVERWORLD, at, Action::Break), None);
+        assert!(denial_in(&in_overworld, "the_nether", at, Action::Break).is_some());
+        assert!(denial_in(&guest, OVERWORLD, at, Action::Break).is_some());
+        assert!(denial_in(&guest, "the_nether", at, Action::Break).is_some());
     }
 }
