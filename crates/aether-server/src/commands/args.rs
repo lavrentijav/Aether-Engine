@@ -75,6 +75,33 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
                 .map(|n| (Value::Int(n), t.clone()))
                 .map_err(|_| ParseError::InvalidInteger(t))
         }
+        ArgKind::IntegerRange { min, max } => {
+            let t = read_required(r)?;
+            let n = t
+                .parse::<i32>()
+                .map_err(|_| ParseError::InvalidInteger(t.clone()))?;
+            if let Some(min) = min {
+                if n < min {
+                    return Err(ParseError::Argument(
+                        crate::commands::feedback::lang::format(
+                            crate::commands::feedback::lang::ARG_INTEGER_LOW,
+                            &[&min.to_string(), &n.to_string()],
+                        ),
+                    ));
+                }
+            }
+            if let Some(max) = max {
+                if n > max {
+                    return Err(ParseError::Argument(
+                        crate::commands::feedback::lang::format(
+                            crate::commands::feedback::lang::ARG_INTEGER_BIG,
+                            &[&max.to_string(), &n.to_string()],
+                        ),
+                    ));
+                }
+            }
+            Ok((Value::Int(n), t))
+        }
         ArgKind::Long => {
             let t = read_required(r)?;
             t.parse::<i64>()
@@ -239,6 +266,16 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
         // a space (`@a[name="Bob Smith"]`) stays whole.
         ArgKind::Entity | ArgKind::Entities => {
             let t = read_selector_token(r)?;
+            Ok((Value::Text(t.clone()), t))
+        }
+        // `EntityArgument.players`: a selector that can include non-players is
+        // refused at parse time, as vanilla does; a plain player name is fine.
+        ArgKind::Players => {
+            let t = read_selector_token(r)?;
+            if t.starts_with('@') {
+                super::selector::Selector::parse_players(&t)
+                    .map_err(|e| ParseError::Argument(e.message()))?;
+            }
             Ok((Value::Text(t.clone()), t))
         }
         ArgKind::Uuid | ArgKind::NbtPath => {

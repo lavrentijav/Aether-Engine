@@ -146,6 +146,11 @@ pub struct Ctx<'a, 'e> {
     /// an argument after the tree parsed it (`/pardon` on a name that is not
     /// banned) call [`Ctx::fail`]; everything else stays a success.
     pub reply_kind: FeedbackKind,
+    /// A sink for a body that must report progress **before** it finishes
+    /// (`/save-all`), rather than only in the final [`Reply`]. `None` when the
+    /// caller does not stream (tests, functions), in which case the body falls
+    /// back to one reply.
+    pub progress: Option<&'a mut dyn FnMut(&str)>,
 }
 
 impl<'a> Ctx<'a, '_> {
@@ -175,6 +180,19 @@ impl<'a> Ctx<'a, '_> {
     pub fn fail_lines(&mut self, lines: Vec<String>) -> Reply {
         self.reply_kind = FeedbackKind::Error;
         Reply(lines)
+    }
+
+    /// Report a progress line to the source right now, when the caller streams
+    /// output. Returns whether it was sent; a body that gets `false` must put
+    /// the line in its final reply instead.
+    pub fn report(&mut self, line: impl Into<String>) -> bool {
+        match self.progress.as_deref_mut() {
+            Some(sink) => {
+                sink(&line.into());
+                true
+            }
+            None => false,
+        }
     }
 
     /// The reply a player-only command gives a server source: there is no
@@ -260,6 +278,16 @@ pub enum ArgKind {
     Entity,
     /// `minecraft:entities`.
     Entities,
+    /// `minecraft:entity` restricted to players, multiple
+    /// (`EntityArgument.players`).
+    Players,
+    /// `brigadier:integer` with vanilla's bounds.
+    IntegerRange {
+        /// The smallest accepted value, if bounded below.
+        min: Option<i32>,
+        /// The largest accepted value, if bounded above.
+        max: Option<i32>,
+    },
     /// `minecraft:block_pos`.
     BlockPos,
     /// `minecraft:vec3`. The flag is vanilla's `centerIntegers`: `true` (the
@@ -332,12 +360,12 @@ impl ArgKind {
             // CMD task gives the kind that data.
             ArgKind::ResourceOrTag => "brigadier:string",
             ArgKind::Message => "minecraft:message",
-            ArgKind::Integer => "brigadier:integer",
+            ArgKind::Integer | ArgKind::IntegerRange { .. } => "brigadier:integer",
             ArgKind::Long => "brigadier:long",
             ArgKind::Float => "brigadier:float",
             ArgKind::Double => "brigadier:double",
             ArgKind::Bool => "brigadier:bool",
-            ArgKind::Entity | ArgKind::Entities => "minecraft:entity",
+            ArgKind::Entity | ArgKind::Entities | ArgKind::Players => "minecraft:entity",
             ArgKind::BlockPos => "minecraft:block_pos",
             ArgKind::Vec3(_) => "minecraft:vec3",
             ArgKind::Vec2(_) => "minecraft:vec2",
@@ -408,13 +436,16 @@ impl ArgKind {
             | ArgKind::Rotation
             | ArgKind::Uuid => ArgProperties::None,
             // The numeric kinds write a flags byte with the min/max bits;
-            // neither is present.
+            // an unbounded one has neither bit set.
             ArgKind::Integer | ArgKind::Long | ArgKind::Float | ArgKind::Double => {
                 ArgProperties::Flags(0)
             }
-            // `0x01` is "single", as vanilla writes `EntityArgumentType`.
+            ArgKind::IntegerRange { min, max } => ArgProperties::IntegerBounds { min, max },
+            // `0x01` is "single", `0x02` "players", as vanilla writes
+            // `EntityArgumentType`.
             ArgKind::Entity => ArgProperties::Flags(0x01),
             ArgKind::Entities => ArgProperties::Flags(0x00),
+            ArgKind::Players => ArgProperties::Flags(0x02),
             ArgKind::ScoreHolder => ArgProperties::Flags(0x00),
             // An `i32` minimum from 1.19.4 on, and no field before that; the
             // serializer decides from the codec's parser generation.
@@ -442,9 +473,16 @@ pub enum ArgProperties {
     None,
     /// A VarInt: the string mode (`0` word, `1` quotable, `2` greedy).
     VarInt(i32),
-    /// A single flags byte: the numeric bounds bits, or the entity and
-    /// score-holder flags.
+    /// A single flags byte: the entity and score-holder flags.
     Flags(u8),
+    /// A flags byte followed by the bounded `i32` values it announces: the
+    /// `brigadier:integer` min/max form.
+    IntegerBounds {
+        /// The lower bound, when present (`0x01`).
+        min: Option<i32>,
+        /// The upper bound, when present (`0x02`).
+        max: Option<i32>,
+    },
     /// An `i32` minimum — `minecraft:time` from 1.19.4 on, and no field at all
     /// before that.
     Time,
@@ -729,6 +767,7 @@ fn build() -> CommandTree {
     children.extend(super::world_edit::nodes());
     children.extend(crate::economy::commands::nodes());
     children.extend(crate::admin::nodes());
+    children.extend(super::server::nodes());
     // The not-yet-implemented core commands are derived from the one catalogue
     // (`catalogue::CATALOGUE`, the single source of truth): registered now so
     // completion and permission checks are right from day one. A name a real
@@ -1127,7 +1166,25 @@ pub fn execute_feedback_from(
 ) -> Option<Feedback> {
     let trimmed = text.trim();
     let body = trimmed.strip_prefix('/')?;
-    run_body(body, source, registry, world)
+    run_body(body, source, registry, world, None)
+}
+
+/// [`execute_feedback_from`] with a sink for a body's progress lines.
+///
+/// The sink is called as the body runs (`/save-all` reports that it is saving
+/// before it starts), and the returned reply carries only what is left, so a
+/// progress line is never repeated and never inherits the final reply's error
+/// styling.
+pub fn execute_feedback_streaming<'a>(
+    text: &str,
+    source: Source<'a>,
+    registry: &'a SharedRegistry,
+    world: &'a DemoWorld,
+    progress: &'a mut dyn FnMut(&str),
+) -> Option<Feedback> {
+    let trimmed = text.trim();
+    let body = trimmed.strip_prefix('/')?;
+    run_body(body, source, registry, world, Some(progress))
 }
 
 /// Run one console/RCON line as a command, with or without a leading slash.
@@ -1145,18 +1202,32 @@ pub fn run_command(
         return Reply(Vec::new());
     }
     let body = trimmed.strip_prefix('/').unwrap_or(trimmed);
-    match run_body(body, source, registry, world) {
-        Some(feedback) => Reply(feedback.lines),
-        None => Reply(Vec::new()),
+    // Console/RCON output is one body; collect the progress lines in front of
+    // the final reply so a streaming body still reads in vanilla's order.
+    let mut progress = Vec::new();
+    let feedback = run_body(
+        body,
+        source,
+        registry,
+        world,
+        Some(&mut |line: &str| progress.push(line.to_string())),
+    );
+    match feedback {
+        Some(feedback) => {
+            progress.extend(feedback.lines);
+            Reply(progress)
+        }
+        None => Reply(progress),
     }
 }
 
 /// Parse and run one command body (no leading slash), for any source.
-fn run_body(
+fn run_body<'a>(
     body: &str,
-    source: Source,
-    registry: &SharedRegistry,
-    world: &DemoWorld,
+    source: Source<'a>,
+    registry: &'a SharedRegistry,
+    world: &'a DemoWorld,
+    progress: Option<&'a mut dyn FnMut(&str)>,
 ) -> Option<Feedback> {
     match tree().parse_source(body, &source) {
         Ok(m) => {
@@ -1167,6 +1238,7 @@ fn run_body(
                 econ: crate::economy::get(),
                 args: m.args,
                 reply_kind: FeedbackKind::Success,
+                progress,
             };
             let reply = m.node.run(&mut ctx).unwrap_or_else(|| Reply(Vec::new()));
             Some(Feedback {

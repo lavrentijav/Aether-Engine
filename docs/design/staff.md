@@ -68,12 +68,13 @@ movement broadcasts to an untracked entity are ignored by the client (the
 movement/teleport/sound broadcasts themselves are not filtered; the client
 ignores packets for an entity it does not hold).
 
-The remaining items in the brief's list are **not wired because the core feature
-does not exist yet**, and so are absent by construction until it lands: `/list`
-is still a CMD-09 stub, the command tree is static (no dynamic name completion),
-there is no server-list player count/sample, and beds only set the spawn point
-(no sleep count). Each of those must call `staff::visible_to` when it is built —
-it is the one place the rule lives.
+`/list` is wired through `staff::visible_to` (CMD-09): a viewer's count and
+names omit players they may not see. The remaining items in the brief's list are
+**not wired because the core feature does not exist yet**, and so are absent by
+construction until it lands: the command tree is static (no dynamic name
+completion), there is no server-list player count/sample, and beds only set the
+spawn point (no sleep count). Each of those must call `staff::visible_to` when
+it is built — it is the one place the rule lives.
 
 Container opens are already silent in this engine (no open animation or chest
 sound is broadcast), so a vanished player's containers are silent by

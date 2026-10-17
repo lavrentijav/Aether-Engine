@@ -44,6 +44,7 @@ cb_remove_mob_effect
 cb_system_chat
 cb_commands
 cb_custom_payload
+cb_transfer
 sb_accept_teleportation
 sb_chat_command
 sb_chat_command_signed

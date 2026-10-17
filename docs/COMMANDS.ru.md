@@ -12,12 +12,12 @@
 
 **Легенда:** ✅ работает · 🚧 ожидает (`CMD-nn` — задача, которая её реализует). **Узел** — правомочие, а **Op** — ванильный уровень оператора (0 — всем … 4 — владельцу); для ожидающей команды заглушка требует ровно их. **Gate** — что сервер проверяет *сегодня*: `node` (узел/op применяются), `operator` (прежняя проверка «только оператор» — узел/op это цель, пока не применяются) или `everyone` (требований нет; узел/op — цель).
 
-**Итого:** 113 команд — 49 работают, 64 ожидают.
+**Итого:** 112 команд — 56 работают, 56 ожидают.
 
 ## Содержание
 
 - [admin](#admin) — Управление игроками и доступом. (10)
-- [server](#server) — Управление сервером и информация о нём. (10)
+- [server](#server) — Управление сервером и информация о нём. (9)
 - [player](#player) — Игрок: инвентарь, перемещение, эффекты и предметы. (22)
 - [world](#world) — Блоки, окружение и правила мира. (16)
 - [data](#data) — Данные, счётная доска, команды и чат. (27)
@@ -49,15 +49,14 @@
 | Команда | Синонимы | Статус | Gate | Узел | Op | Использование |
 | --- | --- | --- | --- | --- | --- | --- |
 | `/stop` | – | ✅ работает | `node` | `minecraft.command.stop` | 4 | `/stop` |
-| `/save-all` | – | ✅ работает | `node` | `minecraft.command.save-all` | 4 | `/save-all` |
-| `/save-on` | – | 🚧 ожидает CMD-09 | `node` | `minecraft.command.save-on` | 4 | `/save-on` |
-| `/save-off` | – | 🚧 ожидает CMD-09 | `node` | `minecraft.command.save-off` | 4 | `/save-off` |
-| `/list` | – | 🚧 ожидает CMD-09 | `node` | `minecraft.command.list` | 0 | `/list [uuids]` |
-| `/seed` | – | 🚧 ожидает CMD-09 | `node` | `minecraft.command.seed` | 2 | `/seed` |
-| `/version` | – | 🚧 ожидает CMD-09 | `node` | `minecraft.command.version` | 2 | `/version` |
-| `/setidletimeout` | – | 🚧 ожидает CMD-09 | `node` | `minecraft.command.setidletimeout` | 3 | `/setidletimeout <minutes>` |
-| `/transfer` | – | 🚧 ожидает CMD-09 | `node` | `minecraft.command.transfer` | 3 | `/transfer <hostname> [port] [players]` |
-| `/publish` | – | 🚧 ожидает CMD-09 | `node` | `minecraft.command.publish` | 4 | `/publish [allow-commands] [gamemode] [port]` |
+| `/save-all` | – | ✅ работает | `node` | `minecraft.command.save-all` | 4 | `/save-all [flush]` |
+| `/save-on` | – | ✅ работает | `node` | `minecraft.command.save-on` | 4 | `/save-on` |
+| `/save-off` | – | ✅ работает | `node` | `minecraft.command.save-off` | 4 | `/save-off` |
+| `/list` | – | ✅ работает | `everyone` | `minecraft.command.list` | 0 | `/list [uuids]` |
+| `/seed` | – | ✅ работает | `node` | `minecraft.command.seed` | 2 | `/seed` |
+| `/version` | – | ✅ работает | `node` | `minecraft.command.version` | 2 | `/version` |
+| `/setidletimeout` | – | ✅ работает | `node` | `minecraft.command.setidletimeout` | 3 | `/setidletimeout <minutes>` |
+| `/transfer` | – | ✅ работает | `node` | `minecraft.command.transfer` | 3 | `/transfer <hostname> [port] [players]` |
 
 ## player
 

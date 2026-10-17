@@ -719,7 +719,9 @@ fn play_loop(
         }
         if last_saved.elapsed() >= Duration::from_secs(30) {
             last_saved = Instant::now();
-            save_player(handle, world);
+            if crate::commands::server::autosave_enabled() {
+                save_player(handle, world);
+            }
         }
 
         // Disconnected from elsewhere: the writer gave up on the socket, or
@@ -733,6 +735,14 @@ fn play_loop(
             handle.disconnect(&reason);
             log_left(&handle.name, &reason);
             return Ok(());
+        }
+        if let Some(timeout) = crate::commands::server::idle_timeout() {
+            if handle.idle_for() >= timeout {
+                let reason = "You have been idle for too long!";
+                handle.disconnect(reason);
+                log_left(&handle.name, reason);
+                return Ok(());
+            }
         }
 
         // Send a keep-alive roughly every 10s (clients disconnect after ~30s).
@@ -784,6 +794,12 @@ fn play_loop(
         let full = handle.full();
         let dead = full && handle.game().dead;
         let event = handle.codec.decode(&pkt, handle.pos());
+        // Vanilla's idle clock is reset by actions, not by the keep-alive
+        // replies the client sends on its own, so an AFK client still times
+        // out.
+        if !matches!(&event, ClientEvent::KeepAlive(_)) {
+            handle.touch_input();
+        }
         // Whatever this packet does to items — a click, a drop, a craft, a
         // block placed from the hand — is journalled when the scope ends.
         let _items = (full && may_move_items(&event))
@@ -1049,7 +1065,26 @@ fn play_loop(
                 if text.trim_start().starts_with('/') {
                     crate::chatlog::log_command(handle, &text, world);
                 }
-                if let Some(feedback) = crate::commands::dispatch(&text, handle, registry, world) {
+                let source = crate::commands::source::CommandSource::Player(handle);
+                let rules = crate::commands::feedback::GameRules::load(world);
+                // A body may report progress before it finishes (`/save-all`
+                // says it is saving first). That line is a success line and
+                // goes through the same per-source/per-kind gate as the rest.
+                let mut progress = |line: &str| {
+                    let feedback =
+                        crate::commands::feedback::Feedback::success(vec![line.to_string()]);
+                    crate::commands::feedback::send(&source, &feedback, rules, |line| {
+                        handle.emit(&ServerEvent::Chat(line.to_string()), world)
+                    });
+                };
+                let dispatched = crate::commands::dispatch_streaming(
+                    &text,
+                    handle,
+                    registry,
+                    world,
+                    &mut progress,
+                );
+                if let Some(feedback) = dispatched {
                     // Command output goes only to whoever typed it: a
                     // rollback report names players and sequence numbers
                     // and is nobody else's business. The one feedback path
@@ -1057,8 +1092,6 @@ fn play_loop(
                     // per success/error whether the source sees it (for a
                     // player, `sendCommandFeedback` gates success but never
                     // error) and colours errors red.
-                    let source = crate::commands::source::CommandSource::Player(handle);
-                    let rules = crate::commands::feedback::GameRules::load(world);
                     crate::commands::feedback::send(&source, &feedback, rules, |line| {
                         handle.emit(&ServerEvent::Chat(line.to_string()), world)
                     });
