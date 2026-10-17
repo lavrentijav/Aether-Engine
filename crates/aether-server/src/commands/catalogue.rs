@@ -780,30 +780,27 @@ pub const CATALOGUE: &[Command] = &[
         Category::Data,
         "/scoreboard <objectives,players> [...]",
     ),
-    pend(
+    imp_node(
         "tag",
         &[],
         "minecraft.command.tag",
         2,
-        "CMD-16",
         Category::Data,
-        "/tag <targets> <add,remove,list> <name>",
+        "/tag <targets> <add|remove> <name> | <targets> list",
     ),
-    pend(
+    imp_node(
         "team",
         &[],
         "minecraft.command.team",
         2,
-        "CMD-16",
         Category::Data,
-        "/team <add,list,modify,join,leave,remove> [...]",
+        "/team <list,add,remove,empty,join,leave,modify> [...]",
     ),
-    pend(
+    imp(
         "teammsg",
         &["tm"],
         "minecraft.command.teammsg",
         0,
-        "CMD-16",
         Category::Data,
         "/teammsg <message>",
     ),
@@ -870,32 +867,29 @@ pub const CATALOGUE: &[Command] = &[
         Category::Data,
         "/trigger <objective> [add,set] [value]",
     ),
-    pend(
+    imp_node(
         "particle",
         &[],
         "minecraft.command.particle",
         2,
-        "CMD-19",
         Category::Data,
-        "/particle <name> <pos> [delta] [speed] [count]",
+        "/particle <name> [<pos>] [<delta>] [<speed>] [<count>] [force|normal] [<viewers>]",
     ),
-    pend(
+    imp_node(
         "playsound",
         &[],
         "minecraft.command.playsound",
         2,
-        "CMD-19",
         Category::Data,
-        "/playsound <sound> <source> <targets> [pos]",
+        "/playsound <sound> [<source>] [<targets>] [<pos>] [<volume>] [<pitch>] [<minVolume>]",
     ),
-    pend(
+    imp_node(
         "stopsound",
         &[],
         "minecraft.command.stopsound",
         2,
-        "CMD-19",
         Category::Data,
-        "/stopsound <targets> [source] [sound]",
+        "/stopsound <targets> [<source>] [<sound>]",
     ),
     pend(
         "loot",
@@ -1573,7 +1567,13 @@ mod tests {
                 .iter()
                 .find(|n| n.name == c.name)
                 .unwrap_or_else(|| panic!("implemented `{}` has no tree node", c.name));
-            assert!(has_executor(node), "`{}` has no executor", c.name);
+            // A command may be non-executable at its root (vanilla's `/tag`,
+            // `/team` and `/teammsg` are), as long as some node below it runs.
+            assert!(
+                node.executor.is_some() || has_executor(node),
+                "`{}` has no executor",
+                c.name
+            );
         }
     }
 

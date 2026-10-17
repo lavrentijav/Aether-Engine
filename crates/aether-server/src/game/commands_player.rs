@@ -20,17 +20,17 @@
 
 use std::sync::Arc;
 
-use aether_api::Vector3;
 use aether_world::journal::DestroyReason;
 
 use super::{effects, enchantment, entities};
 use crate::commands::feedback::lang;
-use crate::commands::selector::{EntityRef, Gamemode, LcgRng, Selector, SelectorSource};
+use crate::commands::selector::{EntityRef, LcgRng, Selector, SelectorSource};
 use crate::commands::tree::{self, ArgKind, Builder, Ctx, Node, Requirement, Source};
 use crate::commands::Reply;
 use crate::inventory::SLOTS;
 use crate::players::{PlayerHandle, SharedRegistry};
 use crate::session::DemoWorld;
+use crate::team::TeamIndex;
 
 /// The permission gate every command in this group uses.
 fn gamemaster() -> Requirement {
@@ -99,14 +99,15 @@ fn effect_node() -> Node {
     let give =
         Builder::literal("give").then(Builder::arg("targets", ArgKind::Entities).then(effect));
     let clear_effect = Builder::arg("effect", ArgKind::String).executable(exec_effect_clear);
-    let clear = Builder::literal("clear").then(
-        Builder::arg("targets", ArgKind::Entities)
-            .executable(exec_effect_clear)
-            .then(clear_effect),
-    );
+    let clear = Builder::literal("clear")
+        .executable(exec_effect_clear_self)
+        .then(
+            Builder::arg("targets", ArgKind::Entities)
+                .executable(exec_effect_clear)
+                .then(clear_effect),
+        );
     Builder::literal("effect")
         .requires(effect_gate())
-        .executable(exec_effect_usage)
         .then(give)
         .then(clear)
         .build()
@@ -117,12 +118,9 @@ fn enchant_node() -> Node {
     let enchantment = Builder::arg("enchantment", ArgKind::String)
         .executable(exec_enchant)
         .then(level);
-    let targets = Builder::arg("targets", ArgKind::Entities)
-        .executable(exec_enchant)
-        .then(enchantment);
+    let targets = Builder::arg("targets", ArgKind::Entities).then(enchantment);
     Builder::literal("enchant")
         .requires(enchant_gate())
-        .executable(exec_enchant)
         .then(targets)
         .build()
 }
@@ -145,31 +143,14 @@ fn int_arg(ctx: &Ctx, i: usize) -> Option<i32> {
     }
 }
 
-fn player_ref(handle: &PlayerHandle) -> EntityRef {
-    let pos = handle.pos();
-    EntityRef {
-        id: handle.entity_id,
-        uuid: handle.uuid,
-        kind: "minecraft:player".into(),
-        is_player: true,
-        alive: true,
-        name: Some(handle.name.clone()),
-        pos: Vector3::new(pos.x, pos.y, pos.z),
-        rotation: crate::commands::coordinates::Rotation::new(pos.yaw, pos.pitch),
-        tags: Vec::new(),
-        team: None,
-        gamemode: Some(Gamemode::from(handle.game().mode)),
-        level: 0,
-        scores: Vec::new(),
-        advancements: Vec::new(),
-        predicates: Vec::new(),
-        nbt: crate::protocol::nbt::Nbt::Compound(Vec::new()),
-    }
-}
-
 /// The live registry and entity list, as the CMD-06b selector layer sees it.
+///
+/// The player and entity snapshots are CMD-16's ([`crate::commands::team_tag`]),
+/// so `@a[tag=x]`, `@a[team=red]`, `@a[level=…]` and `@e[team=…]` match the
+/// same entities `/tag` and `/team` just changed.
 struct LiveSource<'a> {
     registry: &'a SharedRegistry,
+    teams: TeamIndex,
     executor: Option<EntityRef>,
 }
 
@@ -182,27 +163,31 @@ impl SelectorSource for LiveSource<'_> {
         self.registry
             .snapshot()
             .iter()
-            .map(|handle| player_ref(handle))
+            .map(|handle| crate::commands::team_tag::player_ref(handle, &self.teams))
             .collect()
     }
 
     fn entities(&self) -> Vec<EntityRef> {
-        entities::selector_snapshot()
+        entities::selectable()
             .into_iter()
-            .map(|(id, uuid, kind, pos, alive)| {
-                let mut e = EntityRef::other(kind, id, pos);
-                e.uuid = uuid;
-                e.alive = alive;
-                e
-            })
+            .map(|e| crate::commands::team_tag::entity_ref(e, &self.teams))
             .collect()
     }
 }
 
-fn live_source<'a>(registry: &'a SharedRegistry, source: Source<'a>) -> LiveSource<'a> {
+fn live_source<'a>(
+    registry: &'a SharedRegistry,
+    world: &DemoWorld,
+    source: Source<'a>,
+) -> LiveSource<'a> {
+    let teams = TeamIndex::load(world);
+    let executor = source
+        .player()
+        .map(|p| crate::commands::team_tag::player_ref(p, &teams));
     LiveSource {
         registry,
-        executor: source.player().map(player_ref),
+        teams,
+        executor,
     }
 }
 
@@ -234,6 +219,7 @@ fn resolve_entities(
     text: &str,
     source: Source<'_>,
     registry: &SharedRegistry,
+    world: &DemoWorld,
 ) -> Result<Vec<Target>, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -248,7 +234,7 @@ fn resolve_entities(
             .ok_or_else(|| "No player was found".to_string());
     }
     let selector = Selector::parse(text).map_err(|e| e.message())?;
-    let live = live_source(registry, source);
+    let live = live_source(registry, world, source);
     let found = selector
         .select(&live, &mut LcgRng::new(seed()))
         .map_err(|e| e.message())?;
@@ -288,6 +274,7 @@ fn resolve_players(
     text: &str,
     source: Source<'_>,
     registry: &SharedRegistry,
+    world: &DemoWorld,
 ) -> Result<Vec<Arc<PlayerHandle>>, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -302,7 +289,7 @@ fn resolve_players(
             .ok_or_else(|| "No player was found".to_string());
     }
     let selector = Selector::parse_players(text).map_err(|e| e.message())?;
-    let live = live_source(registry, source);
+    let live = live_source(registry, world, source);
     let found = selector
         .select(&live, &mut LcgRng::new(seed()))
         .map_err(|e| e.message())?;
@@ -359,7 +346,7 @@ fn exec_clear(ctx: &mut Ctx) -> Reply {
     }
 
     let targets = match target_text {
-        Some(text) => match resolve_players(&text, ctx.source, ctx.registry) {
+        Some(text) => match resolve_players(&text, ctx.source, ctx.registry, ctx.world) {
             Ok(v) => v,
             Err(e) => return ctx.fail(e),
         },
@@ -431,8 +418,8 @@ fn parse_item_filter(text: &str, world: &DemoWorld) -> Result<ItemFilter, String
         return Ok(ItemFilter::Any);
     }
     if stem.starts_with('#') {
-        return super::recipes::item_tag(stem)
-            .map(|ids| ItemFilter::Items(ids.to_vec()))
+        return item_tag_ids(stem)
+            .map(ItemFilter::Items)
             .ok_or_else(|| format!("Unknown item tag '{stem}'"));
     }
     let name = if stem.contains(':') {
@@ -446,6 +433,41 @@ fn parse_item_filter(text: &str, world: &DemoWorld) -> Result<ItemFilter, String
         .ok_or_else(|| format!("Unknown item '{text}'"))
 }
 
+/// The items in an item tag: the loaded data pack first, then the compiled
+/// 1.21.11 `TAGS` table, so `#minecraft:planks` works on a default (packless)
+/// server exactly as it does with a pack.
+fn item_tag_ids(name: &str) -> Option<Vec<aether_world::ItemTypeId>> {
+    if let Some(ids) = super::recipes::item_tag(name) {
+        return Some(ids.to_vec());
+    }
+    compiled_item_tag(name)
+}
+
+fn compiled_item_tag(name: &str) -> Option<Vec<aether_world::ItemTypeId>> {
+    let name = name.strip_prefix('#').unwrap_or(name);
+    let key = if name.contains(':') {
+        name.to_string()
+    } else {
+        format!("minecraft:{name}")
+    };
+    let v = &crate::protocol::modern::version::V1_21_11;
+    let tags = crate::protocol::modern::gen::v1_21_11::TAGS;
+    let (_, entries) = tags
+        .iter()
+        .find(|(registry, _)| *registry == "minecraft:item")?;
+    let (_, wires) = entries.iter().find(|(tag, _)| *tag == key)?;
+    let mut out = Vec::with_capacity(wires.len());
+    for &wire in *wires {
+        let Some(item_name) = v.item_name(wire as i32) else {
+            continue;
+        };
+        if let Some(id) = aether_world::ItemTypeId::vanilla(item_name) {
+            out.push(id);
+        }
+    }
+    Some(out)
+}
+
 /// Remove up to `max` matching items from one player, journalling the
 /// destruction, and return how many units left.
 fn clear_one(handle: &PlayerHandle, filter: &ItemFilter, max: i32, world: &DemoWorld) -> u64 {
@@ -455,6 +477,9 @@ fn clear_one(handle: &PlayerHandle, filter: &ItemFilter, max: i32, world: &DemoW
     let scope = super::provenance::Scope::begin(handle, world);
     super::provenance::note_destroy_reason(DestroyReason::Command);
     let mut removed = 0u64;
+    // The one slot a `maxCount` cut short, if any: its original uid survives
+    // with the remainder, and the taken units are journalled by hand below.
+    let mut partial: Option<(usize, aether_world::ItemTypeId, u8)> = None;
     {
         let mut inv = handle.inventory();
         for slot in 0..SLOTS {
@@ -464,35 +489,48 @@ fn clear_one(handle: &PlayerHandle, filter: &ItemFilter, max: i32, world: &DemoW
             let Some(stack) = inv.slot(slot) else {
                 continue;
             };
-            if !filter.matches(stack.item) {
+            let item = stack.item;
+            let count = stack.count;
+            if !filter.matches(item) {
                 continue;
             }
             let take = if max < 0 {
-                stack.count as u64
+                count as u64
             } else {
-                (max as u64 - removed).min(stack.count as u64)
+                (max as u64 - removed).min(count as u64)
             };
             if take == 0 {
                 break;
             }
             removed += take;
-            let left = stack.count - take as u8;
+            let left = count - take as u8;
             if left == 0 {
                 inv.put_slot(slot, None);
             } else {
-                // Split the survivors into a fresh instance. The provenance
-                // layer represents a partial take as the old uid destroyed
-                // and the remainder minted, so the units that `/clear` ate are
-                // journalled as a `Command` destruction rather than a silent
-                // same-slot shrink.
-                let mut rest = stack.clone();
-                rest.count = left;
-                rest.uid = aether_world::journal::ledger::mint_uid();
-                inv.put_slot(slot, Some(rest));
+                // Keep the identity: the remaining units are the same stack.
+                // The removed units get their own mint+destroy pair so the
+                // journal attributes exactly them, not the whole instance.
+                if let Some(s) = inv.slot_mut(slot).and_then(|s| s.as_mut()) {
+                    s.count = left;
+                }
+                partial = Some((slot, item, take as u8));
             }
         }
     }
     drop(scope);
+    if let Some((slot, item, count)) = partial {
+        super::provenance::command_partial_destroy(
+            world,
+            aether_world::journal::ActorId(handle.uuid),
+            item,
+            aether_world::journal::Place::Inventory {
+                owner: aether_world::journal::ActorId(handle.uuid),
+                slot: slot as i16,
+            },
+            count,
+            DestroyReason::Command,
+        );
+    }
     handle.sync_inventory(world);
     removed
 }
@@ -500,10 +538,6 @@ fn clear_one(handle: &PlayerHandle, filter: &ItemFilter, max: i32, world: &DemoW
 // ---------------------------------------------------------------------------
 // /effect
 // ---------------------------------------------------------------------------
-
-fn exec_effect_usage(ctx: &mut Ctx) -> Reply {
-    ctx.fail("Unknown or incomplete command")
-}
 
 fn exec_effect_give(ctx: &mut Ctx) -> Reply {
     exec_effect_give_in(ctx, false)
@@ -551,12 +585,16 @@ fn exec_effect_give_in(ctx: &mut Ctx, infinite: bool) -> Reply {
         return ctx.fail(e);
     }
 
-    let duration = if infinite {
+    let instant = effects::is_instant(id);
+    // An instant effect is applied at once and never stored; its duration is
+    // irrelevant (vanilla passes the seconds value straight through).
+    let duration = if instant {
+        1
+    } else if infinite {
         -1
     } else {
         match seconds {
             Some(s) => s.saturating_mul(20),
-            None if effects::is_instant(id) => 1,
             None => 600,
         }
     };
@@ -565,24 +603,40 @@ fn exec_effect_give_in(ctx: &mut Ctx, infinite: bool) -> Reply {
         effect = effect.hidden();
     }
 
-    let targets = match resolve_entities(&target_text, ctx.source, ctx.registry) {
+    let targets = match resolve_entities(&target_text, ctx.source, ctx.registry, ctx.world) {
         Ok(v) => v,
         Err(e) => return ctx.fail(e),
     };
     let mut applied = 0usize;
     for target in &targets {
-        let ok = match target {
-            Target::Player(handle) => effects::try_give(handle, ctx.registry, ctx.world, effect),
-            Target::Mob { id, .. } => {
-                if let Some(shown) = entities::apply_mob_effect(*id, effect) {
-                    let ev = effects::event(*id, shown);
-                    ctx.registry.broadcast_tracking(*id, &ev, ctx.world);
+        let ok = if instant {
+            // Vanilla applies an instant effect at once and never stores it:
+            // instant health heals, instant damage hurts, and no Update Mob
+            // Effect is sent.
+            match target {
+                Target::Player(handle) => {
+                    entities::apply_command_effects(handle, ctx.registry, ctx.world, &[effect]);
                     true
-                } else {
-                    false
                 }
+                Target::Mob { id, .. } => entities::apply_mob_instant_effect(*id, effect),
+                Target::Other { .. } => false,
             }
-            Target::Other { .. } => false,
+        } else {
+            match target {
+                Target::Player(handle) => {
+                    effects::try_give(handle, ctx.registry, ctx.world, effect)
+                }
+                Target::Mob { id, .. } => {
+                    if let Some(shown) = entities::apply_mob_effect(*id, effect) {
+                        let ev = effects::event(*id, shown);
+                        ctx.registry.broadcast_tracking(*id, &ev, ctx.world);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Target::Other { .. } => false,
+            }
         };
         if ok {
             applied += 1;
@@ -591,6 +645,8 @@ fn exec_effect_give_in(ctx: &mut Ctx, infinite: bool) -> Reply {
     if applied == 0 {
         return ctx.fail(lang::EFFECT_GIVE_FAILED);
     }
+    // Vanilla counts the successes, not the requested targets, when more than
+    // one was named.
     let line = if targets.len() == 1 {
         lang::format(
             lang::EFFECT_GIVE_SUCCESS_SINGLE,
@@ -599,7 +655,7 @@ fn exec_effect_give_in(ctx: &mut Ctx, infinite: bool) -> Reply {
     } else {
         lang::format(
             lang::EFFECT_GIVE_SUCCESS_MULTIPLE,
-            &[display, &targets.len().to_string()],
+            &[display, &applied.to_string()],
         )
     };
     Reply::one(line)
@@ -611,7 +667,7 @@ fn exec_effect_clear(ctx: &mut Ctx) -> Reply {
     let Some(target_text) = target_text else {
         return ctx.fail("Unknown or incomplete command");
     };
-    let targets = match resolve_entities(&target_text, ctx.source, ctx.registry) {
+    let targets = match resolve_entities(&target_text, ctx.source, ctx.registry, ctx.world) {
         Ok(v) => v,
         Err(e) => return ctx.fail(e),
     };
@@ -669,6 +725,21 @@ fn exec_effect_clear(ctx: &mut Ctx) -> Reply {
             Reply::one(line)
         }
     }
+}
+
+/// `/effect clear` with no targets: the source entity, vanilla's `j(ctx)`.
+fn exec_effect_clear_self(ctx: &mut Ctx) -> Reply {
+    let Some(handle) = ctx.player() else {
+        return ctx.needs_player();
+    };
+    if handle.game().effects.is_empty() {
+        return ctx.fail(lang::EFFECT_CLEAR_EVERYTHING_FAILED);
+    }
+    effects::clear(handle, ctx.registry, ctx.world);
+    Reply::one(lang::format(
+        lang::EFFECT_CLEAR_EVERYTHING_SUCCESS_SINGLE,
+        &[&handle.name],
+    ))
 }
 
 fn target_has_effect(target: &Target, id: u8) -> bool {
@@ -745,11 +816,13 @@ fn exec_enchant(ctx: &mut Ctx) -> Reply {
             &[&level.to_string(), &def.max_level.to_string()],
         ));
     }
-    let targets = match resolve_entities(&target_text, ctx.source, ctx.registry) {
+    let targets = match resolve_entities(&target_text, ctx.source, ctx.registry, ctx.world) {
         Ok(v) => v,
         Err(e) => return ctx.fail(e),
     };
+    let tag = item_tag_ids(&def.tag());
 
+    let multiple = targets.len() > 1;
     let mut enchanted = 0usize;
     for target in &targets {
         match target {
@@ -757,25 +830,33 @@ fn exec_enchant(ctx: &mut Ctx) -> Reply {
                 let index = handle.inventory().held_index();
                 let held = handle.inventory().slot(index).cloned();
                 let Some(stack) = held else {
+                    if multiple {
+                        continue;
+                    }
                     return ctx.fail(lang::format(lang::ENCHANT_FAILED_ITEMLESS, &[&handle.name]));
                 };
                 let item_name = ctx
                     .world
                     .item_name(stack.item)
                     .unwrap_or_else(|| stack.item.vanilla_name().unwrap_or_default().to_string());
-                // Creative is exempt from the compatibility check, exactly as
-                // vanilla's `hasInfiniteMaterials`. A pack's real
-                // `enchantable/…` tag is authoritative; the compiled category
-                // is the fallback without one.
-                let compatible = handle.game().mode == crate::protocol::GameMode::Creative
-                    || match super::recipes::item_tag(&def.tag()) {
-                        Some(ids) => ids.contains(&stack.item),
-                        None => enchantment::can_enchant(&item_name, &def),
-                    };
-                if !compatible {
+                // `Enchantment.canEnchant(item)`: a loaded pack's real
+                // `enchantable/…` tag, else the compiled one, else the
+                // hand-written category fallback.
+                let supports = match &tag {
+                    Some(ids) => ids.contains(&stack.item),
+                    None => enchantment::can_enchant(&item_name, &def),
+                };
+                // `EnchantmentHelper.isEnchantmentCompatible`: the candidate's
+                // exclusive set may not contain any enchantment already on the
+                // item.
+                let existing: Vec<u8> = stack.enchantments.iter().map(|e| e.id).collect();
+                if !supports || !enchantment::is_compatible(&existing, &def) {
+                    if multiple {
+                        continue;
+                    }
                     return ctx.fail(lang::format(
                         lang::ENCHANT_FAILED_INCOMPATIBLE,
-                        &[&enchantment::item_display(&item_name)],
+                        &[&item_display(stack.item, &item_name)],
                     ));
                 }
                 {
@@ -794,9 +875,15 @@ fn exec_enchant(ctx: &mut Ctx) -> Reply {
                 enchanted += 1;
             }
             Target::Mob { name, .. } => {
+                if multiple {
+                    continue;
+                }
                 return ctx.fail(lang::format(lang::ENCHANT_FAILED_ITEMLESS, &[name]));
             }
             Target::Other { name } => {
+                if multiple {
+                    continue;
+                }
                 return ctx.fail(lang::format(lang::ENCHANT_FAILED_ENTITY, &[name]));
             }
         }
@@ -804,16 +891,22 @@ fn exec_enchant(ctx: &mut Ctx) -> Reply {
     if enchanted == 0 {
         return ctx.fail(lang::ENCHANT_FAILED);
     }
-    let line = if targets.len() == 1 {
-        lang::format(
-            lang::ENCHANT_SUCCESS_SINGLE,
-            &[def.display, targets[0].name()],
-        )
-    } else {
+    let full = enchantment::full_name(&def, level);
+    let line = if multiple {
         lang::format(
             lang::ENCHANT_SUCCESS_MULTIPLE,
-            &[def.display, &targets.len().to_string()],
+            &[&full, &enchanted.to_string()],
         )
+    } else {
+        lang::format(lang::ENCHANT_SUCCESS_SINGLE, &[&full, targets[0].name()])
     };
     Reply::one(line)
+}
+
+/// The hover name of an item for command feedback: the engine's English table
+/// where it has one (`TNT`, not `Tnt`), else a title-cased id.
+fn item_display(id: aether_world::ItemTypeId, name: &str) -> String {
+    crate::protocol::compat::items::english(id)
+        .map(str::to_owned)
+        .unwrap_or_else(|| enchantment::item_display(name))
 }

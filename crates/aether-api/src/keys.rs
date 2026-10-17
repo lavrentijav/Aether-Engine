@@ -84,6 +84,8 @@ pub const WEB_PROFILE: &[u8] = b"WB";
 /// server's command layer (CMD-05 introduced the store; CMD-13 owns
 /// `/gamerule`).
 pub const GAME_RULES: &[u8] = b"GR";
+/// One scoreboard team, keyed by its name (CMD-16).
+pub const TEAM: &[u8] = b"TM";
 
 /// Every top-level key prefix in a world's KV store, and its owner.
 ///
@@ -170,6 +172,10 @@ pub const KEY_PREFIXES: &[KeyClaim] = &[
     KeyClaim {
         owner: "game rules",
         prefix: GAME_RULES,
+    },
+    KeyClaim {
+        owner: "scoreboard team",
+        prefix: TEAM,
     },
 ];
 

@@ -64,7 +64,14 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
             let t = r.read_remainder()?;
             Ok((Value::Text(t.clone()), t))
         }
-        ArgKind::String | ArgKind::Quotable => {
+        // `StringArgumentType.word()`: quotes are ordinary characters, not a
+        // quoted-string syntax. Only `quotable` and the message kinds read a
+        // quoted span.
+        ArgKind::String => {
+            let t = read_required(r)?;
+            Ok((Value::Text(t.clone()), t))
+        }
+        ArgKind::Quotable => {
             let t = r.read_string_arg()?;
             Ok((Value::Text(t.clone()), t))
         }
@@ -243,14 +250,34 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
             }
         }
         ArgKind::Particle => {
-            // A particle id, then whatever the type-specific parameters are;
-            // kept whole so the executor can hand the tail to its own parser.
+            // A particle id, then an optional `{…}` options object with **no
+            // whitespace** between them (`ParticleArgument` checks for `{`
+            // immediately after the id). The registry name and the options
+            // are resolved here, not in the executor: Brigadier reads
+            // arguments left to right, so a bad particle must fail before
+            // `pos`/`delta`/`speed`/`count` are parsed.
             let t = read_component(r)?;
-            Ok((Value::Text(t.clone()), t))
+            let particle = super::effects::parse_particle(&t).map_err(ParseError::Argument)?;
+            Ok((Value::Particle(particle), t))
         }
         ArgKind::ScoreHolder => {
             let t = read_selector_token(r)?;
             Ok((Value::Text(t.clone()), t))
+        }
+        // `TeamArgument`: an unquoted token; whether the team exists is
+        // checked by the executor, which has the world.
+        ArgKind::Team => {
+            let t = read_required(r)?;
+            Ok((Value::Text(t.clone()), t))
+        }
+        // `ColorArgument`: a `ChatFormatting` name (reset included), rejecting
+        // a format such as `bold` exactly as vanilla does.
+        ArgKind::Color => {
+            let t = read_required(r)?;
+            match crate::team::Color::parse(&t) {
+                Some(_) => Ok((Value::Text(t.clone()), t)),
+                None => Err(ParseError::Argument(format!("Unknown color '{t}'"))),
+            }
         }
         ArgKind::Operation => {
             let t = read_required(r)?;
@@ -363,7 +390,7 @@ fn coord_error(e: CoordError) -> ParseError {
 ///
 /// The shape is `id[prop=value,…]{blockEntityNbt}`; both the property list and
 /// the NBT are optional (vanilla's `BlockArgumentParser.block(…, true)`).
-fn parse_block_state(text: &str) -> Result<BlockState, ParseError> {
+pub(crate) fn parse_block_state(text: &str) -> Result<BlockState, ParseError> {
     // Split off an optional `{…}` block-entity tag first: it comes last, and
     // the base/property part never contains a `{`.
     let (head, nbt) = match text.find('{') {
@@ -578,7 +605,7 @@ fn normalize_block(name: &str) -> String {
 }
 
 /// A syntactically valid `namespace:path`.
-fn valid_resource(name: &str) -> bool {
+pub(crate) fn valid_resource(name: &str) -> bool {
     let Some((ns, path)) = name.split_once(':') else {
         return false;
     };

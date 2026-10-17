@@ -7,6 +7,8 @@ use crate::protocol::GameMode;
 
 /// Ticks a hit leaves a player immune to the next, vanilla's half second.
 pub const HURT_COOLDOWN: u32 = 10;
+/// Vanilla's cap on an entity's scoreboard tags (`Entity.addTag`).
+pub const MAX_TAGS: usize = 1024;
 /// Ticks eating takes.
 pub const EAT_TICKS: u64 = 32;
 
@@ -170,6 +172,8 @@ pub struct PlayerState {
     /// Bumped on every window update the server sends.
     pub state_id: i32,
     pub cursor: Option<Stack>,
+    /// Scoreboard tags, the `/tag` set on this entity (CMD-16).
+    pub tags: std::collections::BTreeSet<String>,
     /// The item a creative client is carrying between slots, shadowed from
     /// its slot reports so a substituted item moved through the cursor keeps
     /// its real identity and count. See `session::record_slot_change`.
@@ -219,6 +223,7 @@ impl PlayerState {
             window_counter: 1,
             state_id: 1,
             cursor: None,
+            tags: std::collections::BTreeSet::new(),
             creative_carry: None,
             drag: None,
             xp_total: 0,
@@ -317,14 +322,16 @@ pub struct Saved {
     pub spawn: (f64, f64, f64),
     /// Status effects still running when the player left.
     pub effects: Vec<Effect>,
+    /// Scoreboard tags, in sorted order.
+    pub tags: Vec<String>,
 }
 
 /// The version 1 layout, without effects. Still read, so a player who last
 /// logged in before effects existed is not locked out of their save.
 const LEGACY_LEN: usize = 1 + 6 * 8 + 4 * 4 + 4 + 4 + 1;
 
-/// 2 added the active effects.
-const SAVE_VERSION: u8 = 2;
+/// 2 added the active effects; 3 added scoreboard tags.
+const SAVE_VERSION: u8 = 3;
 
 /// KV key for a player's saved state.
 ///
@@ -367,6 +374,14 @@ pub fn encode(s: &Saved) -> Vec<u8> {
         let flags = (e.ambient as u8) | ((e.visible as u8) << 1) | ((e.show_icon as u8) << 2);
         out.push(flags);
     }
+    let tags = s.tags.iter().take(u16::MAX as usize).collect::<Vec<_>>();
+    out.extend_from_slice(&(tags.len() as u16).to_be_bytes());
+    for tag in tags {
+        let bytes = tag.as_bytes();
+        let len = bytes.len().min(u16::MAX as usize);
+        out.extend_from_slice(&(len as u16).to_be_bytes());
+        out.extend_from_slice(&bytes[..len]);
+    }
     out
 }
 
@@ -375,7 +390,7 @@ pub fn decode(b: &[u8]) -> Option<Saved> {
         return None;
     }
     match b[0] {
-        1 | 2 => {}
+        1..=3 => {}
         _ => return None,
     }
     let f64_at = |i: usize| f64::from_be_bytes(b[1 + i * 8..9 + i * 8].try_into().unwrap());
@@ -387,7 +402,7 @@ pub fn decode(b: &[u8]) -> Option<Saved> {
         1 => GameMode::Creative,
         _ => GameMode::Survival,
     };
-    let effects = if b[0] == 2 {
+    let effects = if b[0] >= 2 {
         let mut at = LEGACY_LEN;
         let n = *b.get(at)? as usize;
         at += 1;
@@ -407,9 +422,6 @@ pub fn decode(b: &[u8]) -> Option<Saved> {
                 show_icon: flags & 4 != 0,
             });
         }
-        if at != b.len() {
-            return None;
-        }
         list
     } else {
         if b.len() != LEGACY_LEN {
@@ -417,6 +429,32 @@ pub fn decode(b: &[u8]) -> Option<Saved> {
         }
         Vec::new()
     };
+    let mut at = LEGACY_LEN;
+    if b[0] >= 2 {
+        let n = *b.get(at)? as usize;
+        at += 1;
+        for _ in 0..n {
+            at += 7;
+        }
+    }
+    let tags = if b[0] >= 3 {
+        let mut list = Vec::new();
+        let n = u16::from_be_bytes(b.get(at..at + 2)?.try_into().ok()?) as usize;
+        at += 2;
+        for _ in 0..n {
+            let len = u16::from_be_bytes(b.get(at..at + 2)?.try_into().ok()?) as usize;
+            at += 2;
+            let bytes = b.get(at..at + len)?;
+            at += len;
+            list.push(String::from_utf8(bytes.to_vec()).ok()?);
+        }
+        list
+    } else {
+        Vec::new()
+    };
+    if at != b.len() {
+        return None;
+    }
     Some(Saved {
         pos: (f64_at(0), f64_at(1), f64_at(2)),
         spawn: (f64_at(3), f64_at(4), f64_at(5)),
@@ -428,6 +466,7 @@ pub fn decode(b: &[u8]) -> Option<Saved> {
         xp_total: i32_at(base + 20),
         mode,
         effects,
+        tags,
     })
 }
 
@@ -451,6 +490,7 @@ mod tests {
                 Effect::new(crate::game::effects::SPEED, 1, 200),
                 Effect::new(crate::game::effects::ABSORPTION, 0, 2400).hidden(),
             ],
+            tags: vec!["vip".into(), "here".into()],
         };
         assert_eq!(decode(&encode(&s)), Some(s));
     }
@@ -469,6 +509,7 @@ mod tests {
                 mode: GameMode::Survival,
                 spawn: (8.5, 80.0, 8.5),
                 effects: Vec::new(),
+                tags: Vec::new(),
             };
             let mut out = vec![1u8];
             out.extend_from_slice(&encode(&s)[1..LEGACY_LEN]);

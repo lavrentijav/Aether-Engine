@@ -124,6 +124,8 @@ pub struct Entity {
     pub pitch: f32,
     pub age: u32,
     pub kind: Kind,
+    /// Scoreboard tags, the `/tag` set on this entity (CMD-16).
+    pub tags: std::collections::BTreeSet<String>,
     /// Position and yaw as last sent to clients.
     sent: (f64, f64, f64, f32),
     /// Removed at the end of this tick.
@@ -211,6 +213,69 @@ pub fn for_each_named(f: &mut dyn FnMut(&'static str, Vector3)) {
     }
 }
 
+/// An owned snapshot of one non-player entity, for selectors and `/tag`.
+#[derive(Clone, Debug)]
+pub struct Selectable {
+    pub id: i32,
+    pub uuid: u128,
+    pub kind: &'static str,
+    pub pos: Vector3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub alive: bool,
+    pub tags: Vec<String>,
+}
+
+/// Every loaded non-player entity, copied out so no lock is held by a caller.
+pub fn selectable() -> Vec<Selectable> {
+    entities()
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| Selectable {
+            id: e.id,
+            uuid: e.uuid,
+            kind: e.type_name(),
+            pos: e.pos(),
+            yaw: e.yaw,
+            pitch: e.pitch,
+            alive: !e.dead,
+            tags: e.tags.iter().cloned().collect(),
+        })
+        .collect()
+}
+
+/// Add `tag` to entity `id`; `false` when it already had it, the entity is
+/// gone, or it already holds vanilla's 1024-tag limit.
+pub fn add_tag(id: i32, tag: &str) -> bool {
+    entities()
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|e| e.id == id)
+        .is_some_and(|e| e.tags.len() < super::player::MAX_TAGS && e.tags.insert(tag.to_string()))
+}
+
+/// Remove `tag` from entity `id`; `false` when it did not have it (or is gone).
+pub fn remove_tag(id: i32, tag: &str) -> bool {
+    entities()
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|e| e.id == id)
+        .is_some_and(|e| e.tags.remove(tag))
+}
+
+/// The tags on entity `id`, if it is still loaded.
+pub fn tags(id: i32) -> Option<Vec<String>> {
+    entities()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|e| e.id == id)
+        .map(|e| e.tags.iter().cloned().collect())
+}
+
 /// Entity ids for everything that is not a player.
 ///
 /// Counted up from a long way above the player range, which counts up from
@@ -245,6 +310,7 @@ fn push(body: Body, yaw: f32, kind: Kind) -> i32 {
         pitch: 0.0,
         age: 0,
         kind,
+        tags: std::collections::BTreeSet::new(),
         sent: (p.x, p.y, p.z, yaw),
         dead: false,
         rested: false,
@@ -1683,7 +1749,11 @@ fn apply_potion_area(
 /// Apply one instant effect to a mob, honouring the undead's inversion of
 /// heal and harm — vanilla's `HealOrHarmMobEffect.applyInstantenousEffect`
 /// branches on `livingEntity.isInvertedHealAndHarm()`.
-fn apply_instant_to_mob(m: &mut super::mobs::Mob, effect: &super::effects::Effect, factor: f64) {
+pub(crate) fn apply_instant_to_mob(
+    m: &mut super::mobs::Mob,
+    effect: &super::effects::Effect,
+    factor: f64,
+) {
     let is_harm = effect.id == super::effects::INSTANT_DAMAGE;
     if is_harm == m.def.undead {
         // Heals (instant health on the living, instant damage on the undead).
@@ -1702,7 +1772,7 @@ fn apply_instant_to_mob(m: &mut super::mobs::Mob, effect: &super::effects::Effec
 /// rest through [`super::effects::give`]. A player is never undead, so instant
 /// health always heals and instant damage always hurts — unlike
 /// [`apply_instant_to_mob`].
-fn apply_to_player(
+pub(crate) fn apply_to_player(
     handle: &PlayerHandle,
     registry: &SharedRegistry,
     world: &DemoWorld,
@@ -1732,6 +1802,33 @@ fn apply_to_player(
             super::effects::give(handle, registry, world, *effect);
         }
     }
+}
+
+/// Apply a command's already-resolved effects to a player: instant effects
+/// take hold at once, the rest are stored. `/effect give` uses this so an
+/// instant health/damage command behaves like a splash potion at factor 1.
+pub fn apply_command_effects(
+    handle: &PlayerHandle,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    list: &[super::effects::Effect],
+) {
+    apply_to_player(handle, registry, world, list, 1.0);
+}
+
+/// Apply one instant effect to mob `id` at factor 1, for `/effect give`.
+/// Returns `false` when there is no living mob with that id.
+pub fn apply_mob_instant_effect(id: i32, effect: super::effects::Effect) -> bool {
+    let mut all = entities().lock().unwrap();
+    let Some(e) = all.iter_mut().find(|e| e.id == id && !e.dead) else {
+        return false;
+    };
+    let Kind::Mob(m) = &mut e.kind else {
+        return false;
+    };
+    apply_instant_to_mob(m, &effect, 1.0);
+    m.meta_dirty = true;
+    true
 }
 
 /// Bring every player's tracked set in line with what is in range.
@@ -1921,6 +2018,7 @@ mod tests {
             pitch: 0.0,
             age: 0,
             kind: Kind::XpOrb(XpOrb { value }),
+            tags: std::collections::BTreeSet::new(),
             sent: (x, 64.0, 0.0, 0.0),
             dead: false,
             rested: false,

@@ -228,6 +228,8 @@ fn every_argument_kind_parses_a_valid_word() {
         ArgKind::Difficulty,
         ArgKind::Particle,
         ArgKind::ScoreHolder,
+        ArgKind::Team,
+        ArgKind::Color,
         ArgKind::Swizzle,
         ArgKind::Angle,
         ArgKind::Operation,
@@ -256,6 +258,8 @@ fn every_argument_kind_parses_a_valid_word() {
             ArgKind::Gamemode => "creative",
             ArgKind::Difficulty => "normal",
             ArgKind::Operation => "+=",
+            ArgKind::Color => "red",
+            ArgKind::Particle => "minecraft:flame",
             _ => "word",
         };
         let mut r = StringReader::new(text);
@@ -355,6 +359,8 @@ const ALL_KINDS: &[ArgKind] = &[
     ArgKind::Difficulty,
     ArgKind::Particle,
     ArgKind::ScoreHolder,
+    ArgKind::Team,
+    ArgKind::Color,
     ArgKind::Swizzle,
     ArgKind::Angle,
     ArgKind::Operation,
@@ -418,6 +424,7 @@ fn sample_tree() -> CommandTree {
         executor: None,
         children: vec![num.build(), mode.build(), say.build(), flag.build()],
         usage: None,
+        bounds: None,
         task: None,
     };
     CommandTree { root }
@@ -461,6 +468,7 @@ fn a_coordinate_argument_consumes_three_tokens_in_the_tree() {
             requirement: Requirement::None,
             executor: None,
             usage: None,
+            bounds: None,
             task: None,
             children: vec![Builder::literal("setblock")
                 .then(Builder::arg("pos", ArgKind::BlockPos).executable(noop))
@@ -507,6 +515,7 @@ fn unknown_literal_and_trailing_input_use_the_vanilla_errors() {
             requirement: Requirement::None,
             executor: None,
             usage: None,
+            bounds: None,
             task: None,
             children: vec![Builder::literal("toggle")
                 .executable(|_| Reply(Vec::new()))
@@ -549,6 +558,7 @@ fn requirement_tree(req: Requirement) -> CommandTree {
             requirement: Requirement::None,
             executor: None,
             usage: None,
+            bounds: None,
             task: None,
             children: vec![Builder::literal("secret")
                 .requires(req)
@@ -609,6 +619,7 @@ fn suggestion_tree() -> CommandTree {
             requirement: Requirement::None,
             executor: None,
             usage: None,
+            bounds: None,
             task: None,
             children: vec![
                 Builder::literal("time").executable(noop).build(),
@@ -659,6 +670,7 @@ fn registry_arguments_suggest_from_the_vanilla_tables() {
             requirement: Requirement::None,
             executor: None,
             usage: None,
+            bounds: None,
             task: None,
             children: vec![Builder::literal("setblock")
                 .then(Builder::arg("block", ArgKind::BlockState).executable(noop))
@@ -739,6 +751,7 @@ fn a_two_hundred_node_tree_parses() {
             requirement: Requirement::None,
             executor: None,
             usage: None,
+            bounds: None,
             task: None,
             children,
         },
@@ -1559,6 +1572,925 @@ fn a_double_slash_command_falls_through_the_tree_to_the_plugin_registry() {
 }
 
 // ---------------------------------------------------------------------------
+// CMD-16: tags, teams and team messages
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tag_add_list_remove_and_selector_matching() {
+    let env = env();
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s add here"),
+        "Added tag 'here' to tester"
+    );
+    // Adding the same tag twice changes nothing, exactly as vanilla throws.
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s add here"),
+        "Target either already has the tag or has too many tags"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s list"),
+        "tester has 1 tags: here"
+    );
+    // The selector filter sees the tag the command just wrote.
+    assert_eq!(
+        one(&env, &env.tester, "/tag @e[tag=here] list"),
+        "tester has 1 tags: here"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tag @e[tag=!here] list"),
+        "bob has no tags"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s remove here"),
+        "Removed tag 'here' from tester"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s remove here"),
+        "Target does not have this tag"
+    );
+    assert_eq!(one(&env, &env.tester, "/tag @s list"), "tester has no tags");
+}
+
+#[test]
+fn tags_are_saved_with_the_player_record() {
+    let env = env();
+    one(&env, &env.tester, "/tag @s add saved");
+    let blob = env
+        .world
+        .get_meta(&crate::game::player::key(env.tester.uuid))
+        .unwrap()
+        .expect("the command saved the player");
+    let saved = crate::game::player::decode(&blob).expect("a version 3 save");
+    assert_eq!(saved.tags, vec!["saved".to_string()]);
+}
+
+#[test]
+fn team_lifecycle_moves_members_and_lists_them_sorted() {
+    let env = env();
+    assert_eq!(
+        one(&env, &env.tester, "/team add red"),
+        "Created team [red]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team add red"),
+        "A team already exists by that name"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team join red"),
+        "Added tester to team [red]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team join red bob"),
+        "Added bob to team [red]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team list red"),
+        "Team [red] has 2 member(s): bob, tester"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team list"),
+        "There are 1 team(s): [red]"
+    );
+
+    one(&env, &env.tester, "/team add blue");
+    assert_eq!(
+        one(&env, &env.tester, "/team join blue tester"),
+        "Added tester to team [blue]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team list red"),
+        "Team [red] has 1 member(s): bob"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team list blue"),
+        "Team [blue] has 1 member(s): tester"
+    );
+
+    assert_eq!(
+        one(&env, &env.tester, "/team empty blue"),
+        "Removed 1 member(s) from team [blue]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team empty blue"),
+        "Nothing changed. That team is already empty"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team leave bob"),
+        "Removed bob from any team"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team leave bob"),
+        "Removed bob from any team"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team remove red"),
+        "Removed team [red]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team remove red"),
+        "Unknown team 'red'"
+    );
+}
+
+#[test]
+fn team_modify_covers_every_option_and_rejects_bad_input() {
+    let env = env();
+    one(&env, &env.tester, "/team add red");
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red prefix \"<\""),
+        "Team prefix set to <"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red suffix \">\""),
+        "Team suffix set to >"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red color red"),
+        "Updated the color for team §c[red] to red"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red color red"),
+        "Nothing changed. That team already has that color"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red color nope"),
+        "Unknown color 'nope'"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red friendlyFire false"),
+        "Disabled friendly fire for team §c[red]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red friendlyFire false"),
+        "Nothing changed. Friendly fire is already disabled for that team"
+    );
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red seeFriendlyInvisibles false"
+        ),
+        "Team §c[red] can no longer see invisible teammates"
+    );
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red seeFriendlyInvisibles true"
+        ),
+        "Team §c[red] can now see invisible teammates"
+    );
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red nametagVisibility never"
+        ),
+        "Nametag visibility for team §c[red] is now \"Never\""
+    );
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red deathMessageVisibility hideForOwnTeam"
+        ),
+        "Death message visibility for team §c[red] is now \"Hide for own team\""
+    );
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red collisionRule pushOwnTeam"
+        ),
+        "Collision rule for team §c[red] is now \"Push own team\""
+    );
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red displayName {\"text\":\"Red Team\",\"color\":\"gold\"}"
+        ),
+        "Updated the name of team §c[§6Red Team]"
+    );
+    // A malformed component is an error, not a panic.
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red prefix {"),
+        "Invalid component: unterminated compound at byte 1"
+    );
+
+    let team = crate::team::find(&env.world, "red").expect("team still exists");
+    assert!(!team.friendly_fire);
+    assert_eq!(team.prefix, "<");
+    assert_eq!(team.suffix, ">");
+    assert_eq!(team.color, crate::team::Color::Red);
+    assert_eq!(team.nametag_visibility, crate::team::Visibility::Never);
+    assert_eq!(
+        team.death_message_visibility,
+        crate::team::Visibility::HideForOwnTeam
+    );
+    assert_eq!(team.collision_rule, crate::team::CollisionRule::PushOwnTeam);
+    assert_eq!(team.display_name, "§6Red Team");
+}
+
+#[test]
+fn teammsg_needs_a_team_and_the_tm_alias_works() {
+    let env = env();
+    assert_eq!(
+        one(&env, &env.tester, "/teammsg hello"),
+        "You must be on a team to message your team"
+    );
+    one(&env, &env.tester, "/team add red");
+    one(&env, &env.tester, "/team join red");
+    assert_eq!(
+        one(&env, &env.tester, "/teammsg hello team"),
+        "-> [red] <tester> hello team"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tm hello again"),
+        "-> [red] <tester> hello again"
+    );
+}
+
+#[test]
+fn team_join_accepts_a_selector_and_rejects_an_unknown_team() {
+    let env = env();
+    one(&env, &env.tester, "/team add red");
+    assert_eq!(
+        one(&env, &env.tester, "/team join red @a[name=bob]"),
+        "Added bob to team [red]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team join missing @a"),
+        "Unknown team 'missing'"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tag @e[type=player] list"),
+        "There are no tags on the 2 entities"
+    );
+}
+
+#[test]
+fn collision_rules_decide_whether_players_collide() {
+    let env = env();
+    one(&env, &env.tester, "/team add red");
+    one(&env, &env.tester, "/team add blue");
+    assert_eq!(
+        one(&env, &env.tester, "/team join blue bob"),
+        "Added bob to team [blue]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team join red"),
+        "Added tester to team [red]"
+    );
+
+    // Different teams, default ALWAYS.
+    assert!(crate::team::collides(&env.world, "tester", "bob"));
+
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red collisionRule never"),
+        "Collision rule for team [red] is now \"Never\""
+    );
+    assert!(!crate::team::collides(&env.world, "tester", "bob"));
+
+    one(
+        &env,
+        &env.tester,
+        "/team modify red collisionRule pushOwnTeam",
+    );
+    // `pushOwnTeam` refuses only teammates: Bob is on another team, so the
+    // two still collide (vanilla's contrary-to-the-name rule).
+    assert!(crate::team::collides(&env.world, "tester", "bob"));
+
+    one(&env, &env.tester, "/team join red bob");
+    // Now they are teammates, and `pushOwnTeam` stops the push.
+    assert!(!crate::team::collides(&env.world, "tester", "bob"));
+
+    one(
+        &env,
+        &env.tester,
+        "/team modify red collisionRule pushOtherTeams",
+    );
+    // `pushOtherTeams` refuses outsiders: a teammate now collides.
+    assert!(crate::team::collides(&env.world, "tester", "bob"));
+
+    one(&env, &env.tester, "/team modify red collisionRule always");
+    assert!(crate::team::collides(&env.world, "tester", "bob"));
+}
+
+#[test]
+fn death_message_visibility_filters_viewers() {
+    let env = env();
+    one(&env, &env.tester, "/team add red");
+    one(&env, &env.tester, "/team join red @a");
+
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red deathMessageVisibility never"
+        ),
+        "Death message visibility for team [red] is now \"Never\""
+    );
+    assert!(!crate::team::death_message_visible(
+        &env.world, "tester", "bob"
+    ));
+    assert!(!crate::team::death_message_visible(
+        &env.world, "tester", "carol"
+    ));
+
+    one(
+        &env,
+        &env.tester,
+        "/team modify red deathMessageVisibility hideForOwnTeam",
+    );
+    assert!(!crate::team::death_message_visible(
+        &env.world, "tester", "bob"
+    ));
+    assert!(crate::team::death_message_visible(
+        &env.world, "tester", "carol"
+    ));
+
+    one(
+        &env,
+        &env.tester,
+        "/team modify red deathMessageVisibility hideForOtherTeams",
+    );
+    assert!(crate::team::death_message_visible(
+        &env.world, "tester", "bob"
+    ));
+    assert!(!crate::team::death_message_visible(
+        &env.world, "tester", "carol"
+    ));
+
+    one(
+        &env,
+        &env.tester,
+        "/team modify red deathMessageVisibility always",
+    );
+    assert!(crate::team::death_message_visible(
+        &env.world, "tester", "carol"
+    ));
+}
+
+#[test]
+fn the_level_selector_compares_experience_level_not_total_xp() {
+    let env = env();
+    {
+        let mut st = env.tester.game();
+        st.xp_total = 352; // 16 levels, but 352 total XP
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/tag @a[level=16] add lvl"),
+        "Added tag 'lvl' to tester"
+    );
+    // No player has 352 levels; 352 is only this player's total XP.
+    assert_eq!(
+        one(&env, &env.tester, "/tag @a[level=352] add nope"),
+        "No player was found"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s list"),
+        "tester has 1 tags: lvl"
+    );
+}
+
+#[test]
+fn non_player_team_members_are_visible_to_selectors() {
+    let env = env();
+    one(&env, &env.tester, "/team add red");
+    let uuid = 0xae7e_0000_0000_4000_8000_0000_dead_beefu128;
+    let name = crate::team::uuid_name(uuid);
+    assert_eq!(
+        one(&env, &env.tester, &format!("/team join red {name}")),
+        format!("Added {name} to team [red]")
+    );
+    let entity = crate::game::entities::Selectable {
+        id: 1234,
+        uuid,
+        kind: "minecraft:zombie",
+        pos: aether_api::Vector3::new(1.0, 64.0, 1.0),
+        yaw: 0.0,
+        pitch: 0.0,
+        alive: true,
+        tags: Vec::new(),
+    };
+    let snapshot =
+        crate::commands::team_tag::entity_ref(entity, &crate::team::TeamIndex::load(&env.world));
+    assert_eq!(snapshot.team.as_deref(), Some("red"));
+}
+
+#[test]
+fn the_tag_cap_is_vanillas_1024() {
+    let env = env();
+    for i in 0..crate::game::player::MAX_TAGS {
+        env.tester.game().tags.insert(format!("t{i}"));
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s add overflow"),
+        "Target either already has the tag or has too many tags"
+    );
+}
+
+#[test]
+fn the_declared_team_tree_uses_vanillas_argument_parsers() {
+    use crate::commands::tree::{ArgKind, Kind, Node};
+    fn child<'a>(node: &'a Node, name: &str) -> &'a Node {
+        node.children
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no child `{name}` under `{}`", node.name))
+    }
+    fn arg(node: &Node) -> ArgKind {
+        match node.kind {
+            Kind::Argument(kind) => kind,
+            _ => panic!("`{}` is not an argument", node.name),
+        }
+    }
+
+    let commands = crate::commands::tree::tree();
+    let tag = commands.find_command("tag").unwrap();
+    assert!(!tag.executable, "vanilla's /tag root is not executable");
+    assert_eq!(arg(child(tag, "targets")), ArgKind::Entities);
+
+    let team = commands.find_command("team").unwrap();
+    assert!(!team.executable, "vanilla's /team root is not executable");
+    assert_eq!(arg(child(child(team, "list"), "team")), ArgKind::Team);
+    assert_eq!(arg(child(child(team, "add"), "team")), ArgKind::String);
+    assert_eq!(arg(child(child(team, "remove"), "team")), ArgKind::Team);
+    assert_eq!(arg(child(child(team, "empty"), "team")), ArgKind::Team);
+    assert_eq!(arg(child(child(team, "join"), "team")), ArgKind::Team);
+    assert_eq!(
+        arg(child(child(child(team, "join"), "team"), "members")),
+        ArgKind::ScoreHolder
+    );
+    assert_eq!(
+        arg(child(child(team, "leave"), "members")),
+        ArgKind::ScoreHolder
+    );
+    let modify_team = child(child(team, "modify"), "team");
+    assert_eq!(arg(modify_team), ArgKind::Team);
+    assert_eq!(
+        arg(child(child(modify_team, "color"), "value")),
+        ArgKind::Color
+    );
+
+    let teammsg = commands.find_command("teammsg").unwrap();
+    assert!(!teammsg.executable);
+    assert_eq!(arg(child(teammsg, "message")), ArgKind::Message);
+}
+
+#[test]
+fn team_arguments_resolve_before_selectors_and_components() {
+    let env = env();
+    // Unknown team beats a malformed selector and a malformed component, as
+    // vanilla resolves the `minecraft:team` argument first.
+    assert_eq!(
+        one(&env, &env.tester, "/team join missing @e[type=nope]"),
+        "Unknown team 'missing'"
+    );
+    // A component is parsed before any executor runs, so a broken component
+    // is the parse error; only the selector resolution comes after the team
+    // lookup, as vanilla's `TeamArgument.getTeam(...)` is evaluated first.
+    assert_eq!(
+        one(&env, &env.tester, "/team modify missing prefix {"),
+        "Invalid component: unterminated compound at byte 1"
+    );
+}
+
+#[test]
+fn spectators_never_take_part_in_team_collision() {
+    use crate::players::PosLook;
+    use crate::protocol::GameMode;
+
+    let env = env();
+    let at = |x: f64| PosLook {
+        x,
+        y: 64.0,
+        z: 0.5,
+        yaw: 0.0,
+        pitch: 0.0,
+        on_ground: true,
+    };
+    env.tester.set_pos(at(0.5));
+    env.bob.set_pos(at(2.5));
+
+    // Two unteamed players collide under vanilla's default `always`.
+    assert!(crate::session::team_collision_blocks(
+        &env.tester,
+        &env.registry,
+        &env.world,
+        at(0.5),
+        at(2.5)
+    ));
+
+    // A spectator is not pushable.
+    env.bob.game().mode = GameMode::Spectator;
+    assert!(!crate::session::team_collision_blocks(
+        &env.tester,
+        &env.registry,
+        &env.world,
+        at(0.5),
+        at(2.5)
+    ));
+
+    // A moving spectator is not blocked either.
+    env.bob.game().mode = GameMode::Survival;
+    env.tester.game().mode = GameMode::Spectator;
+    assert!(!crate::session::team_collision_blocks(
+        &env.tester,
+        &env.registry,
+        &env.world,
+        at(0.5),
+        at(2.5)
+    ));
+
+    // An already-overlapping pair can always walk apart.
+    env.tester.game().mode = GameMode::Survival;
+    env.bob.set_pos(at(0.7));
+    assert!(!crate::session::team_collision_blocks(
+        &env.tester,
+        &env.registry,
+        &env.world,
+        at(0.5),
+        at(0.7)
+    ));
+}
+
+#[test]
+fn word_arguments_do_not_accept_quoted_spans() {
+    let env = env();
+    let commands = crate::commands::tree::tree();
+    // `brigadier:string` word: the quote is an ordinary character, so a
+    // quoted phrase leaves trailing input and does not parse. This matches
+    // vanilla's `StringArgumentType.word()`.
+    assert!(commands
+        .parse("/tag @s add \"two words\"", &env.tester)
+        .is_err());
+    assert!(commands
+        .parse("/team add \"red team\"", &env.tester)
+        .is_err());
+    assert!(commands.parse("/tag @s add two", &env.tester).is_ok());
+}
+
+#[test]
+fn ordinary_sub_block_steps_are_checked_against_other_players() {
+    use crate::players::PosLook;
+
+    let env = env();
+    let at = |x: f64| PosLook {
+        x,
+        y: 64.0,
+        z: 0.5,
+        yaw: 0.0,
+        pitch: 0.0,
+        on_ground: true,
+    };
+    env.tester.set_pos(at(0.2));
+    // Bob's box is [0.7, 1.3]; the mover's destination [0.15, 0.75] overlaps.
+    env.bob.set_pos(at(1.0));
+
+    // A normal 0.25-block step, far below the 0.6 box width, still blocks:
+    // the earlier guard compared the mover's own before/to and never looked
+    // at the other player.
+    assert!(crate::session::team_collision_blocks(
+        &env.tester,
+        &env.registry,
+        &env.world,
+        at(0.2),
+        at(0.45)
+    ));
+
+    // An already-overlapping pair may walk apart.
+    env.tester.set_pos(at(0.7));
+    env.bob.set_pos(at(1.0));
+    assert!(!crate::session::team_collision_blocks(
+        &env.tester,
+        &env.registry,
+        &env.world,
+        at(0.7),
+        at(0.75)
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// CMD-19: client effects
+// ---------------------------------------------------------------------------
+
+#[test]
+fn particle_recipients_are_distance_filtered() {
+    let env = env();
+    let who = &env.tester;
+    let here = PosLook {
+        x: 0.5,
+        y: 64.0,
+        z: 0.5,
+        yaw: 0.0,
+        pitch: 0.0,
+        on_ground: true,
+    };
+    env.tester.set_pos(here);
+    env.bob.set_pos(here);
+
+    // 400 blocks away: outside the normal 32-block range, inside the forced
+    // 512-block one. `force` widens the range; it does not mean "everyone".
+    assert_eq!(
+        one(&env, who, "/particle flame 400 64 0"),
+        "The particle was not visible for anybody"
+    );
+    assert_eq!(
+        one(&env, who, "/particle flame 400 64 0 0 0 0 1 1 force"),
+        "Displaying particle minecraft:flame"
+    );
+    // An explicit viewer list goes through the same distance filter.
+    assert_eq!(
+        one(&env, who, "/particle flame 400 64 0 0 0 0 1 1 normal @a"),
+        "The particle was not visible for anybody"
+    );
+    assert_eq!(
+        one(&env, who, "/particle flame 400 64 0 0 0 0 1 1 force @a"),
+        "Displaying particle minecraft:flame"
+    );
+}
+
+#[test]
+fn particle_and_playsound_skip_targets_in_another_level() {
+    let env = env();
+    let who = &env.tester;
+    env.registry
+        .insert_for_test(crate::players::PlayerHandle::for_test_in_world(
+            991,
+            "netherguy",
+            "the_nether",
+        ));
+    // The two are at the same position, so only the level check can skip the
+    // target.
+    let here = PosLook {
+        x: 0.5,
+        y: 64.0,
+        z: 0.5,
+        yaw: 0.0,
+        pitch: 0.0,
+        on_ground: true,
+    };
+    env.tester.set_pos(here);
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/particle flame 0 64 0 0 0 0 1 1 force @e[type=player,name=netherguy]"
+        ),
+        "The particle was not visible for anybody"
+    );
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/playsound block.note_block.harp master @e[type=player,name=netherguy]"
+        ),
+        "The sound is too far away to be heard"
+    );
+}
+
+#[test]
+fn particle_and_sound_commands_route_through_the_tree() {
+    let env = env();
+    let who = &env.tester;
+
+    // `/particle` reports vanilla's `Displaying particle …`; the optional
+    // position/delta/speed/count and the `force` flag all parse, and the name
+    // may omit `minecraft:`.
+    for (text, shown) in [
+        ("/particle minecraft:flame", "minecraft:flame"),
+        ("/particle flame 0 64 0 0 0 0 0 4 force", "minecraft:flame"),
+        (
+            "/particle flame 0 64 0 0.1 0.2 0.3 0 0 normal @a",
+            "minecraft:flame",
+        ),
+        (
+            "/particle dust{color:[1.0,0.0,0.0],scale:1.0}",
+            "minecraft:dust",
+        ),
+        (
+            "/particle minecraft:block{block_state:\"minecraft:stone\"}",
+            "minecraft:block",
+        ),
+        (
+            "/particle item{item:{id:\"minecraft:stone\",count:1}}",
+            "minecraft:item",
+        ),
+        (
+            "/particle vibration{destination:{type:\"minecraft:block\",pos:[1,2,3]},arrival_in_ticks:10}",
+            "minecraft:vibration",
+        ),
+        // An integer colour is accepted as well as a float list.
+        ("/particle dust{color:16711680,scale:1.0}", "minecraft:dust"),
+        // Vanilla's `MapCodec.unit` ignores an options object on a simple
+        // particle.
+        ("/particle flame{color:1}", "minecraft:flame"),
+        // count 0 means "as many as the client can render".
+        ("/particle flame 0 64 0 0.5 0.5 0.5 0 0", "minecraft:flame"),
+        // 1.21.11's registry name for ids 106/107 is `detection`.
+        (
+            "/particle minecraft:trial_spawner_detection",
+            "minecraft:trial_spawner_detection",
+        ),
+    ] {
+        assert_eq!(
+            one(&env, who, text),
+            format!("Displaying particle {shown}"),
+            "`{text}`"
+        );
+    }
+    assert_eq!(
+        one(&env, who, "/particle minecraft:not_a_particle"),
+        "Unknown particle: minecraft:not_a_particle"
+    );
+    // The stale `minecraft-data` spelling is not a 1.21.11 name.
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/particle minecraft:trial_spawner_detected_player"
+        ),
+        "Unknown particle: minecraft:trial_spawner_detected_player"
+    );
+    // Vanilla's `particle.invalidOptions`, for a missing or bad object.
+    assert_eq!(
+        one(&env, who, "/particle dust"),
+        "Can't parse particle options: Expected particle options"
+    );
+    assert!(
+        one(&env, who, "/particle dust{color:[1.0],scale:1.0}")
+            .starts_with("Can't parse particle options:"),
+        "a bad colour list is an options error"
+    );
+    // No whitespace may separate the id from its options object, so the
+    // parameterised particle is read without one and fails as vanilla's
+    // `ParticleArgument` does.
+    assert_eq!(
+        one(&env, who, "/particle dust {color:[1.0,0.0,0.0],scale:1.0}"),
+        "Can't parse particle options: Expected particle options"
+    );
+    for bad in [
+        "/particle block{block_state:\"minecraft:not_a_block\"}",
+        "/particle item{item:{id:\"minecraft:not_an_item\"}}",
+        "/particle dust{color:[1",
+        "/particle vibration{destination:{type:\"minecraft:entity\",pos:[1,2,3]},arrival_in_ticks:1}",
+    ] {
+        assert!(
+            one(&env, who, bad).starts_with("Can't parse particle options:"),
+            "`{bad}`"
+        );
+    }
+    assert_eq!(
+        one(&env, who, "/particle flame 0 64 0 0 0 0 0 -1"),
+        "Integer must not be less than 0: found -1"
+    );
+    // Brigadier reads left to right: the particle name and its options are
+    // resolved before `pos`/`delta`/`speed`/`count`, so their errors win.
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/particle minecraft:not_a_particle 0 64 0 0 0 0 0 -1"
+        ),
+        "Unknown particle: minecraft:not_a_particle"
+    );
+    assert_eq!(
+        one(&env, who, "/particle minecraft:not_a_particle 0 64"),
+        "Unknown particle: minecraft:not_a_particle"
+    );
+    assert!(
+        one(&env, who, "/particle dust{bad} 0 64 0 0 0 0 0 -1")
+            .starts_with("Can't parse particle options:"),
+        "the options error wins over the later count error"
+    );
+    assert_eq!(
+        one(&env, who, "/particle flame 0 64 0 0 0 0 -1 0"),
+        "Float must not be less than 0.0: found -1.0"
+    );
+    // `delta` and `speed` are not executable in vanilla's grammar.
+    assert_eq!(
+        one(&env, who, "/particle flame 0 64 0 0 0 0"),
+        "Unknown or incomplete command"
+    );
+    assert_eq!(
+        one(&env, who, "/particle flame 0 64 0 0"),
+        "Incomplete (expected 3 coordinates)"
+    );
+
+    // `/playsound`: the default is the caller as the only target, and an
+    // explicit target list picks single/multiple wording.
+    assert_eq!(
+        one(&env, who, "/playsound minecraft:block.note_block.harp"),
+        "Played sound minecraft:block.note_block.harp to tester"
+    );
+    assert_eq!(
+        one(&env, who, "/playsound block.note_block.harp master tester"),
+        "Played sound minecraft:block.note_block.harp to tester"
+    );
+    assert_eq!(
+        one(&env, who, "/playsound block.note_block.harp master @a"),
+        "Played sound minecraft:block.note_block.harp to 2 players"
+    );
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/playsound block.note_block.harp master @a 0 64 0 0 1"
+        ),
+        "Played sound minecraft:block.note_block.harp to 2 players"
+    );
+    // `/playsound` takes a plain resource location: a custom id a pack
+    // defines is accepted even though it is not in the vanilla registry.
+    assert_eq!(
+        one(&env, who, "/playsound minecraft:not_a_sound"),
+        "Played sound minecraft:not_a_sound to tester"
+    );
+    assert_eq!(
+        one(&env, who, "/playsound Bad:Name"),
+        "Invalid resource location 'Bad:Name'"
+    );
+    // Bounds are Brigadier argument errors, so they win over resource and
+    // position errors, and the values print as floats.
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/playsound minecraft:not_a_sound master @a 0 64 0 -1"
+        ),
+        "Float must not be less than 0.0: found -1.0"
+    );
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/playsound block.note_block.harp master @a 0 64 0 1 3"
+        ),
+        "Float must not be more than 2.0: found 3.0"
+    );
+    // Nobody inside the 16-block range and minVolume 0: the command fails.
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/playsound block.note_block.harp master @a 1000 64 0"
+        ),
+        "The sound is too far away to be heard"
+    );
+    // With minVolume the sound is relayed two blocks from each target and
+    // both are counted as hearing it.
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/playsound block.note_block.harp master @a 1000 64 0 1 1 0.5"
+        ),
+        "Played sound minecraft:block.note_block.harp to 2 players"
+    );
+
+    // `/stopsound` has one line per combination of source and sound.
+    assert_eq!(one(&env, who, "/stopsound tester"), "Stopped all sounds");
+    assert_eq!(
+        one(&env, who, "/stopsound tester master"),
+        "Stopped all 'master' sounds"
+    );
+    assert_eq!(
+        one(
+            &env,
+            who,
+            "/stopsound tester master minecraft:block.note_block.harp"
+        ),
+        "Stopped sound 'minecraft:block.note_block.harp' on source 'master'"
+    );
+    assert_eq!(
+        one(&env, who, "/stopsound @a * minecraft:block.note_block.harp"),
+        "Stopped sound 'minecraft:block.note_block.harp'"
+    );
+    // `*` with no sound is not a complete command in vanilla.
+    assert_eq!(
+        one(&env, who, "/stopsound @a *"),
+        "Unknown or incomplete command"
+    );
+    // A target list requires a source literal in 1.21.11's grammar.
+    assert_eq!(
+        one(&env, who, "/playsound block.note_block.harp @a"),
+        "Unknown or incomplete command"
+    );
+
+    // Op level 2: a non-operator is refused by the tree.
+    for text in [
+        "/particle flame",
+        "/playsound block.note_block.harp",
+        "/stopsound tester",
+    ] {
+        assert_eq!(
+            one(&env, &env.bob, text),
+            "You do not have permission to run this command.",
+            "`{text}`"
+        );
+    }
+}
 // CMD-10a: /clear, /effect, /enchant
 // ---------------------------------------------------------------------------
 
@@ -1651,7 +2583,9 @@ fn clear_journals_the_destruction_as_a_command() {
 fn clear_journals_a_partial_stack_as_a_destruction_too() {
     let env = env();
     clear_hand(&env.tester);
-    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 7);
+    // `/give` mints the instance, so the ledger can follow it.
+    one(&env, &env.tester, "/give stone 7");
+    let uid = env.tester.inventory().get(FIRST_HOTBAR).unwrap().uid;
     assert_eq!(
         one(&env, &env.tester, "/clear @s stone 3"),
         "Removed 3 item(s) from player tester"
@@ -1661,16 +2595,22 @@ fn clear_journals_a_partial_stack_as_a_destruction_too() {
         Some(4)
     );
     let events = env.world.journal().all_events().expect("journal reads");
-    assert!(
-        events.iter().any(|e| matches!(
-            &e.body,
-            EventBody::ItemDestroy {
-                reason: DestroyReason::Command,
-                ..
-            }
-        )),
-        "the three units must be journalled as a command destruction: {events:?}"
+    let ledger = aether_world::journal::Ledger::replay(events.iter());
+    assert!(ledger.anomalies().is_empty(), "{:?}", ledger.anomalies());
+    // The surviving four units keep their identity.
+    let live = ledger.get(uid).expect("the original instance");
+    assert_eq!(live.count, 4);
+    assert!(!live.is_destroyed());
+    // Exactly three units were destroyed, not the whole seven-unit instance.
+    let destroyed: u32 = ledger
+        .instances()
+        .map(|(_, inst)| inst.destroyed_units)
+        .sum();
+    assert_eq!(
+        destroyed, 3,
+        "the journal attributes exactly the removed units"
     );
+    assert!(ledger.instances().all(|(_, inst)| inst.conserves_units()));
 }
 
 #[test]
@@ -1687,6 +2627,62 @@ fn clear_with_max_count_zero_removes_nothing() {
         Some(2),
         "maxCount 0 leaves the stack"
     );
+}
+
+#[test]
+fn cmd10a_selectors_see_tags_teams_and_levels() {
+    // The CMD-06b source is CMD-16's, so the filters `/tag` and `/team` feed
+    // work in `/clear`, `/effect` and `/enchant` too.
+    let env = env();
+    one(&env, &env.tester, "/gamemode survival");
+    clear_hand(&env.tester);
+    clear_hand(&env.bob);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 2);
+    hold(&env.bob, FIRST_HOTBAR, "minecraft:dirt", 3);
+    one(&env, &env.tester, "/tag @s add marked");
+    assert_eq!(
+        one(&env, &env.tester, "/clear @a[tag=marked]"),
+        "Removed 2 item(s) from player tester"
+    );
+    assert_eq!(
+        env.bob.inventory().get(FIRST_HOTBAR).map(|s| s.count),
+        Some(3),
+        "bob is not tagged and was not cleared"
+    );
+
+    one(&env, &env.tester, "/team add red");
+    one(&env, &env.tester, "/team join red tester");
+    {
+        let mut st = env.tester.game();
+        st.effects.clear();
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/effect give @a[team=red] speed"),
+        "Applied effect Speed to tester"
+    );
+
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_sword", 1);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant @a[level=0] sharpness 2"),
+        "Applied enchantment Sharpness II to 1 entities"
+    );
+}
+
+#[test]
+fn clear_resolves_an_item_tag_without_a_data_pack() {
+    // The test server has no `worldgen_data`, so this exercises the compiled
+    // 1.21.11 item tags rather than the pack.
+    let env = env();
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:oak_planks", 3);
+    hold(&env.tester, FIRST_HOTBAR + 1, "minecraft:oak_log", 2);
+    assert_eq!(
+        one(&env, &env.tester, "/clear @s #minecraft:planks"),
+        "Removed 3 item(s) from player tester"
+    );
+    let inv = env.tester.inventory();
+    assert!(inv.get(FIRST_HOTBAR).is_none());
+    assert_eq!(inv.get(FIRST_HOTBAR + 1).map(|s| s.count), Some(2));
 }
 
 #[test]
@@ -1779,6 +2775,67 @@ fn effect_give_rejects_an_explicit_zero_second_duration() {
 }
 
 #[test]
+fn effect_clear_without_targets_clears_the_source() {
+    let env = env();
+    {
+        let mut st = env.tester.game();
+        st.effects.clear();
+    }
+    one(&env, &env.tester, "/effect give tester speed");
+    assert_eq!(
+        one(&env, &env.tester, "/effect clear"),
+        "Removed every effect from tester"
+    );
+    assert!(env.tester.game().effects.is_empty());
+    assert_eq!(
+        one(&env, &env.tester, "/effect clear"),
+        "Target has no effects to remove"
+    );
+}
+
+#[test]
+fn effect_give_applies_instant_effects_without_storing_them() {
+    let env = env();
+    one(&env, &env.tester, "/gamemode survival");
+    {
+        let mut st = env.tester.game();
+        st.effects.clear();
+        st.health = 20.0;
+        st.dead = false;
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/effect give tester instant_damage 1 0"),
+        "Applied effect Instant Damage to tester"
+    );
+    {
+        let st = env.tester.game();
+        assert!(st.health < 20.0, "instant damage hurt immediately");
+        assert!(
+            st.effects
+                .get(crate::game::effects::INSTANT_DAMAGE)
+                .is_none(),
+            "an instant effect is never stored"
+        );
+    }
+    {
+        let mut st = env.tester.game();
+        st.health = 10.0;
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/effect give tester instant_health 1 0"),
+        "Applied effect Instant Health to tester"
+    );
+    {
+        let st = env.tester.game();
+        assert!(st.health > 10.0, "instant health healed immediately");
+        assert!(st
+            .effects
+            .get(crate::game::effects::INSTANT_HEALTH)
+            .is_none());
+    }
+}
+
+#[test]
 fn effect_clear_removes_one_effect_or_all_of_them() {
     let env = env();
     {
@@ -1831,7 +2888,7 @@ fn enchant_applies_to_the_held_stack_and_checks_the_level_range() {
     hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_sword", 1);
     assert_eq!(
         one(&env, &env.tester, "/enchant tester sharpness 3"),
-        "Applied enchantment Sharpness to tester's item"
+        "Applied enchantment Sharpness III to tester's item"
     );
     assert_eq!(
         env.tester
@@ -1845,11 +2902,12 @@ fn enchant_applies_to_the_held_stack_and_checks_the_level_range() {
         one(&env, &env.tester, "/enchant tester sharpness 6"),
         "6 is higher than the maximum level of 5 supported by that enchantment"
     );
-    // Vanilla's argument is `integer(0)`: level 0 is legal and removes the
-    // enchantment (the success line is still the applied one).
+    // Re-applying an enchantment the item already has fails vanilla's
+    // compatibility check, even at level 0 (Sharpness is in the damage
+    // exclusive set, which contains Sharpness itself).
     assert_eq!(
         one(&env, &env.tester, "/enchant tester sharpness 0"),
-        "Applied enchantment Sharpness to tester's item"
+        "Diamond Sword cannot support that enchantment"
     );
     assert_eq!(
         env.tester
@@ -1857,8 +2915,8 @@ fn enchant_applies_to_the_held_stack_and_checks_the_level_range() {
             .get(FIRST_HOTBAR)
             .unwrap()
             .enchant_level(33),
-        0,
-        "level 0 removed it"
+        3,
+        "the failed command changed nothing"
     );
     assert_eq!(
         one(&env, &env.tester, "/enchant tester sharpness -1"),
@@ -1873,14 +2931,38 @@ fn enchant_applies_to_the_held_stack_and_checks_the_level_range() {
 }
 
 #[test]
-fn enchant_is_lenient_in_creative_as_vanilla_is() {
+fn enchant_refuses_a_conflicting_enchantment() {
     let env = env();
+    one(&env, &env.tester, "/gamemode survival");
     clear_hand(&env.tester);
-    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 1);
-    one(&env, &env.tester, "/gamemode creative");
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_sword", 1);
     assert_eq!(
-        one(&env, &env.tester, "/enchant tester sharpness 2"),
-        "Applied enchantment Sharpness to tester's item"
+        one(&env, &env.tester, "/enchant tester sharpness 3"),
+        "Applied enchantment Sharpness III to tester's item"
+    );
+    // Smite and Sharpness are both in `exclusive_set/damage`; the candidate's
+    // set contains the existing Sharpness, so vanilla refuses.
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester smite 2"),
+        "Diamond Sword cannot support that enchantment"
+    );
+    let inv = env.tester.inventory();
+    let sword = inv.get(FIRST_HOTBAR).unwrap();
+    assert_eq!(sword.enchant_level(33), 3);
+    assert_eq!(sword.enchant_level(35), 0, "Smite was not added");
+}
+
+#[test]
+fn enchant_skips_failing_targets_when_several_were_named() {
+    let env = env();
+    one(&env, &env.tester, "/gamemode survival");
+    clear_hand(&env.tester);
+    clear_hand(&env.bob);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_sword", 1);
+    // Bob holds nothing: vanilla skips him and reports the one success.
+    assert_eq!(
+        one(&env, &env.tester, "/enchant @a sharpness 2"),
+        "Applied enchantment Sharpness II to 1 entities"
     );
     assert_eq!(
         env.tester
@@ -1890,7 +2972,21 @@ fn enchant_is_lenient_in_creative_as_vanilla_is() {
             .enchant_level(33),
         2
     );
+    assert!(env.bob.inventory().is_empty());
+}
+
+#[test]
+fn enchant_fails_only_when_no_target_succeeded() {
+    let env = env();
     one(&env, &env.tester, "/gamemode survival");
+    clear_hand(&env.tester);
+    clear_hand(&env.bob);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 1);
+    hold(&env.bob, FIRST_HOTBAR, "minecraft:stone", 1);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant @a sharpness 2"),
+        "Nothing changed. Targets either have no item in their hands or the enchantment could not be applied"
+    );
 }
 
 #[test]
@@ -1902,7 +2998,7 @@ fn enchant_hits_every_target_holding_an_item() {
     hold(&env.bob, FIRST_HOTBAR, "minecraft:iron_sword", 1);
     assert_eq!(
         one(&env, &env.tester, "/enchant @a unbreaking 2"),
-        "Applied enchantment Unbreaking to 2 entities"
+        "Applied enchantment Unbreaking II to 2 entities"
     );
     for handle in [&env.tester, &env.bob] {
         assert_eq!(
@@ -1914,4 +3010,47 @@ fn enchant_hits_every_target_holding_an_item() {
             2
         );
     }
+}
+
+// Node executability must match `commands.json`: only the forms vanilla lets
+// stand alone are executable.
+#[test]
+fn cmd10a_executable_flags_match_the_vanilla_tree() {
+    use crate::commands::tree::{tree, Kind};
+    let commands = tree().commands();
+    let find = |name: &str| commands.iter().find(|n| n.name == name).unwrap();
+    fn child<'a>(
+        node: &'a crate::commands::tree::Node,
+        name: &str,
+    ) -> &'a crate::commands::tree::Node {
+        node.children
+            .iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("{name} under {}", node.name))
+    }
+
+    let clear = find("clear");
+    assert!(clear.executable, "/clear is executable");
+    assert!(child(clear, "targets").executable);
+
+    let effect = find("effect");
+    assert!(!effect.executable, "/effect is not executable");
+    let give = child(effect, "give");
+    assert!(!give.executable, "/effect give is not executable");
+    let clear_lit = child(effect, "clear");
+    assert!(
+        clear_lit.executable,
+        "/effect clear without targets is executable"
+    );
+    assert!(child(clear_lit, "targets").executable);
+
+    let enchant = find("enchant");
+    assert!(!enchant.executable, "/enchant is not executable");
+    let targets = child(enchant, "targets");
+    assert!(!targets.executable, "/enchant targets is not executable");
+    assert!(child(targets, "enchantment").executable);
+    assert!(matches!(
+        child(targets, "enchantment").kind,
+        Kind::Argument(_)
+    ));
 }

@@ -12,7 +12,7 @@
 
 **Легенда:** ✅ работает · 🚧 ожидает (`CMD-nn` — задача, которая её реализует). **Узел** — правомочие, а **Op** — ванильный уровень оператора (0 — всем … 4 — владельцу); для ожидающей команды заглушка требует ровно их. **Gate** — что сервер проверяет *сегодня*: `node` (узел/op применяются), `operator` (прежняя проверка «только оператор» — узел/op это цель, пока не применяются) или `everyone` (требований нет; узел/op — цель).
 
-**Итого:** 112 команд — 59 работают, 53 ожидают.
+**Итого:** 112 команд — 65 работают, 47 ожидают.
 
 ## Содержание
 
@@ -119,9 +119,9 @@
 | `/msg` | `tell`, `w` | ✅ работает | `everyone` | `minecraft.command.msg` | 0 | `/msg <player> <message>` |
 | `/data` | – | 🚧 ожидает CMD-14 | `node` | `minecraft.command.data` | 2 | `/data <get,merge,modify,remove> <target> <path> [...]` |
 | `/scoreboard` | – | 🚧 ожидает CMD-15 | `node` | `minecraft.command.scoreboard` | 2 | `/scoreboard <objectives,players> [...]` |
-| `/tag` | – | 🚧 ожидает CMD-16 | `node` | `minecraft.command.tag` | 2 | `/tag <targets> <add,remove,list> <name>` |
-| `/team` | – | 🚧 ожидает CMD-16 | `node` | `minecraft.command.team` | 2 | `/team <add,list,modify,join,leave,remove> [...]` |
-| `/teammsg` | `tm` | 🚧 ожидает CMD-16 | `node` | `minecraft.command.teammsg` | 0 | `/teammsg <message>` |
+| `/tag` | – | ✅ работает | `node` | `minecraft.command.tag` | 2 | `/tag <targets> <add\|remove> <name> \| <targets> list` |
+| `/team` | – | ✅ работает | `node` | `minecraft.command.team` | 2 | `/team <list,add,remove,empty,join,leave,modify> [...]` |
+| `/teammsg` | `tm` | ✅ работает | `everyone` | `minecraft.command.teammsg` | 0 | `/teammsg <message>` |
 | `/say` | – | 🚧 ожидает CMD-17 | `node` | `minecraft.command.say` | 2 | `/say <message>` |
 | `/me` | – | 🚧 ожидает CMD-17 | `node` | `minecraft.command.me` | 0 | `/me <action>` |
 | `/tellraw` | – | 🚧 ожидает CMD-17 | `node` | `minecraft.command.tellraw` | 2 | `/tellraw <targets> <message>` |
@@ -129,9 +129,9 @@
 | `/bossbar` | – | 🚧 ожидает CMD-17 | `node` | `minecraft.command.bossbar` | 2 | `/bossbar <add,get,list,remove,set> [...]` |
 | `/dialog` | – | 🚧 ожидает CMD-17 | `node` | `minecraft.command.dialog` | 2 | `/dialog show <targets> <dialog>` |
 | `/trigger` | – | 🚧 ожидает CMD-18 | `node` | `minecraft.command.trigger` | 0 | `/trigger <objective> [add,set] [value]` |
-| `/particle` | – | 🚧 ожидает CMD-19 | `node` | `minecraft.command.particle` | 2 | `/particle <name> <pos> [delta] [speed] [count]` |
-| `/playsound` | – | 🚧 ожидает CMD-19 | `node` | `minecraft.command.playsound` | 2 | `/playsound <sound> <source> <targets> [pos]` |
-| `/stopsound` | – | 🚧 ожидает CMD-19 | `node` | `minecraft.command.stopsound` | 2 | `/stopsound <targets> [source] [sound]` |
+| `/particle` | – | ✅ работает | `node` | `minecraft.command.particle` | 2 | `/particle <name> [<pos>] [<delta>] [<speed>] [<count>] [force\|normal] [<viewers>]` |
+| `/playsound` | – | ✅ работает | `node` | `minecraft.command.playsound` | 2 | `/playsound <sound> [<source>] [<targets>] [<pos>] [<volume>] [<pitch>] [<minVolume>]` |
+| `/stopsound` | – | ✅ работает | `node` | `minecraft.command.stopsound` | 2 | `/stopsound <targets> [<source>] [<sound>]` |
 | `/loot` | – | 🚧 ожидает CMD-20 | `node` | `minecraft.command.loot` | 2 | `/loot <give,insert,spawn,replace> [...]` |
 | `/recipe` | – | 🚧 ожидает CMD-20 | `node` | `minecraft.command.recipe` | 2 | `/recipe <give,take> <targets> <recipe>` |
 | `/advancement` | – | 🚧 ожидает CMD-20 | `node` | `minecraft.command.advancement` | 2 | `/advancement <grant,revoke> <targets> <advancement>` |

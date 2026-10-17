@@ -10,56 +10,107 @@
 
 /// One vanilla enchantment: canonical name, display name, registry id,
 /// maximum level and the `enchantable/…` category it applies to.
-pub static ENCHANTMENTS: &[(&str, &str, u8, u8, &str)] = &[
-    ("aqua_affinity", "Aqua Affinity", 0, 1, "head_armor"),
-    ("bane_of_arthropods", "Bane of Arthropods", 1, 5, "weapon"),
-    ("binding_curse", "Curse of Binding", 2, 1, "equippable"),
-    ("blast_protection", "Blast Protection", 3, 4, "armor"),
-    ("breach", "Breach", 4, 4, "mace"),
-    ("channeling", "Channeling", 5, 1, "trident"),
-    ("density", "Density", 6, 5, "mace"),
-    ("depth_strider", "Depth Strider", 7, 3, "foot_armor"),
-    ("efficiency", "Efficiency", 8, 5, "mining"),
-    ("feather_falling", "Feather Falling", 9, 4, "foot_armor"),
-    ("fire_aspect", "Fire Aspect", 10, 2, "fire_aspect"),
-    ("fire_protection", "Fire Protection", 11, 4, "armor"),
-    ("flame", "Flame", 12, 1, "bow"),
-    ("fortune", "Fortune", 13, 3, "mining_loot"),
-    ("frost_walker", "Frost Walker", 14, 2, "foot_armor"),
-    ("impaling", "Impaling", 15, 5, "trident"),
-    ("infinity", "Infinity", 16, 1, "bow"),
-    ("knockback", "Knockback", 17, 2, "melee_weapon"),
-    ("looting", "Looting", 18, 3, "melee_weapon"),
-    ("loyalty", "Loyalty", 19, 3, "trident"),
-    ("luck_of_the_sea", "Luck of the Sea", 20, 3, "fishing"),
-    ("lunge", "Lunge", 21, 3, "lunge"),
-    ("lure", "Lure", 22, 3, "fishing"),
-    ("mending", "Mending", 23, 1, "durability"),
-    ("multishot", "Multishot", 24, 1, "crossbow"),
-    ("piercing", "Piercing", 25, 4, "crossbow"),
-    ("power", "Power", 26, 5, "bow"),
+pub static ENCHANTMENTS: &[(&str, &str, u8, u8, &str, &str)] = &[
+    ("aqua_affinity", "Aqua Affinity", 0, 1, "head_armor", ""),
+    (
+        "bane_of_arthropods",
+        "Bane of Arthropods",
+        1,
+        5,
+        "weapon",
+        "damage",
+    ),
+    ("binding_curse", "Curse of Binding", 2, 1, "equippable", ""),
+    (
+        "blast_protection",
+        "Blast Protection",
+        3,
+        4,
+        "armor",
+        "armor",
+    ),
+    ("breach", "Breach", 4, 4, "mace", "damage"),
+    ("channeling", "Channeling", 5, 1, "trident", ""),
+    ("density", "Density", 6, 5, "mace", "damage"),
+    (
+        "depth_strider",
+        "Depth Strider",
+        7,
+        3,
+        "foot_armor",
+        "boots",
+    ),
+    ("efficiency", "Efficiency", 8, 5, "mining", ""),
+    ("feather_falling", "Feather Falling", 9, 4, "foot_armor", ""),
+    ("fire_aspect", "Fire Aspect", 10, 2, "fire_aspect", ""),
+    (
+        "fire_protection",
+        "Fire Protection",
+        11,
+        4,
+        "armor",
+        "armor",
+    ),
+    ("flame", "Flame", 12, 1, "bow", ""),
+    ("fortune", "Fortune", 13, 3, "mining_loot", "mining"),
+    ("frost_walker", "Frost Walker", 14, 2, "foot_armor", "boots"),
+    ("impaling", "Impaling", 15, 5, "trident", "damage"),
+    ("infinity", "Infinity", 16, 1, "bow", "bow"),
+    ("knockback", "Knockback", 17, 2, "melee_weapon", ""),
+    ("looting", "Looting", 18, 3, "melee_weapon", ""),
+    ("loyalty", "Loyalty", 19, 3, "trident", ""),
+    ("luck_of_the_sea", "Luck of the Sea", 20, 3, "fishing", ""),
+    ("lunge", "Lunge", 21, 3, "lunge", ""),
+    ("lure", "Lure", 22, 3, "fishing", ""),
+    ("mending", "Mending", 23, 1, "durability", ""),
+    ("multishot", "Multishot", 24, 1, "crossbow", "crossbow"),
+    ("piercing", "Piercing", 25, 4, "crossbow", "crossbow"),
+    ("power", "Power", 26, 5, "bow", ""),
     (
         "projectile_protection",
         "Projectile Protection",
         27,
         4,
         "armor",
+        "armor",
     ),
-    ("protection", "Protection", 28, 4, "armor"),
-    ("punch", "Punch", 29, 2, "bow"),
-    ("quick_charge", "Quick Charge", 30, 3, "crossbow"),
-    ("respiration", "Respiration", 31, 3, "head_armor"),
-    ("riptide", "Riptide", 32, 3, "trident"),
-    ("sharpness", "Sharpness", 33, 5, "sharp_weapon"),
-    ("silk_touch", "Silk Touch", 34, 1, "mining_loot"),
-    ("smite", "Smite", 35, 5, "weapon"),
-    ("soul_speed", "Soul Speed", 36, 3, "foot_armor"),
-    ("sweeping_edge", "Sweeping Edge", 37, 3, "sweeping"),
-    ("swift_sneak", "Swift Sneak", 38, 3, "leg_armor"),
-    ("thorns", "Thorns", 39, 3, "armor"),
-    ("unbreaking", "Unbreaking", 40, 3, "durability"),
-    ("vanishing_curse", "Curse of Vanishing", 41, 1, "vanishing"),
-    ("wind_burst", "Wind Burst", 42, 3, "mace"),
+    ("protection", "Protection", 28, 4, "armor", "armor"),
+    ("punch", "Punch", 29, 2, "bow", ""),
+    ("quick_charge", "Quick Charge", 30, 3, "crossbow", ""),
+    ("respiration", "Respiration", 31, 3, "head_armor", ""),
+    ("riptide", "Riptide", 32, 3, "trident", "riptide"),
+    ("sharpness", "Sharpness", 33, 5, "sharp_weapon", "damage"),
+    ("silk_touch", "Silk Touch", 34, 1, "mining_loot", "mining"),
+    ("smite", "Smite", 35, 5, "weapon", "damage"),
+    ("soul_speed", "Soul Speed", 36, 3, "foot_armor", ""),
+    ("sweeping_edge", "Sweeping Edge", 37, 3, "sweeping", ""),
+    ("swift_sneak", "Swift Sneak", 38, 3, "leg_armor", ""),
+    ("thorns", "Thorns", 39, 3, "armor", ""),
+    ("unbreaking", "Unbreaking", 40, 3, "durability", ""),
+    (
+        "vanishing_curse",
+        "Curse of Vanishing",
+        41,
+        1,
+        "vanishing",
+        "",
+    ),
+    ("wind_burst", "Wind Burst", 42, 3, "mace", ""),
+];
+
+/// The enchantments in one `exclusive_set/…` tag, by registry id, from the
+/// 1.21.11 data pack. Vanilla's compatibility test only consults the
+/// **candidate's** set: an existing enchantment in it makes the new one
+/// incompatible (which is why re-applying Sharpness at any level is refused
+/// when the item already has Sharpness).
+pub static EXCLUSIVE_SETS: &[(&str, &[u8])] = &[
+    ("armor", &[3, 11, 27, 28]),
+    ("boots", &[7, 14]),
+    ("bow", &[16, 23]),
+    ("crossbow", &[24, 25]),
+    ("damage", &[1, 4, 6, 15, 33, 35]),
+    ("mining", &[13, 34]),
+    ("riptide", &[19, 5]),
 ];
 
 /// One resolved enchantment.
@@ -70,6 +121,9 @@ pub struct Def {
     pub display: &'static str,
     pub max_level: u8,
     pub category: &'static str,
+    /// The name (without `exclusive_set/`) of the tag that conflicts with
+    /// this enchantment, or `""`.
+    pub exclusive: &'static str,
 }
 
 impl Def {
@@ -81,39 +135,70 @@ impl Def {
 }
 
 fn short(name: &str) -> &str {
-    name.strip_prefix("minecraft:")
-        .or_else(|| name.strip_prefix("aether:"))
-        .unwrap_or(name)
+    name.strip_prefix("minecraft:").unwrap_or(name)
 }
 
 /// The definition called `name`, with or without a namespace.
 pub fn by_name(name: &str) -> Option<Def> {
     let short = short(name);
     ENCHANTMENTS.iter().find(|(n, ..)| *n == short).map(
-        |(name, display, id, max_level, category)| Def {
+        |(name, display, id, max_level, category, exclusive)| Def {
             id: *id,
             name,
             display,
             max_level: *max_level,
             category,
+            exclusive,
         },
     )
+}
+
+/// Whether `def` is compatible with `existing` enchantment ids, vanilla's
+/// `EnchantmentHelper.isEnchantmentCompatible(existing.keySet(), candidate)`.
+pub fn is_compatible(existing: &[u8], def: &Def) -> bool {
+    if def.exclusive.is_empty() {
+        return true;
+    }
+    let Some((_, set)) = EXCLUSIVE_SETS.iter().find(|(n, _)| *n == def.exclusive) else {
+        return true;
+    };
+    !existing.iter().any(|id| set.contains(id))
+}
+
+/// The vanilla `Enchantment.getFullname(level)`: the display name followed by
+/// the level numeral, e.g. `Sharpness III`. Levels above ten (which no vanilla
+/// enchantment has) fall back to the Arabic number.
+pub fn full_name(def: &Def, level: i32) -> String {
+    format!("{} {}", def.display, numeral(level))
+}
+
+/// A Roman numeral for `1..=10`, else the decimal number.
+pub fn numeral(level: i32) -> String {
+    const ROMAN: &[(i32, &str)] = &[(10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")];
+    if !(1..=10).contains(&level) {
+        return level.to_string();
+    }
+    let mut n = level;
+    let mut out = String::new();
+    for (value, text) in ROMAN {
+        while n >= *value {
+            out.push_str(text);
+            n -= *value;
+        }
+    }
+    out
 }
 
 /// The 1.21.11 display name of enchantment `id`.
 pub fn display(id: u8) -> &'static str {
     ENCHANTMENTS
         .iter()
-        .find(|(.., i, _, _)| *i == id)
+        .find(|(.., i, _, _, _)| *i == id)
         .map_or("Unknown enchantment", |(_, display, ..)| *display)
 }
 
 fn is_helmet(s: &str) -> bool {
-    s.ends_with("_helmet")
-        || s == "turtle_helmet"
-        || s.ends_with("_head")
-        || s.ends_with("_skull")
-        || s == "carved_pumpkin"
+    s.ends_with("_helmet") || s == "turtle_helmet"
 }
 
 fn is_chestplate(s: &str) -> bool {
@@ -202,7 +287,13 @@ fn item_in_category(item: &str, cat: &str) -> bool {
         "mining_loot" => is_pickaxe(s) || is_shovel(s) || is_axe(s) || is_hoe(s),
         "fire_aspect" => is_sword(s) || is_spear(s) || s == "mace",
         "lunge" => is_spear(s),
-        "equippable" => is_armor(s) || s == "elytra",
+        "equippable" => {
+            is_armor(s)
+                || s == "elytra"
+                || s == "carved_pumpkin"
+                || s.ends_with("_head")
+                || s.ends_with("_skull")
+        }
         // `enchantable/vanishing` is durability + compass + carved pumpkin +
         // skulls, not everything.
         "vanishing" => {
@@ -245,7 +336,7 @@ mod tests {
         // from `data/minecraft/enchantment/*.json`; the ids are the registry
         // order the component and the command argument use.
         assert_eq!(ENCHANTMENTS.len(), 43);
-        let ids: Vec<u8> = ENCHANTMENTS.iter().map(|(.., id, _, _)| *id).collect();
+        let ids: Vec<u8> = ENCHANTMENTS.iter().map(|(.., id, _, _, _)| *id).collect();
         assert_eq!(ids, (0..=42).collect::<Vec<u8>>(), "dense registry ids");
         let sharp = by_name("sharpness").unwrap();
         assert_eq!((sharp.id, sharp.max_level), (33, 5));
@@ -259,10 +350,44 @@ mod tests {
     }
 
     #[test]
-    fn names_resolve_with_or_without_the_namespace() {
+    fn names_resolve_with_or_without_the_minecraft_namespace() {
         assert_eq!(by_name("sharpness").unwrap().id, 33);
         assert_eq!(by_name("minecraft:sharpness").unwrap().id, 33);
+        assert!(
+            by_name("aether:sharpness").is_none(),
+            "only the vanilla registry namespace resolves"
+        );
         assert!(by_name("not_an_enchantment").is_none());
+    }
+
+    #[test]
+    fn exclusive_sets_match_the_data_pack() {
+        let sharp = by_name("sharpness").unwrap();
+        assert!(is_compatible(&[], &sharp));
+        assert!(is_compatible(&[40], &sharp), "unbreaking is not in damage");
+        for conflicting in [33, 35, 1] {
+            assert!(
+                !is_compatible(&[conflicting], &sharp),
+                "id {conflicting} conflicts with Sharpness"
+            );
+        }
+        // The test consults the candidate's set only, as vanilla does: Mending
+        // has no exclusive set of its own, so it is compatible with an existing
+        // Infinity even though Infinity conflicts with Mending.
+        assert!(is_compatible(&[16], &by_name("mending").unwrap()));
+        assert!(!is_compatible(&[23], &by_name("infinity").unwrap()));
+    }
+
+    #[test]
+    fn the_full_name_appends_the_level_numeral() {
+        let sharp = by_name("sharpness").unwrap();
+        assert_eq!(full_name(&sharp, 1), "Sharpness I");
+        assert_eq!(full_name(&sharp, 3), "Sharpness III");
+        assert_eq!(full_name(&sharp, 5), "Sharpness V");
+        assert_eq!(numeral(9), "IX");
+        assert_eq!(numeral(10), "X");
+        assert_eq!(numeral(11), "11");
+        assert_eq!(numeral(0), "0");
     }
 
     #[test]
