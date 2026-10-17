@@ -180,16 +180,29 @@ pub fn on_broken(
         world,
     );
     if let Some((dy, _)) = crate::placement::other_half(broken) {
-        if world.get_block(x, y + dy, z) != block_ids::AIR {
-            crate::session::set_and_broadcast(
-                world,
-                registry,
-                handle,
-                x,
-                y + dy,
-                z,
-                block_ids::AIR,
-            );
+        let other_y = y + dy;
+        if world.get_block(x, other_y, z) != block_ids::AIR {
+            // A door or a tall plant is two cells, and the break hook checked
+            // only the clicked one. A region whose boundary runs between them
+            // must keep its half: a claim with a ceiling at `y + 1` does not
+            // lose it because the other half stands outside.
+            if let Some(reason) =
+                crate::region::denial_at(handle, x, other_y, z, crate::region::Action::Break)
+            {
+                if !reason.is_empty() {
+                    handle.emit(&ServerEvent::Chat(reason), world);
+                }
+            } else {
+                crate::session::set_and_broadcast(
+                    world,
+                    registry,
+                    handle,
+                    x,
+                    other_y,
+                    z,
+                    block_ids::AIR,
+                );
+            }
         }
     }
     if let Some(kind) = ContainerKind::of_block(&name) {

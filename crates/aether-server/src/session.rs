@@ -2231,10 +2231,13 @@ mod placement_tests {
         assert_eq!(parse_pack_status(&[0x80, 0x80]), PackStatus::Unknown);
     }
 
-    /// A throwaway world on a temp store, for the placement-rule tests.
-    fn test_world(seed: u64) -> DemoWorld {
+    /// A throwaway world on a temp store, for the placement-rule tests. The
+    /// `tag` keeps every test's directory unique: tests run in parallel and
+    /// the store's `flock` refuses a second open of the same path.
+    fn test_world(seed: u64, tag: &str) -> DemoWorld {
         use aether_api::{FjallStore, World};
-        let dir = std::env::temp_dir().join(format!("aether-blk-{}-{seed}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aether-blk-{}-{seed}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = FjallStore::open(&dir).expect("temp store");
         let generator = crate::worldgen::Generator::load("", "", seed).expect("noise generator");
@@ -2259,7 +2262,7 @@ mod placement_tests {
         .with_flag("build", false);
         regions.replace_all([region.handle()]);
 
-        let world = test_world(29);
+        let world = test_world(29, "break-place");
         let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
         let handle = crate::players::PlayerHandle::for_test(1, "RegionGuest");
         registry.insert_for_test(std::sync::Arc::clone(&handle));
@@ -2292,6 +2295,46 @@ mod placement_tests {
         );
     }
 
+    #[test]
+    fn a_region_boundary_between_door_halves_protects_the_upper_half() {
+        // Only the upper cell is claimed. Breaking the unprotected lower half
+        // must not delete the protected upper half: the break hook checks the
+        // pair before removing it.
+        let regions = crate::region::install_test_store(crate::region::RegionStore::new());
+        let region = crate::region::Region::new(
+            crate::region::RegionId(1),
+            "overworld",
+            crate::region::BlockPos::new(0, 101, 0),
+            crate::region::BlockPos::new(0, 101, 0),
+        )
+        .with_flag("build", false);
+        regions.replace_all([region.handle()]);
+
+        let world = test_world(29, "door-break-boundary");
+        let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
+        let handle = crate::players::PlayerHandle::for_test(1, "DoorBreakGuest");
+        registry.insert_for_test(std::sync::Arc::clone(&handle));
+
+        let lower = aether_world::registry::blocks::default_state("minecraft:oak_door").unwrap();
+        let (dy, upper) = crate::placement::other_half(lower).expect("a door has two halves");
+        assert_eq!(dy, 1);
+        world.set_block_id(0, 100, 0, lower, world.props_of(lower));
+        world.set_block_id(0, 101, 0, upper, world.props_of(upper));
+
+        break_block(&handle, &registry, &world, 0, 100, 0);
+
+        assert_eq!(
+            world.get_block(0, 100, 0),
+            block_ids::AIR,
+            "the unprotected lower half breaks"
+        );
+        assert_eq!(
+            world.get_block(0, 101, 0),
+            upper,
+            "the protected upper half must survive a break of its pair"
+        );
+    }
+
     /// A region with `build = deny` over `(0..=15, y)` in the overworld, plus
     /// a guest handle. Every test below starts from this fixture.
     fn protected_fixture(
@@ -2313,7 +2356,7 @@ mod placement_tests {
         .with_flag("use", false);
         regions.replace_all([region.handle()]);
 
-        let world = test_world(seed);
+        let world = test_world(seed, tag);
         let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
         let handle = crate::players::PlayerHandle::for_test(1, tag);
         registry.insert_for_test(std::sync::Arc::clone(&handle));
@@ -2398,7 +2441,7 @@ mod placement_tests {
     /// is written: a plant on the wrong soil leaves the world untouched.
     #[test]
     fn a_plant_refused_by_the_rule_writes_nothing() {
-        let world = test_world(7);
+        let world = test_world(7, "plant-rule");
         let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
         let handle = crate::players::PlayerHandle::for_test(1, "Steve");
         registry.insert_for_test(std::sync::Arc::clone(&handle));
@@ -2445,7 +2488,7 @@ mod placement_tests {
     /// this test fails on the sand half.
     #[test]
     fn place_block_refuses_grass_on_sand() {
-        let world = test_world(8);
+        let world = test_world(8, "grass-sand");
         let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
         let handle = crate::players::PlayerHandle::for_test(1, "Steve");
         registry.insert_for_test(std::sync::Arc::clone(&handle));
@@ -2487,7 +2530,7 @@ mod placement_tests {
     /// the refusal half fails.
     #[test]
     fn place_block_refuses_leaf_litter_on_a_wall() {
-        let world = test_world(9);
+        let world = test_world(9, "leaf-wall");
         let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
         let handle = crate::players::PlayerHandle::for_test(1, "Steve");
         registry.insert_for_test(std::sync::Arc::clone(&handle));
@@ -2530,7 +2573,7 @@ mod placement_tests {
     /// water it is refused. On a pre-change tree this fails.
     #[test]
     fn place_block_refuses_leaf_litter_under_water() {
-        let world = test_world(10);
+        let world = test_world(10, "leaf-water");
         let registry: SharedRegistry = std::sync::Arc::new(crate::players::Registry::default());
         let handle = crate::players::PlayerHandle::for_test(1, "Steve");
         registry.insert_for_test(std::sync::Arc::clone(&handle));
