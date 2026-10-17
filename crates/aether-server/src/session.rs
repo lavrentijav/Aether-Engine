@@ -178,12 +178,17 @@ fn login_and_play(
         ));
         return protocol::kick_login(s, "Too many login attempts; try again in a minute.");
     }
-    if !cfg.may_join(&claimed) {
+    // The ban half of the CMD-08 gate, next to the max-players/operator
+    // admission. A ban is decidable from the claimed name and address; the
+    // whitelist is not, because a row keyed by UUID can admit a premium player
+    // under a new name. It is checked again below, after authentication.
+    if let Err(refusal) = crate::admin::ban_admission(&claimed, ip) {
         crate::log::info(&format!(
-            "[x] {claimed} refused: not on the whitelist ({})",
+            "[x] {claimed} refused: {} ({})",
+            refusal.log_reason(),
             ip.map(|i| i.to_string()).unwrap_or_default()
         ));
-        return protocol::kick_login(s, "You are not on this server's whitelist.");
+        return protocol::kick_login(s, &refusal.message());
     }
     // Online/hybrid authentication, before compression is enabled: the
     // encryption handshake runs in the uncompressed login state, and Set
@@ -206,6 +211,18 @@ fn login_and_play(
             // and no one to tell.
             crate::auth::Admission::Ended => return Ok(()),
         };
+    // The authenticated UUID (or the offline one) is what a whitelist entry is
+    // matched by, so the full gate runs now that it is known. The ban half is
+    // repeated because a hybrid login may have changed the effective name.
+    let uuid = uuid_override.unwrap_or_else(|| aether_api::player::offline_uuid(&name));
+    if let Err(refusal) = crate::admin::admit(&name, uuid, ip, cfg) {
+        crate::log::info(&format!(
+            "[x] {name} refused: {} ({})",
+            refusal.log_reason(),
+            ip.map(|i| i.to_string()).unwrap_or_default()
+        ));
+        return protocol::kick_login(s, &refusal.message());
+    }
     // Between Login Start and Login Success, and nowhere else: every version
     // this server speaks takes Set Compression at login id 0x03, so the switch
     // belongs here rather than repeated in nineteen codecs. Both directions
@@ -219,9 +236,7 @@ fn login_and_play(
     let mut player = Player::spawn(eid, name.clone(), world_spawn);
     // An authenticated player keeps their Mojang uuid — inventory, ops and
     // journal all key on it.
-    if let Some(uuid) = uuid_override {
-        player.uuid = uuid;
-    }
+    player.uuid = uuid;
     // The same player logging in again — a client that reconnected before
     // the server noticed the old connection die — replaces the old session,
     // as in vanilla. Its thread saves the player on the way out; wait for

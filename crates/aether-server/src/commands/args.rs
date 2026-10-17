@@ -193,7 +193,7 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
             Ok((Value::ResourceLocation(rendered), t))
         }
         ArgKind::GameProfile => {
-            let t = read_required(r)?;
+            let t = read_selector_token(r)?;
             Ok((Value::Text(t.clone()), t))
         }
         ArgKind::Time => parse_time(r),
@@ -222,7 +222,7 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
             Ok((Value::Text(t.clone()), t))
         }
         ArgKind::ScoreHolder => {
-            let t = read_required(r)?;
+            let t = read_selector_token(r)?;
             Ok((Value::Text(t.clone()), t))
         }
         ArgKind::Operation => {
@@ -234,8 +234,14 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
                 _ => Err(ParseError::IncorrectArg),
             }
         }
-        // `uuid` and the entity kinds are CMD-06b's; they read a token here.
-        ArgKind::Uuid | ArgKind::Entity | ArgKind::Entities | ArgKind::NbtPath => {
+        // `uuid` and `nbt_path` are single tokens; the entity kinds are
+        // CMD-06b's, read as one selector-aware token so a quoted filter with
+        // a space (`@a[name="Bob Smith"]`) stays whole.
+        ArgKind::Entity | ArgKind::Entities => {
+            let t = read_selector_token(r)?;
+            Ok((Value::Text(t.clone()), t))
+        }
+        ArgKind::Uuid | ArgKind::NbtPath => {
             let t = read_required(r)?;
             Ok((Value::Text(t.clone()), t))
         }
@@ -249,6 +255,18 @@ fn read_required(r: &mut StringReader) -> Result<String, ParseError> {
         return Err(ParseError::IncorrectArg);
     }
     Ok(r.read_token())
+}
+
+/// A selector-or-name token: whitespace inside `[...]` and quotes does not end
+/// it, and a plain `"name"` loses its outer quotes. Entity, player and game
+/// profile arguments use this so `@a[name="Bob Smith"]` is one argument.
+fn read_selector_token(r: &mut StringReader) -> Result<String, ParseError> {
+    let t = read_component(r)?;
+    if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+        Ok(t[1..t.len() - 1].to_string())
+    } else {
+        Ok(t)
+    }
 }
 
 /// A brace-aware token, for block states, NBT and components.

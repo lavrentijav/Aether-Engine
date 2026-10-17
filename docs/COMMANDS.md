@@ -12,7 +12,7 @@ Every command Aether knows, grouped by category: the ones that run today and the
 
 **Legend:** ✅ working · 🚧 pending (`CMD-nn` is the task that will implement it). **Node** is the permission node and **Op** the vanilla operator level (0 everyone … 4 owner); for a pending command the stub enforces exactly them. **Gate** is what the server checks *today*: `node` (enforced node/op), `operator` (the legacy operator-only check — Node/Op are the intended target, not yet enforced), or `everyone` (no requirement; Node/Op are the intended target).
 
-**Totals:** 113 commands — 33 working, 80 pending.
+**Totals:** 113 commands — 42 working, 71 pending.
 
 ## Contents
 
@@ -32,15 +32,15 @@ Player and access management.
 | Command | Aliases | Status | Gate | Node | Op | Usage |
 | --- | --- | --- | --- | --- | --- | --- |
 | `/help` | `?` | ✅ working | `everyone` | `minecraft.command.help` | 0 | `/help [command]` |
-| `/op` | – | 🚧 pending CMD-08 | `node` | `minecraft.command.op` | 3 | `/op <targets>` |
-| `/deop` | – | 🚧 pending CMD-08 | `node` | `minecraft.command.deop` | 3 | `/deop <targets>` |
-| `/ban` | – | 🚧 pending CMD-08 | `node` | `minecraft.command.ban` | 3 | `/ban <targets> [reason]` |
-| `/ban-ip` | – | 🚧 pending CMD-08 | `node` | `minecraft.command.ban-ip` | 3 | `/ban-ip <targets> [reason]` |
-| `/banlist` | – | 🚧 pending CMD-08 | `node` | `minecraft.command.banlist` | 3 | `/banlist [ips]` |
-| `/pardon` | – | 🚧 pending CMD-08 | `node` | `minecraft.command.pardon` | 3 | `/pardon <targets>` |
-| `/pardon-ip` | – | 🚧 pending CMD-08 | `node` | `minecraft.command.pardon-ip` | 3 | `/pardon-ip <targets>` |
-| `/kick` | – | 🚧 pending CMD-08 | `node` | `minecraft.command.kick` | 3 | `/kick <targets> [reason]` |
-| `/whitelist` | – | 🚧 pending CMD-08 | `node` | `minecraft.command.whitelist` | 3 | `/whitelist <add,remove,list,on,off,reload> [name]` |
+| `/op` | – | ✅ working | `node` | `minecraft.command.op` | 3 | `/op <targets>` |
+| `/deop` | – | ✅ working | `node` | `minecraft.command.deop` | 3 | `/deop <targets>` |
+| `/ban` | – | ✅ working | `node` | `minecraft.command.ban` | 3 | `/ban <targets> [reason]` |
+| `/ban-ip` | – | ✅ working | `node` | `minecraft.command.ban-ip` | 3 | `/ban-ip <targets> [reason]` |
+| `/banlist` | – | ✅ working | `node` | `minecraft.command.banlist` | 3 | `/banlist [ips\|players]` |
+| `/pardon` | – | ✅ working | `node` | `minecraft.command.pardon` | 3 | `/pardon <targets>` |
+| `/pardon-ip` | – | ✅ working | `node` | `minecraft.command.pardon-ip` | 3 | `/pardon-ip <targets>` |
+| `/kick` | – | ✅ working | `node` | `minecraft.command.kick` | 3 | `/kick <targets> [reason]` |
+| `/whitelist` | – | ✅ working | `node` | `minecraft.command.whitelist` | 3 | `/whitelist <on\|off\|list\|add\|remove\|reload>` |
 
 ## server
 
