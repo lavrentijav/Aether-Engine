@@ -120,7 +120,7 @@ Data, scoreboard, teams and chat.
 | `/msg` | `tell`, `w` | ✅ working | `everyone` | `minecraft.command.msg` | 0 | `/msg <player> <message>` |
 | `/data` | – | 🚧 pending CMD-14 | `node` | `minecraft.command.data` | 2 | `/data <get,merge,modify,remove> <target> <path> [...]` |
 | `/scoreboard` | – | 🚧 pending CMD-15 | `node` | `minecraft.command.scoreboard` | 2 | `/scoreboard <objectives,players> [...]` |
-| `/tag` | – | ✅ working | `node` | `minecraft.command.tag` | 2 | `/tag <targets> <add,remove,list> <name>` |
+| `/tag` | – | ✅ working | `node` | `minecraft.command.tag` | 2 | `/tag <targets> <add\|remove> <name> \| <targets> list` |
 | `/team` | – | ✅ working | `node` | `minecraft.command.team` | 2 | `/team <list,add,remove,empty,join,leave,modify> [...]` |
 | `/teammsg` | `tm` | ✅ working | `everyone` | `minecraft.command.teammsg` | 0 | `/teammsg <message>` |
 | `/say` | – | 🚧 pending CMD-17 | `node` | `minecraft.command.say` | 2 | `/say <message>` |

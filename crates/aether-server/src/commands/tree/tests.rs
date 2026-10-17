@@ -223,6 +223,8 @@ fn every_argument_kind_parses_a_valid_word() {
         ArgKind::Difficulty,
         ArgKind::Particle,
         ArgKind::ScoreHolder,
+        ArgKind::Team,
+        ArgKind::Color,
         ArgKind::Swizzle,
         ArgKind::Angle,
         ArgKind::Operation,
@@ -247,6 +249,7 @@ fn every_argument_kind_parses_a_valid_word() {
             ArgKind::Gamemode => "creative",
             ArgKind::Difficulty => "normal",
             ArgKind::Operation => "+=",
+            ArgKind::Color => "red",
             _ => "word",
         };
         let mut r = StringReader::new(text);
@@ -329,6 +332,8 @@ const ALL_KINDS: &[ArgKind] = &[
     ArgKind::Difficulty,
     ArgKind::Particle,
     ArgKind::ScoreHolder,
+    ArgKind::Team,
+    ArgKind::Color,
     ArgKind::Swizzle,
     ArgKind::Angle,
     ArgKind::Operation,
@@ -1788,5 +1793,230 @@ fn team_join_accepts_a_selector_and_rejects_an_unknown_team() {
     assert_eq!(
         one(&env, &env.tester, "/tag @e[type=player] list"),
         "There are no tags on the 2 entities"
+    );
+}
+
+#[test]
+fn collision_rules_decide_whether_players_collide() {
+    let env = env();
+    one(&env, &env.tester, "/team add red");
+    one(&env, &env.tester, "/team add blue");
+    assert_eq!(
+        one(&env, &env.tester, "/team join blue bob"),
+        "Added bob to team [blue]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team join red"),
+        "Added tester to team [red]"
+    );
+
+    // Different teams, default ALWAYS.
+    assert!(crate::team::collides(&env.world, "tester", "bob"));
+
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red collisionRule never"),
+        "Collision rule for team [red] is now \"Never\""
+    );
+    assert!(!crate::team::collides(&env.world, "tester", "bob"));
+
+    one(
+        &env,
+        &env.tester,
+        "/team modify red collisionRule pushOwnTeam",
+    );
+    // Bob is on another team, so pushOwnTeam does not collide with him.
+    assert!(!crate::team::collides(&env.world, "tester", "bob"));
+
+    one(&env, &env.tester, "/team join red bob");
+    assert!(crate::team::collides(&env.world, "tester", "bob"));
+
+    one(
+        &env,
+        &env.tester,
+        "/team modify red collisionRule pushOtherTeams",
+    );
+    // Bob is now a teammate, so pushOtherTeams no longer collides.
+    assert!(!crate::team::collides(&env.world, "tester", "bob"));
+
+    one(&env, &env.tester, "/team modify red collisionRule always");
+    assert!(crate::team::collides(&env.world, "tester", "bob"));
+}
+
+#[test]
+fn death_message_visibility_filters_viewers() {
+    let env = env();
+    one(&env, &env.tester, "/team add red");
+    one(&env, &env.tester, "/team join red @a");
+
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red deathMessageVisibility never"
+        ),
+        "Death message visibility for team [red] is now \"Never\""
+    );
+    assert!(!crate::team::death_message_visible(
+        &env.world, "tester", "bob"
+    ));
+    assert!(!crate::team::death_message_visible(
+        &env.world, "tester", "carol"
+    ));
+
+    one(
+        &env,
+        &env.tester,
+        "/team modify red deathMessageVisibility hideForOwnTeam",
+    );
+    assert!(!crate::team::death_message_visible(
+        &env.world, "tester", "bob"
+    ));
+    assert!(crate::team::death_message_visible(
+        &env.world, "tester", "carol"
+    ));
+
+    one(
+        &env,
+        &env.tester,
+        "/team modify red deathMessageVisibility hideForOtherTeams",
+    );
+    assert!(crate::team::death_message_visible(
+        &env.world, "tester", "bob"
+    ));
+    assert!(!crate::team::death_message_visible(
+        &env.world, "tester", "carol"
+    ));
+
+    one(
+        &env,
+        &env.tester,
+        "/team modify red deathMessageVisibility always",
+    );
+    assert!(crate::team::death_message_visible(
+        &env.world, "tester", "carol"
+    ));
+}
+
+#[test]
+fn the_level_selector_compares_experience_level_not_total_xp() {
+    let env = env();
+    {
+        let mut st = env.tester.game();
+        st.xp_total = 352; // 16 levels, but 352 total XP
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/tag @a[level=16] add lvl"),
+        "Added tag 'lvl' to tester"
+    );
+    // No player has 352 levels; 352 is only this player's total XP.
+    assert_eq!(
+        one(&env, &env.tester, "/tag @a[level=352] add nope"),
+        "No player was found"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s list"),
+        "tester has 1 tags: lvl"
+    );
+}
+
+#[test]
+fn non_player_team_members_are_visible_to_selectors() {
+    let env = env();
+    one(&env, &env.tester, "/team add red");
+    let uuid = 0xae7e_0000_0000_4000_8000_0000_dead_beefu128;
+    let name = crate::team::uuid_name(uuid);
+    assert_eq!(
+        one(&env, &env.tester, &format!("/team join red {name}")),
+        format!("Added {name} to team [red]")
+    );
+    let entity = crate::game::entities::Selectable {
+        id: 1234,
+        uuid,
+        kind: "minecraft:zombie",
+        pos: aether_api::Vector3::new(1.0, 64.0, 1.0),
+        yaw: 0.0,
+        pitch: 0.0,
+        alive: true,
+        tags: Vec::new(),
+    };
+    let snapshot = crate::commands::team_tag::entity_ref(entity, &env.world);
+    assert_eq!(snapshot.team.as_deref(), Some("red"));
+}
+
+#[test]
+fn the_tag_cap_is_vanillas_1024() {
+    let env = env();
+    for i in 0..crate::game::player::MAX_TAGS {
+        env.tester.game().tags.insert(format!("t{i}"));
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s add overflow"),
+        "Target either already has the tag or has too many tags"
+    );
+}
+
+#[test]
+fn the_declared_team_tree_uses_vanillas_argument_parsers() {
+    use crate::commands::tree::{ArgKind, Kind, Node};
+    fn child<'a>(node: &'a Node, name: &str) -> &'a Node {
+        node.children
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no child `{name}` under `{}`", node.name))
+    }
+    fn arg(node: &Node) -> ArgKind {
+        match node.kind {
+            Kind::Argument(kind) => kind,
+            _ => panic!("`{}` is not an argument", node.name),
+        }
+    }
+
+    let commands = crate::commands::tree::tree();
+    let tag = commands.find_command("tag").unwrap();
+    assert!(!tag.executable, "vanilla's /tag root is not executable");
+    assert_eq!(arg(child(tag, "targets")), ArgKind::Entities);
+
+    let team = commands.find_command("team").unwrap();
+    assert!(!team.executable, "vanilla's /team root is not executable");
+    assert_eq!(arg(child(child(team, "list"), "team")), ArgKind::Team);
+    assert_eq!(arg(child(child(team, "add"), "team")), ArgKind::String);
+    assert_eq!(arg(child(child(team, "remove"), "team")), ArgKind::Team);
+    assert_eq!(arg(child(child(team, "empty"), "team")), ArgKind::Team);
+    assert_eq!(arg(child(child(team, "join"), "team")), ArgKind::Team);
+    assert_eq!(
+        arg(child(child(child(team, "join"), "team"), "members")),
+        ArgKind::ScoreHolder
+    );
+    assert_eq!(
+        arg(child(child(team, "leave"), "members")),
+        ArgKind::ScoreHolder
+    );
+    let modify_team = child(child(team, "modify"), "team");
+    assert_eq!(arg(modify_team), ArgKind::Team);
+    assert_eq!(
+        arg(child(child(modify_team, "color"), "value")),
+        ArgKind::Color
+    );
+
+    let teammsg = commands.find_command("teammsg").unwrap();
+    assert!(!teammsg.executable);
+    assert_eq!(arg(child(teammsg, "message")), ArgKind::Message);
+}
+
+#[test]
+fn team_arguments_resolve_before_selectors_and_components() {
+    let env = env();
+    // Unknown team beats a malformed selector and a malformed component, as
+    // vanilla resolves the `minecraft:team` argument first.
+    assert_eq!(
+        one(&env, &env.tester, "/team join missing @e[type=nope]"),
+        "Unknown team 'missing'"
+    );
+    // A component is parsed before any executor runs, so a broken component
+    // is the parse error; only the selector resolution comes after the team
+    // lookup, as vanilla's `TeamArgument.getTeam(...)` is evaluated first.
+    assert_eq!(
+        one(&env, &env.tester, "/team modify missing prefix {"),
+        "Invalid component: unterminated compound at byte 1"
     );
 }

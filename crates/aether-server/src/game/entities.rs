@@ -245,14 +245,15 @@ pub fn selectable() -> Vec<Selectable> {
         .collect()
 }
 
-/// Add `tag` to entity `id`; `false` when it already had it (or is gone).
+/// Add `tag` to entity `id`; `false` when it already had it, the entity is
+/// gone, or it already holds vanilla's 1024-tag limit.
 pub fn add_tag(id: i32, tag: &str) -> bool {
     entities()
         .lock()
         .unwrap()
         .iter_mut()
         .find(|e| e.id == id)
-        .is_some_and(|e| e.tags.insert(tag.to_string()))
+        .is_some_and(|e| e.tags.len() < super::player::MAX_TAGS && e.tags.insert(tag.to_string()))
 }
 
 /// Remove `tag` from entity `id`; `false` when it did not have it (or is gone).

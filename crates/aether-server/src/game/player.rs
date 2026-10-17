@@ -7,6 +7,8 @@ use crate::protocol::GameMode;
 
 /// Ticks a hit leaves a player immune to the next, vanilla's half second.
 pub const HURT_COOLDOWN: u32 = 10;
+/// Vanilla's cap on an entity's scoreboard tags (`Entity.addTag`).
+pub const MAX_TAGS: usize = 1024;
 /// Ticks eating takes.
 pub const EAT_TICKS: u64 = 32;
 

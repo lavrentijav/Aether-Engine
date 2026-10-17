@@ -166,16 +166,24 @@ pub fn hurt_player(
     true
 }
 
-fn death_message(
-    name: &str,
+pub(crate) fn death_message(
+    target: &PlayerHandle,
     source: &str,
     attacker: Option<i32>,
     registry: &SharedRegistry,
+    world: &DemoWorld,
 ) -> String {
+    let name = crate::team::team_of(world, &target.name)
+        .map(|t| t.format_player_name(&target.name))
+        .unwrap_or_else(|| target.name.clone());
     let killer = attacker.and_then(|a| {
         registry
             .by_entity(a)
-            .map(|p| p.name.clone())
+            .map(|p| {
+                crate::team::team_of(world, &p.name)
+                    .map(|t| t.format_player_name(&p.name))
+                    .unwrap_or_else(|| p.name.clone())
+            })
             .or_else(|| super::entities::kind_of(a).map(pretty))
     });
     match (source, killer) {
@@ -215,7 +223,7 @@ pub fn die(
     registry: &SharedRegistry,
     world: &DemoWorld,
 ) {
-    let text = death_message(&target.name, source, attacker, registry);
+    let text = death_message(target, source, attacker, registry, world);
     crate::log::info(&format!("[death] {text}"));
     crate::plugins::after_entity_death(target.entity_id as u64, attacker.map(|a| a as u64));
     // Death clears every effect; tell the client before the respawn screen
@@ -266,7 +274,14 @@ pub fn die(
         status: 3,
     };
     registry.broadcast_except(target.entity_id, &status, world);
-    registry.broadcast(&ServerEvent::Chat(text), world);
+    // The victim's team decides who may read the death message; the message
+    // itself already carries both players' team prefix/colour.
+    let ev = ServerEvent::Chat(text);
+    for viewer in registry.snapshot() {
+        if crate::team::death_message_visible(world, &target.name, &viewer.name) {
+            viewer.emit(&ev, world);
+        }
+    }
     target.sync_inventory(world);
 }
 

@@ -113,7 +113,6 @@ fn tag_node() -> Node {
                 op: 2,
                 node: "minecraft.command.tag",
             })
-            .executable(exec_tag_usage)
             .then(
                 Builder::arg("targets", tree::ArgKind::Entities)
                     .then(add)
@@ -133,7 +132,7 @@ fn team_node() -> Node {
 
     let list = Builder::literal("list")
         .executable(exec_team_list)
-        .then(Builder::arg("team", tree::ArgKind::String).executable(exec_team_list));
+        .then(Builder::arg("team", tree::ArgKind::Team).executable(exec_team_list));
 
     let add = Builder::literal("add").then(
         Builder::arg("team", tree::ArgKind::String)
@@ -142,19 +141,19 @@ fn team_node() -> Node {
     );
 
     let remove = Builder::literal("remove")
-        .then(Builder::arg("team", tree::ArgKind::String).executable(exec_team_remove));
+        .then(Builder::arg("team", tree::ArgKind::Team).executable(exec_team_remove));
 
     let empty = Builder::literal("empty")
-        .then(Builder::arg("team", tree::ArgKind::String).executable(exec_team_empty));
+        .then(Builder::arg("team", tree::ArgKind::Team).executable(exec_team_empty));
 
     let join = Builder::literal("join").then(
-        Builder::arg("team", tree::ArgKind::String)
+        Builder::arg("team", tree::ArgKind::Team)
             .executable(exec_team_join_self)
-            .then(Builder::arg("members", tree::ArgKind::Entities).executable(exec_team_join)),
+            .then(Builder::arg("members", tree::ArgKind::ScoreHolder).executable(exec_team_join)),
     );
 
     let leave = Builder::literal("leave")
-        .then(Builder::arg("members", tree::ArgKind::Entities).executable(exec_team_leave));
+        .then(Builder::arg("members", tree::ArgKind::ScoreHolder).executable(exec_team_leave));
 
     let visibility = |name: &'static str, set: fn(&mut Ctx, Visibility) -> Reply| {
         let mut b = Builder::literal(name);
@@ -183,13 +182,13 @@ fn team_node() -> Node {
     };
 
     let modify = Builder::literal("modify").then(
-        Builder::arg("team", tree::ArgKind::String)
+        Builder::arg("team", tree::ArgKind::Team)
             .then(Builder::literal("displayName").then(
                 Builder::arg("displayName", tree::ArgKind::Component).executable(exec_display_name),
             ))
             .then(
                 Builder::literal("color")
-                    .then(Builder::arg("value", tree::ArgKind::String).executable(exec_color)),
+                    .then(Builder::arg("value", tree::ArgKind::Color).executable(exec_color)),
             )
             .then(
                 Builder::literal("friendlyFire").then(
@@ -221,7 +220,6 @@ fn team_node() -> Node {
     tree::with_usage(
         Builder::literal("team")
             .requires(req)
-            .executable(exec_team_usage)
             .then(list)
             .then(add)
             .then(remove)
@@ -237,7 +235,6 @@ fn team_node() -> Node {
 fn teammsg_node() -> Node {
     Builder::literal("teammsg")
         .alias("tm")
-        .executable(exec_teammsg_usage)
         .then(Builder::arg("message", tree::ArgKind::Message).executable(exec_teammsg))
         .build()
 }
@@ -312,7 +309,10 @@ impl Target {
                 else {
                     return false;
                 };
-                let inserted = handle.game().tags.insert(tag.to_string());
+                let inserted = {
+                    let mut st = handle.game();
+                    st.tags.len() < crate::game::player::MAX_TAGS && st.tags.insert(tag.to_string())
+                };
                 if inserted {
                     crate::session::save_tags(&handle, world);
                 }
@@ -358,18 +358,6 @@ fn pretty(kind: &str) -> String {
         .join(" ")
 }
 
-fn hyphenated_uuid(uuid: u128) -> String {
-    let hex = format!("{uuid:032x}");
-    format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    )
-}
-
 struct WorldSource<'a> {
     registry: &'a SharedRegistry,
     world: &'a DemoWorld,
@@ -383,7 +371,7 @@ fn player_ref(handle: &PlayerHandle, world: &DemoWorld) -> EntityRef {
     // expression and self-deadlock on the non-reentrant mutex.
     let (tags, mode, level) = {
         let st = handle.game();
-        (st.tags.iter().cloned().collect(), st.mode, st.xp_total)
+        (st.tags.iter().cloned().collect(), st.mode, st.xp_level().0)
     };
     EntityRef {
         id: handle.entity_id,
@@ -421,25 +409,32 @@ impl SelectorSource for WorldSource<'_> {
     fn entities(&self) -> Vec<EntityRef> {
         entities::selectable()
             .into_iter()
-            .map(|e| EntityRef {
-                id: e.id,
-                uuid: e.uuid,
-                kind: e.kind.to_string(),
-                is_player: false,
-                alive: e.alive,
-                name: None,
-                pos: e.pos,
-                rotation: Rotation::new(e.yaw, e.pitch),
-                tags: e.tags,
-                team: None,
-                gamemode: None,
-                level: 0,
-                scores: Vec::new(),
-                advancements: Vec::new(),
-                predicates: Vec::new(),
-                nbt: Nbt::Compound(Vec::new()),
-            })
+            .map(|e| entity_ref(e, self.world))
             .collect()
+    }
+}
+
+/// A non-player entity as a selector snapshot. Its scoreboard name is the
+/// hyphenated UUID, so a team membership recorded by `/team join` is visible
+/// to `@e[team=…]`.
+pub(crate) fn entity_ref(e: entities::Selectable, world: &DemoWorld) -> EntityRef {
+    EntityRef {
+        id: e.id,
+        uuid: e.uuid,
+        kind: e.kind.to_string(),
+        is_player: false,
+        alive: e.alive,
+        name: None,
+        pos: e.pos,
+        rotation: Rotation::new(e.yaw, e.pitch),
+        tags: e.tags,
+        team: crate::team::team_name_of(world, &crate::team::uuid_name(e.uuid)),
+        gamemode: None,
+        level: 0,
+        scores: Vec::new(),
+        advancements: Vec::new(),
+        predicates: Vec::new(),
+        nbt: Nbt::Compound(Vec::new()),
     }
 }
 
@@ -492,18 +487,11 @@ fn resolve_targets(ctx: &Ctx, text: &str) -> Result<Vec<Target>, String> {
     }
     if let Some(e) = entities::selectable()
         .into_iter()
-        .find(|e| e.uuid.to_string() == text || hyphenated_uuid(e.uuid) == text)
+        .find(|e| e.uuid.to_string() == text || crate::team::uuid_name(e.uuid) == text)
     {
         return Ok(vec![Target::Entity(e.id)]);
     }
     Err("No entity was found".into())
-}
-
-fn exec_tag_usage(ctx: &mut Ctx) -> Reply {
-    usage(
-        ctx,
-        "/tag <targets> <add|remove> <name> | /tag <targets> list",
-    )
 }
 
 fn exec_tag_add(ctx: &mut Ctx) -> Reply {
@@ -614,10 +602,6 @@ fn commit(ctx: &Ctx, team: &Team) {
     team::broadcast(ctx.registry, ctx.world, team::update_change(team));
 }
 
-fn exec_team_usage(ctx: &mut Ctx) -> Reply {
-    usage(ctx, "/team <list|add|remove|empty|join|leave|modify> [...]")
-}
-
 fn exec_team_add(ctx: &mut Ctx) -> Reply {
     let Some(name) = text_at(ctx, 0).map(str::to_string) else {
         return usage(ctx, "/team add <name> [<displayName>]");
@@ -686,6 +670,11 @@ fn exec_team_join_self(ctx: &mut Ctx) -> Reply {
     let Some(name) = text_at(ctx, 0).map(str::to_string) else {
         return usage(ctx, "/team join <name> [<members>]");
     };
+    // Vanilla resolves the `minecraft:team` argument before it touches the
+    // source entity, so an unknown team wins over "needs a player".
+    if team::find(ctx.world, &name).is_none() {
+        return not_found(ctx, &name);
+    }
     let Some(handle) = ctx.player() else {
         return ctx.needs_player();
     };
@@ -696,6 +685,9 @@ fn exec_team_join(ctx: &mut Ctx) -> Reply {
     let Some(name) = text_at(ctx, 0).map(str::to_string) else {
         return usage(ctx, "/team join <name> [<members>]");
     };
+    if team::find(ctx.world, &name).is_none() {
+        return not_found(ctx, &name);
+    }
     let members = match resolve_score_holders(ctx, source_at(ctx, 1).unwrap_or("")) {
         Ok(v) => v,
         Err(e) => return ctx.fail(e),
@@ -828,7 +820,7 @@ fn resolve_score_holders(ctx: &Ctx, text: &str) -> Result<Vec<String>, String> {
             if e.is_player {
                 out.push(e.name.unwrap_or_default());
             } else {
-                out.push(hyphenated_uuid(e.uuid));
+                out.push(crate::team::uuid_name(e.uuid));
             }
         }
         return Ok(out);
@@ -877,12 +869,12 @@ fn exec_display_name(ctx: &mut Ctx) -> Reply {
     let Some(raw) = source_at(ctx, 1) else {
         return usage(ctx, "/team modify <team> displayName <name>");
     };
+    let Some(mut team) = team::find(ctx.world, &name) else {
+        return not_found(ctx, &name);
+    };
     let display = match component_text(raw) {
         Ok(v) => v,
         Err(e) => return ctx.fail(e),
-    };
-    let Some(mut team) = team::find(ctx.world, &name) else {
-        return not_found(ctx, &name);
     };
     if team.display_name == display {
         return ctx.fail(lang::NAME_UNCHANGED);
@@ -902,11 +894,11 @@ fn exec_color(ctx: &mut Ctx) -> Reply {
     let Some(raw) = text_at(ctx, 1) else {
         return usage(ctx, "/team modify <team> color <color>");
     };
-    let Some(color) = Color::parse(raw) else {
-        return ctx.fail(format!("Unknown color '{raw}'"));
-    };
     let Some(mut team) = team::find(ctx.world, &name) else {
         return not_found(ctx, &name);
+    };
+    let Some(color) = Color::parse(raw) else {
+        return ctx.fail(format!("Unknown color '{raw}'"));
     };
     if team.color == color {
         return ctx.fail(lang::COLOR_UNCHANGED);
@@ -1044,12 +1036,12 @@ fn exec_prefix(ctx: &mut Ctx) -> Reply {
     let Some(raw) = source_at(ctx, 1) else {
         return usage(ctx, "/team modify <team> prefix <prefix>");
     };
+    let Some(mut team) = team::find(ctx.world, &name) else {
+        return not_found(ctx, &name);
+    };
     let prefix = match component_text(raw) {
         Ok(v) => v,
         Err(e) => return ctx.fail(e),
-    };
-    let Some(mut team) = team::find(ctx.world, &name) else {
-        return not_found(ctx, &name);
     };
     team.prefix = prefix;
     commit(ctx, &team);
@@ -1063,12 +1055,12 @@ fn exec_suffix(ctx: &mut Ctx) -> Reply {
     let Some(raw) = source_at(ctx, 1) else {
         return usage(ctx, "/team modify <team> suffix <suffix>");
     };
+    let Some(mut team) = team::find(ctx.world, &name) else {
+        return not_found(ctx, &name);
+    };
     let suffix = match component_text(raw) {
         Ok(v) => v,
         Err(e) => return ctx.fail(e),
-    };
-    let Some(mut team) = team::find(ctx.world, &name) else {
-        return not_found(ctx, &name);
     };
     team.suffix = suffix;
     commit(ctx, &team);
@@ -1078,10 +1070,6 @@ fn exec_suffix(ctx: &mut Ctx) -> Reply {
 // ---------------------------------------------------------------------------
 // /teammsg
 // ---------------------------------------------------------------------------
-
-fn exec_teammsg_usage(ctx: &mut Ctx) -> Reply {
-    usage(ctx, "/teammsg <message>")
-}
 
 fn exec_teammsg(ctx: &mut Ctx) -> Reply {
     let Some(handle) = ctx.player() else {

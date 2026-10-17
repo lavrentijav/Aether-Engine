@@ -225,6 +225,21 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
             let t = read_selector_token(r)?;
             Ok((Value::Text(t.clone()), t))
         }
+        // `TeamArgument`: an unquoted token; whether the team exists is
+        // checked by the executor, which has the world.
+        ArgKind::Team => {
+            let t = read_required(r)?;
+            Ok((Value::Text(t.clone()), t))
+        }
+        // `ColorArgument`: a `ChatFormatting` name (reset included), rejecting
+        // a format such as `bold` exactly as vanilla does.
+        ArgKind::Color => {
+            let t = read_required(r)?;
+            match crate::team::Color::parse(&t) {
+                Some(_) => Ok((Value::Text(t.clone()), t)),
+                None => Err(ParseError::Argument(format!("Unknown color '{t}'"))),
+            }
+        }
         ArgKind::Operation => {
             let t = read_required(r)?;
             match t.as_str() {

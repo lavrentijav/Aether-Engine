@@ -578,7 +578,7 @@ fn player_ref(handle: &PlayerHandle, world: &DemoWorld) -> EntityRef {
     let pos = handle.pos();
     let st = handle.game();
     let tags = st.tags.iter().cloned().collect();
-    let level = st.xp_total;
+    let level = st.xp_level().0;
     let mode = st.mode;
     drop(st);
     EntityRef {

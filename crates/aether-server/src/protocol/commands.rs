@@ -775,6 +775,20 @@ mod tests {
         assert_ne!(stop.flags & NODE_EXECUTABLE, 0, "/stop executable");
     }
 
+    fn subtree_executor(node: &Node) -> bool {
+        node.executor.is_some() || node.children.iter().any(subtree_executor)
+    }
+
+    /// Whether a decoded node or any descendant is executable.
+    fn decoded_has_executor(nodes: &[Decoded], i: i32) -> bool {
+        let node = &nodes[i as usize];
+        node.flags & NODE_EXECUTABLE != 0
+            || node
+                .children
+                .iter()
+                .any(|&child| decoded_has_executor(nodes, child))
+    }
+
     #[test]
     fn every_declared_name_is_answered_by_the_tree() {
         // The tree is a promise: a declared name with no executor is a
@@ -790,12 +804,12 @@ mod tests {
             let command =
                 command.unwrap_or_else(|| panic!("`{name}` is declared but the tree has no node"));
             assert!(
-                command.executor.is_some(),
-                "`{name}` is declared but not executable"
+                command.executor.is_some() || command.children.iter().any(subtree_executor),
+                "`{name}` is declared but not answered anywhere"
             );
             assert!(
-                nodes[i as usize].flags & NODE_EXECUTABLE != 0,
-                "`{name}` is declared but not marked executable"
+                decoded_has_executor(&nodes, i),
+                "`{name}` is declared but its subtree has no executable node"
             );
         }
     }

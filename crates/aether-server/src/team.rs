@@ -53,6 +53,27 @@ pub enum Color {
 }
 
 impl Color {
+    /// Every name `ColorArgument` suggests: the sixteen colours plus `reset`.
+    pub const NAMES: &'static [&'static str] = &[
+        "black",
+        "dark_blue",
+        "dark_green",
+        "dark_aqua",
+        "dark_red",
+        "dark_purple",
+        "gold",
+        "gray",
+        "dark_gray",
+        "blue",
+        "green",
+        "aqua",
+        "red",
+        "light_purple",
+        "yellow",
+        "white",
+        "reset",
+    ];
+
     /// Parse a `ChatFormatting` name the way `ColorArgument` does: lower-case
     /// it, drop every non-letter, and match the enum name.
     pub fn parse(s: &str) -> Option<Color> {
@@ -376,6 +397,58 @@ pub fn allows_damage(world: &DemoWorld, attacker: &str, target: &str) -> bool {
         return true;
     }
     team.friendly_fire
+}
+
+/// Whether `mover`'s team collides with `other` under the collision rules.
+///
+/// Vanilla's `CollisionRule` decides whether an entity is pushed by another:
+/// `always` collides with everybody, `never` with nobody, `pushOwnTeam` only
+/// with teammates and `pushOtherTeams` only with non-teammates. The mover's
+/// team is authoritative; an unteamed mover falls back to the other side's
+/// rule, and two unteamed entities keep this server's historical (no
+/// player–player collision) behaviour.
+pub fn collides(world: &DemoWorld, mover: &str, other: &str) -> bool {
+    let same = team_of(world, mover).is_some_and(|t| t.members.contains(other));
+    match team_of(world, mover).map(|t| t.collision_rule) {
+        Some(CollisionRule::Always) => true,
+        Some(CollisionRule::Never) => false,
+        Some(CollisionRule::PushOwnTeam) => same,
+        Some(CollisionRule::PushOtherTeams) => !same,
+        None => match team_of(world, other).map(|t| t.collision_rule) {
+            Some(CollisionRule::Always) => true,
+            Some(CollisionRule::PushOtherTeams) => true,
+            Some(CollisionRule::Never | CollisionRule::PushOwnTeam) | None => false,
+        },
+    }
+}
+
+/// Whether `viewer` should see the death message of `victim`, under the
+/// victim's team `deathMessageVisibility`.
+pub fn death_message_visible(world: &DemoWorld, victim: &str, viewer: &str) -> bool {
+    let Some(team) = team_of(world, victim) else {
+        return true;
+    };
+    let same = team.members.contains(viewer);
+    match team.death_message_visibility {
+        Visibility::Always => true,
+        Visibility::Never => false,
+        Visibility::HideForOwnTeam => !same,
+        Visibility::HideForOtherTeams => same,
+    }
+}
+
+/// The scoreboard name of a non-player entity: vanilla's
+/// `Entity.getScoreboardName()` is the hyphenated UUID.
+pub fn uuid_name(uuid: u128) -> String {
+    let hex = format!("{uuid:032x}");
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 /// Send every team to one joining client (add packets with their members).

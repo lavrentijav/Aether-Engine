@@ -606,14 +606,13 @@ fn write_team_change(wire: &Wire, change: &TeamChange) -> PacketOut {
     let mut p = PacketOut::new(wire.team);
     p.string(name).u8(mode);
     if let Some(info) = info {
-        let width = wire.team_width();
+        // A real team has no length limit on modern clients (`writeUtf`
+        // carries the whole component); only 1.8's fixed 16-character halves
+        // need splitting.
         let (prefix, suffix) = if matches!(wire.team_form, TeamForm::Legacy) {
-            split_line(&info.prefix, &info.suffix, width)
+            split_line(&info.prefix, &info.suffix, wire.team_width())
         } else {
-            (
-                truncate(&info.prefix, width.prefix),
-                truncate(&info.suffix, width.suffix),
-            )
+            (info.prefix.clone(), info.suffix.clone())
         };
         match wire.team_form {
             TeamForm::Legacy => {

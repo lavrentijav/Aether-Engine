@@ -791,8 +791,34 @@ fn play_loop(
         let _items = (full && may_move_items(&event))
             .then(|| crate::game::provenance::Scope::begin(handle, world));
         match event {
-            ClientEvent::Move(pos) => {
+            ClientEvent::Move(mut pos) => {
                 let before = handle.pos();
+                // Team collision rules are enforced server-side as well as in
+                // the client's own prediction: a move that would enter another
+                // player's box is refused (and the client is teleported back)
+                // when the mover's team says the two collide. A player already
+                // overlapping is never trapped, so they can always walk apart.
+                if !player_boxes_overlap(before, pos) {
+                    let blocked = registry.snapshot().into_iter().any(|other| {
+                        other.entity_id != handle.entity_id
+                            && !other.game().dead
+                            && player_boxes_overlap(pos, other.pos())
+                            && crate::team::collides(world, &handle.name, &other.name)
+                    });
+                    if blocked {
+                        pos = before;
+                        handle.emit(
+                            &ServerEvent::Teleport {
+                                x: before.x,
+                                y: before.y,
+                                z: before.z,
+                                yaw: before.yaw,
+                                pitch: before.pitch,
+                            },
+                            world,
+                        );
+                    }
+                }
                 handle.set_pos(pos);
                 if full {
                     interact::on_move(handle, registry, world, before, pos);
@@ -1892,6 +1918,16 @@ fn would_bury_a_player(
         .snapshot()
         .iter()
         .any(|p| stands_in_block(p.pos(), x, y, z))
+}
+
+/// Whether two players' 0.6 × 1.8 boxes overlap.
+fn player_boxes_overlap(a: PosLook, b: PosLook) -> bool {
+    (a.x + PLAYER_HALF_WIDTH > b.x - PLAYER_HALF_WIDTH)
+        && (a.x - PLAYER_HALF_WIDTH < b.x + PLAYER_HALF_WIDTH)
+        && (a.z + PLAYER_HALF_WIDTH > b.z - PLAYER_HALF_WIDTH)
+        && (a.z - PLAYER_HALF_WIDTH < b.z + PLAYER_HALF_WIDTH)
+        && (a.y + PLAYER_HEIGHT > b.y)
+        && (a.y < b.y + PLAYER_HEIGHT)
 }
 
 /// Whether a player standing at `pos` overlaps the cube at `(x, y, z)`.

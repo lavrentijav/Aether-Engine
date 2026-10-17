@@ -120,7 +120,7 @@
 | `/msg` | `tell`, `w` | ✅ работает | `everyone` | `minecraft.command.msg` | 0 | `/msg <player> <message>` |
 | `/data` | – | 🚧 ожидает CMD-14 | `node` | `minecraft.command.data` | 2 | `/data <get,merge,modify,remove> <target> <path> [...]` |
 | `/scoreboard` | – | 🚧 ожидает CMD-15 | `node` | `minecraft.command.scoreboard` | 2 | `/scoreboard <objectives,players> [...]` |
-| `/tag` | – | ✅ работает | `node` | `minecraft.command.tag` | 2 | `/tag <targets> <add,remove,list> <name>` |
+| `/tag` | – | ✅ работает | `node` | `minecraft.command.tag` | 2 | `/tag <targets> <add\|remove> <name> \| <targets> list` |
 | `/team` | – | ✅ работает | `node` | `minecraft.command.team` | 2 | `/team <list,add,remove,empty,join,leave,modify> [...]` |
 | `/teammsg` | `tm` | ✅ работает | `everyone` | `minecraft.command.teammsg` | 0 | `/teammsg <message>` |
 | `/say` | – | 🚧 ожидает CMD-17 | `node` | `minecraft.command.say` | 2 | `/say <message>` |
