@@ -63,7 +63,7 @@ disagree.
 `debug` `defaultgamemode` `deop` `dialog` `difficulty` `effect` `enchant` `execute` `experience`/`xp`
 `fill` `fillbiome` `forceload` `function` `gamemode` `gamerule` `give` `help` `item` `jfr` `kick` `kill`
 `list` `locate` `loot` `me` `msg`/`tell`/`w` `op` `pardon` `pardon-ip` `particle` `perf` `place`
-`playsound` `publish` `random` `recipe` `reload` `return` `ride` `rotate` `save-all` `save-off` `save-on`
+`playsound` `random` `recipe` `reload` `return` `ride` `rotate` `save-all` `save-off` `save-on`
 `say` `schedule` `scoreboard` `seed` `setblock` `setidletimeout` `setworldspawn` `spawnpoint`
 `spreadplayers` `stop` `stopsound` `summon` `tag` `team` `teammsg`/`tm` `teleport`/`tp` `tellraw` `test`
 `tick` `time` `title` `transfer` `trigger` `version` `waypoint` `weather` `whitelist` `worldborder`.

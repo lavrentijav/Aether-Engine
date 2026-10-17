@@ -640,6 +640,9 @@ pub enum ServerEvent<'a> {
     /// releases whose packet table carries `custom_payload` render it; an
     /// older codec emits nothing.
     PluginMessage { channel: String, data: Vec<u8> },
+    /// Ask the client to reconnect to another server (1.20.5+). The caller
+    /// closes the connection after this event has been written.
+    Transfer { host: String, port: u16 },
 }
 
 impl ServerEvent<'_> {

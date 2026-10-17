@@ -510,6 +510,17 @@ impl ProtocolCodec for Codec {
                     vec![p]
                 }
             }
+            ServerEvent::Transfer { host, port } => {
+                // Added in 1.20.5; older packet tables carry `-1` and send
+                // nothing, which is why the command refuses those clients.
+                if self.0.packets.cb_transfer < 0 {
+                    Vec::new()
+                } else {
+                    let mut p = PacketOut::new(self.0.packets.cb_transfer);
+                    p.string(host).var_int(*port as i32);
+                    vec![p]
+                }
+            }
             ServerEvent::ActionBar(text) => {
                 // The same System Chat packet with the overlay flag set: the
                 // client draws it above the hotbar.
@@ -1147,6 +1158,19 @@ mod tests {
         assert_eq!(wire[0] as usize, wire.len() - 1);
         assert_eq!(wire[1] as i32, version::V1_21_11.packets.cb_keep_alive);
         assert_eq!(wire.len(), 1 + 1 + 8);
+    }
+
+    #[test]
+    fn transfer_carries_the_host_and_a_varint_port() {
+        let (id, body) = one_packet(&ServerEvent::Transfer {
+            host: "example.com".into(),
+            port: 25565,
+        });
+        assert_eq!(id, version::V1_21_11.packets.cb_transfer);
+        let mut p = crate::proto::PacketIn::new(&body);
+        assert_eq!(p.var_int().unwrap(), id);
+        assert_eq!(p.string().unwrap(), "example.com");
+        assert_eq!(p.var_int().unwrap(), 25565);
     }
 
     #[test]
