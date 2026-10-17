@@ -403,7 +403,10 @@ impl TeamIndex {
         let mut member_team = HashMap::new();
         for (i, team) in teams.iter().enumerate() {
             for member in &team.members {
-                member_team.entry(member.clone()).or_insert(i);
+                // Normal `/team` paths keep one team per member. Corrupt or
+                // hand-edited data is resolved deterministically: the last
+                // team in name order wins, matching the scan `team_of` did.
+                member_team.insert(member.clone(), i);
             }
         }
         TeamIndex { teams, member_team }
@@ -442,10 +445,13 @@ impl TeamIndex {
     }
 
     /// Whether `mover` and `target` collide, combining **both** sides' rules
-    /// the way vanilla's `EntitySelector.pushableBy` does: `never` on either
-    /// side disables pushing, `pushOwnTeam` on either side requires the same
-    /// team, and `pushOtherTeams` on either side requires different teams.
-    /// Two `always` sides (including two unteamed entities) collide.
+    /// the way vanilla's `EntitySelector.pushableBy` does.
+    ///
+    /// The two team-specific rules are contrary to their literal names:
+    /// `pushOwnTeam` **prevents** colliding with a teammate (only outsiders
+    /// push), and `pushOtherTeams` **prevents** colliding with an outsider
+    /// (only teammates push). `never` on either side prevents everything, and
+    /// two `always` sides (including two unteamed entities) collide.
     pub fn collides(&self, mover: &str, target: &str) -> bool {
         let mover_rule = self.collision_rule_of(mover);
         let target_rule = self.collision_rule_of(target);
@@ -453,14 +459,18 @@ impl TeamIndex {
             return false;
         }
         let same = self.same_team(mover, target);
+        // Vanilla: `pushOwnTeam` means "not pushable by my own team", so it
+        // refuses when the two are teammates.
         if (mover_rule == CollisionRule::PushOwnTeam || target_rule == CollisionRule::PushOwnTeam)
-            && !same
+            && same
         {
             return false;
         }
+        // ...and `pushOtherTeams` means "not pushable by another team", so it
+        // refuses when the two are *not* teammates.
         if (mover_rule == CollisionRule::PushOtherTeams
             || target_rule == CollisionRule::PushOtherTeams)
-            && same
+            && !same
         {
             return false;
         }
@@ -633,16 +643,26 @@ mod tests {
         assert!(!index.collides("black", "red"));
         assert!(!index.collides("black", "black"));
 
-        // `pushOwnTeam` on either side requires the same team.
-        assert!(index.collides("own_a", "own_b"));
-        assert!(!index.collides("red", "own_a"));
-        assert!(!index.collides("own_a", "red"));
+        // `pushOwnTeam` on either side refuses teammates (outsiders push).
+        assert!(!index.collides("own_a", "own_b"));
+        assert!(!index.collides("own_b", "own_a"));
+        assert!(index.collides("red", "own_a"));
+        assert!(index.collides("own_a", "red"));
+        assert!(index.collides("pair_a", "own_a"), "own against always, +");
 
-        // `pushOtherTeams` on either side requires different teams.
-        assert!(index.collides("red", "other_a"));
-        assert!(index.collides("other_a", "red"));
-        assert!(!index.collides("other_a", "other_b"));
-        assert!(!index.collides("other_b", "other_a"));
+        // `pushOtherTeams` on either side refuses outsiders (teammates push).
+        assert!(!index.collides("red", "other_a"));
+        assert!(!index.collides("other_a", "red"));
+        assert!(
+            !index.collides("pair_a", "other_a"),
+            "other against always, -"
+        );
+        assert!(index.collides("other_a", "other_b"));
+        assert!(index.collides("other_b", "other_a"));
+
+        // The rule may be present only on the target: still mutual.
+        assert!(index.collides("nobody", "own_a"));
+        assert!(!index.collides("nobody", "other_a"));
 
         // Conflicting own/other requirements can never be satisfied.
         assert!(!index.collides("own_a", "other_a"));

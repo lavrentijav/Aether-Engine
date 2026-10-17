@@ -1910,11 +1910,12 @@ fn would_bury_a_player(
 /// Whether a move by `handle` from `before` to `to` would enter another
 /// player's box whose team collision rules forbid it.
 ///
-/// Vanilla's `EntitySelector.pushableBy` combines **both** sides' rules, so
-/// the check loads one [`crate::team::TeamIndex`] per move and asks it about
-/// every overlapping player. A spectator (on either side) never collides, and
-/// a player already overlapping is never trapped: they can always walk apart,
-/// and only a move that would create a new overlap is refused.
+/// Vanilla's `EntitySelector.pushableBy` combines **both** sides' rules. The
+/// check is per other player: one `before` already overlapping that player is
+/// skipped (they may walk apart), and only a move that would newly enter their
+/// box is refused. A spectator on either side never collides. The
+/// [`crate::team::TeamIndex`] is loaded only when at least one such candidate
+/// exists, so a move into empty space costs no store scan.
 pub(crate) fn team_collision_blocks(
     handle: &PlayerHandle,
     registry: &SharedRegistry,
@@ -1929,22 +1930,33 @@ pub(crate) fn team_collision_blocks(
     if mover.0 || mover.1 == crate::protocol::GameMode::Spectator {
         return false;
     }
-    if player_boxes_overlap(before, to) {
+    // Candidate: a player the move would newly enter. One already overlapping
+    // at `before` is skipped, so a player can always walk out of a pile-up
+    // instead of being pinned by it.
+    let candidates: Vec<(String, PosLook)> = registry
+        .snapshot()
+        .into_iter()
+        .filter(|other| other.entity_id != handle.entity_id)
+        .filter_map(|other| {
+            {
+                let st = other.game();
+                if st.dead || st.mode == crate::protocol::GameMode::Spectator {
+                    return None;
+                }
+            }
+            let other_pos = other.pos();
+            (!player_boxes_overlap(before, other_pos) && player_boxes_overlap(to, other_pos))
+                .then(|| (other.name.clone(), other_pos))
+        })
+        .collect();
+    if candidates.is_empty() {
+        // The common case: nobody in the destination box, so no team scan.
         return false;
     }
     let teams = crate::team::TeamIndex::load(world);
-    registry.snapshot().into_iter().any(|other| {
-        if other.entity_id == handle.entity_id {
-            return false;
-        }
-        {
-            let st = other.game();
-            if st.dead || st.mode == crate::protocol::GameMode::Spectator {
-                return false;
-            }
-        }
-        player_boxes_overlap(to, other.pos()) && teams.collides(&handle.name, &other.name)
-    })
+    candidates
+        .iter()
+        .any(|(name, _)| teams.collides(&handle.name, name))
 }
 
 /// Whether two players' 0.6 × 1.8 boxes overlap.

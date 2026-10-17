@@ -1824,19 +1824,21 @@ fn collision_rules_decide_whether_players_collide() {
         &env.tester,
         "/team modify red collisionRule pushOwnTeam",
     );
-    // Bob is on another team, so pushOwnTeam does not collide with him.
-    assert!(!crate::team::collides(&env.world, "tester", "bob"));
+    // `pushOwnTeam` refuses only teammates: Bob is on another team, so the
+    // two still collide (vanilla's contrary-to-the-name rule).
+    assert!(crate::team::collides(&env.world, "tester", "bob"));
 
     one(&env, &env.tester, "/team join red bob");
-    assert!(crate::team::collides(&env.world, "tester", "bob"));
+    // Now they are teammates, and `pushOwnTeam` stops the push.
+    assert!(!crate::team::collides(&env.world, "tester", "bob"));
 
     one(
         &env,
         &env.tester,
         "/team modify red collisionRule pushOtherTeams",
     );
-    // Bob is now a teammate, so pushOtherTeams no longer collides.
-    assert!(!crate::team::collides(&env.world, "tester", "bob"));
+    // `pushOtherTeams` refuses outsiders: a teammate now collides.
+    assert!(crate::team::collides(&env.world, "tester", "bob"));
 
     one(&env, &env.tester, "/team modify red collisionRule always");
     assert!(crate::team::collides(&env.world, "tester", "bob"));
@@ -2095,4 +2097,44 @@ fn word_arguments_do_not_accept_quoted_spans() {
         .parse("/team add \"red team\"", &env.tester)
         .is_err());
     assert!(commands.parse("/tag @s add two", &env.tester).is_ok());
+}
+
+#[test]
+fn ordinary_sub_block_steps_are_checked_against_other_players() {
+    use crate::players::PosLook;
+
+    let env = env();
+    let at = |x: f64| PosLook {
+        x,
+        y: 64.0,
+        z: 0.5,
+        yaw: 0.0,
+        pitch: 0.0,
+        on_ground: true,
+    };
+    env.tester.set_pos(at(0.2));
+    // Bob's box is [0.7, 1.3]; the mover's destination [0.15, 0.75] overlaps.
+    env.bob.set_pos(at(1.0));
+
+    // A normal 0.25-block step, far below the 0.6 box width, still blocks:
+    // the earlier guard compared the mover's own before/to and never looked
+    // at the other player.
+    assert!(crate::session::team_collision_blocks(
+        &env.tester,
+        &env.registry,
+        &env.world,
+        at(0.2),
+        at(0.45)
+    ));
+
+    // An already-overlapping pair may walk apart.
+    env.tester.set_pos(at(0.7));
+    env.bob.set_pos(at(1.0));
+    assert!(!crate::session::team_collision_blocks(
+        &env.tester,
+        &env.registry,
+        &env.world,
+        at(0.7),
+        at(0.75)
+    ));
 }
