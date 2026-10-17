@@ -6,7 +6,10 @@
 //! [`HostBackend::teleport_player`], which searches for a safe spot, so a home,
 //! warp, request or coordinate above lava or in the void cannot drop a player
 //! into it. `/top`, `/jump`, `/up` and `/rtp` call the same core search through
-//! the `world.read` host hooks instead of re-deriving collision.
+//! the `world.read` host hooks instead of re-deriving collision. `/up` is the
+//! one exception: it validates both body cells itself and asks for an exact
+//! move, because its target feet cell is air and the safe search would snap
+//! back onto the floor below.
 //! Homes, warps, the plugin spawn and `/back` locations live in plugin KV (P1)
 //! and are replayed on `init`, so they survive a restart.
 //!
@@ -396,6 +399,9 @@ struct Pending {
     start: (String, f64, f64, f64),
     location: Location,
     label: String,
+    /// `true` for `/up`, which validated both body cells and therefore asks
+    /// the host for an exact move instead of CMD-31's safe search.
+    exact: bool,
 }
 
 /// The essentials-teleport plugin.
@@ -497,7 +503,13 @@ impl NativePlugin for EssentialsTeleportPlugin {
             let Some(pending) = self.pending.remove(&player) else {
                 continue;
             };
-            let (_, lines) = self.teleport(ctx, player, &pending.location, &pending.label);
+            let (_, lines) = self.teleport(
+                ctx,
+                player,
+                &pending.location,
+                &pending.label,
+                pending.exact,
+            );
             for line in lines {
                 notify(ctx, player, &line);
             }
@@ -991,7 +1003,7 @@ impl EssentialsTeleportPlugin {
             if target.id == p.id {
                 continue;
             }
-            let (ok, lines) = self.teleport(ctx, target.id, &destination, p.name.as_str());
+            let (ok, lines) = self.teleport(ctx, target.id, &destination, p.name.as_str(), false);
             if ok {
                 moved += 1;
             }
@@ -1100,13 +1112,15 @@ impl EssentialsTeleportPlugin {
         let Some((_min_y, max_y)) = ctx.backend.world_height(ctx.id) else {
             return vec!["The world height is not available.".to_string()];
         };
+        // Arm the cooldown **before** the search: a miss is still work (the
+        // core materialises columns), so a failed `/top` must not be spammable.
+        if let Some(lines) = self.cooldown(ctx, p, COMMAND_TOP) {
+            return lines;
+        }
         let around = (x.floor() as i32, max_y, z.floor() as i32);
         let Some((sx, sy, sz)) = ctx.backend.find_safe_spot(ctx.id, around, 0, false) else {
             return vec!["No safe spot was found above you.".to_string()];
         };
-        if let Some(lines) = self.cooldown(ctx, p, COMMAND_TOP) {
-            return lines;
-        }
         self.begin_teleport(
             ctx,
             p,
@@ -1131,6 +1145,10 @@ impl EssentialsTeleportPlugin {
         let Some((world, x, y, z)) = ctx.backend.player_position(ctx.id, p.id) else {
             return vec!["Your current position is not available.".to_string()];
         };
+        // Arm the cooldown before casting the ray and reading the world.
+        if let Some(lines) = self.cooldown(ctx, p, COMMAND_JUMP) {
+            return lines;
+        }
         let Some((yaw, pitch)) = ctx.backend.player_look(ctx.id, p.id) else {
             return vec!["Your facing is not available.".to_string()];
         };
@@ -1168,9 +1186,6 @@ impl EssentialsTeleportPlugin {
         else {
             return vec!["No safe spot was found ahead.".to_string()];
         };
-        if let Some(lines) = self.cooldown(ctx, p, COMMAND_JUMP) {
-            return lines;
-        }
         self.begin_teleport(
             ctx,
             p,
@@ -1212,6 +1227,10 @@ impl EssentialsTeleportPlugin {
         let Some((_min_y, max_y)) = ctx.backend.world_height(ctx.id) else {
             return vec!["The world height is not available.".to_string()];
         };
+        // Arm the cooldown before reading the candidate cells.
+        if let Some(lines) = self.cooldown(ctx, p, COMMAND_UP) {
+            return lines;
+        }
         let (bx, by, bz) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
         let mut best = 0u32;
         for step in 1..=n {
@@ -1233,17 +1252,20 @@ impl EssentialsTeleportPlugin {
         if best == 0 {
             return vec!["There is no room to move up.".to_string()];
         }
-        if let Some(lines) = self.cooldown(ctx, p, COMMAND_UP) {
-            return lines;
-        }
-        self.begin_teleport(
+        // Both body cells of every step were checked against the same
+        // collision/hazard rules the core uses, and the final target is the
+        // last clear one, so an exact move is safe here. The safe search would
+        // otherwise pull the player back onto the floor below the air target.
+        self.begin_exact_teleport(
             ctx,
             p,
             Location {
                 world,
-                x: bx as f64,
+                // Exact moves are not snapped to the block centre the way
+                // CMD-31's safe target is, so centre the column ourselves.
+                x: bx as f64 + 0.5,
                 y: by.saturating_add(best as i32) as f64,
-                z: bz as f64,
+                z: bz as f64 + 0.5,
             },
             format!("up {best} block(s)"),
             COMMAND_UP,
@@ -1269,13 +1291,16 @@ impl EssentialsTeleportPlugin {
         let Some((world, x, y, z)) = ctx.backend.player_position(ctx.id, p.id) else {
             return vec!["Your current position is not available.".to_string()];
         };
+        // Arm the cooldown **before** the search, which may materialise up to
+        // the core's whole attempt budget of columns; a miss must not let a
+        // player repeat it every tick.
+        if let Some(lines) = self.cooldown(ctx, p, COMMAND_RTP) {
+            return lines;
+        }
         let center = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
         let Some((sx, sy, sz)) = ctx.backend.random_safe_spot(ctx.id, center, 1, radius) else {
             return vec![format!("No safe spot was found within {radius} block(s).")];
         };
-        if let Some(lines) = self.cooldown(ctx, p, COMMAND_RTP) {
-            return lines;
-        }
         self.begin_teleport(
             ctx,
             p,
@@ -1298,9 +1323,35 @@ impl EssentialsTeleportPlugin {
         label: String,
         command: &'static str,
     ) -> Vec<String> {
+        self.begin_move(ctx, p, location, label, command, false)
+    }
+
+    /// A move the caller has already validated against the core's safe-spot
+    /// rules (`/up`), so the host is asked for an exact move instead of the
+    /// safe search. Warmup and cancellation still apply.
+    fn begin_exact_teleport(
+        &mut self,
+        ctx: &mut NativeContext,
+        p: &Player,
+        location: Location,
+        label: String,
+        command: &'static str,
+    ) -> Vec<String> {
+        self.begin_move(ctx, p, location, label, command, true)
+    }
+
+    fn begin_move(
+        &mut self,
+        ctx: &mut NativeContext,
+        p: &Player,
+        location: Location,
+        label: String,
+        command: &'static str,
+        exact: bool,
+    ) -> Vec<String> {
         let bypass = permitted(ctx, p, &format!("essentials.{command}.bypass"));
         if self.settings.warmup_ticks == 0 || bypass {
-            let (_, lines) = self.teleport(ctx, p.id, &location, &label);
+            let (_, lines) = self.teleport(ctx, p.id, &location, &label, exact);
             return lines;
         }
         let Some(start) = ctx.backend.player_position(ctx.id, p.id) else {
@@ -1315,6 +1366,7 @@ impl EssentialsTeleportPlugin {
                 start,
                 location,
                 label: label.clone(),
+                exact,
             },
         );
         vec![format!(
@@ -1331,6 +1383,7 @@ impl EssentialsTeleportPlugin {
         player: u64,
         location: &Location,
         label: &str,
+        exact: bool,
     ) -> (bool, Vec<String>) {
         let from = ctx.backend.player_position(ctx.id, player);
         if let Some((world, _, _, _)) = &from {
@@ -1344,14 +1397,26 @@ impl EssentialsTeleportPlugin {
                 );
             }
         }
-        match ctx.backend.teleport_player(
-            ctx.id,
-            player,
-            location.x,
-            location.y,
-            location.z,
-            TeleportCause::Plugin,
-        ) {
+        let result = if exact {
+            ctx.backend.teleport_player_exact(
+                ctx.id,
+                player,
+                location.x,
+                location.y,
+                location.z,
+                TeleportCause::Plugin,
+            )
+        } else {
+            ctx.backend.teleport_player(
+                ctx.id,
+                player,
+                location.x,
+                location.y,
+                location.z,
+                TeleportCause::Plugin,
+            )
+        };
+        match result {
             Ok(()) => {
                 if let Some(from) = from {
                     self.remember_back(ctx, player, Location::from_position(from));

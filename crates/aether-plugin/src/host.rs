@@ -184,6 +184,25 @@ pub trait HostBackend: Send + Sync {
         Err("teleport is not supported by this host".to_string())
     }
 
+    /// Move a player to an **exact** position, without the safe-spot search.
+    ///
+    /// Only for a command that has already validated the destination against
+    /// the same collision and hazard rules the core uses (`/up`, whose target
+    /// body cells the plugin checks before asking). Every other plugin move
+    /// must use [`Self::teleport_player`], the safe search. The default
+    /// refuses, so a host without a world never pretends the move happened.
+    fn teleport_player_exact(
+        &self,
+        _plugin: &str,
+        _player: u64,
+        _x: f64,
+        _y: f64,
+        _z: f64,
+        _cause: crate::sdk::TeleportCause,
+    ) -> std::result::Result<(), String> {
+        Err("exact teleport is not supported by this host".to_string())
+    }
+
     /// Disconnect a player with `reason`. The default does nothing.
     fn disconnect_player(&self, _plugin: &str, _player: u64, _reason: &str) {}
 

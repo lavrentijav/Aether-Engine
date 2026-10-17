@@ -202,6 +202,27 @@ impl HostBackend for Mock {
             .push((player, x, y, z, cause));
         Ok(())
     }
+
+    /// `/up` validates its own cells and asks for an exact move; the recording
+    /// mock treats it like any other move so tests can see the coordinates.
+    fn teleport_player_exact(
+        &self,
+        _plugin: &str,
+        player: u64,
+        x: f64,
+        y: f64,
+        z: f64,
+        cause: TeleportCause,
+    ) -> Result<(), String> {
+        if self.fail_teleport.load(Ordering::SeqCst) {
+            return Err("no safe spot to teleport to".to_string());
+        }
+        self.teleports
+            .lock()
+            .unwrap()
+            .push((player, x, y, z, cause));
+        Ok(())
+    }
 }
 
 impl Mock {
@@ -1464,4 +1485,41 @@ fn requests_do_not_survive_a_restart() {
     fixture.restart();
     let lines = fixture.run(&alex, "tpaccept", &[]);
     assert!(text(&lines).contains("no pending"), "{lines:?}");
+}
+
+#[test]
+fn a_failed_rtp_search_still_arms_the_cooldown_before_the_next_search() {
+    let mut fixture = Fixture::with_config(config(&[("cooldown-ticks", "10")]));
+    let steve = player(7, "Steve");
+    fixture.set_height(0, 20);
+    fixture.set_player_position(7, "overworld", 0.5, 8.0, 0.5);
+
+    // No ground anywhere: the search fails, but it is still work.
+    let lines = fixture.run(&steve, "rtp", &[]);
+    assert!(text(&lines).contains("No safe spot"), "{lines:?}");
+    assert_eq!(fixture.backend.random_calls.lock().unwrap().len(), 1);
+
+    let lines = fixture.run(&steve, "rtp", &[]);
+    assert!(text(&lines).contains("Wait"), "{lines:?}");
+    assert_eq!(
+        fixture.backend.random_calls.lock().unwrap().len(),
+        1,
+        "a cooldown must stop the expensive search, not run it and then refuse"
+    );
+}
+
+#[test]
+fn a_failed_top_search_still_arms_the_cooldown_before_the_next_search() {
+    let mut fixture = Fixture::with_config(config(&[("cooldown-ticks", "10")]));
+    let steve = player(7, "Steve");
+    fixture.set_height(0, 20);
+    fixture.set_player_position(7, "overworld", 0.5, 8.0, 0.5);
+
+    let lines = fixture.run(&steve, "top", &[]);
+    assert!(text(&lines).contains("No safe spot"), "{lines:?}");
+    assert_eq!(fixture.backend.safe_spot_calls.lock().unwrap().len(), 1);
+
+    let lines = fixture.run(&steve, "top", &[]);
+    assert!(text(&lines).contains("Wait"), "{lines:?}");
+    assert_eq!(fixture.backend.safe_spot_calls.lock().unwrap().len(), 1);
 }

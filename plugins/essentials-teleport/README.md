@@ -99,7 +99,9 @@ otherwise) in plugin KV and replayed on `init`.
 
 ## Vertical helpers and `/rtp`
 
-All four use CMD-31 rather than re-deriving collision:
+All four use CMD-31 rather than re-deriving collision (`/up` uses its exact
+teleport path after the plugin has validated the destination cells, as noted
+below):
 
 - `/top` asks the core for the highest safe spot in the player's column,
   starting from the world's maximum Y. It refuses a solid column (for example
@@ -110,7 +112,12 @@ All four use CMD-31 rather than re-deriving collision:
   no block ahead it reports that and does not move.
 - `/up [<n>]` climbs at most `n` blocks (default 1), stopping before the first
   cell whose feet or head is solid or hazardous. `n` is bounded by `max-up`;
-  it never teleports into a solid block.
+  it never teleports into a solid block. The plugin validates the final two
+  body cells against the same collision/hazard rules as CMD-31 and then asks
+  the host for an **exact** move (centred on the column). The safe search
+  cannot be used for the target: its feet cell is air by definition, so it
+  would snap back onto the floor below, and `/up 1` would not move at all on
+  ordinary full-block ground.
 - `/rtp [<radius>]` asks CMD-31's random search for a safe spot between 1 and
   the radius (default and maximum `rtp-radius`). If the core's bounded attempt
   budget finds nothing, the command reports it and does not teleport.
@@ -250,6 +257,7 @@ The server compiles the plugin behind its `plugins` feature, adds it to
 twenty-two commands through the core command registry (the same ownership and
 permission gate as a core command). The `world.read`, safe-spot and random-
 safe-spot host hooks front CMD-31's `find_safe_spot` / `random_safe_spot`; the
-plugin never copies the search. It is disabled with
+plugin never copies the search. `/up` uses the host's exact-teleport path only
+after checking its two body cells; every other move takes the safe path. It is disabled with
 `[plugins.essentials-teleport] enabled = false`, and still requires
 `[plugins] dir` to be set.
