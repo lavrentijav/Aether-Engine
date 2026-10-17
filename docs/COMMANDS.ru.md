@@ -95,9 +95,9 @@
 | Команда | Синонимы | Статус | Gate | Узел | Op | Использование |
 | --- | --- | --- | --- | --- | --- | --- |
 | `/time` | – | ✅ работает | `operator` | `minecraft.command.time` | 2 | `/time [set] <day,noon,night,midnight,ticks>` |
-| `/setblock` | – | ✅ работает | `node` | `minecraft.command.setblock` | 2 | `/setblock <pos> <block> [destroy\|keep\|replace]` |
-| `/fill` | – | ✅ работает | `node` | `minecraft.command.fill` | 2 | `/fill <from> <to> <block> [destroy\|hollow\|keep\|outline\|replace] \| <from> <to> replace <filter> <block>` |
-| `/clone` | – | ✅ работает | `node` | `minecraft.command.clone` | 2 | `/clone <begin> <end> <destination> [replace\|masked] [force\|normal] [filtered <filter>]` |
+| `/setblock` | – | ✅ работает | `node` | `minecraft.command.setblock` | 2 | `/setblock <pos> <block> [destroy\|keep\|replace\|strict]` |
+| `/fill` | – | ✅ работает | `node` | `minecraft.command.fill` | 2 | `/fill <from> <to> <block> [destroy\|hollow\|keep\|outline\|replace\|strict] \| <from> <to> <block> replace <filter> [destroy\|hollow\|keep\|outline\|strict]` |
+| `/clone` | – | ✅ работает | `node` | `minecraft.command.clone` | 2 | `/clone [from <dimension>] <begin> <end> [to <dimension>] <destination> [strict] [replace\|masked\|filtered <filter>] [force\|move\|normal]` |
 | `/fillbiome` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.fillbiome` | 2 | `/fillbiome <from> <to> <biome>` |
 | `/place` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.place` | 2 | `/place <feature,template> <pos> [...]` |
 | `/forceload` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.forceload` | 2 | `/forceload <add,remove,query> <from> [to]` |

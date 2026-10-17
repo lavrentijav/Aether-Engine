@@ -6,21 +6,32 @@
 //! reaches the world until every check has passed, so a refused command leaves
 //! no blocks and no journal entry behind. Publishing (column resends, shape
 //! settle and after-block hooks) is the normal bulk publisher, which is why a
-//! client sees the same result as a player placing the blocks by hand.
+//! client sees the same result as a player placing the blocks by hand. The
+//! `strict` modes skip the shape/update pass and only re-send the touched
+//! columns, matching vanilla's "place as-is without block updates".
 //!
 //! The commands follow vanilla 1.21.11's grammar and limits:
 //!
-//! * `/setblock <pos> <block> [destroy|keep|replace]`
-//! * `/fill <from> <to> <block> [destroy|hollow|keep|outline|replace]`
-//! * `/fill <from> <to> replace <filter> <block>`
+//! * `/setblock <pos> <block> [destroy|keep|replace|strict]`
+//! * `/fill <from> <to> <block> [destroy|hollow|keep|outline|replace|strict]`
+//! * `/fill <from> <to> <block> replace <filter> [destroy|hollow|keep|outline|strict]`
 //! * `/clone [from <dimension>] <begin> <end> [to <dimension>] <destination>
-//!   [replace|masked] [force|normal] [filtered <filter>]`
+//!   [strict] [replace|masked|filtered <filter>] [force|move|normal]`
 //!
 //! Both `/fill` and `/clone` are capped at 32768 blocks, the cap is checked
 //! before a single cell is read, and block positions outside the engine's
 //! vertical range are refused. A block filter is a block state (properties
-//! optional) or a `#tag`, resolved through the pack's block tags when one is
-//! configured and through the built-in name rules otherwise.
+//! optional and matched partially) or a `#tag`, resolved through the pack's
+//! block tags when one is configured and through the built-in name rules
+//! otherwise. A tag the built-in rules cannot represent is refused rather than
+//! silently matching a subset.
+//!
+//! The region check covers **every cell a command can touch**, not only the
+//! cells whose state changes: `/fill … destroy` drops an unchanged block just
+//! as it drops a changed one, and a filtered command still reads (and is
+//! capable of modifying) its whole destination box.
+
+use std::collections::BTreeSet;
 
 use aether_api::{JournalActor, Vector3};
 use aether_world::registry::{blocks, props};
@@ -32,21 +43,32 @@ use super::tree::{self, ArgKind, Ctx, Node, Requirement, Value};
 use super::Reply;
 use crate::bulk::{self, BulkEdit};
 use crate::commands::coordinates::BlockPos;
-use crate::game::{entities, tables};
+use crate::game::{containers, entities, tables, window};
 use crate::inventory::Stack;
+use crate::protocol::ServerEvent;
 use crate::session::{DemoWorld, WORLD_BOTTOM, WORLD_TOP};
 
-/// Vanilla's per-command cap for `/fill` and `/clone`.
+/// Vanilla's per-command cap for `/fill` and `/clone` (the default
+/// `commandModificationBlockLimit`).
 pub const MAX_VOLUME: u128 = 32_768;
 
 const NODE_SETBLOCK: &str = "minecraft.command.setblock";
 const NODE_FILL: &str = "minecraft.command.fill";
 const NODE_CLONE: &str = "minecraft.command.clone";
 
-const ERR_TOO_MANY: &str = "Too many blocks in the specified area";
 const ERR_OUTSIDE: &str = "That position is outside of the world";
-const ERR_OVERLAP: &str = "The source and destination can't overlap";
-const ERR_CLONE_FAILED: &str = "Could not clone blocks";
+const ERR_OVERLAP: &str = "The source and destination areas cannot overlap";
+const ERR_FILL_FAILED: &str = "No blocks were filled";
+const ERR_CLONE_FAILED: &str = "No blocks were cloned";
+const ERR_SETBLOCK_FAILED: &str = "Could not set the block";
+const ERR_BLOCK_ENTITY: &str = "Block entity data is not supported";
+
+fn too_many(volume: u128) -> String {
+    format!(
+        "Too many blocks in the specified area (maximum {}, specified {})",
+        MAX_VOLUME, volume
+    )
+}
 
 /// A position with no source anchor: enough for absolute coordinates, and a
 /// clean `Unknown position` error for `~`/`^` from the console.
@@ -67,16 +89,42 @@ enum SetMode {
     Replace,
     Destroy,
     Keep,
+    Strict,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum FillMode {
+enum FillOp {
     Replace,
     Destroy,
     Hollow,
     Keep,
     Outline,
-    Filtered,
+    Strict,
+}
+
+#[derive(Clone, Copy)]
+struct FillArgs {
+    op: FillOp,
+    filtered: bool,
+    strict: bool,
+}
+
+impl FillArgs {
+    const fn new(op: FillOp) -> FillArgs {
+        FillArgs {
+            op,
+            filtered: false,
+            strict: false,
+        }
+    }
+
+    const fn filtered(op: FillOp) -> FillArgs {
+        FillArgs {
+            op,
+            filtered: true,
+            strict: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,10 +133,24 @@ enum CloneMask {
     Masked,
 }
 
+/// How an overlapping source/destination is treated.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CloneForce {
-    Force,
+enum CloneMode {
     Normal,
+    Force,
+    Move,
+}
+
+/// Where the clone arguments sit after `from`/`to` have been placed in the
+/// tree. `None` means the dimension was not written and defaults to the
+/// execution dimension.
+#[derive(Clone, Copy)]
+struct CloneForm {
+    source_dim: Option<usize>,
+    begin: usize,
+    end: usize,
+    target_dim: Option<usize>,
+    destination: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -122,156 +184,301 @@ fn setblock_node() -> Node {
         .then(
             tree::Builder::literal("replace")
                 .executable(|ctx| exec_setblock(ctx, SetMode::Replace)),
+        )
+        .then(
+            tree::Builder::literal("strict").executable(|ctx| exec_setblock(ctx, SetMode::Strict)),
         );
 
     tree::Builder::literal("setblock")
         .requires(gate(NODE_SETBLOCK))
-        .usage("<pos> <block> [destroy|keep|replace]")
-        .executable(|ctx| ctx.fail("/setblock <pos> <block> [destroy|keep|replace]"))
+        .usage("<pos> <block> [destroy|keep|replace|strict]")
+        .executable(|ctx| ctx.fail("/setblock <pos> <block> [destroy|keep|replace|strict]"))
         .then(tree::Builder::arg("pos", ArgKind::BlockPos).then(block))
         .build()
 }
 
-fn exec_fill(ctx: &mut Ctx, mode: FillMode) -> Reply {
-    match fill(ctx, mode) {
+fn exec_fill(ctx: &mut Ctx, args: FillArgs) -> Reply {
+    match fill(ctx, args) {
         Ok(line) => Reply::one(line),
         Err(e) => ctx.fail(e),
     }
 }
 
+/// The modes that may follow a `replace <filter>` predicate.
+fn filtered_fill_tail() -> tree::Builder {
+    tree::Builder::arg("filter", ArgKind::String)
+        .executable(|ctx| exec_fill(ctx, FillArgs::filtered(FillOp::Replace)))
+        .then(
+            tree::Builder::literal("destroy")
+                .executable(|ctx| exec_fill(ctx, FillArgs::filtered(FillOp::Destroy))),
+        )
+        .then(
+            tree::Builder::literal("hollow")
+                .executable(|ctx| exec_fill(ctx, FillArgs::filtered(FillOp::Hollow))),
+        )
+        .then(
+            tree::Builder::literal("keep")
+                .executable(|ctx| exec_fill(ctx, FillArgs::filtered(FillOp::Keep))),
+        )
+        .then(
+            tree::Builder::literal("outline")
+                .executable(|ctx| exec_fill(ctx, FillArgs::filtered(FillOp::Outline))),
+        )
+        .then(tree::Builder::literal("strict").executable(|ctx| {
+            exec_fill(
+                ctx,
+                FillArgs {
+                    op: FillOp::Strict,
+                    filtered: true,
+                    strict: true,
+                },
+            )
+        }))
+}
+
+fn fill_mode(op: FillOp) -> tree::Builder {
+    tree::Builder::literal(match op {
+        FillOp::Replace => "replace",
+        FillOp::Destroy => "destroy",
+        FillOp::Hollow => "hollow",
+        FillOp::Keep => "keep",
+        FillOp::Outline => "outline",
+        FillOp::Strict => "strict",
+    })
+    .executable(move |ctx| exec_fill(ctx, FillArgs::new(op)))
+}
+
 fn fill_node() -> Node {
-    let filtered = tree::Builder::literal("replace").then(
-        tree::Builder::arg("filter", ArgKind::String).then(
-            tree::Builder::arg("block", ArgKind::BlockState)
-                .executable(|ctx| exec_fill(ctx, FillMode::Filtered)),
-        ),
-    );
+    let replace = fill_mode(FillOp::Replace).then(filtered_fill_tail());
 
     let block = tree::Builder::arg("block", ArgKind::BlockState)
-        .executable(|ctx| exec_fill(ctx, FillMode::Replace))
-        .then(tree::Builder::literal("destroy").executable(|ctx| exec_fill(ctx, FillMode::Destroy)))
-        .then(tree::Builder::literal("hollow").executable(|ctx| exec_fill(ctx, FillMode::Hollow)))
-        .then(tree::Builder::literal("keep").executable(|ctx| exec_fill(ctx, FillMode::Keep)))
-        .then(tree::Builder::literal("outline").executable(|ctx| exec_fill(ctx, FillMode::Outline)))
-        .then(
-            tree::Builder::literal("replace").executable(|ctx| exec_fill(ctx, FillMode::Replace)),
-        );
+        .executable(|ctx| exec_fill(ctx, FillArgs::new(FillOp::Replace)))
+        .then(fill_mode(FillOp::Destroy))
+        .then(fill_mode(FillOp::Hollow))
+        .then(fill_mode(FillOp::Keep))
+        .then(fill_mode(FillOp::Outline))
+        .then(replace)
+        .then(tree::Builder::literal("strict").executable(|ctx| {
+            exec_fill(
+                ctx,
+                FillArgs {
+                    op: FillOp::Strict,
+                    filtered: false,
+                    strict: true,
+                },
+            )
+        }));
 
     tree::Builder::literal("fill")
         .requires(gate(NODE_FILL))
-        .usage("<from> <to> <block> [destroy|hollow|keep|outline|replace]")
+        .usage("<from> <to> <block> [destroy|hollow|keep|outline|replace|strict]")
         .executable(|ctx| {
             ctx.fail(
-                "/fill <from> <to> <block> [destroy|hollow|keep|outline|replace] | \
-                 <from> <to> replace <filter> <block>",
+                "/fill <from> <to> <block> [destroy|hollow|keep|outline|replace|strict] | \
+                 <from> <to> <block> replace <filter> [destroy|hollow|keep|outline|strict]",
             )
         })
         .then(
-            tree::Builder::arg("from", ArgKind::BlockPos).then(
-                tree::Builder::arg("to", ArgKind::BlockPos)
-                    .then(block)
-                    .then(filtered),
-            ),
+            tree::Builder::arg("from", ArgKind::BlockPos)
+                .then(tree::Builder::arg("to", ArgKind::BlockPos).then(block)),
         )
         .build()
 }
 
 fn exec_clone(
     ctx: &mut Ctx,
-    cross: bool,
+    form: CloneForm,
     mask: CloneMask,
-    force: CloneForce,
+    mode: CloneMode,
     filtered: bool,
+    strict: bool,
 ) -> Reply {
-    match clone(ctx, cross, mask, force, filtered) {
+    match clone(ctx, form, mask, mode, filtered, strict) {
         Ok(line) => Reply::one(line),
         Err(e) => ctx.fail(e),
     }
 }
 
-/// A `filtered <filter>` tail.
-fn clone_filtered(cross: bool, mask: CloneMask, force: CloneForce) -> tree::Builder {
-    tree::Builder::literal("filtered").then(
-        tree::Builder::arg("filter", ArgKind::String)
-            .executable(move |ctx| exec_clone(ctx, cross, mask, force, true)),
+fn clone_mode_word(mode: CloneMode) -> &'static str {
+    match mode {
+        CloneMode::Normal => "normal",
+        CloneMode::Force => "force",
+        CloneMode::Move => "move",
+    }
+}
+
+/// A `force`/`move`/`normal` tail.
+fn clone_mode_tail(
+    form: CloneForm,
+    mask: CloneMask,
+    mode: CloneMode,
+    filtered: bool,
+    strict: bool,
+) -> tree::Builder {
+    tree::Builder::literal(clone_mode_word(mode))
+        .executable(move |ctx| exec_clone(ctx, form, mask, mode, filtered, strict))
+}
+
+/// Append `force`/`move`/`normal` as siblings of the current node.
+fn add_clone_force_tails(
+    parent: tree::Builder,
+    form: CloneForm,
+    mask: CloneMask,
+    filtered: bool,
+    strict: bool,
+) -> tree::Builder {
+    parent
+        .then(clone_mode_tail(
+            form,
+            mask,
+            CloneMode::Force,
+            filtered,
+            strict,
+        ))
+        .then(clone_mode_tail(
+            form,
+            mask,
+            CloneMode::Move,
+            filtered,
+            strict,
+        ))
+        .then(clone_mode_tail(
+            form,
+            mask,
+            CloneMode::Normal,
+            filtered,
+            strict,
+        ))
+}
+
+fn clone_mask_node(form: CloneForm, mask: CloneMask, strict: bool) -> tree::Builder {
+    let word = match mask {
+        CloneMask::Replace => "replace",
+        CloneMask::Masked => "masked",
+    };
+    add_clone_force_tails(
+        tree::Builder::literal(word)
+            .executable(move |ctx| exec_clone(ctx, form, mask, CloneMode::Normal, false, strict)),
+        form,
+        mask,
+        false,
+        strict,
     )
 }
 
-/// A `force`/`normal` tail, with its own optional `filtered`.
-fn clone_force(
-    cross: bool,
-    mask: CloneMask,
-    force: CloneForce,
-    word: &'static str,
-) -> tree::Builder {
-    let node = tree::Builder::literal(word)
-        .executable(move |ctx| exec_clone(ctx, cross, mask, force, false));
-    node.then(clone_filtered(cross, mask, force))
+fn clone_filtered_node(form: CloneForm, strict: bool) -> tree::Builder {
+    let filter = tree::Builder::arg("filter", ArgKind::String).executable(move |ctx| {
+        exec_clone(
+            ctx,
+            form,
+            CloneMask::Replace,
+            CloneMode::Normal,
+            true,
+            strict,
+        )
+    });
+    tree::Builder::literal("filtered").then(add_clone_force_tails(
+        filter,
+        form,
+        CloneMask::Replace,
+        true,
+        strict,
+    ))
 }
 
-/// A `replace`/`masked` branch, with optional `force`/`normal`/`filtered`.
-fn clone_mask(cross: bool, mask: CloneMask, word: &'static str) -> tree::Builder {
-    let node = tree::Builder::literal(word)
-        .executable(move |ctx| exec_clone(ctx, cross, mask, CloneForce::Normal, false));
-    node.then(clone_force(cross, mask, CloneForce::Force, "force"))
-        .then(clone_force(cross, mask, CloneForce::Normal, "normal"))
-        .then(clone_filtered(cross, mask, CloneForce::Normal))
+fn clone_strict_node(form: CloneForm) -> tree::Builder {
+    let node = tree::Builder::literal("strict")
+        .executable(move |ctx| {
+            exec_clone(
+                ctx,
+                form,
+                CloneMask::Replace,
+                CloneMode::Normal,
+                false,
+                true,
+            )
+        })
+        .then(clone_mask_node(form, CloneMask::Replace, true))
+        .then(clone_mask_node(form, CloneMask::Masked, true))
+        .then(clone_filtered_node(form, true));
+    add_clone_force_tails(node, form, CloneMask::Replace, false, true)
 }
 
 /// The destination argument and every mode/filter tail.
-fn clone_destination(cross: bool) -> tree::Builder {
-    let node = tree::Builder::arg("destination", ArgKind::BlockPos).executable(move |ctx| {
-        exec_clone(ctx, cross, CloneMask::Replace, CloneForce::Normal, false)
-    });
-    node.then(clone_mask(cross, CloneMask::Replace, "replace"))
-        .then(clone_mask(cross, CloneMask::Masked, "masked"))
-        .then(clone_force(
-            cross,
-            CloneMask::Replace,
-            CloneForce::Force,
-            "force",
-        ))
-        .then(clone_force(
-            cross,
-            CloneMask::Replace,
-            CloneForce::Normal,
-            "normal",
-        ))
-        .then(clone_filtered(
-            cross,
-            CloneMask::Replace,
-            CloneForce::Normal,
-        ))
+fn clone_destination(form: CloneForm) -> tree::Builder {
+    let node = tree::Builder::arg("destination", ArgKind::BlockPos)
+        .executable(move |ctx| {
+            exec_clone(
+                ctx,
+                form,
+                CloneMask::Replace,
+                CloneMode::Normal,
+                false,
+                false,
+            )
+        })
+        .then(clone_strict_node(form))
+        .then(clone_mask_node(form, CloneMask::Replace, false))
+        .then(clone_mask_node(form, CloneMask::Masked, false))
+        .then(clone_filtered_node(form, false));
+    add_clone_force_tails(node, form, CloneMask::Replace, false, false)
+}
+
+/// `to <dimension> <destination>`: an alternative to the plain destination.
+fn clone_to(form: CloneForm) -> tree::Builder {
+    let with_to = CloneForm {
+        target_dim: Some(form.end + 1),
+        destination: form.end + 2,
+        ..form
+    };
+    tree::Builder::literal("to")
+        .then(tree::Builder::arg("to", ArgKind::ResourceLocation).then(clone_destination(with_to)))
+}
+
+/// The end corner, followed by either a plain destination or `to <dim> …`.
+fn clone_end(form: CloneForm) -> tree::Builder {
+    tree::Builder::arg("end", ArgKind::BlockPos)
+        .then(clone_destination(form))
+        .then(clone_to(form))
 }
 
 fn clone_node() -> Node {
-    let short = tree::Builder::arg("begin", ArgKind::BlockPos)
-        .then(tree::Builder::arg("end", ArgKind::BlockPos).then(clone_destination(false)));
+    let short = CloneForm {
+        source_dim: None,
+        begin: 0,
+        end: 1,
+        target_dim: None,
+        destination: 2,
+    };
+    let with_source = CloneForm {
+        source_dim: Some(0),
+        begin: 1,
+        end: 2,
+        target_dim: None,
+        destination: 3,
+    };
 
-    let cross = tree::Builder::literal("from").then(
-        tree::Builder::arg("from", ArgKind::ResourceLocation).then(
-            tree::Builder::arg("begin", ArgKind::BlockPos).then(
-                tree::Builder::arg("end", ArgKind::BlockPos).then(
-                    tree::Builder::literal("to").then(
-                        tree::Builder::arg("to", ArgKind::ResourceLocation)
-                            .then(clone_destination(true)),
-                    ),
-                ),
-            ),
-        ),
+    let plain = tree::Builder::arg("begin", ArgKind::BlockPos).then(clone_end(short));
+
+    let from = tree::Builder::literal("from").then(
+        tree::Builder::arg("from", ArgKind::ResourceLocation)
+            .then(tree::Builder::arg("begin", ArgKind::BlockPos).then(clone_end(with_source))),
     );
 
     tree::Builder::literal("clone")
         .requires(gate(NODE_CLONE))
-        .usage("<begin> <end> <destination> [replace|masked] [force|normal] [filtered <filter>]")
+        .usage(
+            "[from <dimension>] <begin> <end> [to <dimension>] <destination> \
+             [strict] [replace|masked|filtered <filter>] [force|move|normal]",
+        )
         .executable(|ctx| {
             ctx.fail(
-                "/clone <begin> <end> <destination> [replace|masked] [force|normal] \
-                 [filtered <filter>]",
+                "/clone [from <dimension>] <begin> <end> [to <dimension>] <destination> \
+                 [strict] [replace|masked|filtered <filter>] [force|move|normal]",
             )
         })
-        .then(short)
-        .then(cross)
+        .then(plain)
+        .then(from)
         .build()
 }
 
@@ -333,6 +540,25 @@ fn check_y(y: i32) -> Result<(), String> {
         Ok(())
     } else {
         Err(ERR_OUTSIDE.into())
+    }
+}
+
+/// Vanilla's `isAir()`: plain air, cave air and void air are all air.
+fn is_air(state: BlockStateId) -> bool {
+    state == BlockStateId::AIR
+        || blocks::block_of_state(state).is_some_and(|(_, name)| {
+            matches!(name.rsplit(':').next(), Some("cave_air") | Some("void_air"))
+        })
+}
+
+/// The dimension key a clone argument names, validated against the one world
+/// the engine serves. `minecraft:overworld` and `overworld` are the same
+/// dimension, as in the command's own dimension registry.
+fn check_dimension(id: &str) -> Result<(), String> {
+    if crate::region::same_world(id, crate::WORLD) {
+        Ok(())
+    } else {
+        Err(format!("Unknown dimension '{id}'"))
     }
 }
 
@@ -406,15 +632,22 @@ impl Box3 {
             || z == self.min.2
             || z == self.max.2
     }
+
+    fn cells(self) -> impl Iterator<Item = (i32, i32, i32)> {
+        (self.min.0..=self.max.0).flat_map(move |x| {
+            (self.min.1..=self.max.1)
+                .flat_map(move |y| (self.min.2..=self.max.2).map(move |z| (x, y, z)))
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum FilterKind {
-    /// A block type with no properties, or one exact state when properties
-    /// were written.
+    /// A block type. Written properties are matched partially — every one
+    /// must agree, and an unwritten property is a wildcard.
     Block {
         block: u16,
-        state: Option<BlockStateId>,
+        props: Vec<(String, String)>,
     },
     /// A block tag, resolved once at parse time.
     Tag {
@@ -434,22 +667,20 @@ impl BlockFilter {
             return false;
         };
         match &self.kind {
-            FilterKind::Block {
-                state: Some(want_state),
-                ..
-            } => state == *want_state,
-            FilterKind::Block {
-                block: want,
-                state: None,
-            } => block == *want,
+            FilterKind::Block { block: want, props } => {
+                *want == block
+                    && props.iter().all(|(key, value)| {
+                        prop_value(state, key).is_some_and(|actual| actual == value)
+                    })
+            }
             FilterKind::Tag {
                 blocks: members,
-                props: wanted,
+                props,
             } => {
                 if !members.contains(&block) {
                     return false;
                 }
-                wanted.iter().all(|(key, value)| {
+                props.iter().all(|(key, value)| {
                     prop_value(state, key).is_some_and(|actual| actual == value)
                 })
             }
@@ -489,7 +720,7 @@ fn parse_properties(text: &str, list: &str) -> Result<Vec<(String, String)>, Str
     if list.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let mut out = Vec::new();
+    let mut out: Vec<(String, String)> = Vec::new();
     for pair in list.split(',') {
         let (key, value) = pair
             .split_once('=')
@@ -501,7 +732,7 @@ fn parse_properties(text: &str, list: &str) -> Result<Vec<(String, String)>, Str
                 "Expected value for property in block state '{text}'"
             ));
         }
-        if out.iter().any(|(k, _): &(String, String)| k == key) {
+        if out.iter().any(|(k, _)| k == key) {
             return Err(format!(
                 "Property '{key}' is already defined for block state '{text}'"
             ));
@@ -529,7 +760,7 @@ fn parse_filter(raw: &str) -> Result<BlockFilter, String> {
             None => Vec::new(),
         };
         let members = tag_members(&id);
-        if members.is_empty() && !known_builtin_tag(&id) {
+        if members.is_empty() {
             return Err(format!("Unknown block tag '{raw}'"));
         }
         return Ok(BlockFilter {
@@ -543,21 +774,22 @@ fn parse_filter(raw: &str) -> Result<BlockFilter, String> {
     let (head, prop_list) = split_properties(raw);
     let id = normalize_resource(head);
     let block = blocks::block_id_of(&id).ok_or_else(|| format!("Unknown block type '{raw}'"))?;
-    let state = match prop_list {
-        Some(list) => {
-            let pairs = parse_properties(raw, list)?;
-            let borrowed: Vec<(&str, &str)> = pairs
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            let state = props::state_with(block, &borrowed)
-                .ok_or_else(|| format!("Unknown property or value in block state '{raw}'"))?;
-            Some(BlockStateId(state))
-        }
-        None => None,
+    let props = match prop_list {
+        Some(list) => parse_properties(raw, list)?,
+        None => Vec::new(),
     };
+    // Validate the property names and values once, against the block's own
+    // state schema; matching itself stays partial.
+    if !props.is_empty() {
+        let borrowed: Vec<(&str, &str)> = props
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        props::state_with(block, &borrowed)
+            .ok_or_else(|| format!("Unknown property or value in block state '{raw}'"))?;
+    }
     Ok(BlockFilter {
-        kind: FilterKind::Block { block, state },
+        kind: FilterKind::Block { block, props },
     })
 }
 
@@ -585,6 +817,9 @@ fn tag_members(id: &str) -> Vec<u16> {
         }
     }
     let short = id.strip_prefix("minecraft:").unwrap_or(id);
+    if !known_builtin_tag(short) {
+        return Vec::new();
+    }
     blocks::BLOCKS
         .iter()
         .enumerate()
@@ -607,61 +842,119 @@ fn pack_tags() -> Option<&'static aether_worldgen::vanilla::tags::Tags> {
     .as_ref()
 }
 
+/// Every tag the built-in fallback knows. A tag outside this set is refused
+/// rather than silently matching a hand-written subset.
 fn known_builtin_tag(id: &str) -> bool {
     const NAMES: &[&str] = &[
         "air",
         "base_stone_overworld",
+        "banners",
+        "beds",
+        "buttons",
+        "candles",
+        "carpets",
         "concrete",
         "concrete_powder",
+        "coral",
+        "coral_blocks",
+        "coral_plants",
         "crops",
         "dirt",
+        "doors",
+        "fence_gates",
+        "fences",
         "flowers",
         "glass",
+        "glass_panes",
         "leaves",
         "logs",
         "planks",
+        "pressure_plates",
+        "rails",
         "replaceable",
         "sand",
         "saplings",
+        "signs",
+        "slabs",
+        "small_flowers",
+        "stairs",
+        "standing_signs",
         "stone_bricks",
+        "tall_flowers",
         "terracotta",
+        "trapdoors",
+        "walls",
+        "wall_signs",
+        "wooden_buttons",
+        "wooden_doors",
+        "wooden_fences",
+        "wooden_fence_gates",
+        "wooden_pressure_plates",
+        "wooden_slabs",
+        "wooden_stairs",
+        "wooden_trapdoors",
         "wool",
     ];
-    let short = id.strip_prefix("minecraft:").unwrap_or(id);
-    NAMES.contains(&short)
+    NAMES.contains(&id)
+}
+
+/// Which wood family a name belongs to, for the `wooden_*` tags.
+fn is_wood(name: &str) -> bool {
+    const WOODS: &[&str] = &[
+        "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "bamboo",
+        "crimson", "warped", "pale_oak",
+    ];
+    let family = name.split('_').next().unwrap_or(name);
+    WOODS.contains(&family)
 }
 
 fn builtin_tag_matches(tag: &str, name: &str) -> bool {
     let short = name.strip_prefix("minecraft:").unwrap_or(name);
+    let suffix = |s: &str| short.strip_suffix(s).is_some();
     match tag {
         "air" => matches!(short, "air" | "cave_air" | "void_air"),
         "logs" => {
-            short.ends_with("_log")
-                || short.ends_with("_wood")
-                || short.ends_with("_stem")
-                || short.ends_with("_hyphae")
+            suffix("_log")
+                || suffix("_wood")
+                || suffix("_stem")
+                || suffix("_hyphae")
                 || matches!(short, "bamboo_block" | "stripped_bamboo_block")
         }
-        "planks" => short.ends_with("_planks"),
-        "leaves" => short.ends_with("_leaves"),
-        "saplings" => short.ends_with("_sapling"),
-        "wool" => short.ends_with("_wool"),
-        "concrete" => short.ends_with("_concrete"),
-        "concrete_powder" => short.ends_with("_concrete_powder"),
-        "terracotta" => short.ends_with("_terracotta"),
-        "glass" => short.ends_with("_glass"),
-        "stone_bricks" => short.ends_with("_bricks") || short.ends_with("_brick"),
+        "planks" => suffix("_planks"),
+        "leaves" => suffix("_leaves"),
+        "saplings" => suffix("_sapling"),
+        "wool" => suffix("_wool"),
+        "concrete" => suffix("_concrete"),
+        "concrete_powder" => suffix("_concrete_powder"),
+        "terracotta" => suffix("_terracotta"),
+        "glass" => suffix("_glass"),
+        "glass_panes" => suffix("_pane") || short == "glass_pane",
+        "stone_bricks" => matches!(
+            short,
+            "stone_bricks"
+                | "mossy_stone_bricks"
+                | "cracked_stone_bricks"
+                | "chiseled_stone_bricks"
+        ),
         "sand" => matches!(short, "sand" | "red_sand"),
         "dirt" => matches!(
             short,
-            "dirt" | "coarse_dirt" | "rooted_dirt" | "grass_block" | "podzol" | "mycelium"
+            "dirt"
+                | "coarse_dirt"
+                | "rooted_dirt"
+                | "grass_block"
+                | "podzol"
+                | "mycelium"
+                | "moss_block"
+                | "mud"
+                | "muddy_mangrove_roots"
         ),
         "base_stone_overworld" => matches!(
             short,
             "stone" | "granite" | "diorite" | "andesite" | "deepslate" | "tuff"
         ),
         "flowers" => {
-            short.ends_with("_tulip")
+            suffix("_tulip")
                 || matches!(
                     short,
                     "dandelion"
@@ -676,6 +969,11 @@ fn builtin_tag_matches(tag: &str, name: &str) -> bool {
                         | "torchflower"
                 )
         }
+        "small_flowers" => builtin_tag_matches("flowers", name),
+        "tall_flowers" => matches!(
+            short,
+            "sunflower" | "lilac" | "rose_bush" | "peony" | "pitcher_plant"
+        ),
         "crops" => matches!(
             short,
             "wheat"
@@ -686,6 +984,40 @@ fn builtin_tag_matches(tag: &str, name: &str) -> bool {
                 | "melon_stem"
                 | "pumpkin_stem"
         ),
+        "rails" => suffix("_rail"),
+        "banners" => suffix("_banner"),
+        "beds" => suffix("_bed"),
+        "buttons" => suffix("_button"),
+        "candles" => suffix("_candle"),
+        "carpets" => suffix("_carpet"),
+        "doors" => suffix("_door") && !suffix("_trapdoor"),
+        "fence_gates" => suffix("_fence_gate"),
+        "fences" => suffix("_fence"),
+        "pressure_plates" => suffix("_pressure_plate"),
+        "signs" => suffix("_sign") && !suffix("_wall_sign"),
+        "standing_signs" => suffix("_sign") && !suffix("_wall_sign"),
+        "wall_signs" => suffix("_wall_sign"),
+        "slabs" => suffix("_slab"),
+        "stairs" => suffix("_stairs"),
+        "trapdoors" => suffix("_trapdoor"),
+        "walls" => suffix("_wall") && !suffix("_wall_sign") && !suffix("_wall_torch"),
+        "coral" => {
+            short.starts_with("tube_coral")
+                || short.starts_with("brain_coral")
+                || short.starts_with("bubble_coral")
+                || short.starts_with("fire_coral")
+                || short.starts_with("horn_coral")
+        }
+        "coral_blocks" => suffix("_coral_block"),
+        "coral_plants" => suffix("_coral_plant"),
+        "wooden_buttons" => suffix("_button") && is_wood(short),
+        "wooden_doors" => suffix("_door") && !suffix("_trapdoor") && is_wood(short),
+        "wooden_fences" => suffix("_fence") && is_wood(short),
+        "wooden_fence_gates" => suffix("_fence_gate") && is_wood(short),
+        "wooden_pressure_plates" => suffix("_pressure_plate") && is_wood(short),
+        "wooden_slabs" => suffix("_slab") && is_wood(short),
+        "wooden_stairs" => suffix("_stairs") && is_wood(short),
+        "wooden_trapdoors" => suffix("_trapdoor") && is_wood(short),
         "replaceable" => blocks::block_id_of(name).is_some_and(|b| {
             crate::placement::rules::is_replaceable(BlockStateId(blocks::DEFAULT_STATE[b as usize]))
         }),
@@ -697,11 +1029,15 @@ fn builtin_tag_matches(tag: &str, name: &str) -> bool {
 // Region check
 // ---------------------------------------------------------------------------
 
-/// Ask the core region index about every cell the command will write.
+/// Ask the core region index about every cell a command can touch.
 ///
 /// The console/RCON has no player subject and is an owner, so it skips the
 /// check; a player goes through the same `Action::Place` gate as a hand
 /// placement, including the `aether.region.bypass`/per-world bypass nodes.
+/// The caller passes the *whole* touched box, not only the cells whose state
+/// will change: `/fill … destroy` drops unchanged blocks too, and a filtered
+/// command must not be able to farm a protected cell that happens to already
+/// hold the filter's block.
 fn check_region(ctx: &Ctx, cells: impl Iterator<Item = (i32, i32, i32)>) -> Result<(), String> {
     let Some(handle) = ctx.player() else {
         return Ok(());
@@ -736,15 +1072,97 @@ struct Committed {
     undo_id: u64,
 }
 
-fn commit(world: &DemoWorld, edit: BulkEdit) -> Result<Committed, String> {
-    let commit = edit.commit_with_changes(world).map_err(|e| e.to_string())?;
+/// Commit the staged edit and publish it.
+///
+/// The normal path is the CMD-30b publisher: settle derived shapes, re-send
+/// the touched columns and fire the after-* hooks over the next ticks. A
+/// `strict` edit skips the settle/hooks (vanilla's "place as-is without block
+/// updates") and re-sends the touched columns directly.
+fn commit(ctx: &Ctx, edit: BulkEdit, strict: bool) -> Result<Committed, String> {
+    let commit = edit
+        .commit_with_changes(ctx.world)
+        .map_err(|e| e.to_string())?;
     if !commit.changes.is_empty() {
-        bulk::enqueue_publish(commit.actor, commit.changes);
+        if strict {
+            let mut columns = BTreeSet::new();
+            for change in &commit.changes {
+                columns.insert((change.x >> 4, change.z >> 4));
+            }
+            for (cx, cz) in columns {
+                ctx.registry
+                    .broadcast(&ServerEvent::ChunkColumn { cx, cz }, ctx.world);
+            }
+        } else {
+            bulk::enqueue_publish(commit.actor, commit.changes);
+        }
     }
     Ok(Committed {
         changed: commit.result.changed,
         undo_id: commit.result.undo_id,
     })
+}
+
+fn container_kind(world: &DemoWorld, state: BlockStateId) -> Option<containers::ContainerKind> {
+    let name = crate::game::block_name(world, state)?;
+    containers::ContainerKind::of_block(&name)
+}
+
+/// Drop a destroyed container's contents, exactly as a hand break spills them.
+fn spill_container(
+    world: &DemoWorld,
+    actor: JournalActor,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: BlockStateId,
+) {
+    let Some(kind) = container_kind(world, state) else {
+        return;
+    };
+    window::close_viewers((x, y, z), world);
+    let items = containers::remove(world, (x, y, z), kind);
+    if !items.is_empty() {
+        entities::spill(x, y, z, items, actor);
+    }
+}
+
+/// Forget a container that a write replaced with a different block, so a later
+/// block at the same position cannot resurrect its items.
+fn clear_replaced_container(
+    world: &DemoWorld,
+    x: i32,
+    y: i32,
+    z: i32,
+    old: BlockStateId,
+    new: BlockStateId,
+) {
+    let Some(kind) = container_kind(world, old) else {
+        return;
+    };
+    if blocks::block_of_state(old).map(|(b, _)| b) == blocks::block_of_state(new).map(|(b, _)| b) {
+        return;
+    }
+    window::close_viewers((x, y, z), world);
+    let _ = containers::remove(world, (x, y, z), kind);
+}
+
+/// A block that a command will write, with the state it replaces.
+#[derive(Clone, Copy)]
+struct Write {
+    x: i32,
+    y: i32,
+    z: i32,
+    old: BlockStateId,
+    new: BlockStateId,
+}
+
+fn stage(world: &DemoWorld, actor: JournalActor, writes: &[Write]) -> Result<BulkEdit, String> {
+    let mut edit = BulkEdit::with_limit(actor, MAX_VOLUME as usize);
+    for w in writes {
+        edit.set(world, w.x, w.y, w.z, w.new)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(edit)
 }
 
 /// Drop what a destroyed block would have dropped, through the same loot
@@ -757,12 +1175,13 @@ fn drop_destroyed(
     destroyed: &[(i32, i32, i32, BlockStateId)],
 ) {
     for &(x, y, z, state) in destroyed {
-        if state == BlockStateId::AIR {
+        if is_air(state) {
             continue;
         }
         let Some(name) = crate::game::block_name(world, state) else {
             continue;
         };
+        spill_container(world, actor, x, y, z, state);
         // A command destroys with the right tool for the block: vanilla's
         // loot table asks whether the breaker can harvest it, and a command
         // has no held item to answer that with. A block that needs a pickaxe
@@ -805,10 +1224,12 @@ fn drop_destroyed(
     }
 }
 
-fn block_name(world: &DemoWorld, state: BlockStateId) -> String {
-    world
-        .block_name_of(state)
-        .unwrap_or_else(|| format!("block#{}", state.0))
+fn require_no_block_entity(block: &BlockState) -> Result<(), String> {
+    if block.nbt.is_some() {
+        Err(ERR_BLOCK_ENTITY.into())
+    } else {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -819,32 +1240,37 @@ fn setblock(ctx: &Ctx, mode: SetMode) -> Result<String, String> {
     let pos = resolve_block(ctx, 0)?;
     check_y(pos.y)?;
     let block = block(ctx, 1)?;
+    require_no_block_entity(&block)?;
     let world = ctx.world;
     let old = world.get_block(pos.x, pos.y, pos.z);
 
-    if mode == SetMode::Keep && old != BlockStateId::AIR {
-        return Err(format!("That block is already {}", block_name(world, old)));
+    if mode == SetMode::Keep && !is_air(old) {
+        return Err(ERR_SETBLOCK_FAILED.into());
     }
 
     check_region(ctx, std::iter::once((pos.x, pos.y, pos.z)))?;
 
     let actor = actor(ctx);
-    let mut edit = BulkEdit::with_limit(actor, MAX_VOLUME as usize);
-    edit.set(world, pos.x, pos.y, pos.z, block.id)
-        .map_err(|e| e.to_string())?;
-    let committed = commit(world, edit)?;
+    let writes = [Write {
+        x: pos.x,
+        y: pos.y,
+        z: pos.z,
+        old,
+        new: block.id,
+    }];
+    let edit = stage(world, actor, &writes)?;
+    let committed = commit(ctx, edit, mode == SetMode::Strict)?;
 
     if mode == SetMode::Destroy {
         let cause = (committed.undo_id != 0).then_some(committed.undo_id);
         drop_destroyed(world, actor, cause, &[(pos.x, pos.y, pos.z, old)]);
+    } else {
+        clear_replaced_container(world, pos.x, pos.y, pos.z, old, block.id);
     }
 
     Ok(format!(
-        "Successfully set block at {}, {}, {} to {}",
-        pos.x,
-        pos.y,
-        pos.z,
-        block_name(world, block.id)
+        "Changed the block at {}, {}, {}",
+        pos.x, pos.y, pos.z
     ))
 }
 
@@ -852,74 +1278,97 @@ fn setblock(ctx: &Ctx, mode: SetMode) -> Result<String, String> {
 // /fill
 // ---------------------------------------------------------------------------
 
-fn fill(ctx: &Ctx, mode: FillMode) -> Result<String, String> {
+fn fill(ctx: &Ctx, args: FillArgs) -> Result<String, String> {
     let from = resolve_block(ctx, 0)?;
     let to = resolve_block(ctx, 1)?;
-    let (filter, target) = if mode == FillMode::Filtered {
-        (Some(parse_filter(&text(ctx, 2)?)?), block(ctx, 3)?)
+    let target = block(ctx, 2)?;
+    require_no_block_entity(&target)?;
+    let filter = if args.filtered {
+        Some(parse_filter(&text(ctx, 3)?)?)
     } else {
-        (None, block(ctx, 2)?)
+        None
     };
 
     let area = Box3::between(from, to);
     area.check_world()?;
     let volume = area.volume();
     if volume > MAX_VOLUME {
-        return Err(ERR_TOO_MANY.into());
+        return Err(too_many(volume));
     }
 
+    // The whole box, before a cell is read: `destroy` drops unchanged blocks,
+    // and a filtered fill must not be able to touch a protected cell that
+    // already holds the filter's block.
+    check_region(ctx, area.cells())?;
+
     let world = ctx.world;
-    let mut writes: Vec<(i32, i32, i32, BlockStateId)> = Vec::new();
+    let mut writes: Vec<Write> = Vec::new();
     let mut destroyed: Vec<(i32, i32, i32, BlockStateId)> = Vec::new();
 
     for x in area.min.0..=area.max.0 {
         for y in area.min.1..=area.max.1 {
             for z in area.min.2..=area.max.2 {
                 let old = world.get_block(x, y, z);
-                let next = match mode {
-                    FillMode::Replace => Some(target.id),
-                    FillMode::Destroy => {
-                        if old != BlockStateId::AIR {
+                let selected = match &filter {
+                    Some(f) => f.matches(old),
+                    None => true,
+                };
+                if !selected {
+                    continue;
+                }
+                let next = match args.op {
+                    FillOp::Replace | FillOp::Strict => Some(target.id),
+                    FillOp::Destroy => {
+                        if !is_air(old) {
                             destroyed.push((x, y, z, old));
                         }
                         Some(target.id)
                     }
-                    FillMode::Keep => (old == BlockStateId::AIR).then_some(target.id),
-                    FillMode::Hollow => Some(if area.is_edge(x, y, z) {
+                    FillOp::Keep => is_air(old).then_some(target.id),
+                    FillOp::Hollow => Some(if area.is_edge(x, y, z) {
                         target.id
                     } else {
                         BlockStateId::AIR
                     }),
-                    FillMode::Outline => area.is_edge(x, y, z).then_some(target.id),
-                    FillMode::Filtered => filter
-                        .as_ref()
-                        .filter(|f| f.matches(old))
-                        .map(|_| target.id),
+                    FillOp::Outline => area.is_edge(x, y, z).then_some(target.id),
                 };
                 if let Some(next) = next {
                     if next != old {
-                        writes.push((x, y, z, next));
+                        writes.push(Write {
+                            x,
+                            y,
+                            z,
+                            old,
+                            new: next,
+                        });
                     }
                 }
             }
         }
     }
 
-    check_region(ctx, writes.iter().map(|&(x, y, z, _)| (x, y, z)))?;
-
     let actor = actor(ctx);
-    let mut edit = BulkEdit::with_limit(actor, MAX_VOLUME as usize);
-    for &(x, y, z, next) in &writes {
-        edit.set(world, x, y, z, next).map_err(|e| e.to_string())?;
-    }
-    let committed = commit(world, edit)?;
+    let edit = stage(world, actor, &writes)?;
+    let committed = commit(ctx, edit, args.strict || args.op == FillOp::Strict)?;
 
-    if mode == FillMode::Destroy {
+    if args.op == FillOp::Destroy {
         let cause = (committed.undo_id != 0).then_some(committed.undo_id);
         drop_destroyed(world, actor, cause, &destroyed);
+    } else {
+        for w in &writes {
+            clear_replaced_container(world, w.x, w.y, w.z, w.old, w.new);
+        }
     }
 
-    Ok(format!("Successfully filled {} blocks", committed.changed))
+    let changed = if args.op == FillOp::Destroy {
+        committed.changed.max(destroyed.len())
+    } else {
+        committed.changed
+    };
+    if changed == 0 {
+        return Err(ERR_FILL_FAILED.into());
+    }
+    Ok(format!("Successfully filled {changed} block(s)"))
 }
 
 // ---------------------------------------------------------------------------
@@ -928,42 +1377,47 @@ fn fill(ctx: &Ctx, mode: FillMode) -> Result<String, String> {
 
 fn clone(
     ctx: &Ctx,
-    cross: bool,
+    form: CloneForm,
     mask: CloneMask,
-    force: CloneForce,
+    mode: CloneMode,
     filtered: bool,
+    strict: bool,
 ) -> Result<String, String> {
-    let (begin_i, end_i, dest_i, filter_i) = if cross {
-        let from = resource(ctx, 0)?;
-        let to = resource(ctx, 3)?;
-        if from != to {
-            return Err("Cannot clone between dimensions".into());
-        }
-        (1, 2, 4, 5)
-    } else {
-        (0, 1, 2, 3)
-    };
-    let begin = resolve_block(ctx, begin_i)?;
-    let end = resolve_block(ctx, end_i)?;
-    let destination = resolve_block(ctx, dest_i)?;
+    if let Some(i) = form.source_dim {
+        check_dimension(&resource(ctx, i)?)?;
+    }
+    if let Some(i) = form.target_dim {
+        check_dimension(&resource(ctx, i)?)?;
+    }
+
+    let begin = resolve_block(ctx, form.begin)?;
+    let end = resolve_block(ctx, form.end)?;
+    let destination = resolve_block(ctx, form.destination)?;
 
     let source = Box3::between(begin, end);
     source.check_world()?;
     let volume = source.volume();
     if volume > MAX_VOLUME {
-        return Err(ERR_TOO_MANY.into());
+        return Err(too_many(volume));
     }
     let destination_box = source.moved_to(destination)?;
     destination_box.check_world()?;
-    if source.overlaps(destination_box) {
+    if mode == CloneMode::Normal && source.overlaps(destination_box) {
         return Err(ERR_OVERLAP.into());
     }
 
     let filter = if filtered {
-        Some(parse_filter(&text(ctx, filter_i)?)?)
+        Some(parse_filter(&text(ctx, form.destination + 1)?)?)
     } else {
         None
     };
+
+    // The destination is written; `move` also rewrites the source. Check both
+    // before reading a cell.
+    check_region(ctx, destination_box.cells())?;
+    if mode == CloneMode::Move {
+        check_region(ctx, source.cells())?;
+    }
 
     let world = ctx.world;
 
@@ -978,9 +1432,10 @@ fn clone(
         }
     }
 
-    let mut writes: Vec<(i32, i32, i32, BlockStateId)> = Vec::new();
+    let mut writes: Vec<Write> = Vec::new();
+    let mut copied_sources: Vec<(i32, i32, i32)> = Vec::new();
     for &(sx, sy, sz, state) in &sources {
-        if mask == CloneMask::Masked && state == BlockStateId::AIR {
+        if mask == CloneMask::Masked && is_air(state) {
             continue;
         }
         if let Some(filter) = &filter {
@@ -992,24 +1447,57 @@ fn clone(
         let y = destination.y + (sy - source.min.1);
         let z = destination.z + (sz - source.min.2);
         let old = world.get_block(x, y, z);
-        if force == CloneForce::Normal && old != BlockStateId::AIR {
-            return Err(ERR_CLONE_FAILED.into());
-        }
+        copied_sources.push((sx, sy, sz));
         if old != state {
-            writes.push((x, y, z, state));
+            writes.push(Write {
+                x,
+                y,
+                z,
+                old,
+                new: state,
+            });
         }
     }
 
-    check_region(ctx, writes.iter().map(|&(x, y, z, _)| (x, y, z)))?;
+    if copied_sources.is_empty() {
+        return Err(ERR_CLONE_FAILED.into());
+    }
+
+    // `move` clears the copied source cells, then the destination writes
+    // override any cell that is part of both (an overlapping force/move).
+    let mut staged = Vec::new();
+    if mode == CloneMode::Move {
+        for (x, y, z) in &copied_sources {
+            let old = world.get_block(*x, *y, *z);
+            if !is_air(old) {
+                staged.push(Write {
+                    x: *x,
+                    y: *y,
+                    z: *z,
+                    old,
+                    new: BlockStateId::AIR,
+                });
+            }
+        }
+    }
+    staged.extend(writes.iter().copied());
 
     let actor = actor(ctx);
-    let mut edit = BulkEdit::with_limit(actor, MAX_VOLUME as usize);
-    for &(x, y, z, next) in &writes {
-        edit.set(world, x, y, z, next).map_err(|e| e.to_string())?;
-    }
-    let committed = commit(world, edit)?;
+    let edit = stage(world, actor, &staged)?;
+    let committed = commit(ctx, edit, strict)?;
 
-    Ok(format!("Successfully cloned {} blocks", committed.changed))
+    for w in &writes {
+        clear_replaced_container(world, w.x, w.y, w.z, w.old, w.new);
+    }
+
+    // Vanilla reports the number of source blocks it copied, not the number of
+    // destination states that happened to differ; a successful clone that
+    // overwrites identical blocks still says how many it cloned.
+    let _ = committed;
+    Ok(format!(
+        "Successfully cloned {} block(s)",
+        copied_sources.len()
+    ))
 }
 
 #[cfg(test)]
@@ -1074,7 +1562,7 @@ mod tests {
     fn block_groups(world: &DemoWorld) -> Vec<aether_world::journal::Event> {
         world
             .journal()
-            .recent_events(50)
+            .recent_events(100)
             .unwrap()
             .into_iter()
             .filter(|e| matches!(e.body, EventBody::BlockGroup { .. }))
@@ -1086,10 +1574,7 @@ mod tests {
         let world = test_world();
         let head = world.journal().head();
         let out = run(&world, "setblock 0 200 0 minecraft:stone");
-        assert_eq!(
-            out,
-            vec!["Successfully set block at 0, 200, 0 to minecraft:stone"]
-        );
+        assert_eq!(out, vec!["Changed the block at 0, 200, 0"]);
         assert_eq!(world.get_block(0, 200, 0), block_ids::STONE);
         assert_eq!(world.journal().head(), head + 1, "one journal revision");
         assert_eq!(block_groups(&world).len(), 1);
@@ -1100,13 +1585,47 @@ mod tests {
         let world = test_world();
         assert_eq!(
             run(&world, "setblock 0 200 0 minecraft:stone"),
-            vec!["Successfully set block at 0, 200, 0 to minecraft:stone"]
+            vec!["Changed the block at 0, 200, 0"]
         );
         let head = world.journal().head();
         let out = run(&world, "setblock 0 200 0 minecraft:dirt keep");
-        assert_eq!(out, vec!["That block is already minecraft:stone"]);
+        assert_eq!(out, vec!["Could not set the block"]);
         assert_eq!(world.get_block(0, 200, 0), block_ids::STONE);
         assert_eq!(world.journal().head(), head, "no change, no journal");
+    }
+
+    #[test]
+    fn cave_and_void_air_count_as_air_for_keep_and_masked() {
+        let world = test_world();
+        assert_eq!(
+            run(&world, "setblock 0 201 0 minecraft:cave_air"),
+            vec!["Changed the block at 0, 201, 0"]
+        );
+        assert_eq!(
+            run(&world, "setblock 0 201 0 minecraft:stone keep"),
+            vec!["Changed the block at 0, 201, 0"]
+        );
+        assert_eq!(world.get_block(0, 201, 0), block_ids::STONE);
+
+        assert_eq!(
+            run(&world, "fill 10 201 0 11 201 0 minecraft:cave_air"),
+            vec!["Successfully filled 2 block(s)"]
+        );
+        assert_eq!(
+            run(&world, "fill 10 201 0 11 201 0 minecraft:dirt keep"),
+            vec!["Successfully filled 2 block(s)"]
+        );
+        assert_eq!(world.get_block(10, 201, 0), block_ids::DIRT);
+
+        assert_eq!(
+            run(&world, "fill 20 201 0 21 201 0 minecraft:cave_air"),
+            vec!["Successfully filled 2 block(s)"]
+        );
+        assert_eq!(
+            run(&world, "clone 20 201 0 21 201 0 22 201 0 masked"),
+            vec!["No blocks were cloned"]
+        );
+        assert_eq!(world.get_block(22, 201, 0), air());
     }
 
     #[test]
@@ -1114,13 +1633,10 @@ mod tests {
         let world = test_world();
         assert_eq!(
             run(&world, "setblock 0 200 0 minecraft:stone"),
-            vec!["Successfully set block at 0, 200, 0 to minecraft:stone"]
+            vec!["Changed the block at 0, 200, 0"]
         );
         let out = run(&world, "setblock 0 200 0 minecraft:dirt destroy");
-        assert_eq!(
-            out,
-            vec!["Successfully set block at 0, 200, 0 to minecraft:dirt"]
-        );
+        assert_eq!(out, vec!["Changed the block at 0, 200, 0"]);
         assert_eq!(world.get_block(0, 200, 0), block_ids::DIRT);
         let events = world.journal().recent_events(20).unwrap();
         assert!(
@@ -1141,10 +1657,18 @@ mod tests {
     }
 
     #[test]
+    fn setblock_rejects_block_entity_data_instead_of_silently_dropping_it() {
+        let world = test_world();
+        let out = run(&world, "setblock 0 200 0 minecraft:chest{Items:[]}");
+        assert_eq!(out, vec!["Block entity data is not supported"]);
+        assert_eq!(world.get_block(0, 200, 0), air());
+    }
+
+    #[test]
     fn fill_normalises_corners_and_reports_the_block_count() {
         let world = test_world();
         let out = run(&world, "fill 2 200 2 0 200 0 minecraft:stone");
-        assert_eq!(out, vec!["Successfully filled 9 blocks"]);
+        assert_eq!(out, vec!["Successfully filled 9 block(s)"]);
         for x in 0..=2 {
             for z in 0..=2 {
                 assert_eq!(world.get_block(x, 200, z), block_ids::STONE);
@@ -1158,9 +1682,23 @@ mod tests {
         let head = world.journal().head();
         // 33 * 32 * 32 = 33792 blocks.
         let out = run(&world, "fill 0 200 0 32 231 31 minecraft:stone");
-        assert_eq!(out, vec!["Too many blocks in the specified area"]);
+        assert_eq!(
+            out,
+            vec!["Too many blocks in the specified area (maximum 32768, specified 33792)"]
+        );
         assert_eq!(world.journal().head(), head);
         assert_eq!(world.get_block(0, 200, 0), air());
+    }
+
+    #[test]
+    fn fill_that_changes_nothing_is_a_failure() {
+        let world = test_world();
+        assert_eq!(
+            run(&world, "fill 0 200 0 1 200 1 minecraft:stone"),
+            vec!["Successfully filled 4 block(s)"]
+        );
+        let out = run(&world, "fill 0 200 0 1 200 1 minecraft:stone");
+        assert_eq!(out, vec!["No blocks were filled"]);
     }
 
     #[test]
@@ -1168,11 +1706,11 @@ mod tests {
         let world = test_world();
         assert_eq!(
             run(&world, "fill 10 200 10 12 202 12 minecraft:stone"),
-            vec!["Successfully filled 27 blocks"]
+            vec!["Successfully filled 27 block(s)"]
         );
         assert_eq!(
             run(&world, "fill 10 200 10 12 202 12 minecraft:dirt hollow"),
-            vec!["Successfully filled 27 blocks"]
+            vec!["Successfully filled 27 block(s)"]
         );
         assert_eq!(world.get_block(11, 201, 11), air(), "hollow interior");
         assert_eq!(world.get_block(10, 200, 10), block_ids::DIRT);
@@ -1181,128 +1719,272 @@ mod tests {
         // Restore the solid cube, then outline only its shell.
         assert_eq!(
             run(&world, "fill 10 200 10 12 202 12 minecraft:stone"),
-            vec!["Successfully filled 27 blocks"]
+            vec!["Successfully filled 27 block(s)"]
         );
         assert_eq!(
             run(&world, "fill 10 200 10 12 202 12 minecraft:dirt outline"),
-            vec!["Successfully filled 26 blocks"]
+            vec!["Successfully filled 26 block(s)"]
         );
         assert_eq!(world.get_block(11, 201, 11), block_ids::STONE);
         assert_eq!(world.get_block(10, 200, 10), block_ids::DIRT);
     }
 
     #[test]
-    fn fill_replace_filters_only_matching_blocks() {
+    fn fill_replace_filter_uses_the_vanilla_argument_order() {
         let world = test_world();
         assert_eq!(
             run(&world, "fill 20 200 20 22 200 22 minecraft:stone"),
-            vec!["Successfully filled 9 blocks"]
+            vec!["Successfully filled 9 block(s)"]
         );
         assert_eq!(
             run(&world, "setblock 21 200 21 minecraft:dirt"),
-            vec!["Successfully set block at 21, 200, 21 to minecraft:dirt"]
+            vec!["Changed the block at 21, 200, 21"]
         );
         let out = run(
             &world,
-            "fill 20 200 20 22 200 22 replace minecraft:dirt minecraft:gold_block",
+            "fill 20 200 20 22 200 22 minecraft:gold_block replace minecraft:dirt",
         );
-        assert_eq!(out, vec!["Successfully filled 1 blocks"]);
+        assert_eq!(out, vec!["Successfully filled 1 block(s)"]);
         assert_eq!(world.get_block(21, 200, 21), block("minecraft:gold_block"));
         assert_eq!(world.get_block(20, 200, 20), block_ids::STONE);
+    }
+
+    #[test]
+    fn fill_replace_filter_matches_written_properties_partially() {
+        let world = test_world();
+        let east_top = BlockStateId(
+            props::state_with(
+                blocks::block_id_of("minecraft:oak_stairs").unwrap(),
+                &[("facing", "east"), ("half", "top")],
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            run(
+                &world,
+                "setblock 30 200 30 minecraft:oak_stairs[facing=east,half=top]"
+            ),
+            vec!["Changed the block at 30, 200, 30"]
+        );
+        assert_eq!(world.get_block(30, 200, 30), east_top);
+        let out = run(
+            &world,
+            "fill 30 200 30 30 200 30 minecraft:stone replace oak_stairs[facing=east]",
+        );
+        assert_eq!(out, vec!["Successfully filled 1 block(s)"]);
+        assert_eq!(world.get_block(30, 200, 30), block_ids::STONE);
     }
 
     #[test]
     fn fill_replace_accepts_a_block_tag_filter() {
         let world = test_world();
         assert_eq!(
-            run(&world, "fill 30 200 30 31 200 31 minecraft:oak_log"),
-            vec!["Successfully filled 4 blocks"]
+            run(&world, "fill 40 200 40 41 200 41 minecraft:oak_log"),
+            vec!["Successfully filled 4 block(s)"]
         );
         assert_eq!(
-            run(&world, "setblock 30 200 30 minecraft:stone"),
-            vec!["Successfully set block at 30, 200, 30 to minecraft:stone"]
+            run(&world, "setblock 40 200 40 minecraft:stone"),
+            vec!["Changed the block at 40, 200, 40"]
         );
         let out = run(
             &world,
-            "fill 30 200 30 31 200 31 replace #minecraft:logs minecraft:dirt",
+            "fill 40 200 40 41 200 41 minecraft:dirt replace #minecraft:logs",
         );
-        assert_eq!(out, vec!["Successfully filled 3 blocks"]);
-        assert_eq!(world.get_block(30, 200, 30), block_ids::STONE);
-        assert_eq!(world.get_block(31, 200, 31), block_ids::DIRT);
+        assert_eq!(out, vec!["Successfully filled 3 block(s)"]);
+        assert_eq!(world.get_block(40, 200, 40), block_ids::STONE);
+        assert_eq!(world.get_block(41, 200, 41), block_ids::DIRT);
+    }
+
+    #[test]
+    fn fill_destroy_checks_the_whole_box_including_unchanged_cells() {
+        let _guard = crate::permissions::test_lock();
+        let mut perms = crate::permissions::Store::new();
+        perms
+            .add_member(crate::permissions::OP_GROUP, "Alice", None)
+            .unwrap();
+        perms
+            .set_player_node("Alice", crate::region::BYPASS_PERMISSION, None, Some(false))
+            .unwrap();
+        perms
+            .set_player_node(
+                "Alice",
+                &crate::region::worldguard_bypass_permission(crate::region::OVERWORLD),
+                None,
+                Some(false),
+            )
+            .unwrap();
+        crate::permissions::install_store_for_test(perms);
+
+        let _store = crate::region::install_test_store(crate::region::RegionStore::new());
+        crate::region::store().set_deny_message("That area is protected.");
+        crate::region::store().upsert(crate::region::Region::new(
+            crate::region::RegionId(1),
+            crate::region::OVERWORLD,
+            crate::region::BlockPos::new(0, 0, 0),
+            crate::region::BlockPos::new(10, 300, 10),
+        ));
+
+        let world = test_world();
+        assert_eq!(
+            run(&world, "setblock 5 200 5 minecraft:stone"),
+            vec!["Changed the block at 5, 200, 5"]
+        );
+        let registry = registry();
+        let alice = PlayerHandle::for_test(1, "Alice");
+        registry.insert_for_test(Arc::clone(&alice));
+
+        let head = world.journal().head();
+        let out = run_player(
+            &world,
+            &registry,
+            &alice,
+            "fill 5 200 5 5 200 5 minecraft:stone destroy",
+        );
+        assert_eq!(out, vec!["That area is protected."]);
+        assert_eq!(world.journal().head(), head, "no drop, no revision");
+        assert_eq!(world.get_block(5, 200, 5), block_ids::STONE);
+        assert!(
+            !world
+                .journal()
+                .recent_events(20)
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e.body, EventBody::ItemMint { .. })),
+            "a refused destroy must not mint loot"
+        );
     }
 
     #[test]
     fn clone_masked_copies_only_non_air() {
         let world = test_world();
         assert_eq!(
-            run(&world, "fill 40 200 40 41 201 41 minecraft:stone"),
-            vec!["Successfully filled 8 blocks"]
+            run(&world, "fill 50 200 50 51 201 51 minecraft:stone"),
+            vec!["Successfully filled 8 block(s)"]
         );
         assert_eq!(
-            run(&world, "setblock 40 200 40 minecraft:air"),
-            vec!["Successfully set block at 40, 200, 40 to minecraft:air"]
+            run(&world, "setblock 50 200 50 minecraft:air"),
+            vec!["Changed the block at 50, 200, 50"]
         );
         assert_eq!(
-            run(&world, "clone 40 200 40 41 201 41 50 200 50 masked"),
-            vec!["Successfully cloned 7 blocks"]
+            run(&world, "clone 50 200 50 51 201 51 60 200 60 masked"),
+            vec!["Successfully cloned 7 block(s)"]
         );
-        assert_eq!(world.get_block(50, 200, 50), air());
-        assert_eq!(world.get_block(51, 201, 51), block_ids::STONE);
+        assert_eq!(world.get_block(60, 200, 60), air());
+        assert_eq!(world.get_block(61, 201, 61), block_ids::STONE);
     }
 
     #[test]
-    fn clone_normal_refuses_a_non_air_destination_but_force_overwrites() {
+    fn clone_normal_overwrites_a_non_air_destination_but_refuses_overlap() {
         let world = test_world();
         assert_eq!(
-            run(&world, "fill 60 200 60 61 200 61 minecraft:stone"),
-            vec!["Successfully filled 4 blocks"]
+            run(&world, "fill 70 200 70 71 200 71 minecraft:stone"),
+            vec!["Successfully filled 4 block(s)"]
         );
         assert_eq!(
-            run(&world, "setblock 70 200 70 minecraft:dirt"),
-            vec!["Successfully set block at 70, 200, 70 to minecraft:dirt"]
+            run(&world, "setblock 80 200 80 minecraft:dirt"),
+            vec!["Changed the block at 80, 200, 80"]
         );
-        let head = world.journal().head();
-        let out = run(&world, "clone 60 200 60 61 200 61 70 200 70");
-        assert_eq!(out, vec!["Could not clone blocks"]);
-        assert_eq!(world.journal().head(), head, "no partial clone");
-        assert_eq!(world.get_block(71, 200, 71), air());
+        let out = run(&world, "clone 70 200 70 71 200 71 80 200 80");
+        assert_eq!(out, vec!["Successfully cloned 4 block(s)"]);
+        assert_eq!(world.get_block(80, 200, 80), block_ids::STONE);
 
-        let out = run(&world, "clone 60 200 60 61 200 61 70 200 70 force");
-        assert_eq!(out, vec!["Successfully cloned 4 blocks"]);
-        assert_eq!(world.get_block(70, 200, 70), block_ids::STONE);
-        assert_eq!(world.get_block(71, 200, 71), block_ids::STONE);
+        let head = world.journal().head();
+        let out = run(&world, "clone 70 200 70 71 200 71 70 200 71");
+        assert_eq!(out, vec!["The source and destination areas cannot overlap"]);
+        assert_eq!(world.journal().head(), head);
+    }
+
+    #[test]
+    fn clone_force_and_move_may_overlap() {
+        let world = test_world();
+        assert_eq!(
+            run(&world, "fill 90 200 90 92 200 90 minecraft:stone"),
+            vec!["Successfully filled 3 block(s)"]
+        );
+        let out = run(&world, "clone 90 200 90 92 200 90 91 200 90 force");
+        assert_eq!(out, vec!["Successfully cloned 3 block(s)"]);
+        assert_eq!(world.get_block(93, 200, 90), block_ids::STONE);
+
+        assert_eq!(
+            run(&world, "fill 100 200 100 101 200 100 minecraft:dirt"),
+            vec!["Successfully filled 2 block(s)"]
+        );
+        let out = run(&world, "clone 100 200 100 101 200 100 110 200 100 move");
+        assert_eq!(out, vec!["Successfully cloned 2 block(s)"]);
+        assert_eq!(world.get_block(110, 200, 100), block_ids::DIRT);
+        assert_eq!(world.get_block(100, 200, 100), air());
+        assert_eq!(world.get_block(101, 200, 100), air());
     }
 
     #[test]
     fn clone_filtered_copies_only_matching_source_blocks() {
         let world = test_world();
         assert_eq!(
-            run(&world, "fill 80 200 80 81 200 81 minecraft:stone"),
-            vec!["Successfully filled 4 blocks"]
+            run(&world, "fill 120 200 120 121 200 121 minecraft:stone"),
+            vec!["Successfully filled 4 block(s)"]
         );
         assert_eq!(
-            run(&world, "setblock 80 200 80 minecraft:dirt"),
-            vec!["Successfully set block at 80, 200, 80 to minecraft:dirt"]
+            run(&world, "setblock 120 200 120 minecraft:dirt"),
+            vec!["Changed the block at 120, 200, 120"]
         );
         let out = run(
             &world,
-            "clone 80 200 80 81 200 81 90 200 90 filtered minecraft:dirt",
+            "clone 120 200 120 121 200 121 130 200 130 filtered minecraft:dirt",
         );
-        assert_eq!(out, vec!["Successfully cloned 1 blocks"]);
-        assert_eq!(world.get_block(90, 200, 90), block_ids::DIRT);
-        assert_eq!(world.get_block(91, 200, 91), air());
+        assert_eq!(out, vec!["Successfully cloned 1 block(s)"]);
+        assert_eq!(world.get_block(130, 200, 130), block_ids::DIRT);
+        assert_eq!(world.get_block(131, 200, 131), air());
+    }
+
+    #[test]
+    fn clone_accepts_and_validates_the_dimension_forms() {
+        let world = test_world();
+        assert_eq!(
+            run(&world, "fill 140 200 140 140 200 140 minecraft:stone"),
+            vec!["Successfully filled 1 block(s)"]
+        );
+        assert_eq!(
+            run(
+                &world,
+                "clone from minecraft:overworld 140 200 140 140 200 140 \
+                 to minecraft:overworld 141 200 140"
+            ),
+            vec!["Successfully cloned 1 block(s)"]
+        );
+        assert_eq!(world.get_block(141, 200, 140), block_ids::STONE);
+
+        assert_eq!(
+            run(
+                &world,
+                "clone from overworld 140 200 140 140 200 140 142 200 140"
+            ),
+            vec!["Successfully cloned 1 block(s)"]
+        );
+        assert_eq!(
+            run(
+                &world,
+                "clone 140 200 140 140 200 140 to minecraft:overworld 143 200 140"
+            ),
+            vec!["Successfully cloned 1 block(s)"]
+        );
+        let out = run(
+            &world,
+            "clone from minecraft:the_nether 140 200 140 140 200 140 144 200 140",
+        );
+        assert_eq!(out, vec!["Unknown dimension 'minecraft:the_nether'"]);
+        assert_eq!(world.get_block(144, 200, 140), air());
     }
 
     #[test]
     fn clone_into_itself_is_refused_without_a_journal_entry() {
         let world = test_world();
         assert_eq!(
-            run(&world, "fill 100 200 100 101 201 101 minecraft:stone"),
-            vec!["Successfully filled 8 blocks"]
+            run(&world, "fill 150 200 150 151 201 151 minecraft:stone"),
+            vec!["Successfully filled 8 block(s)"]
         );
         let head = world.journal().head();
-        let out = run(&world, "clone 100 200 100 101 201 101 100 200 100");
-        assert_eq!(out, vec!["The source and destination can't overlap"]);
+        let out = run(&world, "clone 150 200 150 151 201 151 150 200 150");
+        assert_eq!(out, vec!["The source and destination areas cannot overlap"]);
         assert_eq!(world.journal().head(), head);
     }
 
@@ -1311,8 +1993,87 @@ mod tests {
         let world = test_world();
         let head = world.journal().head();
         let out = run(&world, "clone 0 200 0 32 231 31 40 200 40");
-        assert_eq!(out, vec!["Too many blocks in the specified area"]);
+        assert_eq!(
+            out,
+            vec!["Too many blocks in the specified area (maximum 32768, specified 33792)"]
+        );
         assert_eq!(world.journal().head(), head);
+    }
+
+    #[test]
+    fn clone_that_copies_nothing_is_a_failure() {
+        let world = test_world();
+        let out = run(&world, "clone 160 200 160 161 200 161 170 200 170 masked");
+        assert_eq!(out, vec!["No blocks were cloned"]);
+    }
+
+    #[test]
+    fn strict_modes_parse_and_still_write() {
+        let world = test_world();
+        assert_eq!(
+            run(&world, "setblock 180 200 180 minecraft:stone strict"),
+            vec!["Changed the block at 180, 200, 180"]
+        );
+        assert_eq!(
+            run(&world, "fill 180 200 180 181 200 180 minecraft:dirt strict"),
+            vec!["Successfully filled 2 block(s)"]
+        );
+        assert_eq!(
+            run(&world, "clone 180 200 180 181 200 180 182 200 180 strict"),
+            vec!["Successfully cloned 2 block(s)"]
+        );
+        assert_eq!(world.get_block(182, 200, 180), block_ids::DIRT);
+    }
+
+    #[test]
+    fn destroy_spills_a_container_and_replacing_it_clears_the_record() {
+        // Distinct coordinates: the container store is process-wide and tests
+        // run in parallel.
+        let world = test_world();
+        assert_eq!(
+            run(&world, "setblock 190 220 190 minecraft:chest"),
+            vec!["Changed the block at 190, 220, 190"]
+        );
+        containers::with(
+            &world,
+            (190, 220, 190),
+            containers::ContainerKind::Chest,
+            |c| {
+                c.slots[0] = Some(Stack::named("minecraft:stone", 3));
+            },
+        );
+
+        let out = run(&world, "setblock 190 220 190 minecraft:dirt destroy");
+        assert_eq!(out, vec!["Changed the block at 190, 220, 190"]);
+        let chest = containers::snapshot(&world, (190, 220, 190), containers::ContainerKind::Chest);
+        assert!(
+            chest.slots.iter().all(Option::is_none),
+            "destroy must take the container's contents"
+        );
+
+        // Replacing a container discards its record so a later chest is empty.
+        assert_eq!(
+            run(&world, "setblock 191 220 190 minecraft:chest"),
+            vec!["Changed the block at 191, 220, 190"]
+        );
+        containers::with(
+            &world,
+            (191, 220, 190),
+            containers::ContainerKind::Chest,
+            |c| {
+                c.slots[0] = Some(Stack::named("minecraft:dirt", 2));
+            },
+        );
+        assert_eq!(
+            run(&world, "setblock 191 220 190 minecraft:stone"),
+            vec!["Changed the block at 191, 220, 190"]
+        );
+        assert_eq!(
+            run(&world, "setblock 191 220 190 minecraft:chest"),
+            vec!["Changed the block at 191, 220, 190"]
+        );
+        let chest = containers::snapshot(&world, (191, 220, 190), containers::ContainerKind::Chest);
+        assert!(chest.slots.iter().all(Option::is_none), "stale contents");
     }
 
     #[test]
@@ -1334,10 +2095,7 @@ mod tests {
             &alice,
             "setblock 0 200 0 minecraft:stone",
         );
-        assert_eq!(
-            out,
-            vec!["Successfully set block at 0, 200, 0 to minecraft:stone"]
-        );
+        assert_eq!(out, vec!["Changed the block at 0, 200, 0"]);
         let events = world.journal().recent_events(5).unwrap();
         let group = events
             .iter()
@@ -1361,8 +2119,6 @@ mod tests {
         perms
             .add_member(crate::permissions::OP_GROUP, "Alice", None)
             .unwrap();
-        // An operator, but with both bypass nodes explicitly denied: the
-        // region must still refuse the command.
         perms
             .set_player_node("Alice", crate::region::BYPASS_PERMISSION, None, Some(false))
             .unwrap();
@@ -1403,16 +2159,19 @@ mod tests {
     }
 
     #[test]
-    fn a_filter_parses_block_states_and_tags() {
-        let stone = parse_filter("minecraft:stone").unwrap();
-        assert!(stone.matches(block_ids::STONE));
-        assert!(!stone.matches(block_ids::DIRT));
-
+    fn a_filter_parses_block_states_partially_and_tags() {
         let stairs = parse_filter("oak_stairs[facing=east]").unwrap();
         let east = BlockStateId(
             props::state_with(
                 blocks::block_id_of("minecraft:oak_stairs").unwrap(),
                 &[("facing", "east")],
+            )
+            .unwrap(),
+        );
+        let east_top = BlockStateId(
+            props::state_with(
+                blocks::block_id_of("minecraft:oak_stairs").unwrap(),
+                &[("facing", "east"), ("half", "top")],
             )
             .unwrap(),
         );
@@ -1424,13 +2183,22 @@ mod tests {
             .unwrap(),
         );
         assert!(stairs.matches(east));
+        assert!(
+            stairs.matches(east_top),
+            "unwritten properties are wildcards"
+        );
         assert!(!stairs.matches(west));
 
         let logs = parse_filter("#minecraft:logs").unwrap();
         assert!(logs.matches(block("minecraft:oak_log")));
         assert!(!logs.matches(block_ids::STONE));
 
+        let wooden_stairs = parse_filter("#minecraft:wooden_stairs").unwrap();
+        assert!(wooden_stairs.matches(east));
+
         assert!(parse_filter("not_a_block").is_err());
         assert!(parse_filter("oak_stairs[facing=upside]").is_err());
+        // A tag the built-in table cannot represent fails closed.
+        assert!(parse_filter("#minecraft:definitely_not_a_tag").is_err());
     }
 }

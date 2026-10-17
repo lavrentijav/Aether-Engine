@@ -648,7 +648,7 @@ pub const CATALOGUE: &[Command] = &[
         "minecraft.command.setblock",
         2,
         Category::World,
-        "/setblock <pos> <block> [destroy|keep|replace]",
+        "/setblock <pos> <block> [destroy|keep|replace|strict]",
     ),
     imp_node(
         "fill",
@@ -656,7 +656,7 @@ pub const CATALOGUE: &[Command] = &[
         "minecraft.command.fill",
         2,
         Category::World,
-        "/fill <from> <to> <block> [destroy|hollow|keep|outline|replace] | <from> <to> replace <filter> <block>",
+        "/fill <from> <to> <block> [destroy|hollow|keep|outline|replace|strict] | <from> <to> <block> replace <filter> [destroy|hollow|keep|outline|strict]",
     ),
     imp_node(
         "clone",
@@ -664,7 +664,7 @@ pub const CATALOGUE: &[Command] = &[
         "minecraft.command.clone",
         2,
         Category::World,
-        "/clone <begin> <end> <destination> [replace|masked] [force|normal] [filtered <filter>]",
+        "/clone [from <dimension>] <begin> <end> [to <dimension>] <destination> [strict] [replace|masked|filtered <filter>] [force|move|normal]",
     ),
     pend(
         "fillbiome",
