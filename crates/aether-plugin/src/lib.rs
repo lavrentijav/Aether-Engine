@@ -47,7 +47,7 @@ pub mod bindings {
 
 use std::fmt;
 
-pub use host::{discover, HostBackend, HostConfig, PluginHost};
+pub use host::{discover, HostBackend, HostConfig, PluginHost, WorldBlock};
 pub use manifest::{Manifest, ManifestFile, PluginTier};
 pub use native::{NativeContext, NativePlugin, NativeRegistration};
 pub use region::{RegionInfo, RegionWriteError};

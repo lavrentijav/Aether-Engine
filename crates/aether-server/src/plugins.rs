@@ -15,9 +15,11 @@ mod imp {
     use std::path::Path;
     use std::sync::{Arc, Mutex, OnceLock};
 
+    use aether_physics::BlockView;
     use aether_plugin::sdk::{HistoryEvent, HistoryPage, HistoryPos, HistoryWindow, TeleportCause};
     use aether_plugin::{
         discover, Decision, HostBackend, HostConfig, LogLevel, ManifestFile, Player, PluginHost,
+        WorldBlock,
     };
     use aether_world::journal::{self, ActorId, Event, EventBody, Place};
     use aether_world::KvBackend;
@@ -221,6 +223,87 @@ mod imp {
             let handle = self.registry.by_entity(player as i32)?;
             let pos = handle.pos();
             Some(("minecraft:overworld".to_string(), pos.x, pos.y, pos.z))
+        }
+
+        fn player_look(&self, _plugin: &str, player: u64) -> Option<(f32, f32)> {
+            let handle = self.registry.by_entity(player as i32)?;
+            let pos = handle.pos();
+            Some((pos.yaw, pos.pitch))
+        }
+
+        /// `world.read`: one block for a plugin's vertical helpers. The
+        /// capability is required, exactly like `players.teleport`; an
+        /// ungranted caller sees "unknown" and its command refuses rather
+        /// than guessing.
+        fn world_block(&self, plugin: &str, x: i32, y: i32, z: i32) -> Option<WorldBlock> {
+            if !self.capabilities(plugin).iter().any(|c| c == "world.read") {
+                return None;
+            }
+            let name = self.world.get_block_name(x, y, z)?;
+            Some(WorldBlock {
+                solid: BlockView::is_solid(&*self.world, x, y, z),
+                hazard: crate::teleport::is_hazard_name(&name),
+                name,
+            })
+        }
+
+        fn world_height(&self, plugin: &str) -> Option<(i32, i32)> {
+            if !self.capabilities(plugin).iter().any(|c| c == "world.read") {
+                return None;
+            }
+            let config = crate::teleport::SafeSpotConfig::default();
+            Some((config.min_y, config.max_y))
+        }
+
+        /// CMD-31's nearest-safe-spot search. The plugin only chooses the
+        /// column, radius and surface preference; the collision, hazard and
+        /// height rules stay in the core.
+        fn find_safe_spot(
+            &self,
+            plugin: &str,
+            around: (i32, i32, i32),
+            radius: u32,
+            prefer_surface: bool,
+        ) -> Option<(i32, i32, i32)> {
+            if !self.capabilities(plugin).iter().any(|c| c == "world.read") {
+                return None;
+            }
+            let config = crate::teleport::SafeSpotConfig {
+                prefer_surface,
+                ..crate::teleport::SafeSpotConfig::default()
+            };
+            crate::teleport::find_safe_spot(
+                &*self.world,
+                crate::teleport::BlockPos::new(around.0, around.1, around.2),
+                radius,
+                config,
+            )
+            .map(|p| (p.x, p.y, p.z))
+        }
+
+        /// CMD-31's random safe-spot search, with the core's bounded attempt
+        /// budget. A miss returns `None` and the plugin reports it without
+        /// moving the player.
+        fn random_safe_spot(
+            &self,
+            plugin: &str,
+            center: (i32, i32, i32),
+            min_radius: u32,
+            max_radius: u32,
+        ) -> Option<(i32, i32, i32)> {
+            if !self.capabilities(plugin).iter().any(|c| c == "world.read") {
+                return None;
+            }
+            let mut rng = crate::game::tables::Rng::from_time();
+            crate::teleport::random_safe_spot(
+                &*self.world,
+                crate::teleport::BlockPos::new(center.0, center.1, center.2),
+                min_radius,
+                max_radius,
+                crate::teleport::SafeSpotConfig::default(),
+                &mut rng,
+            )
+            .map(|p| (p.x, p.y, p.z))
         }
 
         fn held_item(&self, _plugin: &str, player: u64) -> Option<String> {
