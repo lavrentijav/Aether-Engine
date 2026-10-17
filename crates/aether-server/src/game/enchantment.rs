@@ -72,6 +72,14 @@ pub struct Def {
     pub category: &'static str,
 }
 
+impl Def {
+    /// The `minecraft:enchantable/…` tag this enchantment applies to, the
+    /// data pack's `supported_items`.
+    pub fn tag(&self) -> String {
+        format!("minecraft:enchantable/{}", self.category)
+    }
+}
+
 fn short(name: &str) -> &str {
     name.strip_prefix("minecraft:")
         .or_else(|| name.strip_prefix("aether:"))
@@ -160,28 +168,28 @@ fn is_damageable(item: &str) -> bool {
     crate::game::tables::max_durability(item) > 0
 }
 
-/// Whether `def` can be applied to an item of this name, following the
-/// vanilla `enchantable/…` tags the category names. A book accepts every
-/// non-treasure enchantment, as vanilla hardcodes.
+/// Whether `def` can be applied to an item of this name, by the vanilla
+/// `enchantable/…` rules. This is the fallback for a server without a data
+/// pack; when one is loaded the command asks the pack's real item tags (see
+/// [`Def::tag`] and `game::recipes::item_tag`). A book is not in any
+/// `enchantable` tag: vanilla's enchanting *table* special-cases books, but
+/// `/enchant` does not.
 pub fn can_enchant(item: &str, def: &Def) -> bool {
-    let s = short(item);
-    if s == "book" || s == "enchanted_book" {
-        return def.category != "mace" && def.category != "trident";
-    }
     item_in_category(item, def.category)
 }
 
 fn item_in_category(item: &str, cat: &str) -> bool {
     let s = short(item);
-    if s == "book" || s == "enchanted_book" {
-        return true;
-    }
     match cat {
         "head_armor" => is_helmet(s),
         "foot_armor" => is_boots(s),
         "leg_armor" => is_leggings(s),
         "armor" | "chest_armor" | "armor_enchanted" => is_armor(s),
-        "weapon" | "sharp_weapon" | "melee_weapon" => is_melee_weapon(s),
+        // `weapon` = sharp_weapon + mace; `sharp_weapon` = melee_weapon +
+        // axes; `melee_weapon` = swords + spears.
+        "weapon" => is_melee_weapon(s) || is_spear(s) || s == "mace",
+        "sharp_weapon" => is_melee_weapon(s) || is_spear(s),
+        "melee_weapon" => is_sword(s) || is_spear(s),
         "sweeping" => is_sword(s),
         "mace" => s == "mace",
         "trident" => s == "trident",
@@ -189,11 +197,17 @@ fn item_in_category(item: &str, cat: &str) -> bool {
         "crossbow" => s == "crossbow",
         "fishing" | "fishing_rod" => s == "fishing_rod",
         "durability" => is_damageable(item),
-        "mining" | "mining_loot" => is_mining_tool(s),
-        "fire_aspect" => is_melee_weapon(s) || is_spear(s) || s == "mace",
+        "mining" => is_mining_tool(s),
+        // Silk Touch and Fortune exclude shears.
+        "mining_loot" => is_pickaxe(s) || is_shovel(s) || is_axe(s) || is_hoe(s),
+        "fire_aspect" => is_sword(s) || is_spear(s) || s == "mace",
         "lunge" => is_spear(s),
-        "equippable" => is_armor(s) || s == "elytra" || is_spear(s),
-        "vanishing" => true,
+        "equippable" => is_armor(s) || s == "elytra",
+        // `enchantable/vanishing` is durability + compass + carved pumpkin +
+        // skulls, not everything.
+        "vanishing" => {
+            is_damageable(item) || s == "compass" || s == "carved_pumpkin" || s.ends_with("_skull")
+        }
         // An unknown category (a custom tag the engine cannot resolve) is
         // permissive rather than exclusive, as in the future custom
         // enchantment registry.
@@ -226,6 +240,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_table_matches_the_1_21_11_data_pack() {
+        // Names, ids, maximum levels and `supported_items` tags were taken
+        // from `data/minecraft/enchantment/*.json`; the ids are the registry
+        // order the component and the command argument use.
+        assert_eq!(ENCHANTMENTS.len(), 43);
+        let ids: Vec<u8> = ENCHANTMENTS.iter().map(|(.., id, _, _)| *id).collect();
+        assert_eq!(ids, (0..=42).collect::<Vec<u8>>(), "dense registry ids");
+        let sharp = by_name("sharpness").unwrap();
+        assert_eq!((sharp.id, sharp.max_level), (33, 5));
+        assert_eq!(sharp.tag(), "minecraft:enchantable/sharp_weapon");
+        assert_eq!(by_name("wind_burst").unwrap().max_level, 3);
+        assert_eq!(
+            by_name("mending").unwrap().tag(),
+            "minecraft:enchantable/durability"
+        );
+        assert!(by_name("not_an_enchantment").is_none());
+    }
+
+    #[test]
     fn names_resolve_with_or_without_the_namespace() {
         assert_eq!(by_name("sharpness").unwrap().id, 33);
         assert_eq!(by_name("minecraft:sharpness").unwrap().id, 33);
@@ -251,10 +284,12 @@ mod tests {
     }
 
     #[test]
-    fn a_book_takes_non_treasure_enchantments() {
+    fn a_book_is_not_enchantable_by_the_command() {
+        // Vanilla's enchanting table special-cases books; `/enchant` does
+        // not, and a book is in no `enchantable/…` tag.
         let book = "minecraft:book";
-        assert!(can_enchant(book, &by_name("sharpness").unwrap()));
-        assert!(can_enchant(book, &by_name("silk_touch").unwrap()));
+        assert!(!can_enchant(book, &by_name("sharpness").unwrap()));
+        assert!(!can_enchant(book, &by_name("silk_touch").unwrap()));
         assert!(!can_enchant(book, &by_name("wind_burst").unwrap()));
     }
 }

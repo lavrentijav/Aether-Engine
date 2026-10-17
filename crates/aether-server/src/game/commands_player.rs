@@ -74,19 +74,24 @@ fn clear_node() -> Node {
         .build()
 }
 
-fn amplifier_branch() -> Builder {
+fn amplifier_branch(infinite: bool) -> Builder {
     Builder::arg("amplifier", ArgKind::Integer)
-        .executable(exec_effect_give)
-        .then(Builder::arg("hideParticles", ArgKind::Bool).executable(exec_effect_give))
+        .executable(move |ctx| exec_effect_give_in(ctx, infinite))
+        .then(
+            Builder::arg("hideParticles", ArgKind::Bool)
+                .executable(move |ctx| exec_effect_give_in(ctx, infinite)),
+        )
 }
 
 fn effect_node() -> Node {
-    let infinite = Builder::arg("infinite", ArgKind::Enum(&["infinite"]))
-        .executable(exec_effect_give)
-        .then(amplifier_branch());
+    // Vanilla declares `infinite` as a literal sibling of the `seconds`
+    // argument; a plain word, not an enum argument.
+    let infinite = Builder::literal("infinite")
+        .executable(exec_effect_give_infinite)
+        .then(amplifier_branch(true));
     let seconds = Builder::arg("seconds", ArgKind::Integer)
         .executable(exec_effect_give)
-        .then(amplifier_branch());
+        .then(amplifier_branch(false));
     let effect = Builder::arg("effect", ArgKind::String)
         .executable(exec_effect_give)
         .then(seconds)
@@ -261,7 +266,7 @@ fn resolve_entities(
                 Some(handle) => out.push(Target::Player(handle)),
                 None => return Err("No player was found".into()),
             }
-        } else if entities::kind_of(entity.id).is_some() {
+        } else if entities::is_mob(entity.id) {
             out.push(Target::Mob {
                 id: entity.id,
                 name: entity.stringified_name(),
@@ -369,16 +374,16 @@ fn exec_clear(ctx: &mut Ctx) -> Reply {
 
     let filter = match item_text {
         Some(text) => match parse_item_filter(&text, ctx.world) {
-            Ok(item) => item,
+            Ok(filter) => filter,
             Err(e) => return ctx.fail(e),
         },
-        None => None,
+        None => ItemFilter::Any,
     };
     let max = max_count.unwrap_or(-1);
 
     let mut total = 0u64;
     for handle in &targets {
-        total += clear_one(handle, filter, max, ctx.world);
+        total += clear_one(handle, &filter, max, ctx.world);
     }
     if total == 0 {
         return ctx.fail(if targets.len() == 1 {
@@ -401,19 +406,34 @@ fn exec_clear(ctx: &mut Ctx) -> Reply {
     Reply::one(line)
 }
 
-/// The item filter of `/clear`: `None` matches every item; `Some(id)` only
-/// that item. A component patch (after `[`/`{`) is accepted syntactically but
-/// not tested, because the stack model carries no components yet.
-fn parse_item_filter(
-    text: &str,
-    world: &DemoWorld,
-) -> Result<Option<aether_world::ItemTypeId>, String> {
+/// The item filter of `/clear`: every item, one item, or the members of an
+/// item tag (`#minecraft:…`) from the loaded data pack. A component patch
+/// (after `[`/`{`) is accepted syntactically but not tested, because the stack
+/// model carries no components yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ItemFilter {
+    Any,
+    Items(Vec<aether_world::ItemTypeId>),
+}
+
+impl ItemFilter {
+    fn matches(&self, item: aether_world::ItemTypeId) -> bool {
+        match self {
+            ItemFilter::Any => true,
+            ItemFilter::Items(ids) => ids.contains(&item),
+        }
+    }
+}
+
+fn parse_item_filter(text: &str, world: &DemoWorld) -> Result<ItemFilter, String> {
     let stem = text.split(['[', '{']).next().unwrap_or(text).trim();
     if stem == "*" {
-        return Ok(None);
+        return Ok(ItemFilter::Any);
     }
     if stem.starts_with('#') {
-        return Err(format!("Unknown item tag '{stem}'"));
+        return super::recipes::item_tag(stem)
+            .map(|ids| ItemFilter::Items(ids.to_vec()))
+            .ok_or_else(|| format!("Unknown item tag '{stem}'"));
     }
     let name = if stem.contains(':') {
         stem.to_string()
@@ -422,18 +442,13 @@ fn parse_item_filter(
     };
     world
         .item_id(&name)
-        .map(Some)
+        .map(|id| ItemFilter::Items(vec![id]))
         .ok_or_else(|| format!("Unknown item '{text}'"))
 }
 
 /// Remove up to `max` matching items from one player, journalling the
 /// destruction, and return how many units left.
-fn clear_one(
-    handle: &PlayerHandle,
-    filter: Option<aether_world::ItemTypeId>,
-    max: i32,
-    world: &DemoWorld,
-) -> u64 {
+fn clear_one(handle: &PlayerHandle, filter: &ItemFilter, max: i32, world: &DemoWorld) -> u64 {
     if max == 0 {
         return 0;
     }
@@ -449,7 +464,7 @@ fn clear_one(
             let Some(stack) = inv.slot(slot) else {
                 continue;
             };
-            if filter.is_some_and(|id| stack.item != id) {
+            if !filter.matches(stack.item) {
                 continue;
             }
             let take = if max < 0 {
@@ -491,6 +506,14 @@ fn exec_effect_usage(ctx: &mut Ctx) -> Reply {
 }
 
 fn exec_effect_give(ctx: &mut Ctx) -> Reply {
+    exec_effect_give_in(ctx, false)
+}
+
+fn exec_effect_give_infinite(ctx: &mut Ctx) -> Reply {
+    exec_effect_give_in(ctx, true)
+}
+
+fn exec_effect_give_in(ctx: &mut Ctx, infinite: bool) -> Reply {
     let target_text = text_arg(ctx, 0).map(str::to_owned);
     let effect_text = text_arg(ctx, 1).map(str::to_owned);
     let (Some(target_text), Some(effect_text)) = (target_text, effect_text) else {
@@ -500,19 +523,25 @@ fn exec_effect_give(ctx: &mut Ctx) -> Reply {
         return ctx.fail(format!("Unknown effect '{effect_text}'"));
     };
 
+    // With `infinite` the first integer after the effect is the amplifier;
+    // otherwise it is `seconds` and the next one is the amplifier.
+    let mut at = 2usize;
     let mut seconds: Option<i32> = None;
-    let mut amplifier = 0i32;
-    let mut hide = false;
-    let mut infinite = false;
-    for arg in ctx.args.iter().skip(2) {
-        match &arg.value {
-            tree::Value::Text(t) if t == "infinite" => infinite = true,
-            tree::Value::Int(n) if seconds.is_none() && !infinite => seconds = Some(*n),
-            tree::Value::Int(n) => amplifier = *n,
-            tree::Value::Bool(b) => hide = *b,
-            _ => {}
+    if !infinite {
+        if let Some(tree::Value::Int(n)) = ctx.args.get(at).map(|a| &a.value) {
+            seconds = Some(*n);
+            at += 1;
         }
     }
+    let mut amplifier = 0i32;
+    if let Some(tree::Value::Int(n)) = ctx.args.get(at).map(|a| &a.value) {
+        amplifier = *n;
+        at += 1;
+    }
+    let hide = matches!(
+        ctx.args.get(at).map(|a| &a.value),
+        Some(tree::Value::Bool(true))
+    );
     if let Some(s) = seconds {
         if let Err(e) = int_range(s, 1, Some(1_000_000)) {
             return ctx.fail(e);
@@ -701,7 +730,10 @@ fn exec_enchant(ctx: &mut Ctx) -> Reply {
     let (Some(target_text), Some(enchant_text)) = (target_text, enchant_text) else {
         return ctx.fail("Unknown or incomplete command");
     };
-    if let Err(e) = int_range(level, 1, Some(255)) {
+    // Vanilla's `EnchantCommand` argument is `integer(0)`: level 0 is legal and
+    // removes the enchantment, while an absent level defaults to 1. Anything
+    // above the enchantment's own maximum is the `failed.level` error below.
+    if let Err(e) = int_range(level, 0, None) {
         return ctx.fail(e);
     }
     let Some(def) = enchantment::by_name(&enchant_text) else {
@@ -725,37 +757,36 @@ fn exec_enchant(ctx: &mut Ctx) -> Reply {
                 let index = handle.inventory().held_index();
                 let held = handle.inventory().slot(index).cloned();
                 let Some(stack) = held else {
-                    if targets.len() == 1 {
-                        return ctx
-                            .fail(lang::format(lang::ENCHANT_FAILED_ITEMLESS, &[&handle.name]));
-                    }
-                    continue;
+                    return ctx.fail(lang::format(lang::ENCHANT_FAILED_ITEMLESS, &[&handle.name]));
                 };
-                let Some(item_name) = ctx.world.item_name(stack.item) else {
-                    if targets.len() == 1 {
-                        return ctx.fail(lang::format(
-                            lang::ENCHANT_FAILED_INCOMPATIBLE,
-                            &[&enchantment::item_display(
-                                stack.item.vanilla_name().unwrap_or_default(),
-                            )],
-                        ));
-                    }
-                    continue;
-                };
-                if !enchantment::can_enchant(&item_name, &def) {
-                    if targets.len() == 1 {
-                        return ctx.fail(lang::format(
-                            lang::ENCHANT_FAILED_INCOMPATIBLE,
-                            &[&enchantment::item_display(&item_name)],
-                        ));
-                    }
-                    continue;
+                let item_name = ctx
+                    .world
+                    .item_name(stack.item)
+                    .unwrap_or_else(|| stack.item.vanilla_name().unwrap_or_default().to_string());
+                // Creative is exempt from the compatibility check, exactly as
+                // vanilla's `hasInfiniteMaterials`. A pack's real
+                // `enchantable/…` tag is authoritative; the compiled category
+                // is the fallback without one.
+                let compatible = handle.game().mode == crate::protocol::GameMode::Creative
+                    || match super::recipes::item_tag(&def.tag()) {
+                        Some(ids) => ids.contains(&stack.item),
+                        None => enchantment::can_enchant(&item_name, &def),
+                    };
+                if !compatible {
+                    return ctx.fail(lang::format(
+                        lang::ENCHANT_FAILED_INCOMPATIBLE,
+                        &[&enchantment::item_display(&item_name)],
+                    ));
                 }
                 {
                     let mut inv = handle.inventory();
                     if let Some(s) = inv.slot_mut(index).and_then(|s| s.as_mut()) {
                         if s.uid == stack.uid {
-                            s.add_enchantment(def.id, level as u8);
+                            if level == 0 {
+                                s.remove_enchantment(def.id);
+                            } else {
+                                s.add_enchantment(def.id, level as u8);
+                            }
                         }
                     }
                 }
@@ -763,14 +794,10 @@ fn exec_enchant(ctx: &mut Ctx) -> Reply {
                 enchanted += 1;
             }
             Target::Mob { name, .. } => {
-                if targets.len() == 1 {
-                    return ctx.fail(lang::format(lang::ENCHANT_FAILED_ITEMLESS, &[name]));
-                }
+                return ctx.fail(lang::format(lang::ENCHANT_FAILED_ITEMLESS, &[name]));
             }
             Target::Other { name } => {
-                if targets.len() == 1 {
-                    return ctx.fail(lang::format(lang::ENCHANT_FAILED_ENTITY, &[name]));
-                }
+                return ctx.fail(lang::format(lang::ENCHANT_FAILED_ENTITY, &[name]));
             }
         }
     }

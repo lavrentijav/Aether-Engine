@@ -581,6 +581,25 @@ pub fn sync_movement(handle: &PlayerHandle, registry: &SharedRegistry, world: &D
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_mob_effect_registry_matches_1_21_11() {
+        // Protocol ids from the generated `registries.json`; names from the
+        // 1.21.11 `en_us` table. Appending new effects never moves these.
+        assert_eq!(by_name("speed"), Some((0, "Speed")));
+        assert_eq!(by_name("minecraft:regeneration"), Some((9, "Regeneration")));
+        assert_eq!(by_name("absorption"), Some((21, "Absorption")));
+        assert_eq!(by_name("infested"), Some((38, "Infested")));
+        assert_eq!(
+            by_name("breath_of_the_nautilus"),
+            Some((39, "Breath of the Nautilus"))
+        );
+        assert_eq!(display(26), "Bad Luck");
+        assert!(by_name("not_an_effect").is_none());
+        let mut ids: Vec<u8> = MOB_EFFECTS.iter().map(|(_, id, _)| *id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (0..=39).collect::<Vec<u8>>(), "dense, no gaps");
+    }
+
     fn rng() -> Rng {
         Rng::new(0x1234_5678)
     }

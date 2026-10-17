@@ -187,6 +187,11 @@ impl Stack {
             .map_or(0, |e| e.level)
     }
 
+    /// Remove one enchantment, if present.
+    pub fn remove_enchantment(&mut self, id: u8) {
+        self.enchantments.retain(|e| e.id != id);
+    }
+
     /// Add (or raise) an enchantment, keeping the list sorted by id.
     pub fn add_enchantment(&mut self, id: u8, level: u8) {
         match self.enchantments.binary_search_by_key(&id, |e| e.id) {

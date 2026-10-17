@@ -1674,6 +1674,22 @@ fn clear_journals_a_partial_stack_as_a_destruction_too() {
 }
 
 #[test]
+fn clear_with_max_count_zero_removes_nothing() {
+    let env = env();
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 2);
+    assert_eq!(
+        one(&env, &env.tester, "/clear @s minecraft:stone 0"),
+        "No items were found on player tester"
+    );
+    assert_eq!(
+        env.tester.inventory().get(FIRST_HOTBAR).map(|s| s.count),
+        Some(2),
+        "maxCount 0 leaves the stack"
+    );
+}
+
+#[test]
 fn clear_accepts_several_targets() {
     let env = env();
     clear_hand(&env.tester);
@@ -1743,6 +1759,26 @@ fn effect_give_keeps_a_high_amplifier_and_honours_infinite_and_hide_particles() 
 }
 
 #[test]
+fn effect_give_rejects_an_explicit_zero_second_duration() {
+    // 1.21.11's `seconds` is `integer(1, 1000000)`; only an *omitted*
+    // duration takes the default, an explicit 0 is an argument error.
+    let env = env();
+    {
+        let mut st = env.tester.game();
+        st.effects.clear();
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/effect give tester speed 0"),
+        "Integer must not be less than 1: found 0"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/effect give tester speed 1000001"),
+        "Integer must not be more than 1000000: found 1000001"
+    );
+    assert!(env.tester.game().effects.is_empty());
+}
+
+#[test]
 fn effect_clear_removes_one_effect_or_all_of_them() {
     let env = env();
     {
@@ -1774,6 +1810,7 @@ fn effect_clear_removes_one_effect_or_all_of_them() {
 #[test]
 fn enchant_requires_a_held_enchantable_item() {
     let env = env();
+    one(&env, &env.tester, "/gamemode survival");
     clear_hand(&env.tester);
     assert_eq!(
         one(&env, &env.tester, "/enchant tester sharpness"),
@@ -1789,6 +1826,7 @@ fn enchant_requires_a_held_enchantable_item() {
 #[test]
 fn enchant_applies_to_the_held_stack_and_checks_the_level_range() {
     let env = env();
+    one(&env, &env.tester, "/gamemode survival");
     clear_hand(&env.tester);
     hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_sword", 1);
     assert_eq!(
@@ -1807,14 +1845,52 @@ fn enchant_applies_to_the_held_stack_and_checks_the_level_range() {
         one(&env, &env.tester, "/enchant tester sharpness 6"),
         "6 is higher than the maximum level of 5 supported by that enchantment"
     );
+    // Vanilla's argument is `integer(0)`: level 0 is legal and removes the
+    // enchantment (the success line is still the applied one).
     assert_eq!(
         one(&env, &env.tester, "/enchant tester sharpness 0"),
-        "Integer must not be less than 1: found 0"
+        "Applied enchantment Sharpness to tester's item"
     );
     assert_eq!(
-        one(&env, &env.tester, "/enchant tester sharpness 256"),
-        "Integer must not be more than 255: found 256"
+        env.tester
+            .inventory()
+            .get(FIRST_HOTBAR)
+            .unwrap()
+            .enchant_level(33),
+        0,
+        "level 0 removed it"
     );
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness -1"),
+        "Integer must not be less than 0: found -1"
+    );
+    // There is no argument maximum; the enchantment's own maximum is the cap,
+    // so 256 fails as a level error, as vanilla's `integer(0)` does.
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness 256"),
+        "256 is higher than the maximum level of 5 supported by that enchantment"
+    );
+}
+
+#[test]
+fn enchant_is_lenient_in_creative_as_vanilla_is() {
+    let env = env();
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 1);
+    one(&env, &env.tester, "/gamemode creative");
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness 2"),
+        "Applied enchantment Sharpness to tester's item"
+    );
+    assert_eq!(
+        env.tester
+            .inventory()
+            .get(FIRST_HOTBAR)
+            .unwrap()
+            .enchant_level(33),
+        2
+    );
+    one(&env, &env.tester, "/gamemode survival");
 }
 
 #[test]

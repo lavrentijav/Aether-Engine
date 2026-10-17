@@ -735,6 +735,19 @@ pub fn mob_has_effects(id: i32) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `id` is a living mob (not an item, arrow, orb or cloud). The
+/// CMD-10a commands act on players and mobs, and `/enchant` must refuse a
+/// non-living entity the way vanilla refuses anything that is not a
+/// `LivingEntity`.
+pub fn is_mob(id: i32) -> bool {
+    entities()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|e| e.id == id && !e.dead)
+        .is_some_and(|e| matches!(e.kind, Kind::Mob(_)))
+}
+
 /// The entity type of `id`, if it exists.
 pub fn kind_of(id: i32) -> Option<&'static str> {
     entities()
