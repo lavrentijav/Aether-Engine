@@ -178,15 +178,11 @@ fn login_and_play(
         ));
         return protocol::kick_login(s, "Too many login attempts; try again in a minute.");
     }
-    // Bans and the whitelist (CMD-08), next to the max-players/operator
-    // admission. The pre-auth check uses the offline UUID derived from the
-    // claimed name; the post-auth check below repeats it with the real UUID.
-    if let Err(refusal) = crate::admin::admit(
-        &claimed,
-        aether_api::player::offline_uuid(&claimed),
-        ip,
-        cfg,
-    ) {
+    // The ban half of the CMD-08 gate, next to the max-players/operator
+    // admission. A ban is decidable from the claimed name and address; the
+    // whitelist is not, because a row keyed by UUID can admit a premium player
+    // under a new name. It is checked again below, after authentication.
+    if let Err(refusal) = crate::admin::ban_admission(&claimed, ip) {
         crate::log::info(&format!(
             "[x] {claimed} refused: {} ({})",
             refusal.log_reason(),
@@ -216,9 +212,8 @@ fn login_and_play(
             crate::auth::Admission::Ended => return Ok(()),
         };
     // The authenticated UUID (or the offline one) is what a whitelist entry is
-    // matched by, so the gate runs once more now that it is known. A name ban
-    // was already caught before authentication; this also catches an address
-    // ban after a hybrid login.
+    // matched by, so the full gate runs now that it is known. The ban half is
+    // repeated because a hybrid login may have changed the effective name.
     let uuid = uuid_override.unwrap_or_else(|| aether_api::player::offline_uuid(&name));
     if let Err(refusal) = crate::admin::admit(&name, uuid, ip, cfg) {
         crate::log::info(&format!(

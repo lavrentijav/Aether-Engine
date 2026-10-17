@@ -46,3 +46,31 @@ Status: ✅ implemented on `oc/CMD08`.
 - **Online effect:** banning or kicking a connected target disconnects that
   handle; the disconnect reason is the ban/kick text. Whitelist changes do not
   kick anyone already online (vanilla does not either).
+
+## Review 1 fixes
+
+- Whitelist is now a **post-authentication** gate: `session::login_and_play`
+  calls `admin::ban_admission` (name + address) before auth and
+  `admin::admit` (ban + whitelist by the real UUID) after it. A whitelist row
+  keyed only by UUID admits a renamed premium player.
+- A corrupt `banned.json` or `whitelist.json` now **refuses startup** with a
+  clear error and is left untouched; it is never replaced by an empty list or
+  by a disabled whitelist.
+- `/ban-ip <literal ip>` kicks every connected handle whose (canonicalised)
+  address matches.
+- Repeated operations use the vanilla `en_us` failures (`commands.op.failed`,
+  `deop.failed`, `ban.failed`, `banip.failed`, `pardon.failed`,
+  `pardonip.failed`, `whitelist.alreadyOn/Off`, `whitelist.add/remove.failed`).
+  `/banlist [ips|players]` uses the one `There are N bans:` header, and
+  `/kick` always includes the reason (default `Kicked by an operator`).
+- The tree mirrors the vanilla grammar: `game_profile` targets for
+  op/deop/ban/pardon/whitelist add/remove, a word for ban-ip/pardon-ip,
+  `message` for reasons, `entity` for kick, and literal subcommands for
+  banlist and whitelist. An extra argument is a parse error.
+- Entity/profile arguments read one selector-aware token, so
+  `@a[name="Bob Smith"]` stays one argument; reasons keep their spaces.
+- `::ffff:a.b.c.d` is canonicalised to IPv4 when bans are stored and compared.
+- `warn_if_exposed` reads the live `whitelist.json` state
+  (`admin::whitelist_enabled`); the unused `Config::may_join` is gone.
+- `docs/COMMANDS.md` / `.ru` are regenerated (usage escaped for the markdown
+  table), and `KNOWN_ISSUES.ru.md` / `STATUS.ru.md` are updated.

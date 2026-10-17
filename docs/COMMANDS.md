@@ -36,11 +36,11 @@ Player and access management.
 | `/deop` | – | ✅ working | `node` | `minecraft.command.deop` | 3 | `/deop <targets>` |
 | `/ban` | – | ✅ working | `node` | `minecraft.command.ban` | 3 | `/ban <targets> [reason]` |
 | `/ban-ip` | – | ✅ working | `node` | `minecraft.command.ban-ip` | 3 | `/ban-ip <targets> [reason]` |
-| `/banlist` | – | ✅ working | `node` | `minecraft.command.banlist` | 3 | `/banlist [ips]` |
+| `/banlist` | – | ✅ working | `node` | `minecraft.command.banlist` | 3 | `/banlist [ips\|players]` |
 | `/pardon` | – | ✅ working | `node` | `minecraft.command.pardon` | 3 | `/pardon <targets>` |
 | `/pardon-ip` | – | ✅ working | `node` | `minecraft.command.pardon-ip` | 3 | `/pardon-ip <targets>` |
 | `/kick` | – | ✅ working | `node` | `minecraft.command.kick` | 3 | `/kick <targets> [reason]` |
-| `/whitelist` | – | ✅ working | `node` | `minecraft.command.whitelist` | 3 | `/whitelist <add,remove,list,on,off,reload> [name]` |
+| `/whitelist` | – | ✅ working | `node` | `minecraft.command.whitelist` | 3 | `/whitelist <on\|off\|list\|add\|remove\|reload>` |
 
 ## server
 

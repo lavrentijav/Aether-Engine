@@ -318,7 +318,7 @@ pub const CATALOGUE: &[Command] = &[
         "minecraft.command.banlist",
         3,
         Category::Admin,
-        "/banlist [ips]",
+        "/banlist [ips|players]",
     ),
     imp_node(
         "pardon",
@@ -350,7 +350,7 @@ pub const CATALOGUE: &[Command] = &[
         "minecraft.command.whitelist",
         3,
         Category::Admin,
-        "/whitelist <add,remove,list,on,off,reload> [name]",
+        "/whitelist <on|off|list|add|remove|reload>",
     ),
     // -- server ------------------------------------------------------------
     // `/stop` and `/save-all` are implemented by CMD-07: the console and RCON
@@ -1435,7 +1435,7 @@ pub fn render_markdown(lang: Lang) -> String {
                 gate = c.gate.key(),
                 node = c.node,
                 op = c.op,
-                usage = c.usage,
+                usage = c.usage.replace('|', "\\|"),
             )
             .unwrap();
         }
@@ -1490,12 +1490,6 @@ mod tests {
             );
             assert!(c.op <= 4, "{}: op level {} out of range", c.name, c.op);
             assert!(!c.usage.is_empty(), "{}: no usage", c.name);
-            assert!(
-                !c.usage.contains('|'),
-                "{}: usage `{}` contains a pipe, which breaks the markdown table",
-                c.name,
-                c.usage
-            );
             match c.status {
                 Status::Implemented => assert_eq!(
                     c.task, "-",
