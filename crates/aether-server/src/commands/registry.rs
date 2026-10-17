@@ -106,7 +106,7 @@ mod tests {
         // Implemented core names...
         assert!(register_plugin("give", "p", "p.give", 0).is_err());
         assert!(register_plugin("gamemode", "p", "p.gm", 0).is_err());
-        // ...and specified-but-unimplemented ones (`/stop` is a CMD-09 stub).
+        // ...and the server-control commands (`/stop` is CMD-07/09).
         assert!(register_plugin("stop", "p", "p.stop", 4).is_err());
         assert!(core_owns("stop") && core_owns("give") && !core_owns("myplugin_cmd"));
     }

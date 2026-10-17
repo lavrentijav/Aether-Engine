@@ -353,10 +353,9 @@ pub const CATALOGUE: &[Command] = &[
         "/whitelist <on|off|list|add|remove|reload>",
     ),
     // -- server ------------------------------------------------------------
-    // `/stop` and `/save-all` are implemented by CMD-07: the console and RCON
-    // sources need a lifecycle, and `/stop` shares `ops::request_stop` with the
-    // signal handler's clean shutdown path. `/stop` needs the server source,
-    // but a player at op 4 may run it too.
+    // `/stop` and `/save-all` were first wired for the console and RCON
+    // lifecycle (CMD-07); CMD-09 completes the group with the information and
+    // transfer verbs.
     imp_node(
         "stop",
         &[],
@@ -371,77 +370,70 @@ pub const CATALOGUE: &[Command] = &[
         "minecraft.command.save-all",
         4,
         Category::Server,
-        "/save-all",
+        "/save-all [flush]",
     ),
-    pend(
+    imp_node(
         "save-on",
         &[],
         "minecraft.command.save-on",
         4,
-        "CMD-09",
         Category::Server,
         "/save-on",
     ),
-    pend(
+    imp_node(
         "save-off",
         &[],
         "minecraft.command.save-off",
         4,
-        "CMD-09",
         Category::Server,
         "/save-off",
     ),
-    pend(
+    // Op level 0 is "everyone"; the tree has no requirement for it.
+    imp(
         "list",
         &[],
         "minecraft.command.list",
         0,
-        "CMD-09",
         Category::Server,
         "/list [uuids]",
     ),
-    pend(
+    imp_node(
         "seed",
         &[],
         "minecraft.command.seed",
         2,
-        "CMD-09",
         Category::Server,
-        "/seed",
+        "/seed [<world>]",
     ),
-    pend(
+    imp_node(
         "version",
         &[],
         "minecraft.command.version",
         2,
-        "CMD-09",
         Category::Server,
         "/version",
     ),
-    pend(
+    imp_node(
         "setidletimeout",
         &[],
         "minecraft.command.setidletimeout",
         3,
-        "CMD-09",
         Category::Server,
         "/setidletimeout <minutes>",
     ),
-    pend(
+    imp_node(
         "transfer",
         &[],
         "minecraft.command.transfer",
         3,
-        "CMD-09",
         Category::Server,
         "/transfer <hostname> [port] [players]",
     ),
-    pend(
+    imp_node(
         "publish",
         &[],
         "minecraft.command.publish",
         4,
-        "CMD-09",
         Category::Server,
         "/publish [allow-commands] [gamemode] [port]",
     ),
@@ -1580,6 +1572,9 @@ mod tests {
 
     #[test]
     fn every_implemented_entry_has_a_real_executor() {
+        fn has_executor(node: &tree::Node) -> bool {
+            (node.executable && node.executor.is_some()) || node.children.iter().any(has_executor)
+        }
         let tree = tree::tree();
         for c in CATALOGUE.iter().filter(|c| c.status == Status::Implemented) {
             let node = tree
@@ -1587,8 +1582,7 @@ mod tests {
                 .iter()
                 .find(|n| n.name == c.name)
                 .unwrap_or_else(|| panic!("implemented `{}` has no tree node", c.name));
-            assert!(node.executable, "`{}` is not executable", c.name);
-            assert!(node.executor.is_some(), "`{}` has no executor", c.name);
+            assert!(has_executor(node), "`{}` has no executor", c.name);
         }
     }
 

@@ -28,6 +28,7 @@ pub mod pager;
 pub mod query;
 pub mod registry;
 pub mod selector;
+pub mod server;
 mod snbt;
 pub mod source;
 pub mod tree;
@@ -123,27 +124,6 @@ pub(crate) fn core_nodes() -> Vec<Node> {
             tree::greedy("aether", &[], Requirement::Fn(require_admin), exec_aether),
             "auth migrate <name>",
         ),
-        // The server-lifecycle commands the console and RCON need. CMD-09
-        // expands this group (`/list`, `/seed`, `/version`, save-on/off); the
-        // save/stop path here is the same one the shutdown watcher uses.
-        tree::simple(
-            "stop",
-            &[],
-            Requirement::Level {
-                op: 4,
-                node: "minecraft.command.stop",
-            },
-            exec_stop,
-        ),
-        tree::simple(
-            "save-all",
-            &[],
-            Requirement::Level {
-                op: 4,
-                node: "minecraft.command.save-all",
-            },
-            exec_save_all,
-        ),
     ]
 }
 
@@ -155,27 +135,6 @@ pub fn require_admin(source: &Source) -> Result<(), Deny> {
         Err(Deny::Message(
             "You do not have permission to run this command.".into(),
         ))
-    }
-}
-
-/// `/stop` — ask the server to stop cleanly.
-///
-/// It only requests the stop; the shutdown watcher ([`crate::ops`]) performs
-/// the save and exit, so the console, RCON and a signal all leave the same
-/// way. No reply is required by vanilla, but one is sent so an RCON client is
-/// not left waiting for a response that will never come as the socket closes.
-fn exec_stop(_ctx: &mut Ctx) -> Reply {
-    crate::ops::request_stop();
-    Reply::one("Stopping the server")
-}
-
-/// `/save-all` — flush every dirty chunk and pending queue to disk.
-fn exec_save_all(ctx: &mut Ctx) -> Reply {
-    crate::game::blockticks::save(ctx.world);
-    crate::game::fluids::save(ctx.world);
-    match ctx.world.flush() {
-        Ok(()) => Reply::one("Saved the game"),
-        Err(e) => Reply::one(format!("Saving failed: {e}")),
     }
 }
 

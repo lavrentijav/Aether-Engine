@@ -1302,11 +1302,10 @@ fn help_renders_from_the_tree_with_usages_and_stub_marks() {
         one(&env, &env.tester, "/help gm"),
         "/gamemode (gm) <gamemode> [<targets>]"
     );
-    // A specified-but-unimplemented command is listed and marked. (`/stop` and
-    // `/save-all` are CMD-07 now, so a CMD-09 stub like `/save-on` stands in.)
+    // A specified-but-unimplemented command is listed and marked.
     assert_eq!(
-        one(&env, &env.tester, "/help save-on"),
-        "/save-on — not implemented yet (CMD-09)"
+        one(&env, &env.tester, "/help xp"),
+        "/experience (xp) — not implemented yet (CMD-10)"
     );
     // The `?` alias routes to the same node.
     assert_eq!(
@@ -1348,7 +1347,7 @@ fn help_with_no_argument_lists_the_visible_tree_paged() {
     );
     assert!(
         all.iter()
-            .any(|l| l.contains("/save-on (not implemented yet)")),
+            .any(|l| l.contains("/experience (xp) (not implemented yet)")),
         "{all:?}"
     );
     // `all_help` left the pager on the last page; run `/help` again so the
@@ -1465,18 +1464,18 @@ fn a_function_is_silenced_while_a_player_keeps_their_errors() {
 fn the_stub_registry_is_on_the_tree() {
     let env = env();
     // A specified-but-unimplemented command answers with its task id, and its
-    // op level is enforced by the tree. (`/stop` and `/save-all` are CMD-07.)
-    assert_eq!(
-        one(&env, &env.tester, "/save-on"),
-        "/save-on is not implemented yet (CMD-09)"
-    );
-    assert_eq!(
-        one(&env, &env.bob, "/save-on"),
-        "You do not have permission to run this command."
-    );
+    // op level is enforced by the tree.
     assert_eq!(
         one(&env, &env.tester, "/xp"),
         "/experience is not implemented yet (CMD-10)"
+    );
+    assert_eq!(
+        one(&env, &env.bob, "/xp"),
+        "You do not have permission to run this command."
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/clear"),
+        "/clear is not implemented yet (CMD-10)"
     );
 }
 

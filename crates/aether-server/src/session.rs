@@ -719,7 +719,9 @@ fn play_loop(
         }
         if last_saved.elapsed() >= Duration::from_secs(30) {
             last_saved = Instant::now();
-            save_player(handle, world);
+            if crate::commands::server::autosave_enabled() {
+                save_player(handle, world);
+            }
         }
 
         // Disconnected from elsewhere: the writer gave up on the socket, or
@@ -733,6 +735,14 @@ fn play_loop(
             handle.disconnect(&reason);
             log_left(&handle.name, &reason);
             return Ok(());
+        }
+        if let Some(timeout) = crate::commands::server::idle_timeout() {
+            if handle.idle_for() >= timeout {
+                let reason = "You have been idle for too long!";
+                handle.disconnect(reason);
+                log_left(&handle.name, reason);
+                return Ok(());
+            }
         }
 
         // Send a keep-alive roughly every 10s (clients disconnect after ~30s).
@@ -770,6 +780,7 @@ fn play_loop(
             }
         };
         last_heard = Instant::now();
+        handle.touch_input();
         // The client's resource-pack status, if its codec reports one. Only a
         // `successfully_loaded` client may be shown carrier states, so the
         // moment it loads the pack the whole view is re-sent with carriers —

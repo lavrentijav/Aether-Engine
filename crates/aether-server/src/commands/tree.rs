@@ -729,6 +729,7 @@ fn build() -> CommandTree {
     children.extend(super::world_edit::nodes());
     children.extend(crate::economy::commands::nodes());
     children.extend(crate::admin::nodes());
+    children.extend(super::server::nodes());
     // The not-yet-implemented core commands are derived from the one catalogue
     // (`catalogue::CATALOGUE`, the single source of truth): registered now so
     // completion and permission checks are right from day one. A name a real

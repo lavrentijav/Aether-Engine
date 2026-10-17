@@ -67,11 +67,12 @@ fn spawn_autosave(world: Arc<DemoWorld>, secs: u64) {
     let period = Duration::from_secs(secs.max(1));
     std::thread::spawn(move || loop {
         std::thread::sleep(period);
+        if !commands::server::autosave_enabled() {
+            continue;
+        }
         // The scheduled queues are not part of the world's dirty set, so they
         // are written here, beside the chunks they belong to.
-        game::blockticks::save(&world);
-        game::fluids::save(&world);
-        if let Err(e) = world.flush() {
+        if let Err(e) = commands::server::save_world(&world) {
             log::error(&format!("autosave failed: {e}"));
         }
     });
@@ -544,6 +545,14 @@ pub fn worldgen_data() -> &'static str {
 /// it (structure chest loot).
 pub fn seed() -> u64 {
     CONFIG.get().map(|c| c.server.seed).unwrap_or(0)
+}
+
+/// The reported player slots, for `/list`.
+pub fn max_players() -> u32 {
+    CONFIG
+        .get()
+        .map(|c| c.server.max_players)
+        .unwrap_or_else(|| Config::default().server.max_players)
 }
 
 /// Say so, loudly, when a server anyone can reach trusts names alone.

@@ -132,7 +132,7 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
         }
     }
 
-    if now % 600 == 0 {
+    if now % 600 == 0 && crate::commands::server::autosave_enabled() {
         save_time(world);
         // Bound what a crash loses of the pending scheduled ticks, the same
         // thirty-second horizon the world clock gets.
