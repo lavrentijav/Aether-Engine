@@ -96,6 +96,11 @@ name = "ax3c_cells"
 harness = false
 test = false
 
+[[bench]]
+name = "region_index"
+harness = false
+test = false
+
 [lints]
 workspace = true
 
