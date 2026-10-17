@@ -543,7 +543,14 @@ fn write_particle_options(v: &Version, p: &mut PacketOut, options: &ParticleOpti
             // The trail particle arrived in 1.21.4 together with its fields.
             p.f64(*x).f64(*y).f64(*z).i32(*color).var_int(*duration);
         }
-        ParticleOptions::TintedLeaves { color } | ParticleOptions::Flash { color } => {
+        ParticleOptions::TintedLeaves { color } => {
+            // `tinted_leaves` arrived in 1.21.5 with its colour field.
+            if v.protocol >= 770 {
+                p.i32(*color);
+            }
+        }
+        ParticleOptions::Flash { color } => {
+            // `flash` arrived in 1.21.9.
             if v.protocol >= 773 {
                 p.i32(*color);
             }
@@ -2336,6 +2343,54 @@ mod tests {
             pin.var_int().unwrap(),
             v.state(aether_world::registry::ids::STONE) as i32
         );
+    }
+
+    #[test]
+    fn tinted_leaves_carries_its_colour_from_1_21_5() {
+        let ev = ServerEvent::Particle {
+            name: "minecraft:tinted_leaves".into(),
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            dz: 0.0,
+            speed: 0.0,
+            count: 1,
+            force: false,
+            options: ParticleOptions::TintedLeaves {
+                color: 0x8012_3456u32 as i32,
+            },
+        };
+        for v in [
+            &crate::protocol::modern::version::V1_21_5,
+            &crate::protocol::modern::version::V1_21_8,
+            &crate::protocol::modern::version::V1_21_11,
+        ] {
+            let pkts = encode(v, &ev).unwrap();
+            let mut pin = crate::proto::PacketIn::new(pkts[0].body());
+            let expected_id = if v.protocol >= 773 { 46 } else { 41 };
+            assert_eq!(pin.var_int().unwrap(), expected_id, "{}", v.name);
+            let _ = pin.bool().unwrap();
+            let _ = pin.bool().unwrap();
+            for _ in 0..3 {
+                let _ = pin.f64().unwrap();
+            }
+            for _ in 0..3 {
+                let _ = pin.f32().unwrap();
+            }
+            let _ = pin.f32().unwrap();
+            let _ = pin.i32().unwrap();
+            let id = pin.var_int().unwrap();
+            assert_eq!(
+                id,
+                crate::protocol::resources::particle_id(v.protocol, "minecraft:tinted_leaves")
+                    .unwrap(),
+                "{}",
+                v.name
+            );
+            assert_eq!(pin.i32().unwrap(), 0x8012_3456u32 as i32, "{}", v.name);
+        }
     }
 
     #[test]

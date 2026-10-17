@@ -1547,6 +1547,42 @@ fn a_double_slash_command_falls_through_the_tree_to_the_plugin_registry() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn particle_recipients_are_distance_filtered() {
+    let env = env();
+    let who = &env.tester;
+    let here = PosLook {
+        x: 0.5,
+        y: 64.0,
+        z: 0.5,
+        yaw: 0.0,
+        pitch: 0.0,
+        on_ground: true,
+    };
+    env.tester.set_pos(here);
+    env.bob.set_pos(here);
+
+    // 400 blocks away: outside the normal 32-block range, inside the forced
+    // 512-block one. `force` widens the range; it does not mean "everyone".
+    assert_eq!(
+        one(&env, who, "/particle flame 400 64 0"),
+        "The particle was not visible for anybody"
+    );
+    assert_eq!(
+        one(&env, who, "/particle flame 400 64 0 0 0 0 1 1 force"),
+        "Displaying particle minecraft:flame"
+    );
+    // An explicit viewer list goes through the same distance filter.
+    assert_eq!(
+        one(&env, who, "/particle flame 400 64 0 0 0 0 1 1 normal @a"),
+        "The particle was not visible for anybody"
+    );
+    assert_eq!(
+        one(&env, who, "/particle flame 400 64 0 0 0 0 1 1 force @a"),
+        "Displaying particle minecraft:flame"
+    );
+}
+
+#[test]
 fn particle_and_sound_commands_route_through_the_tree() {
     let env = env();
     let who = &env.tester;

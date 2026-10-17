@@ -575,7 +575,15 @@ fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
         }
     } else {
         // Vanilla's `MapCodec.unit` ignores an object on a simple particle
-        // (`/particle flame{color:1}` is accepted and the object dropped).
+        // (`/particle flame{color:1}` is accepted and the object dropped),
+        // but the object still has to parse as JSON.
+        if let Some(text) = options_text {
+            match snbt::parse(text) {
+                Ok(Nbt::Compound(_)) => {}
+                Ok(_) => return ctx.fail(invalid_options("Expected particle options")),
+                Err(e) => return ctx.fail(invalid_options(e)),
+            }
+        }
         ParticleOptions::None
     };
 
