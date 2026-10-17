@@ -797,30 +797,27 @@ pub const CATALOGUE: &[Command] = &[
         Category::Data,
         "/scoreboard <objectives,players> [...]",
     ),
-    pend(
+    imp_node(
         "tag",
         &[],
         "minecraft.command.tag",
         2,
-        "CMD-16",
         Category::Data,
         "/tag <targets> <add,remove,list> <name>",
     ),
-    pend(
+    imp_node(
         "team",
         &[],
         "minecraft.command.team",
         2,
-        "CMD-16",
         Category::Data,
-        "/team <add,list,modify,join,leave,remove> [...]",
+        "/team <list,add,remove,empty,join,leave,modify> [...]",
     ),
-    pend(
+    imp(
         "teammsg",
         &["tm"],
         "minecraft.command.teammsg",
         0,
-        "CMD-16",
         Category::Data,
         "/teammsg <message>",
     ),

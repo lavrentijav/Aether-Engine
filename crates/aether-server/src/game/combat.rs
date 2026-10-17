@@ -87,6 +87,17 @@ pub fn hurt_player(
     if amount <= 0.0 {
         return false;
     }
+    // Vanilla's friendly-fire rule: a player on the same team as the victim
+    // deals no damage while that team's friendly fire is off.
+    if let Some((attacker_id, _)) = attacker {
+        if let Some(attacker) = registry.by_entity(attacker_id) {
+            if attacker.entity_id != target.entity_id
+                && !crate::team::allows_damage(world, &attacker.name, &target.name)
+            {
+                return false;
+            }
+        }
+    }
     let armor = if bypasses_armor(source) {
         (0.0, 0.0)
     } else {

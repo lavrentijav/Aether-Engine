@@ -531,12 +531,14 @@ fn login_and_play(
             st.xp_total = s.xp_total;
             st.effects = crate::game::effects::Effects::from_list(s.effects.clone());
             st.absorption = st.effects.absorption_amount();
+            st.tags = s.tags.iter().cloned().collect();
         }
     }
 
     // What this server answers, so the client can complete it. Sent before
     // anything the player might type at.
     handle.emit(&ServerEvent::CommandTree, world);
+    crate::team::send_all(&handle, world);
 
     // Join events run **before** anything is broadcast about this player, so a
     // plugin can restore per-player state the join burst must respect — the
@@ -1073,7 +1075,10 @@ fn play_loop(
                 // Log and journal only the chat that was actually delivered
                 // (a plugin veto above returns before this point).
                 crate::chatlog::log_chat(handle, &text, world);
-                let line = format!("<{}> {}", handle.name, text);
+                let line = match crate::team::team_of(world, &handle.name) {
+                    Some(team) => format!("<{}> {}", team.format_player_name(&handle.name), text),
+                    None => format!("<{}> {}", handle.name, text),
+                };
                 let ev = ServerEvent::Chat(line);
                 handle.emit(&ev, world);
                 registry.broadcast_except(handle.entity_id, &ev, world);
@@ -1667,6 +1672,7 @@ pub(crate) fn save_player(handle: &crate::players::PlayerHandle, world: &DemoWor
         mode: st.mode,
         spawn: st.spawn,
         effects: st.effects.all().to_vec(),
+        tags: st.tags.iter().cloned().collect(),
     };
     let pos = if st.dead { st.spawn } else { saved.pos };
     drop(st);
@@ -1675,6 +1681,44 @@ pub(crate) fn save_player(handle: &crate::players::PlayerHandle, world: &DemoWor
         &crate::game::player::key(handle.uuid),
         &crate::game::player::encode(&saved),
     );
+}
+
+/// Persist only the scoreboard tags, keeping whatever else the player's save
+/// already holds. `/tag` must survive a logout even for a client that does not
+/// run the full gameplay save path; it also must not overwrite a modern save
+/// with a compat client's defaults, so an existing record is decoded and
+/// updated in place.
+pub(crate) fn save_tags(handle: &crate::players::PlayerHandle, world: &DemoWorld) {
+    let key = crate::game::player::key(handle.uuid);
+    let tags: Vec<String> = handle.game().tags.iter().cloned().collect();
+    let mut saved = match world.get_meta(&key) {
+        Ok(Some(blob)) => match crate::game::player::decode(&blob) {
+            Some(saved) => saved,
+            // Never write over a record that exists but does not decode: that
+            // is the same rule the login path applies before gameplay starts.
+            None => return,
+        },
+        Ok(None) => {
+            let pos = handle.pos();
+            let st = handle.game();
+            crate::game::player::Saved {
+                pos: (pos.x, pos.y, pos.z),
+                yaw: pos.yaw,
+                pitch: pos.pitch,
+                health: if st.dead { 20.0 } else { st.health },
+                food: if st.dead { 20 } else { st.food },
+                saturation: st.saturation,
+                xp_total: st.xp_total,
+                mode: st.mode,
+                spawn: st.spawn,
+                effects: st.effects.all().to_vec(),
+                tags: Vec::new(),
+            }
+        }
+        _ => return,
+    };
+    saved.tags = tags;
+    let _ = world.put_meta(&key, &crate::game::player::encode(&saved));
 }
 
 /// How many columns are generated at once, across every player: one per

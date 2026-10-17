@@ -74,6 +74,7 @@ use crate::commands::Reply;
 use crate::config::Config;
 use crate::players::{PlayerHandle, SharedRegistry};
 use crate::protocol::nbt::Nbt;
+use crate::session::DemoWorld;
 
 /// The file a ban list is persisted to, under the world directory.
 pub const BAN_FILE: &str = "banned.json";
@@ -569,11 +570,17 @@ impl Target {
 /// The CMD-06b selector source over the live player registry.
 struct OnlineSource<'a> {
     registry: &'a SharedRegistry,
+    world: &'a DemoWorld,
     executor: Option<EntityRef>,
 }
 
-fn player_ref(handle: &PlayerHandle) -> EntityRef {
+fn player_ref(handle: &PlayerHandle, world: &DemoWorld) -> EntityRef {
     let pos = handle.pos();
+    let st = handle.game();
+    let tags = st.tags.iter().cloned().collect();
+    let level = st.xp_total;
+    let mode = st.mode;
+    drop(st);
     EntityRef {
         id: handle.entity_id,
         uuid: handle.uuid,
@@ -583,10 +590,10 @@ fn player_ref(handle: &PlayerHandle) -> EntityRef {
         name: Some(handle.name.clone()),
         pos: Vector3::new(pos.x, pos.y, pos.z),
         rotation: Rotation::new(pos.yaw, pos.pitch),
-        tags: Vec::new(),
-        team: None,
-        gamemode: Some(Gamemode::from(handle.game().mode)),
-        level: 0,
+        tags,
+        team: crate::team::team_name_of(world, &handle.name),
+        gamemode: Some(Gamemode::from(mode)),
+        level,
         scores: Vec::new(),
         advancements: Vec::new(),
         predicates: Vec::new(),
@@ -603,15 +610,20 @@ impl SelectorSource for OnlineSource<'_> {
         self.registry
             .snapshot()
             .iter()
-            .map(|handle| player_ref(handle))
+            .map(|handle| player_ref(handle, self.world))
             .collect()
     }
 }
 
-fn online_source<'a>(registry: &'a SharedRegistry, source: Source<'a>) -> OnlineSource<'a> {
+fn online_source<'a>(
+    registry: &'a SharedRegistry,
+    world: &'a DemoWorld,
+    source: Source<'a>,
+) -> OnlineSource<'a> {
     OnlineSource {
         registry,
-        executor: source.player().map(player_ref),
+        world,
+        executor: source.player().map(|p| player_ref(p, world)),
     }
 }
 
@@ -621,6 +633,7 @@ fn online_source<'a>(registry: &'a SharedRegistry, source: Source<'a>) -> Online
 /// profile when `allow_offline` (operators, bans, pardons, whitelist).
 fn resolve_targets(
     registry: &SharedRegistry,
+    world: &DemoWorld,
     source: Source<'_>,
     text: &str,
     allow_offline: bool,
@@ -631,7 +644,7 @@ fn resolve_targets(
     }
     if text.starts_with('@') {
         let selector = Selector::parse_players(text).map_err(|e| e.message())?;
-        let source = online_source(registry, source);
+        let source = online_source(registry, world, source);
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -799,7 +812,7 @@ fn exec_deop(ctx: &mut Ctx) -> Reply {
 }
 
 fn do_op(ctx: &Ctx, target: &str, add: bool) -> Result<Vec<String>, String> {
-    let targets = resolve_targets(ctx.registry, ctx.source, target, true)?;
+    let targets = resolve_targets(ctx.registry, ctx.world, ctx.source, target, true)?;
     let mut lines = Vec::new();
     let mut changed_any = false;
     for target in targets {
@@ -838,7 +851,7 @@ fn exec_ban(ctx: &mut Ctx) -> Reply {
 }
 
 fn do_ban(ctx: &Ctx, target: &str, reason: Option<&str>) -> Result<Vec<String>, String> {
-    let targets = resolve_targets(ctx.registry, ctx.source, target, true)?;
+    let targets = resolve_targets(ctx.registry, ctx.world, ctx.source, target, true)?;
     let stored_reason = reason
         .map(str::to_string)
         .unwrap_or_else(|| DEFAULT_BAN_REASON.to_string());
@@ -880,7 +893,7 @@ fn target_ips(ctx: &Ctx, text: &str) -> Result<Vec<IpAddr>, String> {
     if text.is_empty() {
         return Err(lang::BANIP_INVALID.into());
     }
-    let targets = resolve_targets(ctx.registry, ctx.source, text, false)
+    let targets = resolve_targets(ctx.registry, ctx.world, ctx.source, text, false)
         .map_err(|_| lang::BANIP_INVALID.to_string())?;
     let mut out = Vec::new();
     for target in targets {
@@ -974,7 +987,7 @@ fn exec_pardon(ctx: &mut Ctx) -> Reply {
 }
 
 fn do_pardon(ctx: &Ctx, target: &str) -> Result<Vec<String>, String> {
-    let targets = resolve_targets(ctx.registry, ctx.source, target, true)?;
+    let targets = resolve_targets(ctx.registry, ctx.world, ctx.source, target, true)?;
     let mut lines = Vec::new();
     let mut changed_any = false;
     for target in targets {
@@ -1026,7 +1039,7 @@ fn exec_kick(ctx: &mut Ctx) -> Reply {
 }
 
 fn do_kick(ctx: &Ctx, target: &str, reason: Option<String>) -> Result<Vec<String>, String> {
-    let targets = resolve_targets(ctx.registry, ctx.source, target, false)?;
+    let targets = resolve_targets(ctx.registry, ctx.world, ctx.source, target, false)?;
     let disconnect_reason = reason.unwrap_or_else(|| DEFAULT_KICK_REASON.to_string());
     let mut lines = Vec::new();
     for target in targets {
@@ -1107,7 +1120,7 @@ fn whitelist_target(ctx: &mut Ctx, add: bool) -> Reply {
 }
 
 fn do_whitelist_target(ctx: &Ctx, target: &str, add: bool) -> Result<Vec<String>, String> {
-    let targets = resolve_targets(ctx.registry, ctx.source, target, true)?;
+    let targets = resolve_targets(ctx.registry, ctx.world, ctx.source, target, true)?;
     let mut lines = Vec::new();
     for target in targets {
         let name = target.name().to_string();

@@ -1532,3 +1532,261 @@ fn a_double_slash_command_falls_through_the_tree_to_the_plugin_registry() {
         "the fallback reached the plugin registry, not a parse error"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CMD-16: tags, teams and team messages
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tag_add_list_remove_and_selector_matching() {
+    let env = env();
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s add here"),
+        "Added tag 'here' to tester"
+    );
+    // Adding the same tag twice changes nothing, exactly as vanilla throws.
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s add here"),
+        "Target either already has the tag or has too many tags"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s list"),
+        "tester has 1 tags: here"
+    );
+    // The selector filter sees the tag the command just wrote.
+    assert_eq!(
+        one(&env, &env.tester, "/tag @e[tag=here] list"),
+        "tester has 1 tags: here"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tag @e[tag=!here] list"),
+        "bob has no tags"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s remove here"),
+        "Removed tag 'here' from tester"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tag @s remove here"),
+        "Target does not have this tag"
+    );
+    assert_eq!(one(&env, &env.tester, "/tag @s list"), "tester has no tags");
+}
+
+#[test]
+fn tags_are_saved_with_the_player_record() {
+    let env = env();
+    one(&env, &env.tester, "/tag @s add saved");
+    let blob = env
+        .world
+        .get_meta(&crate::game::player::key(env.tester.uuid))
+        .unwrap()
+        .expect("the command saved the player");
+    let saved = crate::game::player::decode(&blob).expect("a version 3 save");
+    assert_eq!(saved.tags, vec!["saved".to_string()]);
+}
+
+#[test]
+fn team_lifecycle_moves_members_and_lists_them_sorted() {
+    let env = env();
+    assert_eq!(
+        one(&env, &env.tester, "/team add red"),
+        "Created team [red]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team add red"),
+        "A team already exists by that name"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team join red"),
+        "Added tester to team [red]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team join red bob"),
+        "Added bob to team [red]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team list red"),
+        "Team [red] has 2 member(s): bob, tester"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team list"),
+        "There are 1 team(s): [red]"
+    );
+
+    one(&env, &env.tester, "/team add blue");
+    assert_eq!(
+        one(&env, &env.tester, "/team join blue tester"),
+        "Added tester to team [blue]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team list red"),
+        "Team [red] has 1 member(s): bob"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team list blue"),
+        "Team [blue] has 1 member(s): tester"
+    );
+
+    assert_eq!(
+        one(&env, &env.tester, "/team empty blue"),
+        "Removed 1 member(s) from team [blue]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team empty blue"),
+        "Nothing changed. That team is already empty"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team leave bob"),
+        "Removed bob from any team"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team leave bob"),
+        "Removed bob from any team"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team remove red"),
+        "Removed team [red]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team remove red"),
+        "Unknown team 'red'"
+    );
+}
+
+#[test]
+fn team_modify_covers_every_option_and_rejects_bad_input() {
+    let env = env();
+    one(&env, &env.tester, "/team add red");
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red prefix \"<\""),
+        "Team prefix set to <"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red suffix \">\""),
+        "Team suffix set to >"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red color red"),
+        "Updated the color for team §c[red] to red"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red color red"),
+        "Nothing changed. That team already has that color"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red color nope"),
+        "Unknown color 'nope'"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red friendlyFire false"),
+        "Disabled friendly fire for team §c[red]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red friendlyFire false"),
+        "Nothing changed. Friendly fire is already disabled for that team"
+    );
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red seeFriendlyInvisibles false"
+        ),
+        "Team §c[red] can no longer see invisible teammates"
+    );
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red seeFriendlyInvisibles true"
+        ),
+        "Team §c[red] can now see invisible teammates"
+    );
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red nametagVisibility never"
+        ),
+        "Nametag visibility for team §c[red] is now \"Never\""
+    );
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red deathMessageVisibility hideForOwnTeam"
+        ),
+        "Death message visibility for team §c[red] is now \"Hide for own team\""
+    );
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red collisionRule pushOwnTeam"
+        ),
+        "Collision rule for team §c[red] is now \"Push own team\""
+    );
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/team modify red displayName {\"text\":\"Red Team\",\"color\":\"gold\"}"
+        ),
+        "Updated the name of team §c[§6Red Team]"
+    );
+    // A malformed component is an error, not a panic.
+    assert_eq!(
+        one(&env, &env.tester, "/team modify red prefix {"),
+        "Invalid component: unterminated compound at byte 1"
+    );
+
+    let team = crate::team::find(&env.world, "red").expect("team still exists");
+    assert!(!team.friendly_fire);
+    assert_eq!(team.prefix, "<");
+    assert_eq!(team.suffix, ">");
+    assert_eq!(team.color, crate::team::Color::Red);
+    assert_eq!(team.nametag_visibility, crate::team::Visibility::Never);
+    assert_eq!(
+        team.death_message_visibility,
+        crate::team::Visibility::HideForOwnTeam
+    );
+    assert_eq!(team.collision_rule, crate::team::CollisionRule::PushOwnTeam);
+    assert_eq!(team.display_name, "§6Red Team");
+}
+
+#[test]
+fn teammsg_needs_a_team_and_the_tm_alias_works() {
+    let env = env();
+    assert_eq!(
+        one(&env, &env.tester, "/teammsg hello"),
+        "You must be on a team to message your team"
+    );
+    one(&env, &env.tester, "/team add red");
+    one(&env, &env.tester, "/team join red");
+    assert_eq!(
+        one(&env, &env.tester, "/teammsg hello team"),
+        "-> [red] <tester> hello team"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tm hello again"),
+        "-> [red] <tester> hello again"
+    );
+}
+
+#[test]
+fn team_join_accepts_a_selector_and_rejects_an_unknown_team() {
+    let env = env();
+    one(&env, &env.tester, "/team add red");
+    assert_eq!(
+        one(&env, &env.tester, "/team join red @a[name=bob]"),
+        "Added bob to team [red]"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/team join missing @a"),
+        "Unknown team 'missing'"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/tag @e[type=player] list"),
+        "There are no tags on the 2 entities"
+    );
+}

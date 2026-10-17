@@ -124,6 +124,8 @@ pub struct Entity {
     pub pitch: f32,
     pub age: u32,
     pub kind: Kind,
+    /// Scoreboard tags, the `/tag` set on this entity (CMD-16).
+    pub tags: std::collections::BTreeSet<String>,
     /// Position and yaw as last sent to clients.
     sent: (f64, f64, f64, f32),
     /// Removed at the end of this tick.
@@ -211,6 +213,68 @@ pub fn for_each_named(f: &mut dyn FnMut(&'static str, Vector3)) {
     }
 }
 
+/// An owned snapshot of one non-player entity, for selectors and `/tag`.
+#[derive(Clone, Debug)]
+pub struct Selectable {
+    pub id: i32,
+    pub uuid: u128,
+    pub kind: &'static str,
+    pub pos: Vector3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub alive: bool,
+    pub tags: Vec<String>,
+}
+
+/// Every loaded non-player entity, copied out so no lock is held by a caller.
+pub fn selectable() -> Vec<Selectable> {
+    entities()
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| Selectable {
+            id: e.id,
+            uuid: e.uuid,
+            kind: e.type_name(),
+            pos: e.pos(),
+            yaw: e.yaw,
+            pitch: e.pitch,
+            alive: !e.dead,
+            tags: e.tags.iter().cloned().collect(),
+        })
+        .collect()
+}
+
+/// Add `tag` to entity `id`; `false` when it already had it (or is gone).
+pub fn add_tag(id: i32, tag: &str) -> bool {
+    entities()
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|e| e.id == id)
+        .is_some_and(|e| e.tags.insert(tag.to_string()))
+}
+
+/// Remove `tag` from entity `id`; `false` when it did not have it (or is gone).
+pub fn remove_tag(id: i32, tag: &str) -> bool {
+    entities()
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|e| e.id == id)
+        .is_some_and(|e| e.tags.remove(tag))
+}
+
+/// The tags on entity `id`, if it is still loaded.
+pub fn tags(id: i32) -> Option<Vec<String>> {
+    entities()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|e| e.id == id)
+        .map(|e| e.tags.iter().cloned().collect())
+}
+
 /// Entity ids for everything that is not a player.
 ///
 /// Counted up from a long way above the player range, which counts up from
@@ -245,6 +309,7 @@ fn push(body: Body, yaw: f32, kind: Kind) -> i32 {
         pitch: 0.0,
         age: 0,
         kind,
+        tags: std::collections::BTreeSet::new(),
         sent: (p.x, p.y, p.z, yaw),
         dead: false,
         rested: false,
@@ -1832,6 +1897,7 @@ mod tests {
             pitch: 0.0,
             age: 0,
             kind: Kind::XpOrb(XpOrb { value }),
+            tags: std::collections::BTreeSet::new(),
             sent: (x, 64.0, 0.0, 0.0),
             dead: false,
             rested: false,
