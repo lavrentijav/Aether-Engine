@@ -842,20 +842,21 @@ fn pack_tags() -> Option<&'static aether_worldgen::vanilla::tags::Tags> {
     .as_ref()
 }
 
-/// Every tag the built-in fallback knows. A tag outside this set is refused
-/// rather than silently matching a hand-written subset.
+/// Every tag the built-in fallback knows **exactly**.
+///
+/// The set is deliberately small: each entry is either a fixed member list or
+/// a family rule that matches the whole 1.21.11 tag and nothing outside it. A
+/// tag outside this set is refused (`Unknown block tag`) rather than matched
+/// approximately, so a filtered command can never touch cells vanilla would
+/// leave alone because the built-in table guessed.
 fn known_builtin_tag(id: &str) -> bool {
     const NAMES: &[&str] = &[
         "air",
-        "base_stone_overworld",
         "banners",
+        "base_stone_overworld",
         "beds",
         "buttons",
         "candles",
-        "carpets",
-        "concrete",
-        "concrete_powder",
-        "coral",
         "coral_blocks",
         "coral_plants",
         "crops",
@@ -864,8 +865,6 @@ fn known_builtin_tag(id: &str) -> bool {
         "fence_gates",
         "fences",
         "flowers",
-        "glass",
-        "glass_panes",
         "leaves",
         "logs",
         "planks",
@@ -882,40 +881,69 @@ fn known_builtin_tag(id: &str) -> bool {
         "stone_bricks",
         "terracotta",
         "trapdoors",
-        "walls",
+        "wall_corals",
         "wall_signs",
+        "walls",
         "wooden_buttons",
         "wooden_doors",
         "wooden_fences",
-        "wooden_fence_gates",
         "wooden_pressure_plates",
         "wooden_slabs",
         "wooden_stairs",
         "wooden_trapdoors",
         "wool",
+        "wool_carpets",
     ];
     NAMES.contains(&id)
 }
 
+/// The sixteen dye colours, for the tags that are "every coloured variant".
+const DYE_COLOURS: [&str; 16] = [
+    "white",
+    "orange",
+    "magenta",
+    "light_blue",
+    "yellow",
+    "lime",
+    "pink",
+    "gray",
+    "light_gray",
+    "cyan",
+    "purple",
+    "blue",
+    "brown",
+    "green",
+    "red",
+    "black",
+];
+
+fn is_dye_colour(short: &str, suffix: &str) -> bool {
+    short
+        .strip_suffix(suffix)
+        .is_some_and(|prefix| DYE_COLOURS.contains(&prefix))
+}
+
 /// Whether `name` belongs to a wood family, for the `wooden_*` tags.
 ///
-/// The family is the *longest* matching prefix, so `dark_oak_stairs` is dark
-/// oak and `pale_oak_stairs` pale oak rather than `dark`/`pale` — the bug a
-/// first-segment split produces.
+/// The family is the longest matching prefix, so `dark_oak_stairs` is dark oak
+/// and `pale_oak_stairs` pale oak. The remainder must be a plain item suffix:
+/// bamboo has an extra `bamboo_mosaic` family that is *not* wooden, so a
+/// `_mosaic_…` remainder is excluded.
 fn is_wood(name: &str) -> bool {
     const WOODS: &[&str] = &[
         "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "bamboo",
         "crimson", "warped", "pale_oak",
     ];
     WOODS.iter().any(|wood| {
-        name.strip_prefix(wood)
-            .is_some_and(|rest| rest.starts_with('_'))
+        name.strip_prefix(wood).is_some_and(|rest| {
+            rest.starts_with('_') && !rest.trim_start_matches('_').starts_with("mosaic")
+        })
     })
 }
 
 /// The vanilla `#minecraft:small_flowers` set.
 fn is_small_flower(short: &str) -> bool {
-    short.ends_with("_tulip")
+    (short.ends_with("_tulip") && !short.starts_with("potted_"))
         || matches!(
             short,
             "dandelion"
@@ -930,13 +958,10 @@ fn is_small_flower(short: &str) -> bool {
                 | "torchflower"
                 | "closed_eyeblossom"
                 | "open_eyeblossom"
-                | "pink_petals"
-                | "wildflowers"
-                | "cactus_flower"
         )
 }
 
-/// The tall two-block flowers vanilla folds into `#minecraft:flowers`.
+/// The tall two-block flowers in `#minecraft:flowers`.
 fn is_tall_flower(short: &str) -> bool {
     matches!(
         short,
@@ -965,11 +990,7 @@ fn builtin_tag_matches(tag: &str, name: &str) -> bool {
         "leaves" => suffix("_leaves"),
         "saplings" => suffix("_sapling"),
         "wool" => suffix("_wool"),
-        "concrete" => suffix("_concrete"),
-        "concrete_powder" => suffix("_concrete_powder"),
-        "terracotta" => suffix("_terracotta"),
-        "glass" => suffix("_glass"),
-        "glass_panes" => suffix("_pane") || short == "glass_pane",
+        "terracotta" => short == "terracotta" || suffix("_terracotta"),
         "stone_bricks" => matches!(
             short,
             "stone_bricks"
@@ -1005,25 +1026,22 @@ fn builtin_tag_matches(tag: &str, name: &str) -> bool {
                         | "cherry_leaves"
                         | "chorus_flower"
                         | "spore_blossom"
+                        | "pink_petals"
+                        | "wildflowers"
+                        | "cactus_flower"
                 )
         }
         "small_flowers" => is_small_flower(short),
         "crops" => matches!(
             short,
-            "wheat"
-                | "carrots"
-                | "potatoes"
-                | "beetroots"
-                | "sweet_berry_bush"
-                | "melon_stem"
-                | "pumpkin_stem"
+            "wheat" | "carrots" | "potatoes" | "beetroots" | "torchflower_crop" | "pitcher_crop"
         ),
-        "rails" => suffix("_rail"),
+        "rails" => short == "rail" || suffix("_rail"),
         "banners" => suffix("_banner"),
         "beds" => suffix("_bed"),
         "buttons" => suffix("_button"),
-        "candles" => suffix("_candle"),
-        "carpets" => suffix("_carpet"),
+        "candles" => short == "candle" || suffix("_candle"),
+        "wool_carpets" => is_dye_colour(short, "_carpet"),
         "doors" => suffix("_door") && !suffix("_trapdoor"),
         "fence_gates" => suffix("_fence_gate"),
         "fences" => suffix("_fence"),
@@ -1035,19 +1053,12 @@ fn builtin_tag_matches(tag: &str, name: &str) -> bool {
         "stairs" => suffix("_stairs"),
         "trapdoors" => suffix("_trapdoor"),
         "walls" => suffix("_wall") && !suffix("_wall_sign") && !suffix("_wall_torch"),
-        "coral" => {
-            short.starts_with("tube_coral")
-                || short.starts_with("brain_coral")
-                || short.starts_with("bubble_coral")
-                || short.starts_with("fire_coral")
-                || short.starts_with("horn_coral")
-        }
         "coral_blocks" => suffix("_coral_block"),
         "coral_plants" => suffix("_coral_plant"),
+        "wall_corals" => suffix("_wall_fan"),
         "wooden_buttons" => suffix("_button") && is_wood(short),
         "wooden_doors" => suffix("_door") && !suffix("_trapdoor") && is_wood(short),
         "wooden_fences" => suffix("_fence") && is_wood(short),
-        "wooden_fence_gates" => suffix("_fence_gate") && is_wood(short),
         "wooden_pressure_plates" => suffix("_pressure_plate") && is_wood(short),
         "wooden_slabs" => suffix("_slab") && is_wood(short),
         "wooden_stairs" => suffix("_stairs") && is_wood(short),
@@ -2324,6 +2335,48 @@ mod tests {
             wooden_stairs.matches(dark_oak) && wooden_stairs.matches(pale_oak),
             "two-word wood families must be recognised"
         );
+        assert!(wooden_stairs.matches(block("minecraft:bamboo_stairs")));
+        assert!(
+            !wooden_stairs.matches(block("minecraft:bamboo_mosaic_stairs")),
+            "bamboo mosaic is not a wooden family"
+        );
+        let wooden_slabs = parse_filter("#minecraft:wooden_slabs").unwrap();
+        assert!(wooden_slabs.matches(block("minecraft:oak_slab")));
+        assert!(!wooden_slabs.matches(block("minecraft:bamboo_mosaic_slab")));
+
+        // Flowers: the potted variants are not in either flower tag, and
+        // `pink_petals`/`wildflowers`/`cactus_flower` are in `#flowers` only.
+        let flowers = parse_filter("#minecraft:flowers").unwrap();
+        assert!(flowers.matches(block("minecraft:poppy")));
+        assert!(flowers.matches(block("minecraft:red_tulip")));
+        assert!(flowers.matches(block("minecraft:pink_petals")));
+        assert!(!flowers.matches(block("minecraft:potted_red_tulip")));
+        assert!(!flowers.matches(block("minecraft:potted_poppy")));
+        let small_flowers = parse_filter("#minecraft:small_flowers").unwrap();
+        assert!(small_flowers.matches(block("minecraft:red_tulip")));
+        assert!(!small_flowers.matches(block("minecraft:pink_petals")));
+        assert!(!small_flowers.matches(block("minecraft:potted_red_tulip")));
+
+        // Crops: the two crop blocks added after 1.20 are in, the berry bush
+        // and the stems are not.
+        let crops = parse_filter("#minecraft:crops").unwrap();
+        for crop in [
+            "minecraft:wheat",
+            "minecraft:carrots",
+            "minecraft:potatoes",
+            "minecraft:beetroots",
+            "minecraft:torchflower_crop",
+            "minecraft:pitcher_crop",
+        ] {
+            assert!(crops.matches(block(crop)), "{crop}");
+        }
+        for not_crop in [
+            "minecraft:sweet_berry_bush",
+            "minecraft:melon_stem",
+            "minecraft:pumpkin_stem",
+        ] {
+            assert!(!crops.matches(block(not_crop)), "{not_crop}");
+        }
 
         let signs = parse_filter("#minecraft:signs").unwrap();
         assert!(signs.matches(block("minecraft:oak_sign")));
@@ -2333,7 +2386,20 @@ mod tests {
 
         assert!(parse_filter("not_a_block").is_err());
         assert!(parse_filter("oak_stairs[facing=upside]").is_err());
-        // A tag the built-in table cannot represent fails closed.
-        assert!(parse_filter("#minecraft:definitely_not_a_tag").is_err());
+        // Tags the built-in table cannot represent exactly fail closed,
+        // including names that do not exist in 1.21.11 at all.
+        for unknown in [
+            "#minecraft:definitely_not_a_tag",
+            "#minecraft:wooden_fence_gates",
+            "#minecraft:concrete",
+            "#minecraft:concrete_powder",
+            "#minecraft:glass",
+            "#minecraft:glass_panes",
+            "#minecraft:carpets",
+            "#minecraft:coral",
+            "#minecraft:wooden_shelves",
+        ] {
+            assert!(parse_filter(unknown).is_err(), "{unknown}");
+        }
     }
 }
