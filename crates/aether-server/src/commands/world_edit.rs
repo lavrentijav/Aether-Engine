@@ -56,7 +56,7 @@ const NODE_SETBLOCK: &str = "minecraft.command.setblock";
 const NODE_FILL: &str = "minecraft.command.fill";
 const NODE_CLONE: &str = "minecraft.command.clone";
 
-const ERR_OUTSIDE: &str = "That position is outside of the world";
+const ERR_OUTSIDE: &str = "That position is out of this world!";
 const ERR_OVERLAP: &str = "The source and destination areas cannot overlap";
 const ERR_FILL_FAILED: &str = "No blocks were filled";
 const ERR_CLONE_FAILED: &str = "No blocks were cloned";
@@ -65,7 +65,7 @@ const ERR_BLOCK_ENTITY: &str = "Block entity data is not supported";
 
 fn too_many(volume: u128) -> String {
     format!(
-        "Too many blocks in the specified area (maximum {}, specified {})",
+        "Too many blocks in the specified area (maximum {}, but specified {})",
         MAX_VOLUME, volume
     )
 }
@@ -880,7 +880,6 @@ fn known_builtin_tag(id: &str) -> bool {
         "stairs",
         "standing_signs",
         "stone_bricks",
-        "tall_flowers",
         "terracotta",
         "trapdoors",
         "walls",
@@ -898,19 +897,61 @@ fn known_builtin_tag(id: &str) -> bool {
     NAMES.contains(&id)
 }
 
-/// Which wood family a name belongs to, for the `wooden_*` tags.
+/// Whether `name` belongs to a wood family, for the `wooden_*` tags.
+///
+/// The family is the *longest* matching prefix, so `dark_oak_stairs` is dark
+/// oak and `pale_oak_stairs` pale oak rather than `dark`/`pale` — the bug a
+/// first-segment split produces.
 fn is_wood(name: &str) -> bool {
     const WOODS: &[&str] = &[
         "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "bamboo",
         "crimson", "warped", "pale_oak",
     ];
-    let family = name.split('_').next().unwrap_or(name);
-    WOODS.contains(&family)
+    WOODS.iter().any(|wood| {
+        name.strip_prefix(wood)
+            .is_some_and(|rest| rest.starts_with('_'))
+    })
+}
+
+/// The vanilla `#minecraft:small_flowers` set.
+fn is_small_flower(short: &str) -> bool {
+    short.ends_with("_tulip")
+        || matches!(
+            short,
+            "dandelion"
+                | "poppy"
+                | "blue_orchid"
+                | "allium"
+                | "azure_bluet"
+                | "oxeye_daisy"
+                | "cornflower"
+                | "lily_of_the_valley"
+                | "wither_rose"
+                | "torchflower"
+                | "closed_eyeblossom"
+                | "open_eyeblossom"
+                | "pink_petals"
+                | "wildflowers"
+                | "cactus_flower"
+        )
+}
+
+/// The tall two-block flowers vanilla folds into `#minecraft:flowers`.
+fn is_tall_flower(short: &str) -> bool {
+    matches!(
+        short,
+        "sunflower" | "lilac" | "rose_bush" | "peony" | "pitcher_plant"
+    )
 }
 
 fn builtin_tag_matches(tag: &str, name: &str) -> bool {
     let short = name.strip_prefix("minecraft:").unwrap_or(name);
     let suffix = |s: &str| short.strip_suffix(s).is_some();
+    // Signs do not include the hanging variants: vanilla's `#signs` is the
+    // standing and wall signs only, and `#standing_signs` likewise excludes
+    // the ceiling-hung ones.
+    let is_sign = suffix("_sign") && !suffix("_hanging_sign");
+    let is_wall_sign = suffix("_wall_sign") && !suffix("_wall_hanging_sign");
     match tag {
         "air" => matches!(short, "air" | "cave_air" | "void_air"),
         "logs" => {
@@ -954,26 +995,19 @@ fn builtin_tag_matches(tag: &str, name: &str) -> bool {
             "stone" | "granite" | "diorite" | "andesite" | "deepslate" | "tuff"
         ),
         "flowers" => {
-            suffix("_tulip")
+            is_small_flower(short)
+                || is_tall_flower(short)
                 || matches!(
                     short,
-                    "dandelion"
-                        | "poppy"
-                        | "blue_orchid"
-                        | "allium"
-                        | "azure_bluet"
-                        | "oxeye_daisy"
-                        | "cornflower"
-                        | "lily_of_the_valley"
-                        | "wither_rose"
-                        | "torchflower"
+                    "flowering_azalea"
+                        | "flowering_azalea_leaves"
+                        | "mangrove_propagule"
+                        | "cherry_leaves"
+                        | "chorus_flower"
+                        | "spore_blossom"
                 )
         }
-        "small_flowers" => builtin_tag_matches("flowers", name),
-        "tall_flowers" => matches!(
-            short,
-            "sunflower" | "lilac" | "rose_bush" | "peony" | "pitcher_plant"
-        ),
+        "small_flowers" => is_small_flower(short),
         "crops" => matches!(
             short,
             "wheat"
@@ -994,9 +1028,9 @@ fn builtin_tag_matches(tag: &str, name: &str) -> bool {
         "fence_gates" => suffix("_fence_gate"),
         "fences" => suffix("_fence"),
         "pressure_plates" => suffix("_pressure_plate"),
-        "signs" => suffix("_sign") && !suffix("_wall_sign"),
-        "standing_signs" => suffix("_sign") && !suffix("_wall_sign"),
-        "wall_signs" => suffix("_wall_sign"),
+        "signs" => is_sign,
+        "standing_signs" => is_sign && !is_wall_sign,
+        "wall_signs" => is_wall_sign,
         "slabs" => suffix("_slab"),
         "stairs" => suffix("_stairs"),
         "trapdoors" => suffix("_trapdoor"),
@@ -1432,8 +1466,14 @@ fn clone(
         }
     }
 
-    let mut writes: Vec<Write> = Vec::new();
-    let mut copied_sources: Vec<(i32, i32, i32)> = Vec::new();
+    // Every selected source block is a destination write, even when the
+    // destination already holds that state: `move` clears the source first,
+    // and a self-move (or any overlap) must have the destination write
+    // override its own clear. BulkEdit keeps the last staged state per
+    // position, so appending the destination writes after the clears is what
+    // makes the block survive.
+    let mut destination_writes: Vec<Write> = Vec::new();
+    let mut copied_sources: Vec<(i32, i32, i32, BlockStateId)> = Vec::new();
     for &(sx, sy, sz, state) in &sources {
         if mask == CloneMask::Masked && is_air(state) {
             continue;
@@ -1447,53 +1487,63 @@ fn clone(
         let y = destination.y + (sy - source.min.1);
         let z = destination.z + (sz - source.min.2);
         let old = world.get_block(x, y, z);
-        copied_sources.push((sx, sy, sz));
-        if old != state {
-            writes.push(Write {
-                x,
-                y,
-                z,
-                old,
-                new: state,
-            });
-        }
+        copied_sources.push((sx, sy, sz, state));
+        destination_writes.push(Write {
+            x,
+            y,
+            z,
+            old,
+            new: state,
+        });
     }
 
     if copied_sources.is_empty() {
         return Err(ERR_CLONE_FAILED.into());
     }
 
-    // `move` clears the copied source cells, then the destination writes
-    // override any cell that is part of both (an overlapping force/move).
-    let mut staged = Vec::new();
+    // `move` clears the copied source cells; the destination writes are
+    // staged afterwards so an overlapping destination is written, not erased.
+    let mut source_clears: Vec<Write> = Vec::new();
     if mode == CloneMode::Move {
-        for (x, y, z) in &copied_sources {
-            let old = world.get_block(*x, *y, *z);
+        for &(x, y, z, _) in &copied_sources {
+            let old = world.get_block(x, y, z);
             if !is_air(old) {
-                staged.push(Write {
-                    x: *x,
-                    y: *y,
-                    z: *z,
+                source_clears.push(Write {
+                    x,
+                    y,
+                    z,
                     old,
                     new: BlockStateId::AIR,
                 });
             }
         }
     }
-    staged.extend(writes.iter().copied());
+    let mut staged = source_clears.clone();
+    staged.extend(destination_writes.iter().copied());
 
     let actor = actor(ctx);
     let edit = stage(world, actor, &staged)?;
-    let committed = commit(ctx, edit, strict)?;
+    commit(ctx, edit, strict)?;
 
-    for w in &writes {
+    let destination_cells: BTreeSet<(i32, i32, i32)> =
+        destination_writes.iter().map(|w| (w.x, w.y, w.z)).collect();
+    for w in &destination_writes {
         clear_replaced_container(world, w.x, w.y, w.z, w.old, w.new);
+    }
+    for w in &source_clears {
+        // A cell that is also a destination was overwritten above and keeps
+        // its block (and its container record).
+        if destination_cells.contains(&(w.x, w.y, w.z)) {
+            continue;
+        }
+        // `/clone` copies block states only, so a moved container's contents
+        // cannot follow it. Drop them at the source rather than deleting them.
+        spill_container(world, actor, w.x, w.y, w.z, w.old);
     }
 
     // Vanilla reports the number of source blocks it copied, not the number of
     // destination states that happened to differ; a successful clone that
     // overwrites identical blocks still says how many it cloned.
-    let _ = committed;
     Ok(format!(
         "Successfully cloned {} block(s)",
         copied_sources.len()
@@ -1652,7 +1702,7 @@ mod tests {
         let world = test_world();
         let head = world.journal().head();
         let out = run(&world, "setblock 0 400 0 minecraft:stone");
-        assert_eq!(out, vec!["That position is outside of the world"]);
+        assert_eq!(out, vec!["That position is out of this world!"]);
         assert_eq!(world.journal().head(), head);
     }
 
@@ -1684,7 +1734,7 @@ mod tests {
         let out = run(&world, "fill 0 200 0 32 231 31 minecraft:stone");
         assert_eq!(
             out,
-            vec!["Too many blocks in the specified area (maximum 32768, specified 33792)"]
+            vec!["Too many blocks in the specified area (maximum 32768, but specified 33792)"]
         );
         assert_eq!(world.journal().head(), head);
         assert_eq!(world.get_block(0, 200, 0), air());
@@ -1917,6 +1967,67 @@ mod tests {
     }
 
     #[test]
+    fn clone_move_into_itself_keeps_the_block() {
+        // The brief's "clone into itself" edge case. A plain clone refuses the
+        // overlap, but `move` may overlap: clearing the source and then writing
+        // the copied block back must leave the cell occupied.
+        let world = test_world();
+        assert_eq!(
+            run(&world, "setblock 1 230 1 minecraft:stone"),
+            vec!["Changed the block at 1, 230, 1"]
+        );
+        let out = run(&world, "clone 1 230 1 1 230 1 1 230 1 move");
+        assert_eq!(out, vec!["Successfully cloned 1 block(s)"]);
+        assert_eq!(
+            world.get_block(1, 230, 1),
+            block_ids::STONE,
+            "a self-move must not delete the block it copied"
+        );
+
+        // A partially overlapping move behaves the same on the shared cells.
+        assert_eq!(
+            run(&world, "fill 2 230 1 4 230 1 minecraft:dirt"),
+            vec!["Successfully filled 3 block(s)"]
+        );
+        assert_eq!(
+            run(&world, "clone 2 230 1 4 230 1 3 230 1 move"),
+            vec!["Successfully cloned 3 block(s)"]
+        );
+        assert_eq!(
+            world.get_block(2, 230, 1),
+            air(),
+            "the uncovered source clears"
+        );
+        for x in 3..=5 {
+            assert_eq!(
+                world.get_block(x, 230, 1),
+                block_ids::DIRT,
+                "x={x} must survive the overlapping move"
+            );
+        }
+    }
+
+    #[test]
+    fn clone_move_clears_the_source_container_record() {
+        let world = test_world();
+        assert_eq!(
+            run(&world, "setblock 5 230 5 minecraft:chest"),
+            vec!["Changed the block at 5, 230, 5"]
+        );
+        containers::with(&world, (5, 230, 5), containers::ContainerKind::Chest, |c| {
+            c.slots[0] = Some(Stack::named("minecraft:stone", 4));
+        });
+        let out = run(&world, "clone 5 230 5 5 230 5 6 230 5 move");
+        assert_eq!(out, vec!["Successfully cloned 1 block(s)"]);
+        assert_eq!(world.get_block(6, 230, 5), block("minecraft:chest"));
+        let source = containers::snapshot(&world, (5, 230, 5), containers::ContainerKind::Chest);
+        assert!(
+            source.slots.iter().all(Option::is_none),
+            "a moved-from container must not keep its old record"
+        );
+    }
+
+    #[test]
     fn clone_filtered_copies_only_matching_source_blocks() {
         let world = test_world();
         assert_eq!(
@@ -1995,7 +2106,7 @@ mod tests {
         let out = run(&world, "clone 0 200 0 32 231 31 40 200 40");
         assert_eq!(
             out,
-            vec!["Too many blocks in the specified area (maximum 32768, specified 33792)"]
+            vec!["Too many blocks in the specified area (maximum 32768, but specified 33792)"]
         );
         assert_eq!(world.journal().head(), head);
     }
@@ -2195,6 +2306,30 @@ mod tests {
 
         let wooden_stairs = parse_filter("#minecraft:wooden_stairs").unwrap();
         assert!(wooden_stairs.matches(east));
+        let dark_oak = BlockStateId(
+            props::state_with(
+                blocks::block_id_of("minecraft:dark_oak_stairs").unwrap(),
+                &[("facing", "east")],
+            )
+            .unwrap(),
+        );
+        let pale_oak = BlockStateId(
+            props::state_with(
+                blocks::block_id_of("minecraft:pale_oak_stairs").unwrap(),
+                &[("facing", "east")],
+            )
+            .unwrap(),
+        );
+        assert!(
+            wooden_stairs.matches(dark_oak) && wooden_stairs.matches(pale_oak),
+            "two-word wood families must be recognised"
+        );
+
+        let signs = parse_filter("#minecraft:signs").unwrap();
+        assert!(signs.matches(block("minecraft:oak_sign")));
+        assert!(signs.matches(block("minecraft:oak_wall_sign")));
+        assert!(!signs.matches(block("minecraft:oak_hanging_sign")));
+        assert!(!signs.matches(block("minecraft:oak_wall_hanging_sign")));
 
         assert!(parse_filter("not_a_block").is_err());
         assert!(parse_filter("oak_stairs[facing=upside]").is_err());

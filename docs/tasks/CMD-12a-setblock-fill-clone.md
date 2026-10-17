@@ -23,11 +23,13 @@ journal.
 - `placement.rs`, `game/provenance.rs`, `aether_world` block-state parsing from CMD-06b.
 
 ## Edge cases to test explicitly
-- `/setblock keep` on an occupied cell → `That block is already <block>`, no change/journal.
-- `/setblock destroy` on a non-air block drops its items.
-- `/fill hollow` vs `outline` vs `replace` filter; 32769 blocks refused; from/to order irrelevant.
-- `/clone masked` copies only non-air; `filtered` with a filter; `force` overwrites; normal into a
-  non-air destination is refused.
+- `/setblock keep` on an occupied cell → `Could not set the block` (1.21.11 en_us), no
+  change/journal.
+- `/setblock destroy` on a non-air block drops its items (and a container's contents).
+- `/fill hollow` vs `outline` vs `replace <filter>`; 32769 blocks refused; from/to order irrelevant.
+- `/clone masked` copies only non-air; `filtered` with a filter; `replace` overwrites a non-air
+  destination; `normal` refuses an overlapping source/destination; `force`/`move` allow it (and a
+  self-move keeps the block).
 - permission level 2 only.
 
 ## Done criteria
