@@ -27,6 +27,7 @@ pub mod feedback;
 pub mod pager;
 pub mod query;
 pub mod registry;
+pub mod selector;
 mod snbt;
 pub mod source;
 pub mod tree;
