@@ -364,7 +364,7 @@ struct WorldSource<'a> {
     executor: Option<EntityRef>,
 }
 
-fn player_ref(handle: &PlayerHandle, teams: &team::TeamIndex) -> EntityRef {
+pub(crate) fn player_ref(handle: &PlayerHandle, teams: &team::TeamIndex) -> EntityRef {
     let pos = handle.pos();
     // One guard for every field read from the player state: two `handle.game()`
     // temporaries in one struct literal would live to the end of the

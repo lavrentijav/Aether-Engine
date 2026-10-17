@@ -69,8 +69,10 @@ pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
             let lore: &[String] = display.map(|d| d.lore.as_slice()).unwrap_or(&[]);
             let glint = display.is_some_and(|d| d.glint);
             let model = display.and_then(|d| d.model);
+            let enchanted = v.component_enchantments > 0 && !s.enchantments.is_empty();
             let added = (s.damage > 0) as i32
                 + potion.is_some() as i32
+                + enchanted as i32
                 + name.is_some() as i32
                 + !lore.is_empty() as i32
                 + glint as i32
@@ -84,6 +86,9 @@ pub fn write_stack(v: &Version, p: &mut PacketOut, stack: Option<&Stack>) {
             }
             if let Some(potion) = potion {
                 write_potion_contents(v, p, potion);
+            }
+            if enchanted {
+                write_enchantments(v, p, s);
             }
             if let Some(name) = name {
                 p.var_int(v.component_custom_name)
@@ -126,6 +131,15 @@ fn potion_contents(s: &Stack) -> Option<u16> {
         return None;
     }
     Some(s.potion.unwrap_or(crate::game::brewing::WATER))
+}
+
+/// Append `minecraft:enchantments`: a list of `(registry id, level)` pairs.
+fn write_enchantments(v: &Version, p: &mut PacketOut, s: &Stack) {
+    p.var_int(v.component_enchantments)
+        .var_int(s.enchantments.len() as i32);
+    for e in &s.enchantments {
+        p.var_int(e.id as i32).var_int(e.level as i32);
+    }
 }
 
 /// Append `minecraft:potion_contents`, the component that names the potion.
@@ -2472,5 +2486,39 @@ mod tests {
             assert_eq!(update_id(v), expected, "{} update", v.name);
             assert_eq!(remove_id(v), expected, "{} remove", v.name);
         }
+    }
+
+    #[test]
+    fn an_enchanted_stack_carries_the_enchantments_component_on_1_21_11() {
+        let v = &crate::protocol::modern::version::V1_21_11;
+        let mut s = Stack::named("minecraft:diamond_sword", 1);
+        s.add_enchantment(33, 3); // sharpness
+        s.add_enchantment(40, 2); // unbreaking
+        let mut p = PacketOut::new(0);
+        write_stack(v, &mut p, Some(&s));
+        let body = p.body()[1..].to_vec();
+        let mut pin = crate::proto::PacketIn::new(&body);
+        assert_eq!(pin.var_int().unwrap(), 1, "count");
+        assert_eq!(
+            pin.var_int().unwrap(),
+            v.item_id("minecraft:diamond_sword").unwrap()
+        );
+        let added = pin.var_int().unwrap();
+        assert_eq!(pin.var_int().unwrap(), 0, "nothing removed");
+        let mut seen = 0;
+        for _ in 0..added {
+            let id = pin.var_int().unwrap();
+            if id == v.component_enchantments {
+                seen += 1;
+                assert_eq!(pin.var_int().unwrap(), 2, "two enchantments");
+                assert_eq!(pin.var_int().unwrap(), 33);
+                assert_eq!(pin.var_int().unwrap(), 3);
+                assert_eq!(pin.var_int().unwrap(), 40);
+                assert_eq!(pin.var_int().unwrap(), 2);
+            } else {
+                panic!("unexpected component {id}");
+            }
+        }
+        assert_eq!(seen, 1, "the enchantments component is present once");
     }
 }

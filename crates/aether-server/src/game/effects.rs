@@ -53,6 +53,69 @@ pub const WEAVING: u8 = 36;
 pub const OOZING: u8 = 37;
 pub const INFESTED: u8 = 38;
 
+/// The `minecraft:mob_effect` registry, in protocol order: canonical name,
+/// id and the 1.21.11 `en_us` display name. Effects append, so an id is
+/// stable across the releases this codec speaks.
+pub static MOB_EFFECTS: &[(&str, u8, &str)] = &[
+    ("speed", 0, "Speed"),
+    ("slowness", 1, "Slowness"),
+    ("haste", 2, "Haste"),
+    ("mining_fatigue", 3, "Mining Fatigue"),
+    ("strength", 4, "Strength"),
+    ("instant_health", 5, "Instant Health"),
+    ("instant_damage", 6, "Instant Damage"),
+    ("jump_boost", 7, "Jump Boost"),
+    ("nausea", 8, "Nausea"),
+    ("regeneration", 9, "Regeneration"),
+    ("resistance", 10, "Resistance"),
+    ("fire_resistance", 11, "Fire Resistance"),
+    ("water_breathing", 12, "Water Breathing"),
+    ("invisibility", 13, "Invisibility"),
+    ("blindness", 14, "Blindness"),
+    ("night_vision", 15, "Night Vision"),
+    ("hunger", 16, "Hunger"),
+    ("weakness", 17, "Weakness"),
+    ("poison", 18, "Poison"),
+    ("wither", 19, "Wither"),
+    ("health_boost", 20, "Health Boost"),
+    ("absorption", 21, "Absorption"),
+    ("saturation", 22, "Saturation"),
+    ("glowing", 23, "Glowing"),
+    ("levitation", 24, "Levitation"),
+    ("luck", 25, "Luck"),
+    ("unluck", 26, "Bad Luck"),
+    ("slow_falling", 27, "Slow Falling"),
+    ("conduit_power", 28, "Conduit Power"),
+    ("dolphins_grace", 29, "Dolphin's Grace"),
+    ("bad_omen", 30, "Bad Omen"),
+    ("hero_of_the_village", 31, "Hero of the Village"),
+    ("darkness", 32, "Darkness"),
+    ("trial_omen", 33, "Trial Omen"),
+    ("raid_omen", 34, "Raid Omen"),
+    ("wind_charged", 35, "Wind Charged"),
+    ("weaving", 36, "Weaving"),
+    ("oozing", 37, "Oozing"),
+    ("infested", 38, "Infested"),
+    ("breath_of_the_nautilus", 39, "Breath of the Nautilus"),
+];
+
+/// The effect called `name`, with or without the `minecraft:` namespace.
+pub fn by_name(name: &str) -> Option<(u8, &'static str)> {
+    let short = name.strip_prefix("minecraft:").unwrap_or(name);
+    MOB_EFFECTS
+        .iter()
+        .find(|(n, _, _)| *n == short)
+        .map(|(_, id, display)| (*id, *display))
+}
+
+/// The 1.21.11 `en_us` display name of effect `id`.
+pub fn display(id: u8) -> &'static str {
+    MOB_EFFECTS
+        .iter()
+        .find(|(_, i, _)| *i == id)
+        .map_or("Unknown effect", |(_, _, display)| *display)
+}
+
 /// Whether an effect takes hold immediately rather than over time. Vanilla's
 /// `InstantenousMobEffect`: instant health heals and instant damage hurts, and
 /// the effect itself is never added to the entity.
@@ -388,8 +451,20 @@ pub fn event(entity_id: i32, e: Effect) -> ServerEvent<'static> {
 
 /// Give `handle` the effect `e`, telling their client and everyone watching.
 pub fn give(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld, e: Effect) {
+    try_give(handle, registry, world, e);
+}
+
+/// [`give`], reporting whether the effect was applied. A stronger or
+/// infinite running effect is not replaced, which is vanilla's `addEffect`
+/// returning `false` and what `/effect give` reports as a failure.
+pub fn try_give(
+    handle: &PlayerHandle,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    e: Effect,
+) -> bool {
     if !handle.full() {
-        return;
+        return false;
     }
     let shown = {
         let mut st = handle.game();
@@ -408,6 +483,9 @@ pub fn give(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld,
         if shown.id == SPEED || shown.id == SLOWNESS {
             sync_movement(handle, registry, world);
         }
+        true
+    } else {
+        false
     }
 }
 
@@ -502,6 +580,25 @@ pub fn sync_movement(handle: &PlayerHandle, registry: &SharedRegistry, world: &D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mob_effect_registry_matches_1_21_11() {
+        // Protocol ids from the generated `registries.json`; names from the
+        // 1.21.11 `en_us` table. Appending new effects never moves these.
+        assert_eq!(by_name("speed"), Some((0, "Speed")));
+        assert_eq!(by_name("minecraft:regeneration"), Some((9, "Regeneration")));
+        assert_eq!(by_name("absorption"), Some((21, "Absorption")));
+        assert_eq!(by_name("infested"), Some((38, "Infested")));
+        assert_eq!(
+            by_name("breath_of_the_nautilus"),
+            Some((39, "Breath of the Nautilus"))
+        );
+        assert_eq!(display(26), "Bad Luck");
+        assert!(by_name("not_an_effect").is_none());
+        let mut ids: Vec<u8> = MOB_EFFECTS.iter().map(|(_, id, _)| *id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (0..=39).collect::<Vec<u8>>(), "dense, no gaps");
+    }
 
     fn rng() -> Rng {
         Rng::new(0x1234_5678)

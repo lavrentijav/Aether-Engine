@@ -12,7 +12,7 @@ Every command Aether knows, grouped by category: the ones that run today and the
 
 **Legend:** ✅ working · 🚧 pending (`CMD-nn` is the task that will implement it). **Node** is the permission node and **Op** the vanilla operator level (0 everyone … 4 owner); for a pending command the stub enforces exactly them. **Gate** is what the server checks *today*: `node` (enforced node/op), `operator` (the legacy operator-only check — Node/Op are the intended target, not yet enforced), or `everyone` (no requirement; Node/Op are the intended target).
 
-**Totals:** 112 commands — 62 working, 50 pending.
+**Totals:** 112 commands — 65 working, 47 pending.
 
 ## Contents
 
@@ -75,9 +75,9 @@ Player verbs: inventory, movement, effects and items.
 | `/food` | – | ✅ working | `operator` | `aether.command.food` | 2 | `/food [level]` |
 | `/heal` | – | ✅ working | `operator` | `aether.command.heal` | 2 | `/heal` |
 | `/inv` | `inventory` | ✅ working | `everyone` | `aether.command.inventory` | 0 | `/inv` |
-| `/clear` | – | 🚧 pending CMD-10 | `node` | `minecraft.command.clear` | 2 | `/clear [targets] [item] [max-count]` |
-| `/effect` | – | 🚧 pending CMD-10 | `node` | `minecraft.command.effect` | 2 | `/effect <targets> <effect> [seconds] [amplifier]` |
-| `/enchant` | – | 🚧 pending CMD-10 | `node` | `minecraft.command.enchant` | 2 | `/enchant <targets> <enchantment> [level]` |
+| `/clear` | – | ✅ working | `node` | `minecraft.command.clear` | 2 | `/clear [targets] [item] [max-count]` |
+| `/effect` | – | ✅ working | `node` | `minecraft.command.effect` | 2 | `/effect <give\|clear> <targets> <effect> [seconds\|infinite] [amplifier] [hideParticles]` |
+| `/enchant` | – | ✅ working | `node` | `minecraft.command.enchant` | 2 | `/enchant <targets> <enchantment> [level]` |
 | `/experience` | `xp` | 🚧 pending CMD-10 | `node` | `minecraft.command.experience` | 2 | `/experience <targets> <amount> [points,levels]` |
 | `/attribute` | – | 🚧 pending CMD-10 | `node` | `minecraft.command.attribute` | 2 | `/attribute <target> <attribute> <get,base> [value]` |
 | `/damage` | – | 🚧 pending CMD-10 | `node` | `minecraft.command.damage` | 2 | `/damage <target> <amount> [type]` |

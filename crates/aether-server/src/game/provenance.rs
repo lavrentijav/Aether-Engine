@@ -328,6 +328,46 @@ pub fn ground_destroyed(world: &DemoWorld, uid: ItemUid, at: Place, reason: Dest
     );
 }
 
+/// `count` units were taken out of `place`'s stack and destroyed by a
+/// command, while the rest of that stack stays put under its own uid.
+///
+/// [`EventBody::ItemDestroy`] names a whole instance, so the removed units are
+/// given an identity of their own: a mint of exactly `count`, immediately
+/// destroyed with `reason`. The surviving stack keeps its original uid and is
+/// journalled by the enclosing [`Scope`] as a move that reduced its count —
+/// which the ledger accounts as units split out. The net effect is exactly
+/// `count` units destroyed and the remainder continuing as the same instance.
+pub fn command_partial_destroy(
+    world: &DemoWorld,
+    actor: ActorId,
+    item: aether_world::ItemTypeId,
+    place: Place,
+    count: u8,
+    reason: DestroyReason,
+) {
+    if count == 0 {
+        return;
+    }
+    let uid = aether_world::journal::ledger::mint_uid();
+    let _ = world.journal().append(
+        actor,
+        EventBody::ItemMint {
+            uid,
+            item,
+            count,
+            to: place,
+        },
+    );
+    let _ = world.journal().append(
+        actor,
+        EventBody::ItemDestroy {
+            uid,
+            from: place,
+            reason,
+        },
+    );
+}
+
 /// A container changed on its own — a furnace burning fuel and smelting —
 /// from `before` to `after`: journalled as the difference, by the server.
 pub fn container_changed(

@@ -26,7 +26,7 @@ fn join(registry: &SharedRegistry, name: &str, entity_id: i32) -> Arc<PlayerHand
             name.into(),
             None,
             Vec::new(),
-            codec_for(763).unwrap(),
+            codec_for(774).unwrap(),
             &client,
             PosLook {
                 x: 0.5,
@@ -1513,8 +1513,8 @@ fn the_stub_registry_is_on_the_tree() {
         "You do not have permission to run this command."
     );
     assert_eq!(
-        one(&env, &env.tester, "/clear"),
-        "/clear is not implemented yet (CMD-10)"
+        one(&env, &env.tester, "/attribute"),
+        "/attribute is not implemented yet (CMD-10)"
     );
 }
 
@@ -2490,4 +2490,598 @@ fn particle_and_sound_commands_route_through_the_tree() {
             "`{text}`"
         );
     }
+}
+// CMD-10a: /clear, /effect, /enchant
+// ---------------------------------------------------------------------------
+
+use crate::inventory::{Stack, FIRST_HOTBAR};
+use aether_world::journal::{DestroyReason, EventBody};
+
+fn clear_hand(handle: &PlayerHandle) {
+    let mut inv = handle.inventory();
+    for slot in 0..crate::inventory::SLOTS {
+        inv.put_slot(slot, None);
+    }
+}
+
+fn hold(handle: &PlayerHandle, slot: usize, name: &str, count: u8) {
+    let mut inv = handle.inventory();
+    inv.put_slot(slot, Some(Stack::named(name, count)));
+    if (FIRST_HOTBAR..FIRST_HOTBAR + 9).contains(&slot) {
+        inv.select((slot - FIRST_HOTBAR) as u8);
+    }
+}
+
+#[test]
+fn clear_reports_an_empty_inventory_as_a_failure() {
+    let env = env();
+    clear_hand(&env.tester);
+    assert_eq!(
+        one(&env, &env.tester, "/clear"),
+        "No items were found on player tester"
+    );
+}
+
+#[test]
+fn clear_honours_the_item_filter_and_max_count() {
+    let env = env();
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 10);
+    hold(&env.tester, FIRST_HOTBAR + 1, "minecraft:diamond", 5);
+
+    assert_eq!(
+        one(&env, &env.tester, "/clear @s minecraft:stone 4"),
+        "Removed 4 item(s) from player tester"
+    );
+    {
+        let inv = env.tester.inventory();
+        assert_eq!(
+            inv.get(FIRST_HOTBAR).map(|s| s.count),
+            Some(6),
+            "maxCount removes at most that many"
+        );
+        assert_eq!(
+            inv.get(FIRST_HOTBAR + 1).map(|s| s.count),
+            Some(5),
+            "the filter leaves the other item alone"
+        );
+    }
+
+    assert_eq!(
+        one(&env, &env.tester, "/clear @s diamond"),
+        "Removed 5 item(s) from player tester"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/clear @s diamond"),
+        "No items were found on player tester"
+    );
+}
+
+#[test]
+fn clear_journals_the_destruction_as_a_command() {
+    let env = env();
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 7);
+    assert_eq!(
+        one(&env, &env.tester, "/clear"),
+        "Removed 7 item(s) from player tester"
+    );
+    let events = env.world.journal().all_events().expect("journal reads");
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.body,
+            EventBody::ItemDestroy {
+                reason: DestroyReason::Command,
+                ..
+            }
+        )),
+        "the seven units must be journalled as a command destruction: {events:?}"
+    );
+}
+
+#[test]
+fn clear_journals_a_partial_stack_as_a_destruction_too() {
+    let env = env();
+    clear_hand(&env.tester);
+    // `/give` mints the instance, so the ledger can follow it.
+    one(&env, &env.tester, "/give stone 7");
+    let uid = env.tester.inventory().get(FIRST_HOTBAR).unwrap().uid;
+    assert_eq!(
+        one(&env, &env.tester, "/clear @s stone 3"),
+        "Removed 3 item(s) from player tester"
+    );
+    assert_eq!(
+        env.tester.inventory().get(FIRST_HOTBAR).map(|s| s.count),
+        Some(4)
+    );
+    let events = env.world.journal().all_events().expect("journal reads");
+    let ledger = aether_world::journal::Ledger::replay(events.iter());
+    assert!(ledger.anomalies().is_empty(), "{:?}", ledger.anomalies());
+    // The surviving four units keep their identity.
+    let live = ledger.get(uid).expect("the original instance");
+    assert_eq!(live.count, 4);
+    assert!(!live.is_destroyed());
+    // Exactly three units were destroyed, not the whole seven-unit instance.
+    let destroyed: u32 = ledger
+        .instances()
+        .map(|(_, inst)| inst.destroyed_units)
+        .sum();
+    assert_eq!(
+        destroyed, 3,
+        "the journal attributes exactly the removed units"
+    );
+    assert!(ledger.instances().all(|(_, inst)| inst.conserves_units()));
+}
+
+#[test]
+fn clear_with_max_count_zero_removes_nothing() {
+    let env = env();
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 2);
+    assert_eq!(
+        one(&env, &env.tester, "/clear @s minecraft:stone 0"),
+        "No items were found on player tester"
+    );
+    assert_eq!(
+        env.tester.inventory().get(FIRST_HOTBAR).map(|s| s.count),
+        Some(2),
+        "maxCount 0 leaves the stack"
+    );
+}
+
+#[test]
+fn cmd10a_selectors_see_tags_teams_and_levels() {
+    // The CMD-06b source is CMD-16's, so the filters `/tag` and `/team` feed
+    // work in `/clear`, `/effect` and `/enchant` too.
+    let env = env();
+    one(&env, &env.tester, "/gamemode survival");
+    clear_hand(&env.tester);
+    clear_hand(&env.bob);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 2);
+    hold(&env.bob, FIRST_HOTBAR, "minecraft:dirt", 3);
+    one(&env, &env.tester, "/tag @s add marked");
+    assert_eq!(
+        one(&env, &env.tester, "/clear @a[tag=marked]"),
+        "Removed 2 item(s) from player tester"
+    );
+    assert_eq!(
+        env.bob.inventory().get(FIRST_HOTBAR).map(|s| s.count),
+        Some(3),
+        "bob is not tagged and was not cleared"
+    );
+
+    one(&env, &env.tester, "/team add red");
+    one(&env, &env.tester, "/team join red tester");
+    {
+        let mut st = env.tester.game();
+        st.effects.clear();
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/effect give @a[team=red] speed"),
+        "Applied effect Speed to tester"
+    );
+
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_sword", 1);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant @a[level=0] sharpness 2"),
+        "Applied enchantment Sharpness II to 2 entities"
+    );
+}
+
+#[test]
+fn clear_resolves_an_item_tag_without_a_data_pack() {
+    // The test server has no `worldgen_data`, so this exercises the compiled
+    // 1.21.11 item tags rather than the pack.
+    let env = env();
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:oak_planks", 3);
+    hold(&env.tester, FIRST_HOTBAR + 1, "minecraft:oak_log", 2);
+    assert_eq!(
+        one(&env, &env.tester, "/clear @s #minecraft:planks"),
+        "Removed 3 item(s) from player tester"
+    );
+    let inv = env.tester.inventory();
+    assert!(inv.get(FIRST_HOTBAR).is_none());
+    assert_eq!(inv.get(FIRST_HOTBAR + 1).map(|s| s.count), Some(2));
+}
+
+#[test]
+fn clear_accepts_several_targets() {
+    let env = env();
+    clear_hand(&env.tester);
+    clear_hand(&env.bob);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 3);
+    hold(&env.bob, FIRST_HOTBAR, "minecraft:dirt", 2);
+    assert_eq!(
+        one(&env, &env.tester, "/clear @a"),
+        "Removed 5 item(s) from 2 players"
+    );
+    assert!(env.tester.inventory().is_empty());
+    assert!(env.bob.inventory().is_empty());
+}
+
+#[test]
+fn effect_give_uses_the_default_duration_and_applies_to_every_target() {
+    let env = env();
+    for handle in [&env.tester, &env.bob] {
+        let mut st = handle.game();
+        st.effects.clear();
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/effect give @a speed"),
+        "Applied effect Speed to 2 targets"
+    );
+    for handle in [&env.tester, &env.bob] {
+        let st = handle.game();
+        let effect = st.effects.get(0).expect("speed is running");
+        assert_eq!(effect.duration, 600, "vanilla's default is thirty seconds");
+        assert_eq!(effect.amplifier, 0);
+        assert!(effect.visible && effect.show_icon);
+    }
+}
+
+#[test]
+fn effect_give_keeps_a_high_amplifier_and_honours_infinite_and_hide_particles() {
+    let env = env();
+    {
+        let mut st = env.tester.game();
+        st.effects.clear();
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/effect give tester speed 5 10"),
+        "Applied effect Speed to tester"
+    );
+    {
+        let st = env.tester.game();
+        let effect = st.effects.get(0).unwrap();
+        assert_eq!(effect.amplifier, 10, "beyond the normal cap still applies");
+        assert_eq!(effect.duration, 100);
+    }
+    assert_eq!(
+        one(
+            &env,
+            &env.tester,
+            "/effect give tester speed infinite 3 true"
+        ),
+        "Applied effect Speed to tester"
+    );
+    {
+        let st = env.tester.game();
+        let effect = st.effects.get(0).unwrap();
+        assert_eq!(effect.duration, -1, "infinite");
+        assert_eq!(effect.amplifier, 3);
+        assert!(!effect.visible && !effect.show_icon, "hideParticles");
+    }
+}
+
+#[test]
+fn effect_give_rejects_an_explicit_zero_second_duration() {
+    // 1.21.11's `seconds` is `integer(1, 1000000)`; only an *omitted*
+    // duration takes the default, an explicit 0 is an argument error.
+    let env = env();
+    {
+        let mut st = env.tester.game();
+        st.effects.clear();
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/effect give tester speed 0"),
+        "Integer must not be less than 1: found 0"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/effect give tester speed 1000001"),
+        "Integer must not be more than 1000000: found 1000001"
+    );
+    assert!(env.tester.game().effects.is_empty());
+}
+
+#[test]
+fn effect_clear_without_targets_clears_the_source() {
+    let env = env();
+    {
+        let mut st = env.tester.game();
+        st.effects.clear();
+    }
+    one(&env, &env.tester, "/effect give tester speed");
+    assert_eq!(
+        one(&env, &env.tester, "/effect clear"),
+        "Removed every effect from tester"
+    );
+    assert!(env.tester.game().effects.is_empty());
+    assert_eq!(
+        one(&env, &env.tester, "/effect clear"),
+        "Target has no effects to remove"
+    );
+}
+
+#[test]
+fn effect_give_applies_instant_effects_without_storing_them() {
+    let env = env();
+    one(&env, &env.tester, "/gamemode survival");
+    {
+        let mut st = env.tester.game();
+        st.effects.clear();
+        st.health = 20.0;
+        st.dead = false;
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/effect give tester instant_damage 1 0"),
+        "Applied effect Instant Damage to tester"
+    );
+    {
+        let st = env.tester.game();
+        assert!(st.health < 20.0, "instant damage hurt immediately");
+        assert!(
+            st.effects
+                .get(crate::game::effects::INSTANT_DAMAGE)
+                .is_none(),
+            "an instant effect is never stored"
+        );
+    }
+    {
+        let mut st = env.tester.game();
+        st.health = 10.0;
+    }
+    assert_eq!(
+        one(&env, &env.tester, "/effect give tester instant_health 1 0"),
+        "Applied effect Instant Health to tester"
+    );
+    {
+        let st = env.tester.game();
+        assert!(st.health > 10.0, "instant health healed immediately");
+        assert!(st
+            .effects
+            .get(crate::game::effects::INSTANT_HEALTH)
+            .is_none());
+    }
+}
+
+#[test]
+fn effect_give_reports_requested_targets_when_one_is_skipped() {
+    let env = env();
+    for handle in [&env.tester, &env.bob] {
+        let mut st = handle.game();
+        st.effects.clear();
+    }
+    // tester already carries a stronger infinite effect; bob is bare.
+    one(&env, &env.tester, "/effect give tester speed infinite 5");
+    assert_eq!(
+        one(&env, &env.tester, "/effect give @a speed 1 10"),
+        "Applied effect Speed to 2 targets",
+        "vanilla reports targets.size(), not the successes"
+    );
+    assert_eq!(env.bob.game().effects.get(0).map(|e| e.amplifier), Some(10));
+}
+
+#[test]
+fn effect_clear_removes_one_effect_or_all_of_them() {
+    let env = env();
+    {
+        let mut st = env.tester.game();
+        st.effects.clear();
+    }
+    one(&env, &env.tester, "/effect give tester speed");
+    one(&env, &env.tester, "/effect give tester poison");
+    assert_eq!(
+        one(&env, &env.tester, "/effect clear tester speed"),
+        "Removed effect Speed from tester"
+    );
+    assert!(env.tester.game().effects.active(18), "poison remains");
+    assert_eq!(
+        one(&env, &env.tester, "/effect clear tester"),
+        "Removed every effect from tester"
+    );
+    assert!(env.tester.game().effects.is_empty());
+    assert_eq!(
+        one(&env, &env.tester, "/effect clear tester"),
+        "Target has no effects to remove"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/effect clear tester speed"),
+        "Target doesn't have the requested effect"
+    );
+}
+
+#[test]
+fn enchant_requires_a_held_enchantable_item() {
+    let env = env();
+    one(&env, &env.tester, "/gamemode survival");
+    clear_hand(&env.tester);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness"),
+        "tester is not holding any item"
+    );
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 1);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness"),
+        "Stone cannot support that enchantment"
+    );
+}
+
+#[test]
+fn enchant_applies_to_the_held_stack_and_checks_the_level_range() {
+    let env = env();
+    one(&env, &env.tester, "/gamemode survival");
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_sword", 1);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness 3"),
+        "Applied enchantment Sharpness III to tester's item"
+    );
+    assert_eq!(
+        env.tester
+            .inventory()
+            .get(FIRST_HOTBAR)
+            .unwrap()
+            .enchant_level(33),
+        3
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness 6"),
+        "6 is higher than the maximum level of 5 supported by that enchantment"
+    );
+    // Re-applying an enchantment the item already has fails vanilla's
+    // compatibility check, even at level 0 (Sharpness is in the damage
+    // exclusive set, which contains Sharpness itself).
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness 0"),
+        "Diamond Sword cannot support that enchantment"
+    );
+    assert_eq!(
+        env.tester
+            .inventory()
+            .get(FIRST_HOTBAR)
+            .unwrap()
+            .enchant_level(33),
+        3,
+        "the failed command changed nothing"
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness -1"),
+        "Integer must not be less than 0: found -1"
+    );
+    // There is no argument maximum; the enchantment's own maximum is the cap,
+    // so 256 fails as a level error, as vanilla's `integer(0)` does.
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness 256"),
+        "256 is higher than the maximum level of 5 supported by that enchantment"
+    );
+}
+
+#[test]
+fn enchant_refuses_a_conflicting_enchantment() {
+    let env = env();
+    one(&env, &env.tester, "/gamemode survival");
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_sword", 1);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester sharpness 3"),
+        "Applied enchantment Sharpness III to tester's item"
+    );
+    // Smite and Sharpness are both in `exclusive_set/damage`; the candidate's
+    // set contains the existing Sharpness, so vanilla refuses.
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester smite 2"),
+        "Diamond Sword cannot support that enchantment"
+    );
+    let inv = env.tester.inventory();
+    let sword = inv.get(FIRST_HOTBAR).unwrap();
+    assert_eq!(sword.enchant_level(33), 3);
+    assert_eq!(sword.enchant_level(35), 0, "Smite was not added");
+}
+
+#[test]
+fn enchant_skips_failing_targets_when_several_were_named() {
+    let env = env();
+    one(&env, &env.tester, "/gamemode survival");
+    clear_hand(&env.tester);
+    clear_hand(&env.bob);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_sword", 1);
+    // Bob holds nothing: vanilla skips him and reports the one success.
+    assert_eq!(
+        one(&env, &env.tester, "/enchant @a sharpness 2"),
+        "Applied enchantment Sharpness II to 2 entities",
+        "vanilla reports the requested targets, not the successes"
+    );
+    assert_eq!(
+        env.tester
+            .inventory()
+            .get(FIRST_HOTBAR)
+            .unwrap()
+            .enchant_level(33),
+        2
+    );
+    assert!(env.bob.inventory().is_empty());
+}
+
+#[test]
+fn enchant_omits_the_numeral_for_a_single_level_enchantment() {
+    let env = env();
+    one(&env, &env.tester, "/gamemode survival");
+    clear_hand(&env.tester);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_pickaxe", 1);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant tester mending"),
+        "Applied enchantment Mending to tester's item",
+        "vanilla's getFullname has no numeral when max level is 1"
+    );
+}
+
+#[test]
+fn enchant_fails_only_when_no_target_succeeded() {
+    let env = env();
+    one(&env, &env.tester, "/gamemode survival");
+    clear_hand(&env.tester);
+    clear_hand(&env.bob);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:stone", 1);
+    hold(&env.bob, FIRST_HOTBAR, "minecraft:stone", 1);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant @a sharpness 2"),
+        "Nothing changed. Targets either have no item in their hands or the enchantment could not be applied"
+    );
+}
+
+#[test]
+fn enchant_hits_every_target_holding_an_item() {
+    let env = env();
+    clear_hand(&env.tester);
+    clear_hand(&env.bob);
+    hold(&env.tester, FIRST_HOTBAR, "minecraft:diamond_sword", 1);
+    hold(&env.bob, FIRST_HOTBAR, "minecraft:iron_sword", 1);
+    assert_eq!(
+        one(&env, &env.tester, "/enchant @a unbreaking 2"),
+        "Applied enchantment Unbreaking II to 2 entities"
+    );
+    for handle in [&env.tester, &env.bob] {
+        assert_eq!(
+            handle
+                .inventory()
+                .get(FIRST_HOTBAR)
+                .unwrap()
+                .enchant_level(40),
+            2
+        );
+    }
+}
+
+// Node executability must match `commands.json`: only the forms vanilla lets
+// stand alone are executable.
+#[test]
+fn cmd10a_executable_flags_match_the_vanilla_tree() {
+    use crate::commands::tree::{tree, Kind};
+    let commands = tree().commands();
+    let find = |name: &str| commands.iter().find(|n| n.name == name).unwrap();
+    fn child<'a>(
+        node: &'a crate::commands::tree::Node,
+        name: &str,
+    ) -> &'a crate::commands::tree::Node {
+        node.children
+            .iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("{name} under {}", node.name))
+    }
+
+    let clear = find("clear");
+    assert!(clear.executable, "/clear is executable");
+    assert!(child(clear, "targets").executable);
+
+    let effect = find("effect");
+    assert!(!effect.executable, "/effect is not executable");
+    let give = child(effect, "give");
+    assert!(!give.executable, "/effect give is not executable");
+    let clear_lit = child(effect, "clear");
+    assert!(
+        clear_lit.executable,
+        "/effect clear without targets is executable"
+    );
+    assert!(child(clear_lit, "targets").executable);
+
+    let enchant = find("enchant");
+    assert!(!enchant.executable, "/enchant is not executable");
+    let targets = child(enchant, "targets");
+    assert!(!targets.executable, "/enchant targets is not executable");
+    assert!(child(targets, "enchantment").executable);
+    assert!(matches!(
+        child(targets, "enchantment").kind,
+        Kind::Argument(_)
+    ));
 }

@@ -12,7 +12,7 @@
 
 **Легенда:** ✅ работает · 🚧 ожидает (`CMD-nn` — задача, которая её реализует). **Узел** — правомочие, а **Op** — ванильный уровень оператора (0 — всем … 4 — владельцу); для ожидающей команды заглушка требует ровно их. **Gate** — что сервер проверяет *сегодня*: `node` (узел/op применяются), `operator` (прежняя проверка «только оператор» — узел/op это цель, пока не применяются) или `everyone` (требований нет; узел/op — цель).
 
-**Итого:** 112 команд — 62 работают, 50 ожидают.
+**Итого:** 112 команд — 65 работают, 47 ожидают.
 
 ## Содержание
 
@@ -75,9 +75,9 @@
 | `/food` | – | ✅ работает | `operator` | `aether.command.food` | 2 | `/food [level]` |
 | `/heal` | – | ✅ работает | `operator` | `aether.command.heal` | 2 | `/heal` |
 | `/inv` | `inventory` | ✅ работает | `everyone` | `aether.command.inventory` | 0 | `/inv` |
-| `/clear` | – | 🚧 ожидает CMD-10 | `node` | `minecraft.command.clear` | 2 | `/clear [targets] [item] [max-count]` |
-| `/effect` | – | 🚧 ожидает CMD-10 | `node` | `minecraft.command.effect` | 2 | `/effect <targets> <effect> [seconds] [amplifier]` |
-| `/enchant` | – | 🚧 ожидает CMD-10 | `node` | `minecraft.command.enchant` | 2 | `/enchant <targets> <enchantment> [level]` |
+| `/clear` | – | ✅ работает | `node` | `minecraft.command.clear` | 2 | `/clear [targets] [item] [max-count]` |
+| `/effect` | – | ✅ работает | `node` | `minecraft.command.effect` | 2 | `/effect <give\|clear> <targets> <effect> [seconds\|infinite] [amplifier] [hideParticles]` |
+| `/enchant` | – | ✅ работает | `node` | `minecraft.command.enchant` | 2 | `/enchant <targets> <enchantment> [level]` |
 | `/experience` | `xp` | 🚧 ожидает CMD-10 | `node` | `minecraft.command.experience` | 2 | `/experience <targets> <amount> [points,levels]` |
 | `/attribute` | – | 🚧 ожидает CMD-10 | `node` | `minecraft.command.attribute` | 2 | `/attribute <target> <attribute> <get,base> [value]` |
 | `/damage` | – | 🚧 ожидает CMD-10 | `node` | `minecraft.command.damage` | 2 | `/damage <target> <amount> [type]` |

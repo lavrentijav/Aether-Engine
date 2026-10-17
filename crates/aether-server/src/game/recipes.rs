@@ -166,6 +166,10 @@ pub struct RecipeBook {
     smith_trim: Vec<SmithTrim>,
     transmute: Vec<Transmute>,
     counts: Counts,
+    /// Every resolved `data/minecraft/tags/item` tag, keyed by its canonical
+    /// `minecraft:…` name. `/enchant` uses the `enchantable/…` tags to decide
+    /// what an enchantment applies to, and `/clear` to resolve `#tag`.
+    item_tags: HashMap<String, Vec<ItemTypeId>>,
 }
 
 static BOOK: OnceLock<RecipeBook> = OnceLock::new();
@@ -191,6 +195,28 @@ pub fn install(book: RecipeBook) {
 /// The installed pack recipes, if a pack was loaded.
 pub fn book() -> Option<&'static RecipeBook> {
     BOOK.get()
+}
+
+/// The items in the installed pack's item tag `name` — `#minecraft:planks`,
+/// `minecraft:enchantable/sharp_weapon` or a bare `enchantable/...` — or
+/// `None` when no pack is loaded or the tag does not exist. The caller decides
+/// what an unknown tag means; `/clear` refuses it, `/enchant` falls back to
+/// its compiled category.
+pub fn item_tag(name: &str) -> Option<&'static [ItemTypeId]> {
+    BOOK.get()?.item_tag(name)
+}
+
+impl RecipeBook {
+    /// The items in item tag `name` (see [`item_tag`]).
+    pub fn item_tag(&self, name: &str) -> Option<&[ItemTypeId]> {
+        let name = name.strip_prefix('#').unwrap_or(name);
+        let key = if name.contains(':') {
+            name.to_string()
+        } else {
+            format!("minecraft:{name}")
+        };
+        self.item_tags.get(&key).map(Vec::as_slice)
+    }
 }
 
 /// Locate `data/minecraft` from whatever the operator pointed `worldgen_data`
@@ -232,6 +258,7 @@ impl RecipeBook {
             smith_trim: Vec::new(),
             transmute: Vec::new(),
             counts: Counts::default(),
+            item_tags: tags.clone(),
         };
         for (id, j) in &entries {
             book.counts.total += 1;
@@ -1022,6 +1049,34 @@ mod tests {
             .map(|(i, s)| (format!("r{i}"), Json::parse(s).unwrap()))
             .collect();
         RecipeBook::build(entries, &tags)
+    }
+
+    #[test]
+    fn the_pack_item_tags_are_kept_for_the_command_layer() {
+        // `/enchant` asks for `enchantable/…` and `/clear` for an arbitrary
+        // `#tag`; both go through the book's resolved tag table.
+        let book = book_of(
+            &[],
+            vec![
+                (
+                    "enchantable/sharp_weapon",
+                    r##"{"values": ["minecraft:diamond_sword", "#minecraft:axes"]}"##,
+                ),
+                (
+                    "axes",
+                    r#"{"values": ["minecraft:diamond_axe", "minecraft:iron_axe"]}"#,
+                ),
+            ],
+        );
+        let tag = book
+            .item_tag("#minecraft:enchantable/sharp_weapon")
+            .expect("the tag is loaded");
+        let sword = ItemTypeId::vanilla("minecraft:diamond_sword").unwrap();
+        let axe = ItemTypeId::vanilla("minecraft:diamond_axe").unwrap();
+        assert!(tag.contains(&sword));
+        assert!(tag.contains(&axe), "nested tags resolve");
+        assert!(book.item_tag("enchantable/sharp_weapon").is_some());
+        assert!(book.item_tag("minecraft:not_a_tag").is_none());
     }
 
     #[test]

@@ -725,6 +725,95 @@ pub enum Interaction {
     Wear,
 }
 
+/// Every non-player entity, for the CMD-06b selector layer: `(id, uuid, type,
+/// position, alive)`.
+pub fn selector_snapshot() -> Vec<(i32, u128, &'static str, Vector3, bool)> {
+    entities()
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| (e.id, e.uuid, e.type_name(), e.pos(), !e.dead))
+        .collect()
+}
+
+/// Apply `effect` to mob `id`. Returns the effect now stored, or `None` when
+/// the mob is gone or the running one was already at least as strong.
+pub fn apply_mob_effect(id: i32, effect: super::effects::Effect) -> Option<super::effects::Effect> {
+    let mut all = entities().lock().unwrap();
+    let e = all.iter_mut().find(|e| e.id == id && !e.dead)?;
+    let Kind::Mob(m) = &mut e.kind else {
+        return None;
+    };
+    m.effects.apply(effect)
+}
+
+/// Remove one effect from mob `id`; whether it was running.
+pub fn remove_mob_effect(id: i32, effect: u8) -> bool {
+    let mut all = entities().lock().unwrap();
+    let Some(e) = all.iter_mut().find(|e| e.id == id && !e.dead) else {
+        return false;
+    };
+    let Kind::Mob(m) = &mut e.kind else {
+        return false;
+    };
+    m.effects.remove(effect).is_some()
+}
+
+/// Remove every effect from mob `id`, returning the ids that were running.
+pub fn clear_mob_effects(id: i32) -> Vec<u8> {
+    let mut all = entities().lock().unwrap();
+    let Some(e) = all.iter_mut().find(|e| e.id == id && !e.dead) else {
+        return Vec::new();
+    };
+    let Kind::Mob(m) = &mut e.kind else {
+        return Vec::new();
+    };
+    let ids: Vec<u8> = m.effects.iter().map(|e| e.id).collect();
+    m.effects.clear();
+    ids
+}
+
+/// Whether mob `id` has effect `effect`.
+pub fn mob_has_effect(id: i32, effect: u8) -> bool {
+    entities()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|e| e.id == id && !e.dead)
+        .and_then(|e| match &e.kind {
+            Kind::Mob(m) => Some(m.effects.active(effect)),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// Whether mob `id` has any effect at all.
+pub fn mob_has_effects(id: i32) -> bool {
+    entities()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|e| e.id == id && !e.dead)
+        .and_then(|e| match &e.kind {
+            Kind::Mob(m) => Some(!m.effects.is_empty()),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// Whether `id` is a living mob (not an item, arrow, orb or cloud). The
+/// CMD-10a commands act on players and mobs, and `/enchant` must refuse a
+/// non-living entity the way vanilla refuses anything that is not a
+/// `LivingEntity`.
+pub fn is_mob(id: i32) -> bool {
+    entities()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|e| e.id == id && !e.dead)
+        .is_some_and(|e| matches!(e.kind, Kind::Mob(_)))
+}
+
 /// The entity type of `id`, if it exists.
 pub fn kind_of(id: i32) -> Option<&'static str> {
     entities()
@@ -1660,7 +1749,11 @@ fn apply_potion_area(
 /// Apply one instant effect to a mob, honouring the undead's inversion of
 /// heal and harm — vanilla's `HealOrHarmMobEffect.applyInstantenousEffect`
 /// branches on `livingEntity.isInvertedHealAndHarm()`.
-fn apply_instant_to_mob(m: &mut super::mobs::Mob, effect: &super::effects::Effect, factor: f64) {
+pub(crate) fn apply_instant_to_mob(
+    m: &mut super::mobs::Mob,
+    effect: &super::effects::Effect,
+    factor: f64,
+) {
     let is_harm = effect.id == super::effects::INSTANT_DAMAGE;
     if is_harm == m.def.undead {
         // Heals (instant health on the living, instant damage on the undead).
@@ -1679,7 +1772,7 @@ fn apply_instant_to_mob(m: &mut super::mobs::Mob, effect: &super::effects::Effec
 /// rest through [`super::effects::give`]. A player is never undead, so instant
 /// health always heals and instant damage always hurts — unlike
 /// [`apply_instant_to_mob`].
-fn apply_to_player(
+pub(crate) fn apply_to_player(
     handle: &PlayerHandle,
     registry: &SharedRegistry,
     world: &DemoWorld,
@@ -1709,6 +1802,33 @@ fn apply_to_player(
             super::effects::give(handle, registry, world, *effect);
         }
     }
+}
+
+/// Apply a command's already-resolved effects to a player: instant effects
+/// take hold at once, the rest are stored. `/effect give` uses this so an
+/// instant health/damage command behaves like a splash potion at factor 1.
+pub fn apply_command_effects(
+    handle: &PlayerHandle,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    list: &[super::effects::Effect],
+) {
+    apply_to_player(handle, registry, world, list, 1.0);
+}
+
+/// Apply one instant effect to mob `id` at factor 1, for `/effect give`.
+/// Returns `false` when there is no living mob with that id.
+pub fn apply_mob_instant_effect(id: i32, effect: super::effects::Effect) -> bool {
+    let mut all = entities().lock().unwrap();
+    let Some(e) = all.iter_mut().find(|e| e.id == id && !e.dead) else {
+        return false;
+    };
+    let Kind::Mob(m) = &mut e.kind else {
+        return false;
+    };
+    apply_instant_to_mob(m, &effect, 1.0);
+    m.meta_dirty = true;
+    true
 }
 
 /// Bring every player's tracked set in line with what is in range.

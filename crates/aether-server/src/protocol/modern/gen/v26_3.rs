@@ -2019,6 +2019,7 @@ pub const MENU_FURNACE: i32 = 14;
 pub const MENU_HOPPER: i32 = 16;
 pub const MENU_BREWING_STAND: i32 = 11;
 pub const COMPONENT_DAMAGE: i32 = 3;
+pub const COMPONENT_ENCHANTMENTS: i32 = 13;
 pub const COMPONENT_CUSTOM_NAME: i32 = 6;
 pub const COMPONENT_LORE: i32 = 11;
 pub const COMPONENT_POTION_CONTENTS: i32 = 53;
