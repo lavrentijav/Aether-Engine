@@ -13,6 +13,7 @@
 //! [`protocol`] for the neutral vocabulary and [`session`] for the per-client
 //! logic every version shares.
 
+pub mod admin;
 pub mod auth;
 pub mod chatlog;
 pub mod commands;
@@ -255,6 +256,10 @@ pub fn run() -> std::process::ExitCode {
     // The permission store is the source of truth for every level and node
     // check; seed it from `config.operators` before anyone can connect.
     permissions::install(&cfg);
+    // Bans and the whitelist are sidecar JSON files under the world directory
+    // (CMD-08); load them, seeding the whitelist from `config.whitelist` on the
+    // first start, before the listener exists.
+    admin::install(&cfg);
     let _ = GAME_MODE.set(cfg.server.game_mode);
     let cfg = Arc::new(cfg);
     let _ = CONFIG.set(Arc::clone(&cfg));

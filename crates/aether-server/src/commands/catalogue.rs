@@ -280,84 +280,75 @@ pub const CATALOGUE: &[Command] = &[
         Category::Admin,
         "/help [command]",
     ),
-    pend(
+    imp_node(
         "op",
         &[],
         "minecraft.command.op",
         3,
-        "CMD-08",
         Category::Admin,
         "/op <targets>",
     ),
-    pend(
+    imp_node(
         "deop",
         &[],
         "minecraft.command.deop",
         3,
-        "CMD-08",
         Category::Admin,
         "/deop <targets>",
     ),
-    pend(
+    imp_node(
         "ban",
         &[],
         "minecraft.command.ban",
         3,
-        "CMD-08",
         Category::Admin,
         "/ban <targets> [reason]",
     ),
-    pend(
+    imp_node(
         "ban-ip",
         &[],
         "minecraft.command.ban-ip",
         3,
-        "CMD-08",
         Category::Admin,
         "/ban-ip <targets> [reason]",
     ),
-    pend(
+    imp_node(
         "banlist",
         &[],
         "minecraft.command.banlist",
         3,
-        "CMD-08",
         Category::Admin,
         "/banlist [ips]",
     ),
-    pend(
+    imp_node(
         "pardon",
         &[],
         "minecraft.command.pardon",
         3,
-        "CMD-08",
         Category::Admin,
         "/pardon <targets>",
     ),
-    pend(
+    imp_node(
         "pardon-ip",
         &[],
         "minecraft.command.pardon-ip",
         3,
-        "CMD-08",
         Category::Admin,
         "/pardon-ip <targets>",
     ),
-    pend(
+    imp_node(
         "kick",
         &[],
         "minecraft.command.kick",
         3,
-        "CMD-08",
         Category::Admin,
         "/kick <targets> [reason]",
     ),
-    pend(
+    imp_node(
         "whitelist",
         &[],
         "minecraft.command.whitelist",
         3,
-        "CMD-08",
         Category::Admin,
         "/whitelist <add,remove,list,on,off,reload> [name]",
     ),
