@@ -775,11 +775,6 @@ impl Config {
             })
     }
 
-    /// Whether `name` may join.
-    pub fn may_join(&self, name: &str) -> bool {
-        self.whitelist.is_empty() || self.whitelist.iter().any(|w| w.eq_ignore_ascii_case(name))
-    }
-
     /// Whether anyone on the network can reach this server.
     pub fn is_public(&self) -> bool {
         !matches!(self.server.host.as_str(), "127.0.0.1" | "localhost" | "::1")
@@ -1548,15 +1543,6 @@ mod tests {
         assert!(!cfg.is_operator("admin", None));
         assert!(!cfg.is_operator("someone", ip("10.0.0.7")));
         assert_eq!(cfg.unbound_operators(), vec!["Root"]);
-    }
-
-    #[test]
-    fn an_empty_whitelist_lets_everyone_in() {
-        let mut cfg = Config::default();
-        assert!(cfg.may_join("anyone"));
-        cfg.whitelist = vec!["Alice".into()];
-        assert!(cfg.may_join("alice"));
-        assert!(!cfg.may_join("mallory"));
     }
 
     #[test]

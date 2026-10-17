@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 use super::args::{BlockState, ItemStack};
 use super::catalogue::{self, Status};
 use super::coordinates::{Coordinates, Coordinates2, Swizzle, WorldCoordinate};
-use super::feedback::Feedback;
+use super::feedback::{Feedback, FeedbackKind};
 use super::Reply;
 use crate::economy::Economy;
 use crate::players::{PlayerHandle, PosLook, SharedRegistry};
@@ -142,6 +142,10 @@ pub struct Ctx<'a, 'e> {
     pub econ: Option<&'e dyn Economy>,
     /// Parsed arguments, in the order their nodes were matched.
     pub args: Vec<ParsedArg>,
+    /// Whether the body's answer is a success or a failure. Bodies that reject
+    /// an argument after the tree parsed it (`/pardon` on a name that is not
+    /// banned) call [`Ctx::fail`]; everything else stays a success.
+    pub reply_kind: FeedbackKind,
 }
 
 impl<'a> Ctx<'a, '_> {
@@ -159,6 +163,18 @@ impl<'a> Ctx<'a, '_> {
     /// The player running the command, when it came from one.
     pub fn player(&self) -> Option<&'a PlayerHandle> {
         self.source.player()
+    }
+
+    /// Set the reply to an error and answer with `line`.
+    pub fn fail(&mut self, line: impl Into<String>) -> Reply {
+        self.reply_kind = FeedbackKind::Error;
+        Reply::one(line)
+    }
+
+    /// Set the reply to an error and answer with several lines.
+    pub fn fail_lines(&mut self, lines: Vec<String>) -> Reply {
+        self.reply_kind = FeedbackKind::Error;
+        Reply(lines)
     }
 
     /// The reply a player-only command gives a server source: there is no
@@ -710,6 +726,7 @@ fn build() -> CommandTree {
     children.extend(super::core_nodes());
     children.extend(crate::game::commands::nodes());
     children.extend(crate::economy::commands::nodes());
+    children.extend(crate::admin::nodes());
     // The not-yet-implemented core commands are derived from the one catalogue
     // (`catalogue::CATALOGUE`, the single source of truth): registered now so
     // completion and permission checks are right from day one. A name a real
@@ -1147,9 +1164,13 @@ fn run_body(
                 world,
                 econ: crate::economy::get(),
                 args: m.args,
+                reply_kind: FeedbackKind::Success,
             };
             let reply = m.node.run(&mut ctx).unwrap_or_else(|| Reply(Vec::new()));
-            Some(Feedback::success(reply.0))
+            Some(Feedback {
+                kind: ctx.reply_kind,
+                lines: reply.0,
+            })
         }
         Err(ParseError::Denied(m)) => Some(Feedback::error(vec![m])),
         Err(e) => {

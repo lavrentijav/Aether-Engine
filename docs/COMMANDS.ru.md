@@ -12,7 +12,7 @@
 
 **Легенда:** ✅ работает · 🚧 ожидает (`CMD-nn` — задача, которая её реализует). **Узел** — правомочие, а **Op** — ванильный уровень оператора (0 — всем … 4 — владельцу); для ожидающей команды заглушка требует ровно их. **Gate** — что сервер проверяет *сегодня*: `node` (узел/op применяются), `operator` (прежняя проверка «только оператор» — узел/op это цель, пока не применяются) или `everyone` (требований нет; узел/op — цель).
 
-**Итого:** 113 команд — 33 работают, 80 ожидают.
+**Итого:** 113 команд — 42 работают, 71 ожидают.
 
 ## Содержание
 
@@ -32,15 +32,15 @@
 | Команда | Синонимы | Статус | Gate | Узел | Op | Использование |
 | --- | --- | --- | --- | --- | --- | --- |
 | `/help` | `?` | ✅ работает | `everyone` | `minecraft.command.help` | 0 | `/help [command]` |
-| `/op` | – | 🚧 ожидает CMD-08 | `node` | `minecraft.command.op` | 3 | `/op <targets>` |
-| `/deop` | – | 🚧 ожидает CMD-08 | `node` | `minecraft.command.deop` | 3 | `/deop <targets>` |
-| `/ban` | – | 🚧 ожидает CMD-08 | `node` | `minecraft.command.ban` | 3 | `/ban <targets> [reason]` |
-| `/ban-ip` | – | 🚧 ожидает CMD-08 | `node` | `minecraft.command.ban-ip` | 3 | `/ban-ip <targets> [reason]` |
-| `/banlist` | – | 🚧 ожидает CMD-08 | `node` | `minecraft.command.banlist` | 3 | `/banlist [ips]` |
-| `/pardon` | – | 🚧 ожидает CMD-08 | `node` | `minecraft.command.pardon` | 3 | `/pardon <targets>` |
-| `/pardon-ip` | – | 🚧 ожидает CMD-08 | `node` | `minecraft.command.pardon-ip` | 3 | `/pardon-ip <targets>` |
-| `/kick` | – | 🚧 ожидает CMD-08 | `node` | `minecraft.command.kick` | 3 | `/kick <targets> [reason]` |
-| `/whitelist` | – | 🚧 ожидает CMD-08 | `node` | `minecraft.command.whitelist` | 3 | `/whitelist <add,remove,list,on,off,reload> [name]` |
+| `/op` | – | ✅ работает | `node` | `minecraft.command.op` | 3 | `/op <targets>` |
+| `/deop` | – | ✅ работает | `node` | `minecraft.command.deop` | 3 | `/deop <targets>` |
+| `/ban` | – | ✅ работает | `node` | `minecraft.command.ban` | 3 | `/ban <targets> [reason]` |
+| `/ban-ip` | – | ✅ работает | `node` | `minecraft.command.ban-ip` | 3 | `/ban-ip <targets> [reason]` |
+| `/banlist` | – | ✅ работает | `node` | `minecraft.command.banlist` | 3 | `/banlist [ips\|players]` |
+| `/pardon` | – | ✅ работает | `node` | `minecraft.command.pardon` | 3 | `/pardon <targets>` |
+| `/pardon-ip` | – | ✅ работает | `node` | `minecraft.command.pardon-ip` | 3 | `/pardon-ip <targets>` |
+| `/kick` | – | ✅ работает | `node` | `minecraft.command.kick` | 3 | `/kick <targets> [reason]` |
+| `/whitelist` | – | ✅ работает | `node` | `minecraft.command.whitelist` | 3 | `/whitelist <on\|off\|list\|add\|remove\|reload>` |
 
 ## server
 
