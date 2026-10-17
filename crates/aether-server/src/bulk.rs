@@ -28,6 +28,19 @@
 //! to reading it by id. Undo itself is a new revision (attributed to the
 //! original author), so it is auditable and can be undone in turn. See
 //! `docs/design/bulk-edit.md` for the spill policy.
+//!
+//! # Atomicity and concurrency
+//!
+//! A commit is all-or-nothing: the revision is written to the journal before
+//! the world is touched, so a journal failure leaves the world unchanged and
+//! surfaces as [`BulkError::Journal`] rather than a silent partial apply.
+//! `commit` and `undo` therefore return `Result`.
+//!
+//! The commit is not, however, serialised against other writers: `plan` reads
+//! each `from` from the live world and only then applies, so two transactions
+//! over the same block can lose an update. This mirrors
+//! [`World::set_block_by`](aether_api::World::set_block_by) and does not
+//! corrupt the journal; CMD-30b owns per-region serialisation.
 
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
@@ -63,6 +76,9 @@ pub enum BulkError {
     OutOfBounds { x: i32, y: i32, z: i32 },
     /// The transaction would hold more than its block limit.
     TooLarge { requested: usize, limit: usize },
+    /// A block id the world's registry does not know. Staging it would commit
+    /// a state with no name and default properties.
+    UnknownBlock(BlockStateId),
     /// The undo id names no revision in memory or in the journal.
     UnknownRevision(u64),
     /// The undo id names a journal event that is not a bulk revision.
@@ -79,6 +95,9 @@ impl std::fmt::Display for BulkError {
             }
             BulkError::TooLarge { requested, limit } => {
                 write!(f, "edit of {requested} blocks exceeds the limit of {limit}")
+            }
+            BulkError::UnknownBlock(id) => {
+                write!(f, "block state {} is not known to this world", id.0)
             }
             BulkError::UnknownRevision(id) => write!(f, "no bulk revision {id}"),
             BulkError::NotARevision(id) => write!(f, "journal event {id} is not a bulk revision"),
@@ -105,6 +124,19 @@ fn check_y(x: i32, y: i32, z: i32) -> Result<(), BulkError> {
         Ok(())
     } else {
         Err(BulkError::OutOfBounds { x, y, z })
+    }
+}
+
+/// The world's registry must know `block`, or committing it would store a
+/// state the registry cannot name and whose properties would be guessed.
+fn check_block<B: KvBackend, G: ChunkGenerator>(
+    world: &World<B, G>,
+    block: BlockStateId,
+) -> Result<(), BulkError> {
+    if world.block_name_of(block).is_some() {
+        Ok(())
+    } else {
+        Err(BulkError::UnknownBlock(block))
     }
 }
 
@@ -189,13 +221,13 @@ impl BulkEdit {
         block: BlockStateId,
     ) -> Result<(), BulkError> {
         check_y(x, y, z)?;
+        check_block(world, block)?;
         if self.pending.len() >= self.limit && !self.pending.contains_key(&(x, y, z)) {
             return Err(BulkError::TooLarge {
                 requested: self.pending.len() + 1,
                 limit: self.limit,
             });
         }
-        let _ = world;
         self.pending.insert((x, y, z), block);
         Ok(())
     }
@@ -216,10 +248,33 @@ impl BulkEdit {
         let (x2, y2, z2) = (min.0.max(max.0), min.1.max(max.1), min.2.max(max.2));
         check_y(x1, y1, z1)?;
         check_y(x2, y2, z2)?;
+        check_block(world, block)?;
 
-        // Count positions the box adds that are not already pending, without
-        // mutating anything, so a refusal leaves the transaction as it was.
-        let mut added = 0u64;
+        // Compute the box volume arithmetically in `u128`, and reject a box
+        // bigger than the limit **before** touching a position. The earlier
+        // version counted the box with a triple loop, so a mistyped selection
+        // (`//fill ~-2e9 … ~2e9 …`) iterated billions of positions — a hang,
+        // not a refusal — and the `u64` counter could overflow. `x`/`z` are
+        // unbounded, so this arithmetic bound is the only thing standing
+        // between a typo and a stuck tick thread.
+        //
+        // `volume > limit` alone is enough to refuse: distinct new positions
+        // are at least `volume - overlap` and `overlap <= pending.len()`, so
+        // `pending.len() + new >= volume > limit` no matter how much of the
+        // box is already staged.
+        let dx = (x2 as i64 - x1 as i64 + 1) as u128;
+        let dy = (y2 as i64 - y1 as i64 + 1) as u128;
+        let dz = (z2 as i64 - z1 as i64 + 1) as u128;
+        let volume = dx * dy * dz;
+        if volume > self.limit as u128 {
+            return Err(BulkError::TooLarge {
+                requested: volume.min(usize::MAX as u128) as usize,
+                limit: self.limit,
+            });
+        }
+        // `volume <= limit` here, so the counting loop is bounded by the limit
+        // and `added` cannot overflow.
+        let mut added = 0usize;
         for x in x1..=x2 {
             for y in y1..=y2 {
                 for z in z1..=z2 {
@@ -229,10 +284,10 @@ impl BulkEdit {
                 }
             }
         }
-        let requested = self.pending.len() as u64 + added;
-        if requested > self.limit as u64 {
+        let requested = self.pending.len() + added;
+        if requested > self.limit {
             return Err(BulkError::TooLarge {
-                requested: requested as usize,
+                requested,
                 limit: self.limit,
             });
         }
@@ -243,7 +298,6 @@ impl BulkEdit {
                 }
             }
         }
-        let _ = world;
         Ok(())
     }
 
@@ -264,21 +318,31 @@ impl BulkEdit {
 
     /// Commit the transaction as one journal revision.
     ///
-    /// Returns how many blocks changed and the revision's undo id. A commit of
-    /// zero changes writes nothing and returns `undo_id == 0`.
-    pub fn commit<B: KvBackend, G: ChunkGenerator>(self, world: &World<B, G>) -> BulkResult {
+    /// Returns how many blocks changed and the revision's undo id, or an error
+    /// if the journal refused the write. A commit of zero changes writes
+    /// nothing and returns `Ok(undo_id == 0)`. The commit is all-or-nothing:
+    /// on error the world is left exactly as it was (see
+    /// [`World::commit_block_group`]), so a failed edit is never silently
+    /// applied.
+    pub fn commit<B: KvBackend, G: ChunkGenerator>(
+        self,
+        world: &World<B, G>,
+    ) -> Result<BulkResult, BulkError> {
         let changes = plan(&self.pending, world);
         if changes.is_empty() {
-            return BulkResult {
+            return Ok(BulkResult {
                 changed: 0,
                 undo_id: 0,
-            };
+            });
         }
-        let undo_id = world.commit_block_group(self.actor, &changes).unwrap_or(0);
-        BulkResult {
+        let undo_id = world
+            .commit_block_group(self.actor, &changes)
+            .map_err(BulkError::Journal)?;
+        Ok(BulkResult {
             changed: changes.len(),
-            undo_id,
-        }
+            // Non-empty, so the journal always returned an id.
+            undo_id: undo_id.unwrap_or(0),
+        })
     }
 
     /// Discard the transaction. The world was never touched, so this writes
@@ -352,27 +416,33 @@ impl BulkHistory {
     }
 
     /// Commit `edit` and record its revision for undo.
+    ///
+    /// On a journal failure nothing is applied and nothing is recorded; the
+    /// error propagates. A zero-change commit records nothing and returns
+    /// `undo_id == 0`.
     pub fn commit<B: KvBackend, G: ChunkGenerator>(
         &mut self,
         world: &World<B, G>,
         edit: BulkEdit,
-    ) -> BulkResult {
+    ) -> Result<BulkResult, BulkError> {
         let actor = edit.actor;
         let changes = plan(&edit.pending, world);
         if changes.is_empty() {
-            return BulkResult {
+            return Ok(BulkResult {
                 changed: 0,
                 undo_id: 0,
-            };
+            });
         }
-        let undo_id = world.commit_block_group(actor, &changes).unwrap_or(0);
-        if undo_id != 0 {
+        let undo_id = world
+            .commit_block_group(actor, &changes)
+            .map_err(BulkError::Journal)?;
+        if let Some(undo_id) = undo_id {
             self.record(undo_id, actor, changes.clone());
         }
-        BulkResult {
+        Ok(BulkResult {
             changed: changes.len(),
-            undo_id,
-        }
+            undo_id: undo_id.unwrap_or(0),
+        })
     }
 
     /// Undo the revision `undo_id`, restoring every block it changed.
@@ -430,7 +500,10 @@ impl BulkHistory {
                 undo_id: 0,
             });
         }
-        let new_id = world.commit_block_group(actor, &inverse).unwrap_or(0);
+        let new_id = world
+            .commit_block_group(actor, &inverse)
+            .map_err(BulkError::Journal)?
+            .unwrap_or(0);
         if new_id != 0 {
             self.record(new_id, actor, inverse.clone());
         }
@@ -509,7 +582,7 @@ mod tests {
         let mut edit = BulkEdit::new(actor(1));
         edit.set(&world, 4, 20, 4, world.get_block(4, 20, 4))
             .unwrap();
-        let result = edit.commit(&world);
+        let result = edit.commit(&world).unwrap();
         assert_eq!(result.changed, 0);
         assert_eq!(result.undo_id, 0);
         assert_eq!(world.journal().head(), head, "no revision written");
@@ -523,7 +596,7 @@ mod tests {
         for i in 0..100 {
             edit.set(&world, i, 30, 0, block_ids::STONE).unwrap();
         }
-        let result = edit.commit(&world);
+        let result = edit.commit(&world).unwrap();
         assert_eq!(result.changed, 100);
         assert_eq!(
             world.journal().head(),
@@ -549,7 +622,7 @@ mod tests {
             edit.set(&world, 1, 40, 1, block_ids::STONE).unwrap();
             // A second column, so the group's multi-position index matters.
             edit.set(&world, 17, 40, 1, block_ids::SAND).unwrap();
-            edit.commit(&world);
+            edit.commit(&world).unwrap();
         }
         let world = World::new(backend, FlatGenerator::classic());
         assert_eq!(world.get_block(1, 40, 1), block_ids::STONE);
@@ -567,7 +640,7 @@ mod tests {
         let mut edit = BulkEdit::new(actor(1));
         edit.set(&world, 2, 20, 2, block_ids::STONE).unwrap();
         edit.set(&world, 3, 20, 2, block_ids::STONE).unwrap();
-        let result = history.commit(&world, edit);
+        let result = history.commit(&world, edit).unwrap();
         assert_eq!(result.changed, 2);
         assert_eq!(world.get_block(2, 20, 2), block_ids::STONE);
 
@@ -582,7 +655,7 @@ mod tests {
         let mut history = BulkHistory::new(4);
         let mut edit = BulkEdit::new(actor(1));
         edit.set(&world, 1, 20, 1, block_ids::STONE).unwrap();
-        let result = history.commit(&world, edit);
+        let result = history.commit(&world, edit).unwrap();
         // Someone else changes the same block after the bulk commit.
         world.set_block(1, 20, 1, "minecraft:dirt").unwrap();
         let undone = history.undo(&world, result.undo_id).unwrap();
@@ -608,7 +681,7 @@ mod tests {
         for i in 0..3 {
             let mut edit = BulkEdit::new(actor(1));
             edit.set(&world, i, 40, 0, block_ids::STONE).unwrap();
-            let r = history.commit(&world, edit);
+            let r = history.commit(&world, edit).unwrap();
             if i == 0 {
                 first_id = r.undo_id;
             }
@@ -677,8 +750,8 @@ mod tests {
         let mut b = BulkEdit::new(actor(0xBB));
         a.set(&world, 0, 20, 0, block_ids::STONE).unwrap();
         b.set(&world, 100, 20, 0, block_ids::DIRT).unwrap();
-        let ra = a.commit(&world);
-        let rb = b.commit(&world);
+        let ra = a.commit(&world).unwrap();
+        let rb = b.commit(&world).unwrap();
         assert!(rb.undo_id > ra.undo_id, "later commit, later sequence");
         let ea = world.journal().get(ra.undo_id).unwrap().unwrap();
         let eb = world.journal().get(rb.undo_id).unwrap().unwrap();
@@ -713,8 +786,8 @@ mod tests {
             edit.commit(&w2)
         });
 
-        let r1 = t1.join().unwrap();
-        let r2 = t2.join().unwrap();
+        let r1 = t1.join().unwrap().unwrap();
+        let r2 = t2.join().unwrap().unwrap();
         assert_ne!(r1.undo_id, r2.undo_id, "two distinct revisions");
         assert_eq!(world.journal().head(), head + 2, "two revisions written");
         for i in 0..16 {
@@ -763,7 +836,7 @@ mod tests {
                 .iter()
                 .map(|&(x, y, z)| world.get_block(x, y, z))
                 .collect();
-            let result = history.commit(&world, edit);
+            let result = history.commit(&world, edit).unwrap();
             assert!(result.changed > 0);
             history.undo(&world, result.undo_id).unwrap();
             for (p, &was) in positions.iter().zip(&snapshot) {
@@ -775,5 +848,119 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_committed_bulk_change_counts_as_a_block_change() {
+        // Finding 3: a `BlockGroup` is a block change like any other, so the
+        // history queries and worldgen-original check must see it.
+        let world = world();
+        let mut edit = BulkEdit::new(actor(1));
+        edit.set(&world, 5, 20, 5, block_ids::STONE).unwrap();
+        edit.commit(&world).unwrap();
+        let j = world.journal();
+        assert!(
+            j.last_block_change_at(5, 20, 5).unwrap().is_some(),
+            "the position was changed"
+        );
+        assert!(
+            !j.is_worldgen_original(5, 20, 5).unwrap(),
+            "a bulk edit makes a block non-original"
+        );
+        assert!(
+            !j.block_history(5, 20, 5, None, 10).unwrap().is_empty(),
+            "a bulk edit appears in the block's history"
+        );
+    }
+
+    #[test]
+    fn a_failed_journal_write_does_not_apply_the_edit() {
+        // Finding 1: the commit is atomic. A backend that fails its writes
+        // must leave the world exactly as it was, and surface the error
+        // rather than a silent `undo_id == 0`.
+        use aether_world::{KvBackend, StorageError};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Failing {
+            inner: MemStore,
+            fail: AtomicBool,
+        }
+        impl KvBackend for Failing {
+            fn put(&self, k: &[u8], v: &[u8]) -> Result<(), StorageError> {
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err(StorageError::Backend("disk full".into()));
+                }
+                self.inner.put(k, v)
+            }
+            fn get(&self, k: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+                self.inner.get(k)
+            }
+            fn delete(&self, k: &[u8]) -> Result<(), StorageError> {
+                self.inner.delete(k)
+            }
+            fn scan_prefix(&self, p: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+                self.inner.scan_prefix(p)
+            }
+        }
+
+        let backend = Failing {
+            inner: MemStore::new(),
+            fail: AtomicBool::new(false),
+        };
+        let world = World::new(&backend, FlatGenerator::classic());
+        let before = world.get_block(0, 20, 0);
+        backend.fail.store(true, Ordering::SeqCst);
+
+        let mut edit = BulkEdit::new(actor(1));
+        edit.set(&world, 0, 20, 0, block_ids::STONE).unwrap();
+        match edit.commit(&world) {
+            Err(BulkError::Journal(_)) => {}
+            other => panic!("expected a journal error, got {other:?}"),
+        }
+        assert_eq!(
+            world.get_block(0, 20, 0),
+            before,
+            "the failed commit left the world untouched"
+        );
+    }
+
+    #[test]
+    fn a_huge_fill_is_refused_without_scanning_it() {
+        // Finding 2: a mistyped fill must be refused by arithmetic, not by
+        // iterating (which would hang). These boxes are far larger than the
+        // limit and would take effectively forever to count.
+        let world = world();
+        let mut edit = BulkEdit::new(actor(1));
+        assert!(matches!(
+            edit.fill(&world, (0, 20, 0), (1_000_000_000, 20, 0), block_ids::STONE),
+            Err(BulkError::TooLarge { .. })
+        ));
+        assert!(matches!(
+            edit.fill(
+                &world,
+                (i32::MIN, 20, i32::MIN),
+                (i32::MAX, 20, i32::MAX),
+                block_ids::STONE
+            ),
+            Err(BulkError::TooLarge { .. })
+        ));
+        assert!(edit.is_empty(), "a refused fill staged nothing");
+    }
+
+    #[test]
+    fn an_unknown_block_id_is_refused() {
+        // Finding 9: the `world` parameter is used to reject a state the
+        // registry cannot name, instead of committing default properties.
+        let world = world();
+        let mut edit = BulkEdit::new(actor(1));
+        assert!(matches!(
+            edit.set(&world, 0, 20, 0, BlockStateId(999_999)),
+            Err(BulkError::UnknownBlock(_))
+        ));
+        assert!(matches!(
+            edit.fill(&world, (0, 20, 0), (1, 20, 1), BlockStateId(999_999)),
+            Err(BulkError::UnknownBlock(_))
+        ));
+        assert!(edit.is_empty());
     }
 }

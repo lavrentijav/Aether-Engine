@@ -902,7 +902,7 @@ fn audit(world: &DemoWorld) -> Reply {
 #[cfg(test)]
 mod tests {
     use super::query::{parse_duration_ms, Action, Context, ParseError, Query};
-    use aether_world::journal::{ActorId, Event, EventBody};
+    use aether_world::journal::{ActorId, BlockChange, Event, EventBody};
     use aether_world::BlockStateId;
 
     const STONE: BlockStateId = BlockStateId(1);
@@ -1107,5 +1107,55 @@ mod tests {
         assert!(q.accepts(&ev(1, 7, STONE, AIR, 0), &names));
         assert!(!q.accepts(&ev(2, 7, AIR, STONE, 0), &names), "wrong action");
         assert!(!q.accepts(&ev(3, 9, STONE, AIR, 0), &names), "wrong player");
+    }
+
+    /// A bulk revision event carrying `changes`, in one journal revision.
+    fn bulk(actor: u128, changes: &[(i32, BlockStateId, BlockStateId)]) -> Event {
+        Event {
+            seq: 10,
+            at_ms: 1_000_000,
+            actor: ActorId(actor),
+            cause: None,
+            body: EventBody::BlockGroup {
+                changes: changes
+                    .iter()
+                    .map(|&(x, from, to)| BlockChange {
+                        x,
+                        y: 64,
+                        z: 0,
+                        from,
+                        to,
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_radius_filter_selects_a_bulk_revision_that_reaches_into_it() {
+        // Finding 4: the command layer must agree with the journal — a bulk
+        // revision any of whose changes lands in the radius is selected whole.
+        let q = Query::parse(&["radius:5"], &ctx()).unwrap();
+        assert!(
+            q.accepts(&bulk(7, &[(1, AIR, STONE), (400, AIR, STONE)]), &names),
+            "one change inside the radius selects the revision"
+        );
+        assert!(
+            !q.accepts(&bulk(7, &[(400, AIR, STONE), (401, AIR, STONE)]), &names),
+            "nothing inside the radius excludes it"
+        );
+    }
+
+    #[test]
+    fn the_block_and_action_filters_expand_a_bulk_revision() {
+        // A block/action filter matches when any change of the revision does,
+        // the same atomic rule as the area filter.
+        let stone = Query::parse(&["block:stone"], &ctx()).unwrap();
+        let brk = Query::parse(&["action:break"], &ctx()).unwrap();
+        let rev = bulk(7, &[(0, AIR, STONE), (1, STONE, AIR)]);
+        assert!(stone.accepts(&rev, &names));
+        assert!(brk.accepts(&rev, &names));
+        let dirt = Query::parse(&["block:dirt"], &ctx()).unwrap();
+        assert!(!dirt.accepts(&rev, &names), "no change touches dirt");
     }
 }

@@ -459,6 +459,101 @@ impl EventBody {
         }
     }
 
+    /// Call `f(x, y, z, from, to)` for every block change this event carries:
+    /// one pair for a [`EventBody::BlockSet`], every pair of a
+    /// [`EventBody::BlockGroup`], none for any other body.
+    ///
+    /// The single-entry point every "does this change a block?" consumer
+    /// (block history, worldgen-original, the mirror, `/inspect`) should use,
+    /// so a bulk revision is treated as the collection of block changes it is
+    /// and not as an opaque event.
+    pub fn for_each_block_change(
+        &self,
+        f: &mut dyn FnMut(i32, i32, i32, BlockStateId, BlockStateId),
+    ) {
+        match self {
+            EventBody::BlockSet { x, y, z, from, to } => f(*x, *y, *z, *from, *to),
+            EventBody::BlockGroup { changes } => {
+                for c in changes {
+                    f(c.x, c.y, c.z, c.from, c.to);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether this event **changes the block** at `(x, y, z)` — a `BlockSet`
+    /// there, or any change of a `BlockGroup` there.
+    ///
+    /// Distinct from [`Event::position`]: an item event merely *at* the
+    /// coordinates (a drop, a chest access) does not change the block.
+    pub fn changes_block_at(&self, x: i32, y: i32, z: i32) -> bool {
+        match self {
+            EventBody::BlockSet {
+                x: bx,
+                y: by,
+                z: bz,
+                ..
+            } => (*bx, *by, *bz) == (x, y, z),
+            EventBody::BlockGroup { changes } => {
+                changes.iter().any(|c| (c.x, c.y, c.z) == (x, y, z))
+            }
+            _ => false,
+        }
+    }
+
+    /// The state this event installs at `(x, y, z)`, if it changes that block.
+    ///
+    /// A later duplicate inside one group wins, matching a sequential
+    /// application. `None` when the event changes no block there.
+    pub fn block_to_at(&self, x: i32, y: i32, z: i32) -> Option<BlockStateId> {
+        match self {
+            EventBody::BlockSet {
+                x: bx,
+                y: by,
+                z: bz,
+                to,
+                ..
+            } if (*bx, *by, *bz) == (x, y, z) => Some(*to),
+            EventBody::BlockGroup { changes } => changes
+                .iter()
+                .rev()
+                .find(|c| (c.x, c.y, c.z) == (x, y, z))
+                .map(|c| c.to),
+            _ => None,
+        }
+    }
+
+    /// Whether this event "touches" `(x, y, z)` in the broad sense the radius
+    /// filter means: a block change there, or an item event whose place is
+    /// that block. A bulk revision touches every position it changes.
+    pub fn touches_position(&self, x: i32, y: i32, z: i32) -> bool {
+        self.position() == Some((x, y, z)) || self.changes_block_at(x, y, z)
+    }
+
+    /// The block coordinates this body concerns, if it concerns a single one.
+    ///
+    /// A bulk revision spans many positions, so it has none here; use
+    /// [`EventBody::for_each_block_change`] for those. Drives the radius
+    /// filter for single-position events.
+    pub fn position(&self) -> Option<(i32, i32, i32)> {
+        match self {
+            EventBody::BlockSet { x, y, z, .. } => Some((*x, *y, *z)),
+            EventBody::ItemMint { to, .. } => to.position(),
+            EventBody::ItemMove { to, from, .. } => to.position().or_else(|| from.position()),
+            EventBody::ItemDestroy { from, .. } => from.position(),
+            EventBody::ItemMerge { .. } => None,
+            EventBody::ItemDerive { to, .. } => to.position(),
+            // Where the speaker stood, so a radius filter can find what was
+            // said nearby.
+            EventBody::ChatMessage { x, y, z, .. } => Some((*x, *y, *z)),
+            // A plugin event carries no position the core understands.
+            EventBody::Custom { .. } => None,
+            // A revision spans many positions; see the method doc.
+            EventBody::BlockGroup { .. } => None,
+        }
+    }
+
     /// Every block position this event should be recorded under in the
     /// journal's **column** index.
     ///
@@ -535,24 +630,7 @@ impl Event {
     /// Drives the radius filter: an event with no position is global and is
     /// only ever swept up by an unrestricted rollback.
     pub fn position(&self) -> Option<(i32, i32, i32)> {
-        match &self.body {
-            EventBody::BlockSet { x, y, z, .. } => Some((*x, *y, *z)),
-            // A revision spans many positions, so it has no single one. Area
-            // filters handle it by consulting its changes directly (see
-            // `Filter::matches`), and a rollback expands them in
-            // `plan_rollback_where`.
-            EventBody::BlockGroup { .. } => None,
-            EventBody::ItemMint { to, .. } => to.position(),
-            EventBody::ItemMove { to, from, .. } => to.position().or_else(|| from.position()),
-            EventBody::ItemDestroy { from, .. } => from.position(),
-            EventBody::ItemMerge { .. } => None,
-            EventBody::ItemDerive { to, .. } => to.position(),
-            // Where the speaker stood, so a radius filter can find what was
-            // said nearby.
-            EventBody::ChatMessage { x, y, z, .. } => Some((*x, *y, *z)),
-            // A plugin event carries no position the core understands.
-            EventBody::Custom { .. } => None,
-        }
+        self.body.position()
     }
 }
 

@@ -186,7 +186,11 @@ impl Filter {
     }
 
     /// Whether `e` is selected.
-    fn matches(&self, e: &Event) -> bool {
+    ///
+    /// Public so a caller that has its own extra conditions (the command
+    /// layer's `block:` / `action:` filters) ANDs them with the journal's
+    /// exact selection instead of re-implementing — and drifting from — it.
+    pub fn matches(&self, e: &Event) -> bool {
         if let Some(a) = self.actor {
             if e.actor != a {
                 return false;
@@ -413,19 +417,23 @@ impl<B: KvBackend> Journal<B> {
     /// Append one bulk-edit **revision**: many block changes under a single
     /// sequence number, actor and timestamp.
     ///
-    /// Returns the revision's sequence number, which is also its undo id: the
-    /// event carries both sides of every change, so undoing it is reading it
-    /// back and applying the inverse. An empty `changes` writes nothing and
-    /// returns the current head (no revision was recorded).
+    /// Returns the revision's sequence number — which is also its undo id,
+    /// because the event carries both sides of every change — or `None` when
+    /// `changes` is empty, so nothing was written and there is no id to hand
+    /// back mistaken for the previous event's. The changes are stored sorted
+    /// by column, which lets a column replay binary-search its own slice
+    /// rather than scan a whole million-block revision per column.
     pub fn append_block_group(
         &self,
         actor: ActorId,
-        changes: Vec<BlockChange>,
-    ) -> Result<u64, StorageError> {
+        mut changes: Vec<BlockChange>,
+    ) -> Result<Option<u64>, StorageError> {
         if changes.is_empty() {
-            return Ok(self.head());
+            return Ok(None);
         }
+        changes.sort_by_key(|c| (c.x >> 4, c.z >> 4, c.y, c.x, c.z));
         self.append(actor, EventBody::BlockGroup { changes })
+            .map(Some)
     }
 
     /// Append an event that happened because of event `cause` — a drop out of
@@ -530,7 +538,7 @@ impl<B: KvBackend> Journal<B> {
     /// access at its coordinates). A caller that means strictly "was this
     /// block changed" wants [`Self::last_block_change_at`].
     pub fn last_change_at(&self, x: i32, y: i32, z: i32) -> Result<Option<Event>, StorageError> {
-        self.first_column_hit(x, z, &|e| e.position() == Some((x, y, z)))
+        self.first_column_hit(x, z, &|e| e.body.touches_position(x, y, z))
     }
 
     /// The most recent **block change** at `(x, y, z)`, if the block there was
@@ -547,9 +555,7 @@ impl<B: KvBackend> Journal<B> {
         y: i32,
         z: i32,
     ) -> Result<Option<Event>, StorageError> {
-        self.first_column_hit(x, z, &|e| {
-            matches!(e.body, EventBody::BlockSet { .. }) && e.position() == Some((x, y, z))
-        })
+        self.first_column_hit(x, z, &|e| e.body.changes_block_at(x, y, z))
     }
 
     /// The newest event in `(x, z)`'s column for which `accept` holds, walking

@@ -52,7 +52,7 @@ fn bench_bulk_commit(c: &mut Criterion) {
                 block,
             )
             .unwrap();
-            black_box(edit.commit(&world));
+            black_box(edit.commit(&world).unwrap());
         })
     });
     group.finish();
