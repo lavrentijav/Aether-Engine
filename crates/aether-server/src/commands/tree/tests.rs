@@ -798,7 +798,7 @@ fn game_commands_gate_on_operator_through_the_tree() {
     );
     assert_eq!(
         one(&env, &env.bob, "/time set day"),
-        "You are not an operator."
+        "You do not have permission to run this command."
     );
 
     // An op runs them. The replies are vanilla's en_us strings (CMD-05).
@@ -824,6 +824,265 @@ fn game_commands_gate_on_operator_through_the_tree() {
         "Summoned new minecraft:pig"
     );
     assert!(one(&env, &env.tester, "/killall").starts_with("Removed "));
+}
+
+#[test]
+fn time_has_the_full_add_set_query_grammar_and_wraps() {
+    let env = env();
+    let who = &env.tester;
+
+    for (word, value) in [
+        ("day", 1000),
+        ("noon", 6000),
+        ("night", 13000),
+        ("midnight", 18000),
+    ] {
+        assert_eq!(
+            one(&env, who, &format!("/time set {word}")),
+            format!("Set the time to {value}")
+        );
+        assert_eq!(
+            one(&env, who, "/time query daytime"),
+            format!("The time is {value}")
+        );
+    }
+
+    // `add` wraps at 24,000 like vanilla; the reply is the resulting daytime.
+    assert_eq!(one(&env, who, "/time set 1000"), "Set the time to 1000");
+    assert_eq!(one(&env, who, "/time add 24000"), "Set the time to 1000");
+    assert_eq!(one(&env, who, "/time query daytime"), "The time is 1000");
+    assert_eq!(one(&env, who, "/time add 23000"), "Set the time to 0");
+    assert_eq!(one(&env, who, "/time query daytime"), "The time is 0");
+
+    // `set` may name a raw tick count and wraps internally, but the reply
+    // echoes what was asked, as vanilla does.
+    assert_eq!(one(&env, who, "/time set 25000"), "Set the time to 25000");
+    assert_eq!(one(&env, who, "/time query daytime"), "The time is 1000");
+
+    // The pre-tree forms still work: `/time <ticks>`, `/time day`, bare query.
+    assert_eq!(one(&env, who, "/time 12000"), "Set the time to 12000");
+    assert_eq!(one(&env, who, "/time day"), "Set the time to 1000");
+    assert!(one(&env, who, "/time").starts_with("The time is "));
+    assert!(one(&env, who, "/time query gametime").starts_with("The time is "));
+    assert!(one(&env, who, "/time query day").starts_with("The time is "));
+
+    // A negative amount is refused by the time argument, with vanilla's text.
+    assert_eq!(
+        one(&env, who, "/time add -1000"),
+        "The tick count must not be less than 0: found -1000"
+    );
+}
+
+#[test]
+fn weather_sets_the_live_state_and_clamps_durations() {
+    use crate::commands::world_env::{weather_state, Weather, WEATHER_MAX_DURATION};
+
+    let env = env();
+    let who = &env.tester;
+
+    assert_eq!(one(&env, who, "/weather rain"), "Set the weather to rain");
+    let state = weather_state();
+    assert_eq!(state.weather, Weather::Rain);
+    assert!((12_000..=24_000).contains(&state.remaining), "{state:?}");
+
+    assert_eq!(
+        one(&env, who, "/weather thunder"),
+        "Set the weather to rain & thunder"
+    );
+    assert_eq!(weather_state().weather, Weather::Thunder);
+
+    assert_eq!(
+        one(&env, who, "/weather clear 24000"),
+        "Set the weather to clear"
+    );
+    assert_eq!(
+        weather_state(),
+        crate::commands::world_env::WeatherState {
+            weather: Weather::Clear,
+            remaining: 24_000,
+        }
+    );
+
+    // An explicit duration is clamped to vanilla's `0..=1,000,000` range.
+    assert_eq!(
+        one(&env, who, "/weather rain 2000000"),
+        "Set the weather to rain"
+    );
+    assert_eq!(weather_state().remaining, WEATHER_MAX_DURATION);
+    assert_eq!(
+        one(&env, who, "/weather clear -5"),
+        "Set the weather to clear"
+    );
+    assert_eq!(weather_state().remaining, 0);
+}
+
+#[test]
+fn worldborder_has_the_full_grammar_and_reports_its_size() {
+    use crate::commands::world_env::{tick_border, world_border};
+
+    let env = env();
+    let who = &env.tester;
+
+    assert_eq!(
+        one(&env, who, "/worldborder get"),
+        "The world border is currently 59999968 block(s) wide"
+    );
+
+    assert_eq!(
+        one(&env, who, "/worldborder set 100"),
+        "Set the world border to 100 block(s) wide"
+    );
+    assert_eq!(
+        one(&env, who, "/worldborder get"),
+        "The world border is currently 100 block(s) wide"
+    );
+    assert_eq!(
+        one(&env, who, "/worldborder add 50"),
+        "Set the world border to 150 block(s) wide"
+    );
+
+    // A timed resize interpolates over game ticks, both growing and shrinking.
+    assert_eq!(
+        one(&env, who, "/worldborder set 200 10"),
+        "Growing the world border to 200 blocks wide over 10 seconds"
+    );
+    for _ in 0..100 {
+        tick_border();
+    }
+    assert!((world_border().size - 175.0).abs() < 1e-9);
+    for _ in 0..100 {
+        tick_border();
+    }
+    assert_eq!(world_border().size, 200.0);
+
+    assert_eq!(
+        one(&env, who, "/worldborder set 50 5"),
+        "Shrinking the world border to 50 block(s) wide over 5 second(s)"
+    );
+    for _ in 0..100 {
+        tick_border();
+    }
+    assert_eq!(world_border().size, 50.0);
+    assert_eq!(
+        one(&env, who, "/worldborder add -49"),
+        "Set the world border to 1 block(s) wide"
+    );
+
+    // Bounds and no-change refusals.
+    assert_eq!(
+        one(&env, who, "/worldborder set 0"),
+        "World border cannot be smaller than 1 block wide"
+    );
+    assert_eq!(
+        one(&env, who, "/worldborder set 59999969"),
+        "World border cannot be bigger than 59999968 blocks wide"
+    );
+    assert_eq!(
+        one(&env, who, "/worldborder set 1"),
+        "Nothing changed. The world border is already that size"
+    );
+    assert_eq!(
+        one(&env, who, "/worldborder add 0"),
+        "Nothing changed. The world border is already that size"
+    );
+
+    // Centre, damage and warning settings, including their no-change lines.
+    assert_eq!(
+        one(&env, who, "/worldborder center 10 20"),
+        "Set the center of the world border to 10, 20"
+    );
+    let border = world_border();
+    assert_eq!((border.center_x, border.center_z), (10.0, 20.0));
+    assert_eq!(
+        one(&env, who, "/worldborder center 10 20"),
+        "Nothing changed. The world border is already centered there"
+    );
+    assert_eq!(
+        one(&env, who, "/worldborder center 30000000 0"),
+        "World border cannot be further out than 29999984 blocks"
+    );
+    assert_eq!(
+        one(&env, who, "/worldborder damage amount 0.5"),
+        "Set the world border damage to 0.5 per block each second"
+    );
+    assert_eq!(
+        one(&env, who, "/worldborder damage amount 0.5"),
+        "Nothing changed. The world border damage is already that amount"
+    );
+    assert_eq!(
+        one(&env, who, "/worldborder damage buffer 10"),
+        "Set the world border damage buffer to 10 block(s)"
+    );
+    assert_eq!(
+        one(&env, who, "/worldborder warning distance 10"),
+        "Set the world border warning distance to 10 block(s)"
+    );
+    assert_eq!(
+        one(&env, who, "/worldborder warning time 30"),
+        "Set the world border warning time to 30 second(s)"
+    );
+    let border = world_border();
+    assert_eq!(border.damage_per_block, 0.5);
+    assert_eq!(border.damage_buffer, 10.0);
+    assert_eq!(border.warning_distance, 10);
+    assert_eq!(border.warning_time, 30);
+}
+
+#[test]
+fn setworldspawn_changes_the_runtime_spawn_and_defaultgamemode_the_next_join() {
+    use crate::game;
+
+    let env = env();
+    let who = &env.tester;
+
+    assert_eq!(
+        one(&env, who, "/setworldspawn 10 64 10 90"),
+        "Set the world spawn point to 10, 64, 10 [90.0]"
+    );
+    let spawn = game::world_spawn_override().expect("spawn set");
+    assert_eq!((spawn.x, spawn.y, spawn.z), (10, 64, 10));
+    assert_eq!(spawn.angle, 90.0);
+
+    // With no position, vanilla uses the caller's block position and angle 0.
+    assert_eq!(
+        one(&env, who, "/setworldspawn"),
+        "Set the world spawn point to 0, 64, 0 [0.0]"
+    );
+
+    assert_eq!(
+        one(&env, who, "/defaultgamemode survival"),
+        "The default game mode is now Survival Mode"
+    );
+    assert_eq!(
+        game::default_game_mode(),
+        crate::protocol::GameMode::Survival
+    );
+    assert_eq!(
+        one(&env, who, "/defaultgamemode creative"),
+        "The default game mode is now Creative Mode"
+    );
+    assert_eq!(
+        game::default_game_mode(),
+        crate::protocol::GameMode::Creative
+    );
+}
+
+#[test]
+fn the_world_environment_commands_are_node_gated() {
+    let env = env();
+    for text in [
+        "/time set day",
+        "/weather clear",
+        "/worldborder get",
+        "/setworldspawn",
+        "/defaultgamemode creative",
+    ] {
+        assert_eq!(
+            one(&env, &env.bob, text),
+            "You do not have permission to run this command.",
+            "`{text}`"
+        );
+    }
 }
 
 #[test]

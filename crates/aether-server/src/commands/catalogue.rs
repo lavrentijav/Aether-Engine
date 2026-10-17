@@ -634,13 +634,13 @@ pub const CATALOGUE: &[Command] = &[
         "/rotate <target> <yaw> <pitch>",
     ),
     // -- world -------------------------------------------------------------
-    imp_op(
+    imp_node(
         "time",
         &[],
         "minecraft.command.time",
         2,
         Category::World,
-        "/time [set] <day,noon,night,midnight,ticks>",
+        "/time <add,set,query> [...]",
     ),
     pend(
         "setblock",
@@ -705,32 +705,29 @@ pub const CATALOGUE: &[Command] = &[
         Category::World,
         "/locate <structure,biome,poi> [...]",
     ),
-    pend(
+    imp_node(
         "setworldspawn",
         &[],
         "minecraft.command.setworldspawn",
         2,
-        "CMD-13",
         Category::World,
-        "/setworldspawn [pos] [angle]",
+        "/setworldspawn [<pos>] [<angle>]",
     ),
-    pend(
+    imp_node(
         "worldborder",
         &[],
         "minecraft.command.worldborder",
         2,
-        "CMD-13",
         Category::World,
-        "/worldborder <set,center,damage,get,warning> [...]",
+        "/worldborder <add,set,center,damage,get,warning> [...]",
     ),
-    pend(
+    imp_node(
         "weather",
         &[],
         "minecraft.command.weather",
         2,
-        "CMD-13",
         Category::World,
-        "/weather <clear,rain,thunder> [duration]",
+        "/weather <clear,rain,thunder> [<duration>]",
     ),
     pend(
         "gamerule",
@@ -759,14 +756,13 @@ pub const CATALOGUE: &[Command] = &[
         Category::World,
         "/tick <rate,freeze,step,sprint,unfreeze,query> [...]",
     ),
-    pend(
+    imp_node(
         "defaultgamemode",
         &[],
         "minecraft.command.defaultgamemode",
         2,
-        "CMD-13",
         Category::World,
-        "/defaultgamemode <mode>",
+        "/defaultgamemode <gamemode>",
     ),
     pend(
         "waypoint",

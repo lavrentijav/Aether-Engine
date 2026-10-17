@@ -38,10 +38,6 @@ pub fn nodes() -> Vec<Node> {
             "<gamemode> [<targets>]",
         ),
         tree::with_usage(
-            tree::greedy("time", &[], Requirement::Fn(require_op), exec_time),
-            "set <day|noon|night|midnight|ticks>",
-        ),
-        tree::with_usage(
             tree::greedy("give", &[], Requirement::Fn(require_op), exec_give),
             "<item> [<count>]",
         ),
@@ -87,11 +83,6 @@ fn exec_gamemode(ctx: &mut Ctx) -> Reply {
         Some(handle) => Reply(gamemode(&args, handle, ctx.registry, ctx.world)),
         None => ctx.needs_player(),
     }
-}
-
-fn exec_time(ctx: &mut Ctx) -> Reply {
-    let args = ctx.refs();
-    Reply(time(&args, ctx.registry, ctx.world))
 }
 
 fn exec_give(ctx: &mut Ctx) -> Reply {
@@ -219,35 +210,6 @@ fn game_mode_name(mode: GameMode) -> &'static str {
         GameMode::Creative => lang::GAMEMODE_CREATIVE,
         GameMode::Spectator => lang::GAMEMODE_SPECTATOR,
     }
-}
-
-/// `/time [set] <day|noon|night|midnight|ticks>` or a query.
-pub fn time(args: &[&str], registry: &SharedRegistry, world: &DemoWorld) -> Vec<String> {
-    let t = match (args.first().copied(), args.get(1).copied()) {
-        (Some("set"), Some(v)) | (Some(v), None) => match v {
-            "day" => 1000,
-            "noon" => 6000,
-            "night" => 13000,
-            "midnight" => 18000,
-            n => match n.parse::<i64>() {
-                Ok(n) => n,
-                Err(_) => return vec!["/time set <day|noon|night|midnight|ticks>".into()],
-            },
-        },
-        _ => {
-            // The bare `/time` is a query, the closest vanilla analogue being
-            // `/time query daytime`; use its string (`commands.time.query`)
-            // rather than an invented one. CMD-13a ports the full
-            // `add/set/query` grammar onto the tree.
-            return vec![lang::format(
-                lang::TIME_QUERY,
-                &[&super::time_of_day().to_string()],
-            )];
-        }
-    };
-    super::set_time_of_day(t);
-    registry.broadcast(&super::time_event(), world);
-    vec![lang::format(lang::TIME_SET, &[&t.to_string()])]
 }
 
 /// `/give <item> [count]`.

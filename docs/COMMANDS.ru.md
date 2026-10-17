@@ -12,7 +12,7 @@
 
 **Легенда:** ✅ работает · 🚧 ожидает (`CMD-nn` — задача, которая её реализует). **Узел** — правомочие, а **Op** — ванильный уровень оператора (0 — всем … 4 — владельцу); для ожидающей команды заглушка требует ровно их. **Gate** — что сервер проверяет *сегодня*: `node` (узел/op применяются), `operator` (прежняя проверка «только оператор» — узел/op это цель, пока не применяются) или `everyone` (требований нет; узел/op — цель).
 
-**Итого:** 113 команд — 42 работают, 71 ожидают.
+**Итого:** 113 команд — 46 работают, 67 ожидают.
 
 ## Содержание
 
@@ -94,7 +94,7 @@
 
 | Команда | Синонимы | Статус | Gate | Узел | Op | Использование |
 | --- | --- | --- | --- | --- | --- | --- |
-| `/time` | – | ✅ работает | `operator` | `minecraft.command.time` | 2 | `/time [set] <day,noon,night,midnight,ticks>` |
+| `/time` | – | ✅ работает | `node` | `minecraft.command.time` | 2 | `/time <add,set,query> [...]` |
 | `/setblock` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.setblock` | 2 | `/setblock <pos> <block> [mode]` |
 | `/fill` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.fill` | 2 | `/fill <from> <to> <block> [mode]` |
 | `/clone` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.clone` | 2 | `/clone <from> <to> <dest> [mask] [mode]` |
@@ -102,13 +102,13 @@
 | `/place` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.place` | 2 | `/place <feature,template> <pos> [...]` |
 | `/forceload` | – | 🚧 ожидает CMD-12 | `node` | `minecraft.command.forceload` | 2 | `/forceload <add,remove,query> <from> [to]` |
 | `/locate` | – | 🚧 ожидает CMD-13 | `node` | `minecraft.command.locate` | 2 | `/locate <structure,biome,poi> [...]` |
-| `/setworldspawn` | – | 🚧 ожидает CMD-13 | `node` | `minecraft.command.setworldspawn` | 2 | `/setworldspawn [pos] [angle]` |
-| `/worldborder` | – | 🚧 ожидает CMD-13 | `node` | `minecraft.command.worldborder` | 2 | `/worldborder <set,center,damage,get,warning> [...]` |
-| `/weather` | – | 🚧 ожидает CMD-13 | `node` | `minecraft.command.weather` | 2 | `/weather <clear,rain,thunder> [duration]` |
+| `/setworldspawn` | – | ✅ работает | `node` | `minecraft.command.setworldspawn` | 2 | `/setworldspawn [<pos>] [<angle>]` |
+| `/worldborder` | – | ✅ работает | `node` | `minecraft.command.worldborder` | 2 | `/worldborder <add,set,center,damage,get,warning> [...]` |
+| `/weather` | – | ✅ работает | `node` | `minecraft.command.weather` | 2 | `/weather <clear,rain,thunder> [<duration>]` |
 | `/gamerule` | – | 🚧 ожидает CMD-13 | `node` | `minecraft.command.gamerule` | 2 | `/gamerule <rule> [value]` |
 | `/difficulty` | – | 🚧 ожидает CMD-13 | `node` | `minecraft.command.difficulty` | 2 | `/difficulty <peaceful,easy,normal,hard>` |
 | `/tick` | – | 🚧 ожидает CMD-13 | `node` | `minecraft.command.tick` | 3 | `/tick <rate,freeze,step,sprint,unfreeze,query> [...]` |
-| `/defaultgamemode` | – | 🚧 ожидает CMD-13 | `node` | `minecraft.command.defaultgamemode` | 2 | `/defaultgamemode <mode>` |
+| `/defaultgamemode` | – | ✅ работает | `node` | `minecraft.command.defaultgamemode` | 2 | `/defaultgamemode <gamemode>` |
 | `/waypoint` | – | 🚧 ожидает CMD-13 | `node` | `minecraft.command.waypoint` | 2 | `/waypoint <list,modify>` |
 
 ## data

@@ -520,9 +520,9 @@ fn parse_time(r: &mut StringReader) -> Result<(Value, String), ParseError> {
     let ticks = (value * per).round() as i64;
     // `TimeArgumentType.time()` has a minimum of 0.
     if ticks < 0 {
-        return Err(ParseError::Argument(
-            "Time must not be less than 0 ticks".into(),
-        ));
+        return Err(ParseError::Argument(format!(
+            "The tick count must not be less than 0: found {t}"
+        )));
     }
     Ok((Value::Int(ticks as i32), t))
 }

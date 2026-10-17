@@ -61,6 +61,9 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
     let now = super::AGE.fetch_add(1, Ordering::Relaxed) + 1;
     super::set_time_of_day(super::time_of_day() + 1);
     let night = super::is_night();
+    // Weather and the world border advance on the same clock; the border also
+    // damages anyone outside it once a second.
+    crate::commands::world_env::tick_world(registry, world);
 
     let actions = entities::tick(world, registry, now, !night);
     for a in actions {

@@ -333,11 +333,14 @@ fn login_and_play(
     if let Some(s) = &saved {
         player.yaw = s.yaw;
         player.pitch = s.pitch;
+    } else if let Some(spawn) = crate::game::world_spawn_override() {
+        // `/setworldspawn <pos> <angle>` only aims players who join after it.
+        player.yaw = spawn.angle;
     }
     let game_mode = saved
         .as_ref()
         .map(|s| s.mode)
-        .unwrap_or(cfg.server.game_mode);
+        .unwrap_or_else(crate::game::default_game_mode);
 
     // A release with a generated compat pack gets *that* pack; everyone else
     // keeps whatever `[resource_pack]` offers. `compat_offered` says which this
@@ -2208,6 +2211,13 @@ fn find_spawn_y(world: &DemoWorld, x: i32, z: i32) -> f64 {
 /// Where new players appear: the first dry column found spiralling out
 /// from the origin, so nobody starts in the middle of an ocean.
 fn world_spawn(world: &DemoWorld) -> Vector3 {
+    if let Some(spawn) = crate::game::world_spawn_override() {
+        return Vector3::new(
+            f64::from(spawn.x) + 0.5,
+            f64::from(spawn.y),
+            f64::from(spawn.z) + 0.5,
+        );
+    }
     static SPAWN: std::sync::OnceLock<(i32, i32)> = std::sync::OnceLock::new();
     let (x, z) = *SPAWN.get_or_init(|| {
         for ring in 0..16i32 {
