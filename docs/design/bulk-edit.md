@@ -208,38 +208,44 @@ through it.
 The budget is configurable under `[bulk]`: `cells_per_tick`,
 `columns_per_tick`, `hooks_per_tick` (defaults `4096`, `4`, `8192`). Each is a
 per-tick safety cap; a job resumes where it stopped, so an edit larger than the
-budget always eventually completes. The defaults are set from the measured
-**worst** steps on the shared reference builder (`cargo-locked bench
--p aether-server --bench bulk_edit`):
+budget always eventually completes. `cargo-locked bench -p aether-server
+--bench bulk_edit` measures each phase; because the builder is shared, the
+numbers below are an **idle run** with the observed loaded range beside it
+(the publish work moves ~2–3× under other agents' builds):
 
-| step | measured |
-|---|---|
-| `settle_step` (4,096 dense cells) | ≈ 1.0 ms |
-| `last_settle_slice` (final full 4,096-cell seed slice) | ≈ 1.5 ms |
-| `frontier_to_resend_step_real_encoder` (fixed-point slice + 4 columns through the real 1.21.11 codec, one viewer) | ≈ 3.4 ms |
-| `hooks_step` (8,192 **sink calls**, not plugin dispatch) | ≈ 0.8 ms |
-| `sparse_settle_step` (4,096 isolated cells; stone neighbours, reshape is a no-op) | ≈ 1.2 ms |
-| `fence_sparse_settle_step` (4,096 fixed-point checks, each on a fence with six fence neighbours) | ≈ 2.4 ms |
+| step | idle | observed under load |
+|---|---|---|
+| `settle_step` (4,096 dense cells) | 1.0 ms | up to ≈2.8 ms |
+| `last_settle_slice` (final full 4,096-cell seed slice) | 1.6 ms | up to ≈3.1 ms |
+| `frontier_to_resend_step` (remaining frontier + 4 real 1.21.11 column encodes, one viewer) | 3.5 ms | up to ≈10.1 ms |
+| `hooks_step` (8,192 **sink calls**, not plugin dispatch) | 5 µs | up to ≈1.7 ms under a loaded builder |
+| `sparse_settle_step` (4,096 isolated cells, stone neighbours, reshape is a no-op) | 1.2 ms | up to ≈3.0 ms |
+| `fence_sparse_settle_step` (one full 4,096-check frontier slice of fences with six fence neighbours) | 2.3 ms | up to ≈6.5 ms |
 
 The fence case is the worst shape work: each frontier position does four-to-six
-neighbour reads and a `with_props`. It is the number the default is chosen
-against; at 4,096 cells the measured worst step stays around 2–4 ms, under a
-tenth of the 50 ms tick, with room for many viewers' column encodes. The hook number measures the
-sink only; in production each call goes through the plugin host (`HOST` mutex +
-plugin code), whose cost is unbounded in plugin code, which is why
-`hooks_per_tick` is a safety cap rather than a time guarantee. `columns_per_tick`
-is a **send per viewer**: `ServerSink` broadcasts a `ChunkColumn` and the
-registry encodes it once per online client, so wall-clock cost scales with the
-audience; lower it on a crowded server (the work just spans more ticks). The
-bench's `frontier_to_resend` step is the actual combined worst step — a full
-fixed-point slice followed by four encodes — because re-sends only start after
-the frontier has drained, not right after the last seed slice.
+neighbour reads and a `with_props`, and it is measured as a **full** budget
+slice. On a busy builder the worst single step observed was the boundary
+frontier+encode step at ≈10 ms, about a fifth of the 50 ms tick — the budget is
+safe, but it does not leave "a tenth of a tick" of headroom as an earlier
+revision claimed. The hook number measures the sink only; in production each
+call goes through the plugin host (`HOST` mutex + plugin code), whose cost is
+unbounded in plugin code, which is why `hooks_per_tick` is a safety cap rather
+than a time guarantee. `columns_per_tick` is a **send per viewer**: `ServerSink`
+broadcasts a `ChunkColumn` and the registry encodes it once per online client,
+so wall-clock cost scales with the audience; lower it on a crowded server (the
+work just spans more ticks). Re-sends start only when the frontier has drained,
+so the boundary step can be shorter than a full frontier slice; the full slice
+is the separate fence bench.
 
-With the defaults a 1M-block fill is 245 seed slices (`1,000,000 / 4,096` rounds
-up), a proportional fixed-point frontier, 49 column sends (13 ticks at four per
-tick) and 123 hook slices; publication completes over a few seconds and never
-takes an unbounded tick. The commit half is separate and off-tick, above, and
-its one-off cache-write pause is documented there.
+With the defaults a 1M-block fill is 245 seed slices (`1,000,000 / 4,096`
+rounds up), a fixed-point frontier of roughly 1.2× the change count (≈290
+slices in the 65k-cell probe), 49 column sends (13 ticks at four per tick) and
+123 hook slices — roughly **670 ticks, ≈34 s at 20 tps**. That is publication
+*latency*, not a stalled tick: every step is bounded and the server keeps
+ticking throughout. The 1M test drives `publish_all` in a tight loop, so it
+asserts the per-step bounds and completion, not wall-clock. The commit half is
+separate and off-tick, above, and its one-off cache-write pause is documented
+there.
 
 ## Format version
 

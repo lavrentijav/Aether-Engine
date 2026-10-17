@@ -167,15 +167,10 @@ fn commit_guard() -> std::sync::MutexGuard<'static, ()> {
 /// and yields (the job stays queued) when a large commit owns the lock, rather
 /// than blocking the tick for the rest of that commit.
 fn try_commit_guard() -> Option<std::sync::MutexGuard<'static, ()>> {
-    // `cargo test` runs the bulk tests in parallel and many of them hold this
-    // lock through a commit; a yield here would make settle progress depend on
-    // test scheduling rather than on the code under test. The production path
-    // is the `try_lock` below; tests take the same blocking lock commits do.
-    #[cfg(test)]
-    {
-        Some(commit_guard())
-    }
-    #[cfg(not(test))]
+    // The real path in tests too: a settle step must yield while a commit owns
+    // the lock, and `settle_yields_while_a_commit_holds_the_lock` asserts it.
+    // Tests that call `step` directly retry rather than assuming progress, and
+    // the commit itself is still serialised by the blocking `commit_guard`.
     match COMMIT_LOCK.try_lock() {
         Ok(g) => Some(g),
         Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
@@ -830,6 +825,12 @@ struct PublishJob {
     frontier: VecDeque<Pos>,
     /// Positions currently in `frontier`, for deduplication.
     queued: HashSet<Pos>,
+    /// Frontier pops spent on this job, and the defensive cap. A shape rule
+    /// that oscillates (or a future one with a cycle) would otherwise keep the
+    /// FIFO queue in `Settle` forever; on the cap the last corrections are
+    /// applied and the job moves on to re-send.
+    frontier_steps: usize,
+    frontier_cap: usize,
     /// Every section touched by an original change or a settled neighbour.
     sections: BTreeSet<SectionKey>,
     /// Distinct columns and how many touched sections each holds.
@@ -847,6 +848,7 @@ impl PublishJob {
             .map(|c| (c.x >> 4, c.y >> 4, c.z >> 4))
             .collect();
         let final_to = changes.iter().map(|c| c.to).collect();
+        let changes_len = changes.len();
         Self {
             actor,
             changes,
@@ -855,6 +857,10 @@ impl PublishJob {
             cursor: 0,
             frontier: VecDeque::new(),
             queued: HashSet::new(),
+            frontier_steps: 0,
+            // 64x the change count is far above the ~1.2x observed for chest,
+            // fence and stair runs while still bounding a pathological cycle.
+            frontier_cap: changes_len.saturating_mul(64).max(1_000_000),
             sections,
             columns: Vec::new(),
             column_cursor: 0,
@@ -955,6 +961,7 @@ impl PublishJob {
                         };
                         self.queued.remove(&(x, y, z));
                         checked += 1;
+                        self.frontier_steps += 1;
                         let (now, correction) = settle_cell(world, x, y, z);
                         if let Some(change) = correction {
                             self.sections.insert((x >> 4, y >> 4, z >> 4));
@@ -970,6 +977,20 @@ impl PublishJob {
                         self.enqueue_neighbours(change.x, change.y, change.z);
                     }
                     if self.frontier.is_empty() {
+                        self.phase = Phase::Resend;
+                        self.build_columns();
+                        continue;
+                    }
+                    if self.frontier_steps > self.frontier_cap {
+                        // Defensive: a cyclic shape rule must not pin the queue
+                        // in `Settle`. Keep the corrections already applied and
+                        // publish the state reached.
+                        crate::log::warn(
+                            "bulk publish: shape settle hit its iteration cap; publishing the \
+                             state reached",
+                        );
+                        self.frontier.clear();
+                        self.queued.clear();
                         self.phase = Phase::Resend;
                         self.build_columns();
                         continue;
@@ -1372,6 +1393,49 @@ mod tests {
             .and_then(|s| s.split(',').next())
             .unwrap_or("")
             .to_string()
+    }
+
+    #[test]
+    fn settle_yields_while_a_commit_holds_the_lock_and_resumes() {
+        // r3 finding 3: the tick's settle must skip, not block, while a large
+        // off-tick commit owns COMMIT_LOCK, and the job must stay queued and
+        // finish once the lock is free.
+        let world = world();
+        let mut edit = BulkEdit::new(actor(1));
+        for x in 0..64 {
+            edit.set(&world, x, 20, 0, block_ids::STONE).unwrap();
+        }
+        let committed = edit.commit_with_changes(&world).unwrap();
+        let mut publisher = BulkPublisher::new();
+        publisher.enqueue(committed.actor, committed.changes);
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = super::commit_guard();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        held_rx.recv().unwrap();
+
+        let mut sink = RecordingSink::default();
+        let start = std::time::Instant::now();
+        let p = publisher.step(&world, &mut sink, PublishBudget::default());
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "the tick must not block behind the commit lock"
+        );
+        assert_eq!(p.settled, 0, "nothing may settle under the commit lock");
+        assert_eq!(p.remaining, 1, "the job stays queued");
+        assert_eq!(sink.places.len(), 0);
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        let total = publish_all(&mut publisher, &world, &mut sink, PublishBudget::default());
+        assert_eq!(total.settled, 64);
+        assert_eq!(total.hooks, 64);
+        assert_eq!(total.remaining, 0);
     }
 
     #[test]
@@ -1812,6 +1876,16 @@ mod tests {
                     && p.hooks <= budget.hooks.max(1),
                 "a step exceeded its budget: {p:?} with {budget:?}"
             );
+            if p.settled == 0
+                && p.columns == 0
+                && p.hooks == 0
+                && p.finished == 0
+                && p.remaining > 0
+            {
+                // A concurrent test or commit owns COMMIT_LOCK; the job stays
+                // queued. Retry rather than spin at 100%.
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
             total.settled += p.settled;
             total.sections += p.sections;
             total.columns += p.columns;
@@ -2003,6 +2077,17 @@ mod tests {
         let mut steps = 0;
         while !publisher.is_empty() {
             let p = publisher.step(&world, &mut sink, budget);
+            if p.settled == 0
+                && p.columns == 0
+                && p.hooks == 0
+                && p.finished == 0
+                && p.remaining > 0
+            {
+                // A concurrent test's commit owns COMMIT_LOCK; the job stays
+                // queued and resumes when it is released.
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
             settled += p.settled;
             steps += 1;
             assert!(steps < 10_000);
@@ -2112,8 +2197,8 @@ mod tests {
         let mut publisher = BulkPublisher::new();
         publisher.enqueue(committed.actor, committed.changes);
         let mut sink = RecordingSink::default();
-        // The shipped defaults, not a relaxed budget: 123 settle slices, 4
-        // columns per tick and 123 hook slices.
+        // The shipped defaults, not a relaxed budget: 245 seed slices, a
+        // fixed-point frontier, 4 columns per tick and 123 hook slices.
         let budget = PublishBudget::default();
         let total = publish_all(&mut publisher, &world, &mut sink, budget);
 
@@ -2208,7 +2293,7 @@ mod tests {
         let mut sink = RecordingSink::default();
         // Directly constructed, not via config: all three fields zero.
         let mut made_progress = false;
-        for _ in 0..100 {
+        for _ in 0..60_000 {
             let p = publisher.step(
                 &world,
                 &mut sink,
@@ -2221,6 +2306,10 @@ mod tests {
             made_progress |= p.finished + p.settled + p.columns + p.hooks > 0;
             if publisher.is_empty() {
                 break;
+            }
+            if !made_progress {
+                // Waiting for a concurrent test's commit to release the lock.
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
         assert!(made_progress);

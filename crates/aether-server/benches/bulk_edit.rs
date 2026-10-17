@@ -9,15 +9,17 @@
 //!   can be in when the budget ends:
 //!   - `settle_step`: one default settle slice;
 //!   - `last_settle_slice`: the final full seed slice of a dense edit;
-//!   - `frontier_to_resend_step_real_encoder`: the worst combined step — a
-//!     full fixed-point frontier slice followed by `columns_per_tick` encodes;
+//!   - `frontier_to_resend_step_real_encoder`: the settle→resend boundary —
+//!     the remaining fixed-point frontier followed by `columns_per_tick` real
+//!     column encodes;
 //!   - `hooks_step`: a step that only fires `hooks_per_tick` **sink calls**
 //!     (not plugin dispatch — that cost lives in the plugin host and is
 //!     unbounded in plugin code);
 //!   - `sparse_settle_step` and `fence_sparse_settle_step`: isolated changed
 //!     cells, with unchanged neighbours that are stone (reshape is a no-op) and
-//!     fences (four-six neighbour reads plus `with_props` each), the latter
-//!     being the worst shape case.
+//!     fences (four-six neighbour reads plus `with_props` each). The fence
+//!     bench is one full `cells_per_tick` fixed-point slice and is the worst
+//!     shape case.
 //!
 //! Setup (building the committed change list, and for the phase benches the
 //! earlier slices) is excluded by `iter_batched`, so each number is the work a
@@ -287,9 +289,11 @@ fn bench_bulk_publish(c: &mut Criterion) {
                 let mut publisher = BulkPublisher::new();
                 publisher.enqueue(dense.actor, dense.changes.clone());
                 let mut sink = CountingSink::default();
-                // Settle every seed, then drain the frontier down to one
-                // default slice so the measured step does a full frontier
-                // pass and enters Resend in the same tick.
+                // Settle every seed, then drain the frontier down to at most
+                // one default slice. The measured step is the boundary slice:
+                // the remaining frontier plus the first four column encodes.
+                // It can be shorter than a full slice; the full worst slice is
+                // `fence_sparse_settle_step` below.
                 while publisher.pending_seeds() > 0 || publisher.pending_frontier() > 4_096 {
                     let p = publisher.step(&world, &mut sink, PublishBudget::default());
                     debug_assert_eq!(p.columns, 0, "still settling");
@@ -316,24 +320,34 @@ fn bench_bulk_publish(c: &mut Criterion) {
                 let mut publisher = BulkPublisher::new();
                 publisher.enqueue(dense.actor, dense.changes.clone());
                 let mut sink = CountingSink::default();
-                // Settle and re-send everything, then fire exactly one hook;
-                // the measured step is the remaining hook slice.
-                let first = publisher.step(
-                    &world,
-                    &mut sink,
-                    PublishBudget {
-                        cells: usize::MAX,
-                        columns: usize::MAX,
-                        hooks: 1,
-                    },
-                );
-                debug_assert_eq!(first.hooks, 1);
-                debug_assert_eq!(first.remaining, 1);
+                // Drive seeds, the fixed-point frontier and every re-send with
+                // an unlimited budget, firing exactly one hook. The measured
+                // step is then a full `hooks_per_tick` slice in `Phase::Hooks`,
+                // not a settle step (the fixed-point seed phase always returns
+                // after one slice, so a single call cannot reach Hooks).
+                let one = PublishBudget {
+                    cells: usize::MAX,
+                    columns: usize::MAX,
+                    hooks: 1,
+                };
+                let mut fired = false;
+                for _ in 0..1_000 {
+                    let p = publisher.step(&world, &mut sink, one);
+                    if p.hooks > 0 {
+                        fired = true;
+                        break;
+                    }
+                    if p.remaining == 0 {
+                        break;
+                    }
+                }
+                assert!(fired, "setup must reach the hook phase");
                 publisher
             },
             |mut publisher| {
                 let mut sink = CountingSink::default();
                 let progress = publisher.step(&world, &mut sink, PublishBudget::default());
+                assert!(progress.hooks > 0, "the measured step fires hooks");
                 black_box((progress, sink.hooks))
             },
             BatchSize::SmallInput,
