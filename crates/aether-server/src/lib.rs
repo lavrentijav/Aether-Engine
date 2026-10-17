@@ -13,6 +13,7 @@
 //! [`protocol`] for the neutral vocabulary and [`session`] for the per-client
 //! logic every version shares.
 
+pub mod admin;
 pub mod auth;
 pub mod bulk;
 pub mod chatlog;
@@ -256,6 +257,13 @@ pub fn run() -> std::process::ExitCode {
     // The permission store is the source of truth for every level and node
     // check; seed it from `config.operators` before anyone can connect.
     permissions::install(&cfg);
+    // Bans and the whitelist are sidecar JSON files under the world directory
+    // (CMD-08); load them, seeding the whitelist from `config.whitelist` on the
+    // first start, before the listener exists. An unreadable file refuses the
+    // start rather than silently lifting bans or disabling the whitelist.
+    if let Err(e) = admin::install(&cfg) {
+        return fail(&format!("admin state error: {e}"));
+    }
     let _ = GAME_MODE.set(cfg.server.game_mode);
     let cfg = Arc::new(cfg);
     let _ = CONFIG.set(Arc::clone(&cfg));
@@ -542,7 +550,8 @@ fn warn_if_exposed(cfg: &Config) {
         return;
     }
     let unbound = cfg.unbound_operators();
-    if cfg.whitelist.is_empty() && !unbound.is_empty() {
+    let whitelisted = admin::whitelist_enabled(cfg);
+    if !whitelisted && !unbound.is_empty() {
         log::warn(&format!(
             "listening on {} in offline mode with operators bound to no address ({}): \
              anyone who joins under one of those names is an operator. Write them as \
@@ -550,7 +559,7 @@ fn warn_if_exposed(cfg: &Config) {
             cfg.server.host,
             unbound.join(", ")
         ));
-    } else if cfg.whitelist.is_empty() {
+    } else if !whitelisted {
         log::warn(&format!(
             "listening on {} in offline mode with no whitelist: anyone can join under any name",
             cfg.server.host

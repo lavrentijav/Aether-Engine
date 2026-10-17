@@ -784,6 +784,22 @@ impl Store {
         }
     }
 
+    /// Remove `name` from `group`. Returns whether it was a member.
+    ///
+    /// This is the `/deop` write (CMD-08): removal is whole, so a bound entry
+    /// (`name@address`) is removed regardless of the address.
+    pub fn remove_member(&mut self, group: &str, name: &str) -> Result<bool, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a member name is empty".to_string());
+        }
+        let group = self
+            .groups
+            .get_mut(group)
+            .ok_or_else(|| format!("no group `{group}`"))?;
+        Ok(group.members.remove(&name.to_ascii_lowercase()).is_some())
+    }
+
     /// Apply `config.operators` entries as members of `op`. `name` or
     /// `name@address`, exactly as the config reads them. Returns how many were
     /// newly added — zero when the store already knows every entry.
@@ -1142,6 +1158,13 @@ pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Replace the process-wide store for a test, without touching the persisted
+/// file path the way [`install`] does.
+#[cfg(test)]
+pub(crate) fn install_store_for_test(store: Store) {
+    *snapshot().write().unwrap_or_else(|e| e.into_inner()) = Arc::new(store);
+}
+
 /// A player's effective level in the process-wide store.
 pub fn level(name: &str, ip: Option<IpAddr>) -> Level {
     snapshot_store().level_of(name, ip)
@@ -1196,6 +1219,23 @@ pub fn set_node(
 pub fn unset_node(subject: &str, node: &str, context: Option<&str>) -> Result<(), String> {
     update(|store| store.set_player_node(subject, node, context, None))?;
     save()
+}
+
+/// Add a member to a group in the process-wide store and persist it.
+///
+/// `/op` (CMD-08) calls this with [`OP_GROUP`]. A bare add never clears an
+/// existing address binding; `false` means the member was already there.
+pub fn add_member(group: &str, name: &str, addr: Option<&str>) -> Result<bool, String> {
+    let added = update(|store| store.add_member(group, name, addr))?;
+    save()?;
+    Ok(added)
+}
+
+/// Remove a member from a group in the process-wide store and persist it.
+pub fn remove_member(group: &str, name: &str) -> Result<bool, String> {
+    let removed = update(|store| store.remove_member(group, name))?;
+    save()?;
+    Ok(removed)
 }
 
 /// Declare a node's default in the process-wide store.
