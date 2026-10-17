@@ -546,7 +546,7 @@ impl BorderError {
             BorderError::TooSmall => lang::format(lang::WORLDBORDER_FAILED_SMALL, &[]),
             BorderError::TooBig => lang::format(
                 lang::WORLDBORDER_FAILED_BIG,
-                &[&java_double(WORLD_BORDER_MAX)],
+                &[&java_float(WORLD_BORDER_MAX as f32)],
             ),
             BorderError::TooFar => lang::format(
                 lang::WORLDBORDER_FAILED_FAR,
@@ -638,7 +638,10 @@ fn exec_worldborder_set(ctx: &mut Ctx, add: bool) -> Reply {
             border.lerp_ticks().saturating_add(requested_ticks)
         } else {
             requested_ticks
-        };
+        }
+        // The border stores its lerp in a `u32`; clamp here too so the packet
+        // cannot carry a speed the client would run forever.
+        .min(i64::from(u32::MAX));
         let seconds = ticks as f64 / 20.0;
         let message = if ticks == 0 {
             lang::format(lang::WORLDBORDER_SET_IMMEDIATE, &[&fmt_one(target)])
@@ -654,8 +657,12 @@ fn exec_worldborder_set(ctx: &mut Ctx, add: bool) -> Reply {
             )
         };
         border.set_size(target, ticks);
-        (
-            message,
+        // An immediate resize is vanilla's Set Border Size (it leaves the
+        // warning settings and any lerp alone); a timed one needs the full
+        // Initialize payload.
+        let event = if ticks == 0 {
+            crate::protocol::ServerEvent::WorldBorderSize { diameter: target }
+        } else {
             crate::protocol::ServerEvent::WorldBorder {
                 x: border.center_x,
                 z: border.center_z,
@@ -664,8 +671,9 @@ fn exec_worldborder_set(ctx: &mut Ctx, add: bool) -> Reply {
                 speed: ticks,
                 warning_blocks: border.warning_distance,
                 warning_time: border.warning_time,
-            },
-        )
+            }
+        };
+        (message, event)
     };
     ctx.registry.broadcast(&event, ctx.world);
     Reply::one(message)
@@ -1019,16 +1027,33 @@ fn fmt_float(value: f64) -> String {
 }
 
 /// Java's `Double.toString`, which Brigadier's numeric errors use: plain
-/// decimal in `[1e-3, 1e7)`, scientific (`5.9999968E7`) outside it.
+/// decimal in `[1e-3, 1e7)`, scientific (`5.9999968E7`, `6.0E7`) outside it.
 fn java_double(value: f64) -> String {
+    java_scientific(value, &format!("{value:e}"), fmt_float)
+}
+
+/// Java's `Float.toString`, used where vanilla passes a `float` (the
+/// world-border size ceiling): `5.999997E7`.
+fn java_float(value: f32) -> String {
+    let shortest = format!("{value:e}");
+    java_scientific(f64::from(value), &shortest, fmt_float)
+}
+
+/// Format a value in Java's scientific style: a mantissa that always carries
+/// a fractional digit (`6` becomes `6.0`) and an unsigned exponent (`E7`,
+/// `E-4`).
+fn java_scientific(value: f64, shortest: &str, plain: fn(f64) -> String) -> String {
     let abs = value.abs();
-    if abs != 0.0 && !(1e-3..1e7).contains(&abs) {
-        let sci = format!("{value:e}");
-        let (mantissa, exponent) = sci.split_once('e').unwrap_or((&sci, "0"));
-        format!("{mantissa}E{exponent}")
-    } else {
-        fmt_float(value)
+    if abs == 0.0 || (1e-3..1e7).contains(&abs) {
+        return plain(value);
     }
+    let (mantissa, exponent) = shortest.split_once('e').unwrap_or((shortest, "0"));
+    let mantissa = if mantissa.contains('.') {
+        mantissa.to_string()
+    } else {
+        format!("{mantissa}.0")
+    };
+    format!("{mantissa}E{exponent}")
 }
 
 /// A Java `Float.toString`-style angle: `0.0`, not `0`.
@@ -1183,6 +1208,9 @@ mod tests {
         assert_eq!(java_double(-59_999_968.0), "-5.9999968E7");
         assert_eq!(java_double(0.5), "0.5");
         assert_eq!(java_double(1.0), "1.0");
-        assert_eq!(java_double(0.0001), "1E-4");
+        assert_eq!(java_double(0.0001), "1.0E-4");
+        assert_eq!(java_double(6.0e7), "6.0E7");
+        assert_eq!(java_float(59_999_968.0), "5.999997E7");
+        assert_eq!(java_float(60_000_000.0), "6.0E7");
     }
 }

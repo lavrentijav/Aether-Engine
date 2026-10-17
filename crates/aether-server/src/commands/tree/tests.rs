@@ -1022,7 +1022,7 @@ fn worldborder_has_the_full_grammar_and_reports_its_size() {
     );
     assert_eq!(
         one(&env, who, "/worldborder add 59999968"),
-        "World border cannot be bigger than 5.9999968E7 blocks wide"
+        "World border cannot be bigger than 5.999997E7 blocks wide"
     );
     assert_eq!(
         one(&env, who, "/worldborder set 1"),
