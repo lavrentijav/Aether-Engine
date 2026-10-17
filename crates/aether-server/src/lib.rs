@@ -604,6 +604,13 @@ fn warn_if_rcon_exposed(cfg: &Config) {
     }
 }
 
+/// The one world this server serves.
+///
+/// Region checks are world-scoped; carrying the key on the player handle keeps
+/// the per-world `worldguard.region.bypass.<world>` node effective even while
+/// there is only one dimension.
+pub const WORLD: &str = aether_region::OVERWORLD;
+
 /// The permission node that lets a player bypass anti-xray.
 ///
 /// **Not implied by being an operator.** Until the permission store (CMD-01)

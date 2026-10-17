@@ -1157,3 +1157,69 @@ fn the_worldguard_bypass_is_per_world_and_needs_the_node() {
         Verdict::Deny
     );
 }
+
+#[test]
+fn a_foreign_region_id_is_never_overwritten_or_removed() {
+    let mut f = Fixture::new();
+    let owner = player(1, "Steve", true);
+
+    // Another plugin owns id 1 in the shared index.
+    f.store.upsert(
+        Region::new(RegionId(1), OVERWORLD, pos(100, 0, 100), pos(115, 64, 115))
+            .with_priority(7)
+            .with_source("claims"),
+    );
+
+    // A (corrupt/hand-edited) persisted record of this plugin claims the same
+    // numeric id. Loading must not overwrite the claims region.
+    let mut flags = BTreeMap::new();
+    flags.insert("build".to_string(), StoredFlag::Bool(false));
+    f.plugin.regions.state.regions.insert(
+        "spawn".to_string(),
+        StoredRegion {
+            id: 1,
+            name: "spawn".to_string(),
+            world: OVERWORLD.to_string(),
+            min: [0, 0, 0],
+            max: [15, 64, 15],
+            priority: 0,
+            owners: ["Steve".to_string()].into_iter().collect(),
+            members: BTreeSet::new(),
+            flags,
+        },
+    );
+    f.plugin.regions.rebuild();
+
+    let index = f.store.snapshot();
+    let foreign = index.get(RegionId(1)).expect("the claims region survives");
+    assert_eq!(foreign.source.as_deref(), Some("claims"));
+    assert_eq!(foreign.priority, 7);
+    assert_eq!(foreign.min, pos(100, 0, 100));
+
+    // Every write path is ownership-checked: a flag/priority edit and a remove
+    // are refused, and the foreign region is untouched.
+    for args in [
+        vec!["priority", "spawn", "9"],
+        vec!["flag", "spawn", "build", "allow"],
+        vec!["remove", "spawn"],
+    ] {
+        let lines = f.command(&owner, &args);
+        assert!(
+            lines.iter().any(|l| l.contains("not owned")),
+            "{args:?}: {lines:?}"
+        );
+    }
+    let index = f.store.snapshot();
+    let foreign = index.get(RegionId(1)).expect("still there");
+    assert_eq!(foreign.source.as_deref(), Some("claims"));
+    assert_eq!(foreign.priority, 7);
+    assert_eq!(
+        foreign.flags.get("build"),
+        None,
+        "the refused build flag never reached the claims region"
+    );
+    // The refused writes did not get persisted either.
+    let persisted = f.plugin.regions.by_name("spawn").expect("record kept");
+    assert_eq!(persisted.priority, 0);
+    assert_eq!(persisted.flags.get("build"), Some(&StoredFlag::Bool(false)));
+}

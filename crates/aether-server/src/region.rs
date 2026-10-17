@@ -68,16 +68,31 @@ pub fn actor_in<'a>(handle: &'a crate::players::PlayerHandle, world: &str) -> Ac
 
 /// The denial message for `action` at `pos`, or `None` when it is allowed.
 ///
-/// This is the hook helper: it resolves the player's bypass and returns the
-/// store's configured line for a [`Verdict::Deny`]. A [`Verdict::Defer`] is
-/// already resolved by [`RegionStore::check`].
+/// This is the hook helper: it takes the world from the player's session (the
+/// same key the region was stored under), resolves that world's bypass and
+/// returns the store's configured line for a [`Verdict::Deny`]. A
+/// [`Verdict::Defer`] is already resolved by [`RegionStore::check`].
 pub fn denial(
     handle: &crate::players::PlayerHandle,
     pos: BlockPos,
     action: Action,
 ) -> Option<String> {
+    denial_in(handle, handle.world(), pos, action)
+}
+
+/// [`denial`] for an explicit `world`.
+///
+/// A hook that knows the dimension uses this directly; the per-world bypass
+/// node is resolved against the same `world` that is passed to the check, so a
+/// grant for one dimension cannot leak into another.
+pub fn denial_in(
+    handle: &crate::players::PlayerHandle,
+    world: &str,
+    pos: BlockPos,
+    action: Action,
+) -> Option<String> {
     let store = store();
-    match store.check(OVERWORLD, pos, action, &actor(handle)) {
+    match store.check(world, pos, action, &actor_in(handle, world)) {
         Verdict::Deny => Some(store.deny_message().to_string()),
         _ => None,
     }
@@ -92,6 +107,18 @@ pub fn denial_at(
     action: Action,
 ) -> Option<String> {
     denial(handle, BlockPos::new(x, y, z), action)
+}
+
+/// [`denial_in`] in block coordinates.
+pub fn denial_at_in(
+    handle: &crate::players::PlayerHandle,
+    world: &str,
+    x: i32,
+    y: i32,
+    z: i32,
+    action: Action,
+) -> Option<String> {
+    denial_in(handle, world, BlockPos::new(x, y, z), action)
 }
 
 #[cfg(test)]
@@ -190,5 +217,53 @@ mod tests {
             bypass_in(&op, "the_nether"),
             "an operator bypasses each world"
         );
+    }
+    #[test]
+    fn the_denial_hook_uses_the_players_world_and_its_per_world_bypass() {
+        let _guard = crate::permissions::test_lock();
+        let mut perms = crate::permissions::Store::new();
+        perms
+            .set_player_node(
+                "WorldHolder",
+                "worldguard.region.bypass.overworld",
+                None,
+                Some(true),
+            )
+            .unwrap();
+        crate::permissions::install_store_for_test(perms);
+
+        let _store = install_test_store(RegionStore::new());
+        store().upsert(region(1, (0, 0, 0), (15, 255, 15)).with_flag("build", false));
+        store().upsert(
+            Region::new(
+                RegionId(2),
+                "the_nether",
+                BlockPos::new(0, 0, 0),
+                BlockPos::new(15, 255, 15),
+            )
+            .with_flag("build", false),
+        );
+
+        let at = BlockPos::new(8, 64, 8);
+        let in_overworld =
+            crate::players::PlayerHandle::for_test_in_world(1, "WorldHolder", OVERWORLD);
+        let in_nether =
+            crate::players::PlayerHandle::for_test_in_world(2, "WorldHolder", "the_nether");
+        let guest = crate::players::PlayerHandle::for_test(3, "RegionGuest");
+
+        // The hook takes the world from the session, and the grant is scoped to
+        // that same world: overworld passes, the nether does not.
+        assert_eq!(denial(&in_overworld, at, Action::Break), None);
+        assert_eq!(
+            denial(&in_nether, at, Action::Break).as_deref(),
+            Some(DEFAULT_DENY_MESSAGE)
+        );
+
+        // An explicit world resolves the same way, and a non-holder is denied
+        // in either dimension.
+        assert_eq!(denial_in(&in_overworld, OVERWORLD, at, Action::Break), None);
+        assert!(denial_in(&in_overworld, "the_nether", at, Action::Break).is_some());
+        assert!(denial_in(&guest, OVERWORLD, at, Action::Break).is_some());
+        assert!(denial_in(&guest, "the_nether", at, Action::Break).is_some());
     }
 }

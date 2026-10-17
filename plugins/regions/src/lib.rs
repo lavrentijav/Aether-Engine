@@ -48,7 +48,7 @@
 //! what makes the state survive a restart.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use aether_plugin::manifest::{CommandDecl, Manifest, PluginTier};
 use aether_plugin::{
@@ -96,6 +96,9 @@ pub const NODE_OWNER: &str = "worldguard.region.owner";
 
 /// The per-world bypass node prefix (`worldguard.region.bypass.<world>`).
 pub const BYPASS_PREFIX: &str = "worldguard.region.bypass";
+
+/// The built-in flag registry, built once (CMD-34b uses a fixed set).
+static FLAG_REGISTRY: LazyLock<FlagRegistry> = LazyLock::new(FlagRegistry::builtin);
 
 /// The default wand item.
 pub const DEFAULT_WAND: &str = "minecraft:golden_axe";
@@ -428,20 +431,45 @@ impl Regions {
     /// The store is shared with every other region plugin (claims), so a load
     /// must not replace the whole index: it removes only this plugin's stale
     /// regions (ones no longer in the persisted state) and upserts its own.
+    /// Both writes go through the store's **ownership-checked** API, so a
+    /// numeric-id collision with another plugin's region or a core region is
+    /// refused instead of overwriting it.
     fn rebuild(&self) {
         let index = self.store.snapshot();
         for handle in index.regions() {
             if handle.source.as_deref() == Some(SOURCE) && self.by_id(handle.id.get()).is_none() {
-                self.store.remove(handle.id);
+                self.store.remove_owned(SOURCE, handle.id);
             }
         }
         for region in self.state.regions.values() {
-            self.store.upsert(region.region());
+            // No `ctx` here to report a refusal; the command path does.
+            let _ = self.store.upsert_owned(SOURCE, region.region());
         }
     }
 
-    fn publish(&self, region: &StoredRegion) {
-        self.store.upsert(region.region());
+    /// Publish one region under this plugin's source.
+    ///
+    /// A refused write means the id already belongs to the core or another
+    /// plugin; the caller turns that into an error rather than silently
+    /// clobbering the owner's region.
+    fn publish(&self, region: &StoredRegion) -> Result<(), String> {
+        self.store
+            .upsert_owned(SOURCE, region.region())
+            .map_err(|e| format!("region id {} is not owned by `{SOURCE}`: {e}", region.id))
+    }
+
+    /// Refuse to touch an id the core store already assigns to another source.
+    ///
+    /// Checked *before* the KV write, so a collision leaves both the persisted
+    /// model and the store untouched instead of persisting a duplicate id.
+    fn ensure_owned(&self, region: &StoredRegion) -> Result<(), String> {
+        match self.store.snapshot().get(RegionId(region.id)) {
+            Some(handle) if handle.source.as_deref() != Some(SOURCE) => Err(format!(
+                "region id {} is not owned by `{SOURCE}`",
+                region.id
+            )),
+            _ => Ok(()),
+        }
     }
 
     fn by_name(&self, name: &str) -> Option<&StoredRegion> {
@@ -494,9 +522,10 @@ impl Regions {
             members: BTreeSet::new(),
             flags: BTreeMap::new(),
         };
+        self.ensure_owned(&region)?;
         next.regions.insert(region.name.clone(), region.clone());
         self.persist(ctx, next)?;
-        self.publish(&region);
+        self.publish(&region)?;
         Ok(region)
     }
 
@@ -518,6 +547,7 @@ impl Regions {
         if !caller.may_edit(&previous) {
             return Err(format!("you do not own region `{name}`"));
         }
+        self.ensure_owned(&previous)?;
         let (min, max) = normalize(a, b);
         let updated = StoredRegion {
             min: xyz(min),
@@ -529,7 +559,7 @@ impl Regions {
         let mut next = self.state.clone();
         next.regions.insert(updated.name.clone(), updated.clone());
         self.persist(ctx, next)?;
-        self.publish(&updated);
+        self.publish(&updated)?;
         Ok(updated)
     }
 
@@ -546,10 +576,11 @@ impl Regions {
         if !caller.may_edit(&region) {
             return Err(format!("you do not own region `{name}`"));
         }
+        self.ensure_owned(&region)?;
         let mut next = self.state.clone();
         next.regions.remove(name);
         self.persist(ctx, next)?;
-        self.store.remove(RegionId(region.id));
+        self.store.remove_owned(SOURCE, RegionId(region.id));
         Ok(region)
     }
 
@@ -567,6 +598,7 @@ impl Regions {
         if !caller.may_edit(&previous) {
             return Err(format!("you do not own region `{name}`"));
         }
+        self.ensure_owned(&previous)?;
         let updated = StoredRegion {
             priority,
             ..previous
@@ -574,7 +606,7 @@ impl Regions {
         let mut next = self.state.clone();
         next.regions.insert(updated.name.clone(), updated.clone());
         self.persist(ctx, next)?;
-        self.publish(&updated);
+        self.publish(&updated)?;
         Ok(updated)
     }
 
@@ -598,6 +630,7 @@ impl Regions {
         if !caller.may_edit(&previous) {
             return Err(format!("you do not own region `{name}`"));
         }
+        self.ensure_owned(&previous)?;
         let mut updated = previous;
         match value {
             Some(value) => {
@@ -610,7 +643,7 @@ impl Regions {
         let mut next = self.state.clone();
         next.regions.insert(updated.name.clone(), updated.clone());
         self.persist(ctx, next)?;
-        self.publish(&updated);
+        self.publish(&updated)?;
         Ok(updated)
     }
 
@@ -631,6 +664,7 @@ impl Regions {
         if !caller.may_edit(&previous) {
             return Err(format!("you do not own region `{name}`"));
         }
+        self.ensure_owned(&previous)?;
         let mut updated = previous;
         let changed = if add {
             insert_name(&mut updated.members, player)
@@ -643,7 +677,7 @@ impl Regions {
         let mut next = self.state.clone();
         next.regions.insert(updated.name.clone(), updated.clone());
         self.persist(ctx, next)?;
-        self.publish(&updated);
+        self.publish(&updated)?;
         Ok((updated, true))
     }
 
@@ -664,6 +698,7 @@ impl Regions {
         if !caller.may_edit(&previous) {
             return Err(format!("you do not own region `{name}`"));
         }
+        self.ensure_owned(&previous)?;
         let mut updated = previous;
         let changed = if add {
             insert_name(&mut updated.owners, player)
@@ -676,7 +711,7 @@ impl Regions {
         let mut next = self.state.clone();
         next.regions.insert(updated.name.clone(), updated.clone());
         self.persist(ctx, next)?;
-        self.publish(&updated);
+        self.publish(&updated)?;
         Ok((updated, true))
     }
 
@@ -1031,7 +1066,7 @@ impl RegionsPlugin {
                     return vec!["Usage: /rg flag <id> <flag> [value]".to_string()];
                 };
                 let flag = flag.to_ascii_lowercase();
-                let registry = FlagRegistry::builtin();
+                let registry = &*FLAG_REGISTRY;
                 let Some(kind) = registry.kind(&flag) else {
                     return vec![format!(
                         "Unknown flag `{flag}`. Try one of: {}",

@@ -52,6 +52,12 @@ pub struct PlayerHandle {
     pub name: String,
     /// The address the client connected from.
     pub ip: Option<std::net::IpAddr>,
+    /// The world (dimension) this session is in.
+    ///
+    /// The server serves one dimension today, but the value is carried per
+    /// player so the region check and its per-world bypass stay world-scoped
+    /// without every hook threading a world key through.
+    world: String,
     /// Skin/cape properties from Mojang, empty for an offline login. Sent in
     /// the tab list so other clients render the right skin.
     pub properties: Vec<crate::auth::api::Property>,
@@ -103,6 +109,11 @@ impl PlayerHandle {
     /// Current position/look.
     pub fn pos(&self) -> PosLook {
         *self.pos.lock().unwrap()
+    }
+
+    /// The world (dimension) this session is in.
+    pub fn world(&self) -> &str {
+        &self.world
     }
 
     /// Record a new position/look (called by the owning connection thread).
@@ -464,6 +475,11 @@ impl PlayerHandle {
     /// tests that drive the click path or the plugin host without a socket
     /// handshake. Uses the 1.21.11 codec.
     pub(crate) fn for_test(entity_id: i32, name: &str) -> Arc<PlayerHandle> {
+        PlayerHandle::for_test_in_world(entity_id, name, crate::WORLD)
+    }
+
+    /// A test handle in a chosen dimension, for the per-world region checks.
+    pub(crate) fn for_test_in_world(entity_id: i32, name: &str, world: &str) -> Arc<PlayerHandle> {
         use std::net::{TcpListener, TcpStream};
         static CODEC: crate::protocol::modern::Codec =
             crate::protocol::modern::Codec(&crate::protocol::modern::version::V1_21_11);
@@ -479,6 +495,7 @@ impl PlayerHandle {
             uuid: entity_id as u128,
             name: name.to_string(),
             ip: None,
+            world: world.to_string(),
             properties: Vec::new(),
             codec: &CODEC,
             outbox,
@@ -533,6 +550,7 @@ impl Registry {
             uuid,
             name,
             ip,
+            world: crate::WORLD.to_string(),
             properties,
             codec,
             outbox,

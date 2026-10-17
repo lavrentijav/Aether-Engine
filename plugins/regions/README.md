@@ -50,15 +50,24 @@ cannot block `define` before the arguments are read.
 - `list` groups every region by world; an optional player name filters to
   regions that player owns.
 - `flag` sets a **typed** flag from the core registry (CMD-29b).
-  `pvp`, `build`, `use`, `entry`, `explosion` and the other boolean flags accept
-  `allow`/`deny` (also `true`/`false`, `yes`/`no`, `on`/`off`); `greeting`,
-  `farewell` and the other text flags take the rest of the line; integer flags
-  such as `heal-amount` take a whole number. `none`/`unset` clears a flag, and
-  no value shows its current setting. An unknown flag or a value of the wrong
-  type is an error and changes nothing. `build` covers break/place, `use`
-  covers interaction/item use, and `pvp`, `entry` and `explosion` are their own
-  actions. Text/integer flags are stored and shown by `info`; they do not drive
-  the protection check.
+  Boolean flags accept `allow`/`deny` (also `true`/`false`, `yes`/`no`,
+  `on`/`off`); `greeting`, `farewell` and the other text flags take the rest of
+  the line; integer flags such as `heal-amount` take a whole number.
+  `none`/`unset` clears a flag, and no value shows its current setting. An
+  unknown flag or a value of the wrong type is an error and changes nothing.
+
+  The registry is a **fixed built-in set for 1.0** (there is no plugin flag
+  registration yet). Of the boolean names, only the ones the core check
+  consults are effective: **`build`** (break/place), **`use`**
+  (interaction/item use), **`pvp`**, **`explosion`** and **`entry`**.
+  `entry` is **stored-only** for now: the flag is validated, persisted and
+  honoured by an explicit `Action::Entry` check, but the server has no
+  teleport/entry hook yet. `interact`, `item-use`, `construct`, `chest-access`,
+  `other-explosion`, `mob-damage` and the other compatibility boolean names are
+  accepted and persisted but **inert** — `/rg flag <id> interact deny` reports
+  success and changes nothing. Text and integer flags are likewise stored and
+  shown by `info` only. An SDK/WASM reader sees only the boolean flags through
+  `RegionInfo`; `greeting`/`heal-amount` are not exposed there yet.
 - `addmember`/`removemember` and `addowner`/`removeowner` edit the persisted
   membership. Members and owners may build/use a region while the corresponding
   flag is unset; an explicit `deny` still wins. A stranger is denied unless a
@@ -69,11 +78,14 @@ therefore operator-only. Operators bypass this plugin-side gate.
 
 ## Bypass
 
-Region protection itself is the core check. A player with
-`worldguard.region.bypass.<world>` (or the core `aether.region.bypass`) skips it
-in that world; operators hold the undeclared node by default. The node is
-per-world: a grant for `overworld` does not bypass `the_nether`. Without the
-node a non-operator remains subject to the flags, member or not.
+Region protection itself is the core check. The server hook resolves the
+player's current session world and checks the region in that same world. A
+player with `worldguard.region.bypass.<world>` (or the core
+`aether.region.bypass`) skips it in that world; operators hold the undeclared
+node by default. The node is per-world: a grant for `overworld` does not bypass
+`the_nether`, and the hook's per-world resolution is covered by
+`crates/aether-server/src/region.rs` tests. Without the node a non-operator
+remains subject to the flags, member or not.
 
 ## Selection: the internal wand
 

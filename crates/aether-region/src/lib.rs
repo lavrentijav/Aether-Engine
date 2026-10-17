@@ -215,14 +215,18 @@ impl From<&str> for FlagValue {
     }
 }
 
-/// The built-in flag definitions. A plugin may add its own on top; `/rg flag`
+/// The built-in flag definitions: a **fixed** set for 1.0. `/rg flag`
 /// rejects a name that is not in the registry, so a typo cannot silently set a
 /// flag the check will never consult.
 ///
-/// The boolean names map onto the core [`Action`]s where they have one:
-/// `build` covers break/place, `use` covers interaction/item use, and `pvp`,
-/// `entry` and `explosion` are their own actions. The rest are WorldGuard
-/// compatibility flags carried for `/rg flag`/`/rg info`.
+/// The **effective** boolean flags are the ones whose names come back from
+/// [`Action::flag`]: `build` (break/place), `use` (interaction/item use),
+/// `pvp`, `explosion` and `entry`. `entry` is accepted and stored but has no
+/// runtime hook yet (it is reserved for the teleport seam), so it only affects
+/// an explicit [`Action::Entry`] check. The remaining boolean names
+/// (`interact`, `item-use`, `construct`, `chest-access`, `other-explosion`,
+/// `mob-damage`, …) are WorldGuard compatibility names: they are validated and
+/// persisted, but the current check does not consult them.
 pub const BUILTIN_FLAGS: &[(&str, FlagKind)] = &[
     ("build", FlagKind::Boolean),
     ("pvp", FlagKind::Boolean),
@@ -275,6 +279,9 @@ pub const BUILTIN_FLAGS: &[(&str, FlagKind)] = &[
 ];
 
 /// A flag registry: known names and their types.
+///
+/// The set is fixed to [`BUILTIN_FLAGS`] for 1.0; there is no public
+/// `register`/`extend` hook yet (adding one is a later API decision).
 #[derive(Clone, Debug)]
 pub struct FlagRegistry {
     defs: BTreeMap<&'static str, FlagKind>,
@@ -379,7 +386,9 @@ impl FlagSet {
 
     /// Every boolean flag, in name order. This is the view the host's
     /// plugin-facing `RegionInfo` carries; text/integer flags stay in the
-    /// regions plugin's own model.
+    /// regions plugin's own model. Known limitation: an SDK/WASM reader cannot
+    /// see `greeting`, `heal-amount` and other typed flags through
+    /// `RegionInfo` until the interface grows a typed flag value.
     pub fn iter(&self) -> impl Iterator<Item = (&str, bool)> {
         self.values
             .iter()
@@ -415,7 +424,9 @@ pub enum Action {
     Pvp,
     /// An explosion damages blocks.
     Explosion,
-    /// A player enters a region (reserved for the teleport `entry` seam).
+    /// A player enters a region. The flag is stored and checked, but the
+    /// server has no teleport/entry hook yet, so this is stored-only for now
+    /// (reserved for the teleport `entry` seam).
     Entry,
 }
 
