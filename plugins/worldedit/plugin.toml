@@ -1,36 +1,27 @@
-# Manifest for the WorldEdit-style editing plugin (CMD-36). See crates/aether-plugin/src/manifest.rs.
+# Documentation copy of the build-time manifest in src/lib.rs. A native plugin
+# has no runtime plugin.toml; the server collects `registration()` instead.
 id = "worldedit"
 name = "WorldEdit"
 version = "0.1.0"
 api = "0.1"
-# native: a Rust crate in this workspace, linked in-process (CMD-00N).
-# No .wasm entry: the loader calls it directly, no WASM boundary.
+tier = "native"
 priority = 20
 
 capabilities = ["log", "config", "supports", "storage.kv", "world.read", "world.write", "players"]
-
-subscribe = ["on-command", "before-use-item"]
+requires = ["worldedit.host@0.1"]
+subscribe = ["before-block-dig", "before-block-interact", "after-player-leave", "on-command"]
 
 commands = [
-    "wand",
-    "pos1",
-    "pos2",
-    "set",
-    "replace",
-    "walls",
-    "outline",
-    "copy",
-    "cut",
-    "paste",
-    "rotate",
-    "flip",
-    "stack",
-    "move",
-    "undo",
-    "redo",
-    "expand",
-    "contract",
-    "schem",
-    "brush",
-    "mask",
+    { name = "wand", node = "worldedit.wand", op = 0 },
+    { name = "pos1", node = "worldedit.selection", op = 0 },
+    { name = "pos2", node = "worldedit.selection", op = 0 },
+    { name = "sel", node = "worldedit.selection", op = 0 },
+    { name = "expand", node = "worldedit.selection", op = 0 },
+    { name = "contract", node = "worldedit.selection", op = 0 },
+    { name = "set", node = "worldedit.region.set", op = 0 },
+    { name = "replace", node = "worldedit.region.replace", op = 0 },
+    { name = "walls", node = "worldedit.region.walls", op = 0 },
+    { name = "outline", node = "worldedit.region.outline", op = 0 },
+    { name = "undo", node = "worldedit.history.undo", op = 0 },
+    { name = "redo", node = "worldedit.history.redo", op = 0 },
 ]

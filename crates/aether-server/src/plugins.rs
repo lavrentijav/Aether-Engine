@@ -1176,6 +1176,13 @@ mod imp {
         {
             crate::log::warn(&format!("ops service not registered: {e}"));
         }
+        let worldedit = Arc::new(crate::worldedit::Host::new(
+            Arc::clone(world),
+            Arc::clone(registry),
+        ));
+        if let Err(e) = aether_plugin::worldedit::register_host(host.services(), worldedit) {
+            crate::log::warn(&format!("worldedit service not registered: {e}"));
+        }
         install_native(&mut host, cfg, &grant_sink, world);
         for file in discover(Path::new(&cfg.plugins.dir)) {
             let id = file.manifest.id.clone();
@@ -1308,6 +1315,13 @@ mod imp {
             grant_sink,
             aether_claims_plugin::registration(),
             "native claims",
+        );
+        install_native_one(
+            host,
+            cfg,
+            grant_sink,
+            aether_worldedit_plugin::registration(),
+            "native worldedit",
         );
 
         // The admin web interface is the one native plugin that needs the live
