@@ -1488,9 +1488,6 @@ impl LoadedPlugin {
         }
     }
 
-    /// A plugin-channel message. Native plugins subscribed to
-    /// `on-plugin-message` are called in order; the frozen WASM world has no
-    /// callback, so a WASM plugin is a no-op here.
     /// Call a native plugin's tab-completion hook. A wasm plugin has no
     /// completion export in the frozen world and answers nothing.
     fn call_on_complete(

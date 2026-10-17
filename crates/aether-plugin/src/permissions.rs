@@ -180,10 +180,13 @@ pub trait PermissionsAdmin: Send + Sync {
 
     /// Replace a user's direct groups (a `parent set`/`switch`/`clear`).
     fn set_user_groups(&self, name: &str, groups: Vec<String>) -> Result<(), String>;
-    /// Add one direct group to a user.
-    fn add_user_group(&self, name: &str, group: &str) -> Result<(), String>;
-    /// Remove one direct group from a user.
-    fn remove_user_group(&self, name: &str, group: &str) -> Result<(), String>;
+    /// Add one direct group to a user. Returns whether the membership changed
+    /// (`false` when the user already had it, including through a binding).
+    fn add_user_group(&self, name: &str, group: &str) -> Result<bool, String>;
+    /// Remove one direct group from a user. Returns whether a membership was
+    /// actually removed; the removal is whole, so an address-bound entry is
+    /// removed too.
+    fn remove_user_group(&self, name: &str, group: &str) -> Result<bool, String>;
 
     /// Create a group with level 0. The built-in `op` group already exists.
     fn create_group(&self, id: &str) -> Result<(), String>;

@@ -464,7 +464,7 @@ impl PermissionsAdmin for MockAdmin {
         Ok(())
     }
 
-    fn add_user_group(&self, name: &str, group: &str) -> Result<(), String> {
+    fn add_user_group(&self, name: &str, group: &str) -> Result<bool, String> {
         let key = name.trim().to_ascii_lowercase();
         let mut state = self.state();
         let entry = state
@@ -472,19 +472,21 @@ impl PermissionsAdmin for MockAdmin {
             .get_mut(group)
             .ok_or_else(|| format!("no group `{group}`"))?;
         // A bare add never clears an existing binding.
-        entry.members.entry(key).or_insert(None);
-        Ok(())
+        let existed = entry.members.contains_key(&key);
+        if !existed {
+            entry.members.insert(key, None);
+        }
+        Ok(!existed)
     }
 
-    fn remove_user_group(&self, name: &str, group: &str) -> Result<(), String> {
+    fn remove_user_group(&self, name: &str, group: &str) -> Result<bool, String> {
         let key = name.trim().to_ascii_lowercase();
         let mut state = self.state();
         let entry = state
             .groups
             .get_mut(group)
             .ok_or_else(|| format!("no group `{group}`"))?;
-        entry.members.remove(&key);
-        Ok(())
+        Ok(entry.members.remove(&key).is_some())
     }
 
     fn create_group(&self, id: &str) -> Result<(), String> {
@@ -1206,4 +1208,57 @@ fn a_context_write_and_unset_carry_the_context_into_the_audit_detail() {
             .is_some_and(|(_, detail)| detail.contains("world=overworld")),
         "{journal:?}"
     );
+}
+
+#[test]
+fn an_offline_bound_member_removes_and_clears_with_an_honest_message() {
+    let mut f = Fixture::new();
+    let bind = |f: &Fixture| {
+        let mut state = f.admin.state();
+        let op = state.groups.get_mut(OP_GROUP).unwrap();
+        op.members
+            .insert("root".to_string(), Some("10.0.0.7".to_string()));
+    };
+    bind(&f);
+
+    // Offline: effective groups are empty (no address), but the membership is
+    // visible and becomes the primary group.
+    let lines = f.run(&["user", "Root", "info"]);
+    assert_contains(&lines, "Level: 0");
+    assert_contains(&lines, "Primary group: op");
+    assert_contains(&lines, "Memberships: op@10.0.0.7");
+
+    // remove really removes the bound membership and says so.
+    let lines = f.run(&["user", "Root", "parent", "remove", "op"]);
+    assert_contains(
+        &lines,
+        "Root no longer inherits permissions from op in context global.",
+    );
+    assert!(f.admin.user("root", None).unwrap().memberships.is_empty());
+
+    // add of an existing bound membership says "already", and keeps the
+    // binding untouched.
+    bind(&f);
+    let lines = f.run(&["user", "Root", "parent", "add", "op"]);
+    assert_contains(&lines, "Root already inherits from op in context global.");
+    let memberships = f.admin.user("root", None).unwrap().memberships;
+    assert_eq!(memberships.len(), 1);
+    assert_eq!(memberships[0].addr.as_deref(), Some("10.0.0.7"));
+
+    // clear removes it and counts the real membership.
+    let lines = f.run(&["user", "Root", "parent", "clear"]);
+    assert_contains(&lines, "Root's parents were cleared in context global.");
+    assert_contains(&lines, "(1 groups were removed.)");
+    assert!(f.admin.user("root", None).unwrap().memberships.is_empty());
+
+    // `parent set` on the same bound group preserves both the binding and the
+    // message.
+    bind(&f);
+    let lines = f.run(&["user", "Root", "parent", "set", "op"]);
+    assert_contains(
+        &lines,
+        "Root already inherits from op in context global; the existing membership was preserved.",
+    );
+    let memberships = f.admin.user("root", None).unwrap().memberships;
+    assert_eq!(memberships[0].addr.as_deref(), Some("10.0.0.7"));
 }

@@ -491,13 +491,16 @@ impl PermissionsPlugin {
         let Some(current) = admin.user(name, addr.as_deref()) else {
             return vec!["Error: a user name is empty".to_string()];
         };
+        // Direct memberships, not effective groups: an address-bound entry
+        // counts even when the queried address does not satisfy it, and a
+        // destructive command must report the removal it really made.
+        let memberships = current.memberships.len();
         if action == "clear" {
             return match admin.set_user_groups(name, Vec::new()) {
                 Ok(()) => {
                     Self::audit(ctx, p, "parent-clear", &format!("user {name}"));
                     vec![format!(
-                        "{name}'s parents were cleared in context global. ({} groups were removed.)",
-                        current.groups.len()
+                        "{name}'s parents were cleared in context global. ({memberships} groups were removed.)"
                     )]
                 }
                 Err(e) => vec![format!("Error: {e}")],
@@ -506,9 +509,14 @@ impl PermissionsPlugin {
         let Some(group) = rest.get(1).filter(|g| !g.is_empty()) else {
             return vec!["Usage: /lp user <user> parent set|add|remove|switch <group>".to_string()];
         };
-        let already = current.groups.iter().any(|g| g == group);
+        let already = current
+            .memberships
+            .iter()
+            .any(|membership| membership.group == *group);
         let result = match action {
-            "set" | "switch" => admin.set_user_groups(name, vec![group.clone()]),
+            "set" | "switch" => admin
+                .set_user_groups(name, vec![group.clone()])
+                .map(|()| true),
             "add" => admin.add_user_group(name, group),
             "remove" => admin.remove_user_group(name, group),
             other => {
@@ -518,13 +526,13 @@ impl PermissionsPlugin {
             }
         };
         match result {
-            Ok(()) => {
+            Ok(changed) => {
                 Self::audit(ctx, p, "parent", &format!("user {name} {action} {group}"));
                 match action {
-                    "add" if already => {
+                    "add" if !changed => {
                         vec![format!("{name} already inherits from {group} in context global.")]
                     }
-                    "remove" if !already => {
+                    "remove" if !changed => {
                         vec![format!("{name} does not inherit from {group} in context global.")]
                     }
                     "add" => vec![format!(
@@ -532,6 +540,12 @@ impl PermissionsPlugin {
                     )],
                     "remove" => vec![format!(
                         "{name} no longer inherits permissions from {group} in context global."
+                    )],
+                    // `set`/`switch` replaces the whole set. When the target is
+                    // already the only membership (including a preserved
+                    // address binding), say so instead of claiming a clear.
+                    _ if memberships == 1 && already => vec![format!(
+                        "{name} already inherits from {group} in context global; the existing membership was preserved."
                     )],
                     _ => vec![format!(
                         "{name} had their existing parent groups cleared, and now only inherits {group} in context global."
@@ -841,6 +855,7 @@ fn user_info_lines(info: &UserInfo) -> Vec<String> {
     let primary = info
         .groups
         .first()
+        .or_else(|| info.memberships.first().map(|membership| &membership.group))
         .cloned()
         .unwrap_or_else(|| "none".to_string());
     let memberships = if info.memberships.is_empty() {

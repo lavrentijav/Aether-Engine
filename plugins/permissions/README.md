@@ -30,8 +30,9 @@ subcommand then checks its `luckperms.*` node.
 `check` reports the value and the holder that decided it (`user <name>`, `group <id>` or `default`).
 A stored node may be a wildcard: `*` grants everything, `a.b.*` every descendant. An exact node
 beats a wildcard inside one holder; the core's group order decides across holders. A context token
-(`world=overworld`) restricts the node to that world, and a context-specific node beats the global
-one there.
+(`world=overworld`) restricts the node to that world. Among wildcards the longest prefix wins, and
+a context-specific pattern beats the global one only at equal specificity; an exact node always
+beats a wildcard in the same holder.
 
 `parent switch` has no tracks in CMD-33a, so it replaces the current parent/membership exactly as
 `parent set` does. `deletegroup op` is refused; deleting another group removes its parent edges and

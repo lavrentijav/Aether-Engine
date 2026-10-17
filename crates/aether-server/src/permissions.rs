@@ -1805,14 +1805,16 @@ impl aether_plugin::permissions::PermissionsAdmin for AdminService {
         save()
     }
 
-    fn add_user_group(&self, name: &str, group: &str) -> Result<(), String> {
-        update(|store| store.add_user_group(name, group))?;
-        save()
+    fn add_user_group(&self, name: &str, group: &str) -> Result<bool, String> {
+        let changed = update(|store| store.add_user_group(name, group))?;
+        save()?;
+        Ok(changed)
     }
 
-    fn remove_user_group(&self, name: &str, group: &str) -> Result<(), String> {
-        update(|store| store.remove_user_group(name, group))?;
-        save()
+    fn remove_user_group(&self, name: &str, group: &str) -> Result<bool, String> {
+        let removed = update(|store| store.remove_user_group(name, group))?;
+        save()?;
+        Ok(removed)
     }
 
     fn create_group(&self, id: &str) -> Result<(), String> {
@@ -2820,6 +2822,37 @@ parents = ["ghost"]
     }
 
     #[test]
+    fn equal_specificity_prefers_the_context_wildcard() {
+        let mut s = Store::new();
+        s.create_group("equal", Level::NONE).unwrap();
+        s.add_member("equal", "alice", None).unwrap();
+        s.declare_node("a.b", NodeDefault::Deny).unwrap();
+        s.set_group_node("equal", "a.*", None, Some(true)).unwrap();
+        s.set_group_node("equal", "a.*", Some("overworld"), Some(false))
+            .unwrap();
+
+        // Same prefix length: the context pattern decides its world...
+        assert!(!s.resolve(
+            s.level_of("alice", None),
+            "alice",
+            None,
+            "a.b",
+            Some("overworld"),
+            0
+        ));
+        // ...and the global one everywhere else.
+        assert!(s.resolve(
+            s.level_of("alice", None),
+            "alice",
+            None,
+            "a.b",
+            Some("nether"),
+            0
+        ));
+        assert!(s.resolve(s.level_of("alice", None), "alice", None, "a.b", None, 0));
+    }
+
+    #[test]
     fn parent_set_preserves_an_existing_address_binding() {
         let mut s = Store::new();
         s.create_group("staff", Level::new(2)).unwrap();
@@ -2882,5 +2915,120 @@ parents = ["ghost"]
         assert!(admin.delete_group("op").is_err());
         assert!(admin.delete_group("service").is_ok());
         assert!(admin.group("service").is_none());
+    }
+
+    #[cfg(feature = "plugins")]
+    #[test]
+    fn offline_bound_member_through_the_real_admin_service() {
+        use aether_plugin::permissions::PermissionsAdmin;
+        use aether_plugin::NativePlugin;
+
+        struct Backend;
+
+        impl aether_plugin::HostBackend for Backend {
+            fn kv_get(&self, _plugin: &str, _key: &str) -> Option<Vec<u8>> {
+                None
+            }
+            fn kv_put(&self, _plugin: &str, _key: &str, _value: &[u8]) {}
+            fn kv_delete(&self, _plugin: &str, _key: &str) {}
+            fn kv_list(&self, _plugin: &str, _prefix: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn log(&self, _plugin: &str, _level: aether_plugin::LogLevel, _message: &str) {}
+            fn config(&self, _plugin: &str, _key: &str) -> Option<String> {
+                None
+            }
+            fn supports(&self, _plugin: &str, _feature: &str) -> bool {
+                true
+            }
+            fn permission_check(&self, _plugin: &str, _id: u64, _node: &str, _op: u8) -> bool {
+                true
+            }
+        }
+
+        let _guard = test_lock();
+        let mut seeded = Store::new();
+        seeded.create_group("staff", Level::new(2)).unwrap();
+        seeded
+            .add_member("staff", "root", Some("10.0.0.7"))
+            .unwrap();
+        install_store_for_test(seeded);
+
+        let admin: Arc<dyn PermissionsAdmin> = Arc::new(AdminService);
+        let mut plugin = aether_permissions_plugin::PermissionsPlugin::with_admin(admin);
+        let backend: Arc<dyn aether_plugin::HostBackend> = Arc::new(Backend);
+        let services = Arc::new(aether_plugin::service::ServiceRegistry::new());
+        let config = std::collections::BTreeMap::new();
+        let player = aether_plugin::Player {
+            id: 1,
+            name: "Admin".to_string(),
+            operator: true,
+        };
+        let mut run = |args: &[&str]| {
+            let mut ctx = aether_plugin::NativeContext {
+                id: "permissions",
+                capabilities: &[],
+                config: &config,
+                services: &services,
+                backend: &backend,
+            };
+            plugin
+                .on_command(
+                    &mut ctx,
+                    &player,
+                    "lp",
+                    &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                )
+                .expect("the plugin owns /lp")
+                .lines
+        };
+
+        let info = run(&["user", "Root", "info"]);
+        assert!(
+            info.iter().any(|l| l == "Memberships: staff@10.0.0.7"),
+            "{info:?}"
+        );
+        assert!(info.iter().any(|l| l == "Primary group: staff"), "{info:?}");
+
+        // Offline: remove the real binding and report the removal.
+        let lines = run(&["user", "Root", "parent", "remove", "staff"]);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("no longer inherits permissions from staff")),
+            "{lines:?}"
+        );
+        assert!(snapshot_store().memberships_of("root").is_empty());
+
+        // Offline: adding the missing membership really adds it...
+        let lines = run(&["user", "Root", "parent", "add", "staff"]);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("now inherits permissions from staff")),
+            "{lines:?}"
+        );
+        assert_eq!(snapshot_store().memberships_of("root").len(), 1);
+
+        // ...and adding it again preserves the bare membership silently.
+        let lines = run(&["user", "Root", "parent", "add", "staff"]);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("already inherits from staff")),
+            "{lines:?}"
+        );
+
+        // Restore a bound entry and clear it: the count is real.
+        let mut store = (*snapshot_store()).clone();
+        store.remove_member("staff", "root").unwrap();
+        store.add_member("staff", "root", Some("10.0.0.7")).unwrap();
+        install_store_for_test(store);
+        let lines = run(&["user", "Root", "parent", "clear"]);
+        assert!(
+            lines.iter().any(|l| l.contains("(1 groups were removed.)")),
+            "{lines:?}"
+        );
+        assert!(snapshot_store().memberships_of("root").is_empty());
     }
 }
