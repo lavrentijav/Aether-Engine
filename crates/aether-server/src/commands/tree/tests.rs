@@ -1118,3 +1118,27 @@ fn no_second_dispatcher_remains() {
         "commands/mod.rs must dispatch through the tree"
     );
 }
+
+#[test]
+fn a_double_slash_command_falls_through_the_tree_to_the_plugin_registry() {
+    // The tree parses the body after stripping one `/`, so `//set` becomes
+    // `/set` there. No core node matches; the only other owner is the plugin
+    // registry, and it must see the bare name (the worldedit commands are
+    // declared without a slash). This drives the real dispatcher, not the
+    // registry helper directly.
+    let env = env();
+    let name = "tree_double_slash_fixture";
+    crate::commands::registry::register_plugin(
+        name,
+        "tree_fixture",
+        "plugin.tree_fixture.double_slash",
+        0,
+    )
+    .unwrap();
+    let lines = run(&env, &env.tester, &format!("//{name}"));
+    assert_eq!(
+        lines,
+        vec![format!("/{name} is not available right now")],
+        "the fallback reached the plugin registry, not a parse error"
+    );
+}

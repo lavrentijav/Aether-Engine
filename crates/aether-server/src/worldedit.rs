@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -20,9 +20,15 @@ struct PendingEdit {
 pub struct Host<B: KvBackend + Send + Sync + 'static, G: ChunkGenerator + Send + Sync + 'static> {
     world: Arc<World<B, G>>,
     registry: SharedRegistry,
+    /// The operator's `[plugins.worldedit] max-volume`, or the core default.
+    max_volume: usize,
     edits: Mutex<HashMap<u64, PendingEdit>>,
     next_edit: AtomicU64,
     history: Mutex<BulkHistory>,
+    /// Which plugin issued each undo id. Undo/redo ids are plugin-private, but
+    /// the service still scopes them to the caller that committed the edit so
+    /// one plugin cannot undo another's revision.
+    history_owners: Mutex<BTreeMap<u64, String>>,
 }
 
 impl<B, G> Host<B, G>
@@ -30,14 +36,73 @@ where
     B: KvBackend + Send + Sync + 'static,
     G: ChunkGenerator + Send + Sync + 'static,
 {
-    pub fn new(world: Arc<World<B, G>>, registry: SharedRegistry) -> Self {
+    pub fn new(world: Arc<World<B, G>>, registry: SharedRegistry, max_volume: usize) -> Self {
         Host {
             world,
             registry,
+            max_volume: max_volume.clamp(1, bulk::DEFAULT_MAX_BLOCKS),
             edits: Mutex::new(HashMap::new()),
             next_edit: AtomicU64::new(1),
             history: Mutex::new(BulkHistory::new(64)),
+            history_owners: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Remember `undo_id` as issued to `caller`, pruning the oldest entries so
+    /// a long-lived server cannot grow the map without bound.
+    fn remember_owner(&self, undo_id: u64, caller: &str) {
+        if undo_id == 0 {
+            return;
+        }
+        let mut owners = self
+            .history_owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        owners.insert(undo_id, caller.to_string());
+        while owners.len() > 100_000 {
+            owners.pop_first();
+        }
+    }
+
+    /// Whether `caller` issued `undo_id` and may undo it.
+    fn owned_by(&self, undo_id: u64, caller: &str) -> bool {
+        self.history_owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&undo_id)
+            .is_some_and(|owner| owner == caller)
+    }
+
+    fn forget_owner(&self, undo_id: u64) {
+        self.history_owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&undo_id);
+    }
+
+    /// The core region check (CMD-29b) over `cells`, as `player`.
+    fn check_cells(
+        &self,
+        player: u64,
+        cells: impl Iterator<Item = [i32; 3]>,
+    ) -> Result<(), String> {
+        let handle = self
+            .registry
+            .by_entity(player as i32)
+            .ok_or_else(|| "player is not online".to_string())?;
+        let store = crate::region::store();
+        let index = store.snapshot();
+        if index.is_empty() {
+            return Ok(());
+        }
+        let world = handle.world();
+        let actor = crate::region::actor_in(handle.as_ref(), world);
+        for [x, y, z] in cells {
+            if index.check(world, BlockPos::new(x, y, z), Action::Place, &actor) == Verdict::Deny {
+                return Err(store.deny_message().to_string());
+            }
+        }
+        Ok(())
     }
 
     fn pending<T>(
@@ -113,7 +178,7 @@ where
     }
 
     fn max_volume(&self, _caller: &str) -> usize {
-        bulk::DEFAULT_MAX_BLOCKS
+        self.max_volume
     }
 
     fn check_build(
@@ -123,39 +188,22 @@ where
         min: [i32; 3],
         max: [i32; 3],
     ) -> Result<(), String> {
-        if Self::volume(min, max) > bulk::DEFAULT_MAX_BLOCKS as u128 {
+        if Self::volume(min, max) > self.max_volume as u128 {
             return Err(format!(
                 "selection exceeds the limit of {} blocks",
-                bulk::DEFAULT_MAX_BLOCKS
+                self.max_volume
             ));
         }
-        let handle = self
-            .registry
-            .by_entity(player as i32)
-            .ok_or_else(|| "player is not online".to_string())?;
-        let store = crate::region::store();
-        let index = store.snapshot();
-        if index.is_empty() {
-            return Ok(());
-        }
-        let world = handle.world();
-        let actor = crate::region::actor_in(handle.as_ref(), world);
-        for x in min[0]..=max[0] {
-            for y in min[1]..=max[1] {
-                for z in min[2]..=max[2] {
-                    if index.check(world, BlockPos::new(x, y, z), Action::Place, &actor)
-                        == Verdict::Deny
-                    {
-                        return Err(store.deny_message().to_string());
-                    }
-                }
-            }
-        }
-        Ok(())
+        self.check_cells(
+            player,
+            (min[0]..=max[0]).flat_map(|x| {
+                (min[1]..=max[1]).flat_map(move |y| (min[2]..=max[2]).map(move |z| [x, y, z]))
+            }),
+        )
     }
 
     fn begin_edit(&self, caller: &str, player: u64, expected_volume: usize) -> Result<u64, String> {
-        let max = bulk::DEFAULT_MAX_BLOCKS;
+        let max = self.max_volume;
         if expected_volume > max {
             return Err(format!(
                 "edit of {expected_volume} blocks exceeds the limit of {max}"
@@ -240,6 +288,7 @@ where
         if !commit.changes.is_empty() {
             bulk::enqueue_publish(commit.actor, commit.changes);
         }
+        self.remember_owner(commit.result.undo_id, caller);
         Ok(EditOutcome {
             changed: commit.result.changed,
             undo_id: commit.result.undo_id,
@@ -253,11 +302,25 @@ where
         }
     }
 
-    fn undo(&self, _caller: &str, _player: u64, undo_id: u64) -> Result<EditOutcome, String> {
+    fn undo(&self, caller: &str, player: u64, undo_id: u64) -> Result<EditOutcome, String> {
+        if !self.owned_by(undo_id, caller) {
+            return Err("undo handle belongs to another plugin".to_string());
+        }
         let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        // An undo rewrites the blocks the revision changed, so it is an edit
+        // like any other: a region that now covers those cells (and whose owner
+        // is not this player) must refuse it, without a bypass, exactly as the
+        // original `//set` would have been refused. The check is on the cells
+        // the revision actually touched, not its bounding box.
+        let revision = history
+            .revision_changes(&*self.world, undo_id)
+            .map_err(|e| e.to_string())?;
+        self.check_cells(player, revision.iter().map(|c| [c.x, c.y, c.z]))?;
         let result = history
             .undo(&*self.world, undo_id)
             .map_err(|e| e.to_string())?;
+        self.forget_owner(undo_id);
+        self.remember_owner(result.undo_id, caller);
         Ok(EditOutcome {
             changed: result.changed,
             undo_id: result.undo_id,
@@ -327,7 +390,7 @@ mod tests {
     fn a_legal_fill_commits_one_revision_and_undo_restores_it() {
         let world = world();
         let registry = registry(&[(1, "Steve", 0.0, 64.0, 0.0, 0.0)]);
-        let host = Host::new(Arc::clone(&world), registry);
+        let host = Host::new(Arc::clone(&world), registry, bulk::DEFAULT_MAX_BLOCKS);
         let head = world.journal().head();
 
         let edit = host.begin_edit("worldedit", 1, 8).unwrap();
@@ -354,7 +417,7 @@ mod tests {
     fn an_edit_over_the_core_limit_is_refused_before_it_starts() {
         let world = world();
         let registry = registry(&[(1, "Steve", 0.0, 64.0, 0.0, 0.0)]);
-        let host = Host::new(world, registry);
+        let host = Host::new(world, registry, bulk::DEFAULT_MAX_BLOCKS);
         let err = host
             .begin_edit("worldedit", 1, bulk::DEFAULT_MAX_BLOCKS + 1)
             .unwrap_err();
@@ -380,7 +443,7 @@ mod tests {
             (1, "WorldEditGuest", 0.0, 64.0, 0.0, 0.0),
             (2, "WorldEditOp", 0.0, 64.0, 0.0, 0.0),
         ]);
-        let host = Host::new(world, registry);
+        let host = Host::new(world, registry, bulk::DEFAULT_MAX_BLOCKS);
         let err = host
             .check_build("worldedit", 1, pos(1, 20, 1), pos(2, 22, 2))
             .unwrap_err();
@@ -394,7 +457,7 @@ mod tests {
     fn positions_resolve_through_the_core_coordinate_parser() {
         let world = world();
         let registry = registry(&[(1, "Steve", 10.5, 64.0, 30.5, 0.0)]);
-        let host = Host::new(world, registry);
+        let host = Host::new(world, registry, bulk::DEFAULT_MAX_BLOCKS);
         assert_eq!(
             host.resolve_position("worldedit", 1, "~1 ~ ~-2").unwrap(),
             [11, 64, 28]
@@ -412,7 +475,11 @@ mod tests {
         let registry = registry(&[(1, "Steve", 0.0, 64.0, 0.0, 0.0)]);
         let handle = registry.by_entity(1).unwrap();
         handle.seed_hotbar(&[("minecraft:wooden_axe".to_string(), 1)]);
-        let host = Host::new(Arc::clone(&world), Arc::clone(&registry));
+        let host = Host::new(
+            Arc::clone(&world),
+            Arc::clone(&registry),
+            bulk::DEFAULT_MAX_BLOCKS,
+        );
         assert_eq!(
             host.resolve_block("worldedit", "stone").as_deref(),
             Some("minecraft:stone")
@@ -427,10 +494,94 @@ mod tests {
     }
 
     #[test]
+    fn an_undo_that_touches_a_now_protected_region_is_refused_without_a_bypass() {
+        let _guard = crate::permissions::test_lock();
+        crate::permissions::seed_operators(&["UndoOp".to_string()]);
+        let _store = crate::region::install_test_store(crate::region::RegionStore::new());
+        let world = world();
+        let registry = registry(&[
+            (1, "UndoBuilder", 0.0, 64.0, 0.0, 0.0),
+            (2, "UndoOp", 0.0, 64.0, 0.0, 0.0),
+        ]);
+        let host = Host::new(
+            Arc::clone(&world),
+            Arc::clone(&registry),
+            bulk::DEFAULT_MAX_BLOCKS,
+        );
+        let edit = host.begin_edit("worldedit", 1, 8).unwrap();
+        host.fill(
+            "worldedit",
+            edit,
+            pos(0, 20, 0),
+            pos(1, 21, 1),
+            "minecraft:stone",
+        )
+        .unwrap();
+        let outcome = host.commit("worldedit", edit).unwrap();
+        assert_eq!(world.get_block(1, 21, 1), block_ids::STONE);
+
+        // Somebody else now protects the filled area and builds there.
+        crate::region::store().set_deny_message("That area is protected.");
+        crate::region::store().upsert(crate::region::Region::new(
+            crate::region::RegionId(1),
+            crate::region::OVERWORLD,
+            crate::region::BlockPos::new(0, 0, 0),
+            crate::region::BlockPos::new(3, 100, 3),
+        ));
+
+        let err = host
+            .undo("worldedit", 1, outcome.undo_id)
+            .expect_err("the undo must be refused");
+        assert!(err.contains("protected"), "{err}");
+        assert_eq!(
+            world.get_block(1, 21, 1),
+            block_ids::STONE,
+            "a refused undo must leave the world untouched"
+        );
+
+        // A bypassing operator still may, and the undo then restores exactly.
+        let undone = host.undo("worldedit", 2, outcome.undo_id).unwrap();
+        assert_eq!(undone.changed, 8);
+        assert_eq!(world.get_block(1, 21, 1), block_ids::AIR);
+    }
+
+    #[test]
+    fn an_undo_handle_is_scoped_to_the_plugin_that_committed_it() {
+        let world = world();
+        let registry = registry(&[(1, "Steve", 0.0, 64.0, 0.0, 0.0)]);
+        let host = Host::new(world, registry, bulk::DEFAULT_MAX_BLOCKS);
+        let edit = host.begin_edit("worldedit", 1, 1).unwrap();
+        host.set_block("worldedit", edit, 0, 20, 0, "minecraft:stone")
+            .unwrap();
+        let outcome = host.commit("worldedit", edit).unwrap();
+        let err = host
+            .undo("other_plugin", 1, outcome.undo_id)
+            .expect_err("another plugin must not undo this revision");
+        assert!(err.contains("another plugin"), "{err}");
+        assert!(host.undo("worldedit", 1, outcome.undo_id).is_ok());
+    }
+
+    #[test]
+    fn a_configured_max_volume_caps_the_check_and_the_edit() {
+        let world = world();
+        let registry = registry(&[(1, "Steve", 0.0, 64.0, 0.0, 0.0)]);
+        let host = Host::new(world, registry, 4);
+        assert_eq!(host.max_volume("worldedit"), 4);
+        assert!(host.begin_edit("worldedit", 1, 5).is_err());
+        assert!(host.begin_edit("worldedit", 1, 4).is_ok());
+        assert!(host
+            .check_build("worldedit", 1, pos(0, 20, 0), pos(1, 20, 2))
+            .is_err());
+        assert!(host
+            .check_build("worldedit", 1, pos(0, 20, 0), pos(1, 20, 0))
+            .is_ok());
+    }
+
+    #[test]
     fn an_unknown_edit_handle_is_refused() {
         let world = world();
         let registry = registry(&[(1, "Steve", 0.0, 64.0, 0.0, 0.0)]);
-        let host = Host::new(world, registry);
+        let host = Host::new(world, registry, bulk::DEFAULT_MAX_BLOCKS);
         assert!(host
             .set_block("worldedit", 99, 0, 20, 0, "minecraft:stone")
             .is_err());

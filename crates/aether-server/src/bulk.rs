@@ -590,6 +590,35 @@ impl BulkHistory {
         Ok(result)
     }
 
+    /// The changes a committed revision recorded, without applying anything.
+    ///
+    /// Reads the hot record when the revision is still in memory and the
+    /// journal otherwise, exactly like [`BulkHistory::undo`]. A caller that
+    /// must check something about a revision (for example a region
+    /// protection check) before undoing it uses this to learn what the undo
+    /// would touch. The returned list is the revision's own `from`/`to` pairs,
+    /// not the inverse the undo will write.
+    pub fn revision_changes<B: KvBackend, G: ChunkGenerator>(
+        &self,
+        world: &World<B, G>,
+        undo_id: u64,
+    ) -> Result<Vec<BlockChange>, BulkError> {
+        if undo_id == 0 {
+            return Err(BulkError::UnknownRevision(0));
+        }
+        if let Some(record) = self.entries.iter().find(|r| r.undo_id == undo_id) {
+            return Ok(record.changes.clone());
+        }
+        let event = world.journal().get(undo_id).map_err(BulkError::Journal)?;
+        match event {
+            Some(e) => match e.body {
+                EventBody::BlockGroup { changes } => Ok(changes),
+                _ => Err(BulkError::NotARevision(undo_id)),
+            },
+            None => Err(BulkError::UnknownRevision(undo_id)),
+        }
+    }
+
     /// Undo the revision `undo_id`, restoring every block it changed.
     ///
     /// Uses the hot record when there is one and the journal otherwise, so a

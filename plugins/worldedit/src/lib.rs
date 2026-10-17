@@ -24,11 +24,19 @@ pub const NODE_HISTORY_REDO: &str = "worldedit.history.redo";
 pub const DEFAULT_WAND: &str = "minecraft:wooden_axe";
 const DEFAULT_HISTORY: usize = 20;
 
-fn detailed(name: &str, node: &str) -> CommandDecl {
+/// A command with its node and required op level.
+///
+/// Selection and the wand are op 0 (public). Commands that write the world
+/// (`worldedit.region.*`) and the history that can rewrite it
+/// (`worldedit.history.*`) are op 2, the same level as the core `/fill`,
+/// `/setblock` and `/clone`: op 0 declares a public node, so an op-0 `//set`
+/// would let any player bulk-edit unprotected terrain. An operator can still
+/// grant the node to a non-op explicitly (CMD-01/02).
+fn detailed(name: &str, node: &str, op: u8) -> CommandDecl {
     CommandDecl::Detailed {
         name: name.to_string(),
         node: node.to_string(),
-        op: 0,
+        op,
     }
 }
 
@@ -40,11 +48,13 @@ pub fn manifest() -> Manifest {
         entry: String::new(),
         name: "WorldEdit".to_string(),
         priority: 20,
+        // Only what the plugin uses: logs and config, the online player's
+        // world/held item, and the world read/write the service performs. The
+        // selection and history are in memory, so no `storage.kv`; nothing
+        // probes features, so no `supports`.
         capabilities: vec![
             "log".to_string(),
             "config".to_string(),
-            "supports".to_string(),
-            "storage.kv".to_string(),
             "world.read".to_string(),
             "world.write".to_string(),
             "players".to_string(),
@@ -56,18 +66,21 @@ pub fn manifest() -> Manifest {
             "on-command".to_string(),
         ],
         commands: vec![
-            detailed("wand", NODE_WAND),
-            detailed("pos1", NODE_SELECTION),
-            detailed("pos2", NODE_SELECTION),
-            detailed("sel", NODE_SELECTION),
-            detailed("expand", NODE_SELECTION),
-            detailed("contract", NODE_SELECTION),
-            detailed("set", NODE_REGION_SET),
-            detailed("replace", NODE_REGION_REPLACE),
-            detailed("walls", NODE_REGION_WALLS),
-            detailed("outline", NODE_REGION_OUTLINE),
-            detailed("undo", NODE_HISTORY_UNDO),
-            detailed("redo", NODE_HISTORY_REDO),
+            // Selection and the wand do not write the world: public.
+            detailed("wand", NODE_WAND, 0),
+            detailed("pos1", NODE_SELECTION, 0),
+            detailed("pos2", NODE_SELECTION, 0),
+            detailed("sel", NODE_SELECTION, 0),
+            detailed("expand", NODE_SELECTION, 0),
+            detailed("contract", NODE_SELECTION, 0),
+            // Bulk writes and the history that can replay them: operator
+            // level, like the core world commands (`/fill`, `/setblock`).
+            detailed("set", NODE_REGION_SET, 2),
+            detailed("replace", NODE_REGION_REPLACE, 2),
+            detailed("walls", NODE_REGION_WALLS, 2),
+            detailed("outline", NODE_REGION_OUTLINE, 2),
+            detailed("undo", NODE_HISTORY_UNDO, 2),
+            detailed("redo", NODE_HISTORY_REDO, 2),
         ],
         tick_period: 1,
         deny_on_fault: false,
@@ -324,6 +337,18 @@ impl WorldEditPlugin {
         filter: Filter,
         pattern: &Pattern,
     ) -> Result<Vec<String>, String> {
+        // A selection is stored with the world it was made in. The engine has
+        // one dimension today, but a stale selection must never be applied to
+        // another world's cells at the same coordinates once more land.
+        let view = view(host, ctx.id, p)?;
+        if let Some(selected) = self.selections.get(&p.id).and_then(|s| s.world.as_deref()) {
+            if selected != view.world {
+                return Err(format!(
+                    "the selection belongs to `{selected}`, not `{}`",
+                    view.world
+                ));
+            }
+        }
         let expected = self.check_volume(host, ctx.id, min, max)?;
         host.check_build(ctx.id, p.id, min, max)?;
         let edit = host.begin_edit(ctx.id, p.id, expected)?;

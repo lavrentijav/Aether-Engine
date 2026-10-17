@@ -7,7 +7,7 @@ api = "0.1"
 tier = "native"
 priority = 20
 
-capabilities = ["log", "config", "supports", "storage.kv", "world.read", "world.write", "players"]
+capabilities = ["log", "config", "world.read", "world.write", "players"]
 requires = ["worldedit.host@0.1"]
 subscribe = ["before-block-dig", "before-block-interact", "after-player-leave", "on-command"]
 
@@ -18,10 +18,10 @@ commands = [
     { name = "sel", node = "worldedit.selection", op = 0 },
     { name = "expand", node = "worldedit.selection", op = 0 },
     { name = "contract", node = "worldedit.selection", op = 0 },
-    { name = "set", node = "worldedit.region.set", op = 0 },
-    { name = "replace", node = "worldedit.region.replace", op = 0 },
-    { name = "walls", node = "worldedit.region.walls", op = 0 },
-    { name = "outline", node = "worldedit.region.outline", op = 0 },
-    { name = "undo", node = "worldedit.history.undo", op = 0 },
-    { name = "redo", node = "worldedit.history.redo", op = 0 },
+    { name = "set", node = "worldedit.region.set", op = 2 },
+    { name = "replace", node = "worldedit.region.replace", op = 2 },
+    { name = "walls", node = "worldedit.region.walls", op = 2 },
+    { name = "outline", node = "worldedit.region.outline", op = 2 },
+    { name = "undo", node = "worldedit.history.undo", op = 2 },
+    { name = "redo", node = "worldedit.history.redo", op = 2 },
 ]

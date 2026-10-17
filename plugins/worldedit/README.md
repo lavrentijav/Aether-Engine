@@ -16,20 +16,26 @@ Commands are typed in the familiar double-slash form (`//set stone`). The host
 command registry stores the name without the slash, so the plugin declares
 `set`, `pos1`, … and the same node gates the command.
 
-| command | syntax | permission node |
-|---|---|---|
-| wand | `//wand` | `worldedit.wand` |
-| positions | `//pos1 [<pos>]`, `//pos2 [<pos>]` | `worldedit.selection` |
-| selection | `//sel`, `//expand <n> [dir]`, `//contract <n> [dir]` | `worldedit.selection` |
-| fill | `//set <pattern>` | `worldedit.region.set` |
-| replace | `//replace [<filter>] <pattern>` | `worldedit.region.replace` |
-| walls | `//walls <pattern>` | `worldedit.region.walls` |
-| outline | `//outline <pattern>` | `worldedit.region.outline` |
-| history | `//undo [<n>]`, `//redo [<n>]` | `worldedit.history.undo` / `worldedit.history.redo` |
+| command | syntax | permission node | op |
+|---|---|---|---|
+| wand | `//wand` | `worldedit.wand` | 0 |
+| positions | `//pos1 [<pos>]`, `//pos2 [<pos>]` | `worldedit.selection` | 0 |
+| selection | `//sel`, `//expand <n> [dir]`, `//contract <n> [dir]` | `worldedit.selection` | 0 |
+| fill | `//set <pattern>` | `worldedit.region.set` | 2 |
+| replace | `//replace [<filter>] <pattern>` | `worldedit.region.replace` | 2 |
+| walls | `//walls <pattern>` | `worldedit.region.walls` | 2 |
+| outline | `//outline <pattern>` | `worldedit.region.outline` | 2 |
+| history | `//undo [<n>]`, `//redo [<n>]` | `worldedit.history.undo` / `worldedit.history.redo` | 2 |
 
-Every node is declared with op level 0, so an operator can grant it to a
-non-op with the normal permission model. The command registry checks the node
-before the plugin sees the command, exactly like a core command.
+Selection and the wand are **op 0** (public), because reading a selection or
+receiving the wand changes nothing. The commands that write the world and the
+history that can replay those writes are **op 2** — the same level as the core
+`/fill`, `/setblock` and `/clone`. This matters because op 0 declares the node
+`Allow`: an op-0 `//set` would let any player bulk-edit unprotected terrain.
+An operator who wants a player to build with WorldEdit grants the
+`worldedit.region.*` / `worldedit.history.*` nodes (CMD-01/02); the command
+registry checks the node and op level before the plugin sees the command,
+exactly like a core command.
 
 `//pos1` / `//pos2` without an argument use the player's current block cell.
 With arguments they use the core coordinate parser (CMD-06a), so absolute,
@@ -93,6 +99,11 @@ selection from a reused entity id is worse than no selection).
   it, the whole edit is refused. The existing bypass nodes
   (`aether.region.bypass` and `worldguard.region.bypass.<world>`) are honoured
   by the core check; the plugin has no separate bypass.
+- **`//undo` and `//redo` run the same check** over the cells the revision
+  actually changed, before the inverse is written. A player who filled
+  wilderness cannot undo over a region somebody else defined there afterwards;
+  a bypassing operator still can. The undo id is also scoped to the plugin
+  that issued it, so one plugin cannot undo another's revision.
 
 Undo/redo keeps a bounded per-player stack (default 20, configurable up to
 1000). Undo is a new journal revision attributed to the same author, so it is
@@ -107,12 +118,19 @@ its own):
 ```toml
 [plugins.worldedit]
 enabled = true
-config = { wand-item = "minecraft:wooden_axe", history-size = "20" }
+config = { wand-item = "minecraft:wooden_axe", history-size = "20", max-volume = "250000" }
 ```
 
-The plugin asks for `log`, `config`, `supports`, `storage.kv`, `world.read`,
-`world.write` and `players`. As with every native plugin, grants are
-deny-by-default: list the capabilities under `[plugins.worldedit]` as well.
+The plugin asks for `log`, `config`, `world.read`, `world.write` and
+`players` — only what it uses (selection and history are in memory, so no
+`storage.kv`, and nothing probes features, so no `supports`). As with every
+native plugin, grants are deny-by-default: list the capabilities under
+`[plugins.worldedit]` as well.
+
+`max-volume` lowers the maximum edit volume (default and hard ceiling is the
+core `aether_server::bulk::DEFAULT_MAX_BLOCKS`, 1,000,000 distinct blocks). The
+same value is used by the plugin's pre-check and by `BulkEdit::with_limit`, so
+the refusal message and the actual transaction agree.
 
 The edit path is a host service, `worldedit.host@0.1`, declared in
 `crates/aether-plugin/src/worldedit.rs` and implemented in
@@ -139,12 +157,16 @@ The plugin suite covers: a legal `//set` committing once, an over-limit
 selection refused before any edit starts, weighted and `#hand` patterns, an
 invalid pattern, `//replace` with and without a filter, walls and outline, a
 multi-step undo/redo with bounded history, explicit and facing-relative
-expand/contract, a selection across chunk borders, a protected region refusing
-the edit, selection reset on leave, the wand and its two clicks, absolute and
-relative positions. The server suite covers the real service over the core
-`BulkEdit`/journal (one revision, undo restores exactly), the core limit,
-region denial plus an operator bypass, the core coordinate parser, block
-resolution and hand lookup.
+expand/contract on every axis/direction, a selection across chunk borders, a
+protected region refusing the edit, selection reset on leave, a stale
+selection from another world, the wand and its two clicks, absolute and
+relative positions, `#existing`/`#pos1`/`#existing`-filter patterns, and the
+op-level/capability manifest. The server suite covers the real service over
+the core `BulkEdit`/journal (one revision, undo restores exactly), the core
+and configured limits, region denial plus an operator bypass on a fill **and
+on an undo over a region defined afterwards**, undo-handle scoping to its
+plugin, the core coordinate parser, block resolution and hand lookup. The tree
+suite drives `//name` through the real dispatcher fallback.
 
 ## Not in this slice
 

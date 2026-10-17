@@ -56,6 +56,10 @@ impl FakeHost {
         self.view.lock().unwrap().yaw = yaw;
     }
 
+    fn set_world(&self, world: &str) {
+        self.view.lock().unwrap().world = world.to_string();
+    }
+
     fn set_held(&self, item: Option<&str>) {
         *self.held.lock().unwrap() = item.map(str::to_string);
     }
@@ -532,6 +536,75 @@ fn weighted_patterns_and_hand_choose_blocks() {
     for x in 0..=2 {
         assert_eq!(f.host.block(x, 0, 0), "minecraft:glass");
     }
+}
+
+#[test]
+fn existing_and_pos1_patterns_use_the_world_and_the_first_corner() {
+    let mut f = Fixture::new(1_000);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:stone");
+    f.host.put((1, 0, 0), "minecraft:dirt");
+    f.set(&p, [0, 0, 0], [1, 0, 0]);
+    let lines = f.command(&p, "set", &["#existing"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.block(0, 0, 0), "minecraft:stone");
+    assert_eq!(f.host.block(1, 0, 0), "minecraft:dirt");
+
+    // `#pos1` takes the block at position 1 for every cell, including the
+    // cell that currently holds it.
+    f.set(&p, [10, 0, 10], [11, 0, 10]);
+    f.host.put((10, 0, 10), "minecraft:glass");
+    let lines = f.command(&p, "set", &["#pos1"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.block(10, 0, 10), "minecraft:glass");
+    assert_eq!(f.host.block(11, 0, 10), "minecraft:glass");
+}
+
+#[test]
+fn the_existing_filter_replaces_non_air_only() {
+    let mut f = Fixture::new(1_000);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:stone");
+    f.host.put((1, 0, 0), "minecraft:air");
+    f.host.put((2, 0, 0), "minecraft:dirt");
+    f.set(&p, [0, 0, 0], [2, 0, 0]);
+    let lines = f.command(&p, "replace", &["#existing", "glass"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.block(0, 0, 0), "minecraft:glass");
+    assert_eq!(f.host.block(1, 0, 0), "minecraft:air");
+    assert_eq!(f.host.block(2, 0, 0), "minecraft:glass");
+}
+
+#[test]
+fn a_selection_from_another_world_is_refused() {
+    let mut f = Fixture::new(1_000);
+    let p = player();
+    f.set(&p, [0, 0, 0], [1, 0, 0]);
+    f.host.set_world("the_nether");
+    let lines = f.command(&p, "set", &["stone"]);
+    assert!(error(&lines), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("belongs to")), "{lines:?}");
+    assert_eq!(f.host.commits(), 0);
+    assert_eq!(f.host.block(0, 0, 0), "minecraft:air");
+}
+
+#[test]
+fn destructive_commands_require_op_two_and_selection_stays_public() {
+    let manifest = manifest();
+    let level = |name: &str| {
+        manifest
+            .command(name)
+            .unwrap_or_else(|| panic!("{name} is declared"))
+            .op()
+    };
+    for name in ["wand", "pos1", "pos2", "sel", "expand", "contract"] {
+        assert_eq!(level(name), 0, "{name} does not write the world");
+    }
+    for name in ["set", "replace", "walls", "outline", "undo", "redo"] {
+        assert_eq!(level(name), 2, "{name} writes the world or its history");
+    }
+    assert!(!manifest.capabilities.iter().any(|c| c == "storage.kv"));
+    assert!(!manifest.capabilities.iter().any(|c| c == "supports"));
 }
 
 #[test]

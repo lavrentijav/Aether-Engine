@@ -1176,9 +1176,25 @@ mod imp {
         {
             crate::log::warn(&format!("ops service not registered: {e}"));
         }
+        // The operator may lower the bulk-edit cap for their server. The
+        // plugin's own pre-check reads the same value through the host
+        // service, so both the refusal message and the `BulkEdit` limit agree.
+        let worldedit_max = cfg
+            .plugins
+            .plugins
+            .get(aether_worldedit_plugin::ID)
+            .and_then(|entry| {
+                entry
+                    .config
+                    .get("max-volume")
+                    .or_else(|| entry.config.get("max_volume"))
+            })
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(crate::bulk::DEFAULT_MAX_BLOCKS);
         let worldedit = Arc::new(crate::worldedit::Host::new(
             Arc::clone(world),
             Arc::clone(registry),
+            worldedit_max,
         ));
         if let Err(e) = aether_plugin::worldedit::register_host(host.services(), worldedit) {
             crate::log::warn(&format!("worldedit service not registered: {e}"));
@@ -1315,6 +1331,16 @@ mod imp {
             grant_sink,
             aether_claims_plugin::registration(),
             "native claims",
+        );
+        // Essentials homes/warps/spawn: no core mechanism of its own, every
+        // move goes through the CMD-31 teleport service and state lives in
+        // plugin KV. `/spawn` remains core, so this registers only new names.
+        install_native_one(
+            host,
+            cfg,
+            grant_sink,
+            aether_essentials_teleport_plugin::registration(),
+            "native essentials-teleport",
         );
         install_native_one(
             host,
