@@ -934,6 +934,43 @@ impl LoadedPlugin {
         }
     }
 
+    /// `after-block-place`. Native-only: the frozen WIT world has no export,
+    /// so a WASM plugin subscribed to the event is silently skipped (the
+    /// manifest still parses, which keeps one manifest valid for both tiers).
+    #[allow(clippy::too_many_arguments)]
+    fn call_after_block_place(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: &str,
+    ) -> std::result::Result<(), String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { .. } => Ok(()),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                n.after_block_place(&mut ctx, p, x, y, z, block);
+                Ok(())
+            }
+        }
+    }
+
     fn call_after_entity_death(
         &mut self,
         services: &Arc<ServiceRegistry>,
@@ -1802,6 +1839,14 @@ impl PluginHost {
     pub fn after_block_break(&mut self, p: &Player, x: i32, y: i32, z: i32, block: &str) {
         self.observe(manifest::EVENT_AFTER_BLOCK_BREAK, |pl, s, b| {
             pl.call_after_block_break(s, b, p, x, y, z, block)
+        });
+    }
+
+    /// `after-block-place`. Native-only (see
+    /// [`LoadedPlugin::call_after_block_place`]).
+    pub fn after_block_place(&mut self, p: &Player, x: i32, y: i32, z: i32, block: &str) {
+        self.observe(manifest::EVENT_AFTER_BLOCK_PLACE, |pl, s, b| {
+            pl.call_after_block_place(s, b, p, x, y, z, block)
         });
     }
 

@@ -172,6 +172,19 @@ pub trait NativePlugin: Send {
         _block: &str,
     ) {
     }
+    /// A bulk edit (or any server-side write) placed a block. Native-only:
+    /// the frozen `@0.1.0` WIT world has no matching export, so a WASM plugin
+    /// cannot subscribe to it.
+    fn after_block_place(
+        &mut self,
+        _ctx: &mut NativeContext,
+        _p: &Player,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _block: &str,
+    ) {
+    }
     fn after_entity_death(&mut self, _ctx: &mut NativeContext, _entity: u64, _killer: Option<u64>) {
     }
     fn after_damage(

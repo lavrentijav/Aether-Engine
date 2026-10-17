@@ -612,6 +612,13 @@ pub fn anti_xray_config() -> config::AntiXrayConfig {
         .unwrap_or_default()
 }
 
+/// The `[bulk]` settings, or the defaults before startup installs the config.
+/// Read by [`bulk::publish_tick`] once per tick (a clone of a three-number
+/// struct; the bookkeeping is trivial next to the work it bounds).
+pub fn bulk_config() -> config::BulkConfig {
+    CONFIG.get().map(|c| c.bulk.clone()).unwrap_or_default()
+}
+
 /// The `[chat]` settings, or the defaults before startup installs the config.
 /// The defaults log everything with the built-in redact list, so chat logging
 /// works even in a test that never installed a config.
