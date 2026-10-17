@@ -33,18 +33,30 @@ pub struct NodeEntry {
     pub value: bool,
 }
 
+/// One direct group membership, with its optional required address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Membership {
+    /// The group id.
+    pub group: String,
+    /// The address the member is bound to, if any.
+    pub addr: Option<String>,
+}
+
 /// A user as `/lp user <name> info` sees them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UserInfo {
     /// The name, as resolved by the store (lower-cased for lookup).
     pub name: String,
-    /// The effective level (the highest group level).
+    /// The effective level (the highest group level) for the queried address.
     pub level: u8,
-    /// Direct group memberships.
+    /// Direct group memberships effective for the queried address.
     pub groups: Vec<String>,
     /// Direct groups plus every group reached by inheritance, in resolution
-    /// order.
+    /// order, effective for the queried address.
     pub inherited_groups: Vec<String>,
+    /// Every direct membership with its binding, even one the queried address
+    /// does not satisfy. This is what makes `root@10.0.0.7` visible.
+    pub memberships: Vec<Membership>,
     /// The user's own explicit nodes.
     pub nodes: Vec<NodeEntry>,
 }
@@ -116,12 +128,24 @@ pub trait PermissionsAdmin: Send + Sync {
 
     /// A user's groups and explicit nodes. `None` only for an empty name; any
     /// other name (online, offline, or new) gets a level-0 view.
-    fn user(&self, name: &str) -> Option<UserInfo>;
+    ///
+    /// `addr` is the online player's current address, when known. An
+    /// address-bound membership (`name@addr`) only counts for a matching
+    /// address, so the caller passes it or the view is name-only. Bindings are
+    /// still listed in [`UserInfo::memberships`] either way.
+    fn user(&self, name: &str, addr: Option<&str>) -> Option<UserInfo>;
     /// A group, or `None` when it does not exist.
     fn group(&self, id: &str) -> Option<GroupInfo>;
 
-    /// Resolve `node` for a user, with the source that decided it.
-    fn check_user(&self, name: &str, node: &str, context: Option<&str>) -> Check;
+    /// Resolve `node` for a user (from optional address `addr`), with the
+    /// source that decided it.
+    fn check_user(
+        &self,
+        name: &str,
+        addr: Option<&str>,
+        node: &str,
+        context: Option<&str>,
+    ) -> Check;
     /// Resolve `node` for a group (its own nodes, then its parents'), with the
     /// source that decided it.
     fn check_group(&self, id: &str, node: &str, context: Option<&str>) -> Check;

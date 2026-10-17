@@ -3,13 +3,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::*;
-use aether_plugin::permissions::{Check, PermissionsAdmin};
+use aether_plugin::permissions::{Check, Membership, PermissionsAdmin};
 use aether_plugin::service::ServiceRegistry;
 use aether_plugin::HostBackend;
 
 #[derive(Clone, Default)]
 struct MockUser {
-    groups: Vec<String>,
     nodes: Vec<NodeEntry>,
 }
 
@@ -17,7 +16,8 @@ struct MockUser {
 struct MockGroup {
     parents: Vec<String>,
     nodes: Vec<NodeEntry>,
-    members: BTreeSet<String>,
+    /// Member name -> optional required address.
+    members: BTreeMap<String, Option<String>>,
     builtin: bool,
 }
 
@@ -65,7 +65,7 @@ impl MockAdmin {
         if let Some(entry) = nodes.iter().find(|e| e.node == node && e.context.is_none()) {
             return Some(entry.value);
         }
-        let mut best: Option<(usize, usize, bool)> = None;
+        let mut best: Option<(usize, bool, bool)> = None;
         for entry in nodes {
             if !wildcard_matches(&entry.node, node) {
                 continue;
@@ -79,16 +79,37 @@ impl MockAdmin {
             } else {
                 entry.node.len()
             };
-            let rank = (contextual as usize, len, entry.value);
+            // Specificity (prefix length) first, context only on a tie.
+            let rank = (len, contextual, entry.value);
             let better = match best {
                 None => true,
-                Some((bc, bl, _)) => rank.0 > bc || (rank.0 == bc && rank.1 > bl),
+                Some((bl, bc, _)) => match rank.0.cmp(&bl) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Equal => rank.1 && !bc,
+                },
             };
             if better {
                 best = Some(rank);
             }
         }
         best.map(|(_, _, value)| value)
+    }
+
+    /// A user's direct groups that are effective from `addr` (a bare member
+    /// matches any address; a bound member only its own).
+    fn direct_groups(state: &State, name: &str, addr: Option<&str>) -> Vec<String> {
+        let key = name.to_ascii_lowercase();
+        state
+            .groups
+            .iter()
+            .filter(|(_, group)| match group.members.get(&key) {
+                Some(None) => true,
+                Some(Some(bound)) => addr == Some(bound.as_str()),
+                None => false,
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     fn inherited(&self, roots: &[String], state: &State) -> Vec<String> {
@@ -149,7 +170,12 @@ impl PermissionsAdmin for MockAdmin {
     }
 
     fn users(&self) -> Vec<String> {
-        self.state().users.keys().cloned().collect()
+        let state = self.state();
+        let mut names: BTreeSet<String> = state.users.keys().cloned().collect();
+        for group in state.groups.values() {
+            names.extend(group.members.keys().cloned());
+        }
+        names.into_iter().collect()
     }
 
     fn nodes(&self) -> Vec<String> {
@@ -164,7 +190,7 @@ impl PermissionsAdmin for MockAdmin {
         out.into_iter().collect()
     }
 
-    fn user(&self, name: &str) -> Option<UserInfo> {
+    fn user(&self, name: &str, addr: Option<&str>) -> Option<UserInfo> {
         let name = name.trim();
         if name.is_empty() {
             return None;
@@ -172,17 +198,28 @@ impl PermissionsAdmin for MockAdmin {
         let key = name.to_ascii_lowercase();
         let state = self.state();
         let user = state.users.get(&key).cloned().unwrap_or_default();
-        let inherited = self.inherited(&user.groups, &state);
+        let groups = Self::direct_groups(&state, &key, addr);
+        let inherited = self.inherited(&groups, &state);
         let level = if inherited.iter().any(|g| g == OP_GROUP) {
             4
         } else {
             0
         };
+        let mut memberships: Vec<Membership> = Vec::new();
+        for (id, group) in &state.groups {
+            if let Some(binding) = group.members.get(&key) {
+                memberships.push(Membership {
+                    group: id.clone(),
+                    addr: binding.clone(),
+                });
+            }
+        }
         Some(UserInfo {
             name: key,
             level,
-            groups: user.groups,
+            groups,
             inherited_groups: inherited,
+            memberships,
             nodes: user.nodes,
         })
     }
@@ -203,16 +240,23 @@ impl PermissionsAdmin for MockAdmin {
             parents: group.parents.clone(),
             inherited_parents: inherited,
             nodes: group.nodes.clone(),
-            members: group.members.iter().cloned().collect(),
+            members: group.members.keys().cloned().collect(),
         })
     }
 
-    fn check_user(&self, name: &str, node: &str, context: Option<&str>) -> Check {
+    fn check_user(
+        &self,
+        name: &str,
+        addr: Option<&str>,
+        node: &str,
+        context: Option<&str>,
+    ) -> Check {
         let key = name.to_ascii_lowercase();
         let state = self.state();
         let user = state.users.get(&key).cloned().unwrap_or_default();
+        let groups = Self::direct_groups(&state, &key, addr);
         drop(state);
-        let check = self.check(&user.groups, &user.nodes, node, context);
+        let check = self.check(&groups, &user.nodes, node, context);
         if let Source::User(_) = check.source {
             Check {
                 value: check.value,
@@ -392,6 +436,13 @@ impl PermissionsAdmin for MockAdmin {
                 return Err(format!("no group `{group}`"));
             }
         }
+        // Preserve the address binding of a group the user is already in.
+        let mut bindings: BTreeMap<String, Option<String>> = BTreeMap::new();
+        for (id, group) in &state.groups {
+            if let Some(addr) = group.members.get(&key) {
+                bindings.insert(id.clone(), addr.clone());
+            }
+        }
         for group in state.groups.values_mut() {
             group.members.remove(&key);
         }
@@ -402,14 +453,14 @@ impl PermissionsAdmin for MockAdmin {
             }
         }
         for group in &unique {
+            let addr = bindings.get(group).cloned().flatten();
             state
                 .groups
                 .get_mut(group)
                 .expect("validated")
                 .members
-                .insert(key.clone());
+                .insert(key.clone(), addr);
         }
-        state.users.entry(key).or_default().groups = unique;
         Ok(())
     }
 
@@ -420,11 +471,8 @@ impl PermissionsAdmin for MockAdmin {
             .groups
             .get_mut(group)
             .ok_or_else(|| format!("no group `{group}`"))?;
-        entry.members.insert(key.clone());
-        let user = state.users.entry(key).or_default();
-        if !user.groups.iter().any(|g| g == group) {
-            user.groups.push(group.to_string());
-        }
+        // A bare add never clears an existing binding.
+        entry.members.entry(key).or_insert(None);
         Ok(())
     }
 
@@ -436,9 +484,6 @@ impl PermissionsAdmin for MockAdmin {
             .get_mut(group)
             .ok_or_else(|| format!("no group `{group}`"))?;
         entry.members.remove(&key);
-        if let Some(user) = state.users.get_mut(&key) {
-            user.groups.retain(|g| g != group);
-        }
         Ok(())
     }
 
@@ -466,9 +511,6 @@ impl PermissionsAdmin for MockAdmin {
         state.groups.remove(id);
         for group in state.groups.values_mut() {
             group.parents.retain(|p| p != id);
-        }
-        for user in state.users.values_mut() {
-            user.groups.retain(|g| g != id);
         }
         Ok(())
     }
@@ -566,6 +608,7 @@ struct TestBackend {
     allowed: AtomicBool,
     permissions: Mutex<BTreeSet<(u64, String)>>,
     online: Mutex<Vec<Player>>,
+    addresses: Mutex<BTreeMap<u64, String>>,
     journal: Mutex<Vec<(String, String)>>,
     position: Mutex<Option<(String, f64, f64, f64)>>,
 }
@@ -583,6 +626,13 @@ impl TestBackend {
 
     fn journal(&self) -> Vec<(String, String)> {
         self.journal.lock().unwrap().clone()
+    }
+
+    fn bind(&self, player: u64, addr: &str) {
+        self.addresses
+            .lock()
+            .unwrap()
+            .insert(player, addr.to_string());
     }
 }
 
@@ -612,6 +662,9 @@ impl HostBackend for TestBackend {
     }
     fn online_players(&self, _plugin: &str) -> Vec<Player> {
         self.online.lock().unwrap().clone()
+    }
+    fn player_address(&self, _plugin: &str, player: u64) -> Option<String> {
+        self.addresses.lock().unwrap().get(&player).cloned()
     }
     fn player_position(&self, _plugin: &str, _player: u64) -> Option<(String, f64, f64, f64)> {
         self.position.lock().unwrap().clone()
@@ -811,7 +864,7 @@ fn user_parent_set_add_remove_clear_and_duplicates() {
     let lines = f.run(&["user", "Alice", "parent", "set", "two"]);
     assert_contains(&lines, "Alice had their existing parent groups cleared, and now only inherits two in context global.");
     assert_eq!(
-        f.admin.user("alice").unwrap().groups,
+        f.admin.user("alice", None).unwrap().groups,
         vec!["two".to_string()]
     );
 
@@ -822,12 +875,40 @@ fn user_parent_set_add_remove_clear_and_duplicates() {
     );
     let lines = f.run(&["user", "Alice", "parent", "remove", "two"]);
     assert_contains(&lines, "Alice does not inherit from two in context global.");
-    assert!(f.admin.user("alice").unwrap().groups.is_empty());
+    assert!(f.admin.user("alice", None).unwrap().groups.is_empty());
 
     f.run(&["user", "Alice", "parent", "add", "one"]);
     let lines = f.run(&["user", "Alice", "parent", "clear"]);
     assert_contains(&lines, "Alice's parents were cleared in context global.");
-    assert!(f.admin.user("alice").unwrap().groups.is_empty());
+    assert_contains(&lines, "groups were removed");
+    assert!(f.admin.user("alice", None).unwrap().groups.is_empty());
+}
+
+#[test]
+fn switch_replaces_the_user_parent_set() {
+    let mut f = Fixture::new();
+    f.run(&["creategroup", "one"]);
+    f.run(&["creategroup", "two"]);
+    f.run(&["user", "Alice", "parent", "add", "one"]);
+    let lines = f.run(&["user", "Alice", "parent", "switch", "two"]);
+    assert_contains(
+        &lines,
+        "Alice had their existing parent groups cleared, and now only inherits two in context global.",
+    );
+    assert_eq!(
+        f.admin.user("alice", None).unwrap().groups,
+        vec!["two".to_string()]
+    );
+
+    let lines = f.run(&["group", "two", "parent", "switch", "op"]);
+    assert_contains(
+        &lines,
+        "two had their existing parent groups cleared, and now only inherits op in context global.",
+    );
+    assert_eq!(
+        f.admin.group("two").unwrap().parents,
+        vec![OP_GROUP.to_string()]
+    );
 }
 
 #[test]
@@ -877,6 +958,7 @@ fn user_and_group_info_show_membership_and_nodes() {
     let lines = f.run(&["user", "Alice", "info"]);
     assert_contains(&lines, "User: alice");
     assert_contains(&lines, "Parent groups: moderator");
+    assert_contains(&lines, "Memberships: moderator");
     assert_contains(&lines, "Inherited groups: moderator");
     assert_contains(&lines, "Nodes: 0");
 
@@ -976,6 +1058,8 @@ fn completion_offers_users_groups_nodes_values_and_worlds() {
 
     let parents = f.complete(&["user", "alice", "parent", "set", ""]);
     assert!(parents.contains(&"staff".to_string()));
+    let switched = f.complete(&["user", "alice", "parent", "switch", "sta"]);
+    assert!(switched.contains(&"staff".to_string()));
 }
 
 #[test]
@@ -1003,8 +1087,10 @@ fn context_is_parsed_and_reported_by_check() {
         "world=overworld",
     ]);
     assert_eq!(lines[1], "    Result: true");
+    assert_eq!(lines[3], "    Context: world=overworld");
     let lines = f.run(&["user", "Alice", "permission", "check", "test.node"]);
     assert_eq!(lines[1], "    Result: false");
+    assert_eq!(lines[3], "    Context: global");
 
     let lines = f.run(&["user", "Alice", "permission", "set", "test.node", "yes"]);
     assert_contains(&lines, "Usage:");
@@ -1039,4 +1125,85 @@ fn init_refuses_to_load_without_the_admin_service() {
     let mut ctx = ctx(&backend, &services, &config);
     let err = plugin.init(&mut ctx).unwrap_err();
     assert!(err.contains("permissions.admin@0.1"), "{err}");
+}
+
+#[test]
+fn a_bound_member_is_visible_and_checked_from_the_online_address() {
+    let mut f = Fixture::new();
+    {
+        let mut state = f.admin.state();
+        let op = state.groups.get_mut(OP_GROUP).unwrap();
+        op.members
+            .insert("root".to_string(), Some("10.0.0.7".to_string()));
+        op.nodes.push(NodeEntry {
+            node: "bound.node".to_string(),
+            context: None,
+            value: true,
+        });
+    }
+    f.backend.online.lock().unwrap().push(player(7, "Root"));
+    f.backend.bind(7, "10.0.0.7");
+
+    let lines = f.run(&["user", "Root", "info"]);
+    assert_contains(&lines, "Level: 4");
+    assert_contains(&lines, "Parent groups: op");
+    assert_contains(&lines, "Memberships: op@10.0.0.7");
+
+    let lines = f.run(&["user", "Root", "permission", "check", "bound.node"]);
+    assert_eq!(lines[1], "    Result: true");
+    assert_eq!(lines[2], "    Processor: group op");
+
+    // From another address the binding does not apply; the info still shows
+    // the binding so the operator can see why.
+    f.backend.online.lock().unwrap().clear();
+    let lines = f.run(&["user", "Root", "info"]);
+    assert_contains(&lines, "Level: 0");
+    assert_contains(&lines, "Memberships: op@10.0.0.7");
+
+    // Back online, remove is reported as a real removal (not "does not
+    // inherit", which was the IP-blind bug).
+    f.backend.online.lock().unwrap().push(player(7, "Root"));
+    let lines = f.run(&["user", "Root", "parent", "remove", "op"]);
+    assert_contains(
+        &lines,
+        "Root no longer inherits permissions from op in context global.",
+    );
+    assert!(f.admin.user("root", None).unwrap().memberships.is_empty());
+}
+
+#[test]
+fn a_context_write_and_unset_carry_the_context_into_the_audit_detail() {
+    let mut f = Fixture::new();
+    f.run(&[
+        "user",
+        "Alice",
+        "permission",
+        "set",
+        "test.node",
+        "true",
+        "world=overworld",
+    ]);
+    let journal = f.backend.journal();
+    assert!(
+        journal
+            .last()
+            .is_some_and(|(_, detail)| detail.contains("world=overworld")),
+        "{journal:?}"
+    );
+
+    f.run(&[
+        "user",
+        "Alice",
+        "permission",
+        "unset",
+        "test.node",
+        "world=overworld",
+    ]);
+    let journal = f.backend.journal();
+    assert!(
+        journal
+            .last()
+            .is_some_and(|(_, detail)| detail.contains("world=overworld")),
+        "{journal:?}"
+    );
 }

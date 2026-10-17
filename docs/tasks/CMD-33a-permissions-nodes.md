@@ -20,7 +20,8 @@ Op level 4 by default. Tab-completion of users/groups/nodes.
 - reads/writes through the host `permissions` service added in CMD-02.
 
 ## Edge cases to test explicitly
-- set/unset/check a node; a temporary node expires and the previous value returns.
+- set/unset/check a node. **Temporary nodes** (`settemp`/expiry) are explicitly moved to
+  CMD-33b; see `docs/tasks/CMD-33b-permissions-meta-editor.md`.
 - parent add/remove/switch; deleting a group in use is refused or reassigns members (match
   LuckPerms); deleting the built-in `op` group is refused.
 - an invalid node name is rejected by the core (CMD-01).

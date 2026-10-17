@@ -137,6 +137,17 @@ impl PermissionsPlugin {
             .permissions_journal(ctx.id, p.id, action, detail);
     }
 
+    /// The address a target user is online from, when known. An address-bound
+    /// membership only applies to that address, so the admin view/check and
+    /// the add/remove messages must use it instead of a blind name lookup.
+    fn subject_addr(ctx: &NativeContext, name: &str) -> Option<String> {
+        ctx.backend
+            .online_players(ctx.id)
+            .into_iter()
+            .find(|online| online.name.eq_ignore_ascii_case(name))
+            .and_then(|online| ctx.backend.player_address(ctx.id, online.id))
+    }
+
     fn dispatch(&self, ctx: &mut NativeContext, p: &Player, args: &[String]) -> Vec<String> {
         match args.first().map(String::as_str) {
             None => {
@@ -174,7 +185,11 @@ impl PermissionsPlugin {
                 if !Self::may(ctx, p, NODE_USER_INFO) {
                     return vec![Self::denied()];
                 }
-                match self.admin().and_then(|a| a.user(name).ok_or_else(none)) {
+                let addr = Self::subject_addr(ctx, name);
+                match self
+                    .admin()
+                    .and_then(|a| a.user(name, addr.as_deref()).ok_or_else(none))
+                {
                     Ok(info) => user_info_lines(&info),
                     Err(e) => vec![format!("Error: {e}")],
                 }
@@ -247,7 +262,10 @@ impl PermissionsPlugin {
                             ctx,
                             p,
                             "permission-set",
-                            &format!("user {name} {node} {value}"),
+                            &format!(
+                                "user {name} {node} {value}{}",
+                                audit_context(context.as_deref())
+                            ),
                         );
                         vec![format!(
                             "Set {node} to {value} for {name} in context {}.",
@@ -276,7 +294,12 @@ impl PermissionsPlugin {
                     .and_then(|a| a.unset_user_node(name, node, context.as_deref()))
                 {
                     Ok(()) => {
-                        Self::audit(ctx, p, "permission-unset", &format!("user {name} {node}"));
+                        Self::audit(
+                            ctx,
+                            p,
+                            "permission-unset",
+                            &format!("user {name} {node}{}", audit_context(context.as_deref())),
+                        );
                         vec![format!(
                             "Unset {node} for {name} in context {}.",
                             context_label(context.as_deref())
@@ -299,12 +322,12 @@ impl PermissionsPlugin {
                     Ok(c) => c,
                     Err(e) => return vec![e],
                 };
+                let addr = Self::subject_addr(ctx, name);
                 match self.admin() {
                     Ok(admin) => check_lines(
-                        "User",
-                        name,
                         node,
-                        admin.check_user(name, node, context.as_deref()),
+                        context.as_deref(),
+                        admin.check_user(name, addr.as_deref(), node, context.as_deref()),
                     ),
                     Err(e) => vec![format!("Error: {e}")],
                 }
@@ -313,7 +336,11 @@ impl PermissionsPlugin {
                 if !Self::may(ctx, p, NODE_USER_LIST) {
                     return vec![Self::denied()];
                 }
-                match self.admin().and_then(|a| a.user(name).ok_or_else(none)) {
+                let addr = Self::subject_addr(ctx, name);
+                match self
+                    .admin()
+                    .and_then(|a| a.user(name, addr.as_deref()).ok_or_else(none))
+                {
                     Ok(info) => self.user_permission_lines(name, &info),
                     Err(e) => vec![format!("Error: {e}")],
                 }
@@ -358,7 +385,10 @@ impl PermissionsPlugin {
                             ctx,
                             p,
                             "permission-set",
-                            &format!("group {id} {node} {value}"),
+                            &format!(
+                                "group {id} {node} {value}{}",
+                                audit_context(context.as_deref())
+                            ),
                         );
                         vec![format!(
                             "Set {node} to {value} for {id} in context {}.",
@@ -387,7 +417,12 @@ impl PermissionsPlugin {
                     .and_then(|a| a.unset_group_node(id, node, context.as_deref()))
                 {
                     Ok(()) => {
-                        Self::audit(ctx, p, "permission-unset", &format!("group {id} {node}"));
+                        Self::audit(
+                            ctx,
+                            p,
+                            "permission-unset",
+                            &format!("group {id} {node}{}", audit_context(context.as_deref())),
+                        );
                         vec![format!(
                             "Unset {node} for {id} in context {}.",
                             context_label(context.as_deref())
@@ -412,9 +447,8 @@ impl PermissionsPlugin {
                 };
                 match self.admin() {
                     Ok(admin) => check_lines(
-                        "Group",
-                        id,
                         node,
+                        context.as_deref(),
                         admin.check_group(id, node, context.as_deref()),
                     ),
                     Err(e) => vec![format!("Error: {e}")],
@@ -453,7 +487,8 @@ impl PermissionsPlugin {
         let Some(admin) = self.admin().ok() else {
             return vec!["Error: permissions admin service is not available".to_string()];
         };
-        let Some(current) = admin.user(name) else {
+        let addr = Self::subject_addr(ctx, name);
+        let Some(current) = admin.user(name, addr.as_deref()) else {
             return vec!["Error: a user name is empty".to_string()];
         };
         if action == "clear" {
@@ -461,7 +496,7 @@ impl PermissionsPlugin {
                 Ok(()) => {
                     Self::audit(ctx, p, "parent-clear", &format!("user {name}"));
                     vec![format!(
-                        "{name}'s parents were cleared in context global. ({} nodes were removed.)",
+                        "{name}'s parents were cleared in context global. ({} groups were removed.)",
                         current.groups.len()
                     )]
                 }
@@ -533,7 +568,7 @@ impl PermissionsPlugin {
                 Ok(()) => {
                     Self::audit(ctx, p, "parent-clear", &format!("group {id}"));
                     vec![format!(
-                        "{id}'s parents were cleared in context global. ({} nodes were removed.)",
+                        "{id}'s parents were cleared in context global. ({} parent groups were removed.)",
                         current.parents.len()
                     )]
                 }
@@ -808,11 +843,24 @@ fn user_info_lines(info: &UserInfo) -> Vec<String> {
         .first()
         .cloned()
         .unwrap_or_else(|| "none".to_string());
+    let memberships = if info.memberships.is_empty() {
+        "none".to_string()
+    } else {
+        info.memberships
+            .iter()
+            .map(|membership| match &membership.addr {
+                Some(addr) => format!("{}@{}", membership.group, addr),
+                None => membership.group.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     vec![
         format!("User: {}", info.name),
         format!("Level: {}", info.level),
         format!("Primary group: {primary}"),
         format!("Parent groups: {groups}"),
+        format!("Memberships: {memberships}"),
         format!("Inherited groups: {inherited}"),
         format!("Nodes: {}", info.nodes.len()),
     ]
@@ -846,18 +894,35 @@ fn group_info_lines(info: &GroupInfo) -> Vec<String> {
     ]
 }
 
-fn check_lines(_kind: &str, _name: &str, node: &str, check: Check) -> Vec<String> {
+fn check_lines(node: &str, context: Option<&str>, check: Check) -> Vec<String> {
     vec![
         format!("Permission check for {node}:"),
         format!("    Result: {}", check.value),
         format!("    Processor: {}", check.source.label()),
-        "    Context: global".to_string(),
+        format!("    Context: {}", context_display(context)),
     ]
 }
 
-/// The LuckPerms context label: `global` when no world context was given.
+/// The LuckPerms context label: `global` when no world context was given, and
+/// `world=<name>` when one was.
+fn context_display(context: Option<&str>) -> String {
+    match context {
+        Some(context) => format!("world={context}"),
+        None => "global".to_string(),
+    }
+}
+
+/// The context label set/unset report.
 fn context_label(context: Option<&str>) -> &str {
     context.unwrap_or("global")
+}
+
+/// The ` world=<name>` suffix for an audit detail (empty for a global write).
+fn audit_context(context: Option<&str>) -> String {
+    match context {
+        Some(context) => format!(" world={context}"),
+        None => String::new(),
+    }
 }
 
 fn entry_line(entry: &NodeEntry, source: &Source) -> String {

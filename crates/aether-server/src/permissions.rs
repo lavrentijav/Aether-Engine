@@ -239,6 +239,12 @@ fn wildcard_len(pattern: &str) -> usize {
     }
 }
 
+/// Whether any encoded key carries a wildcard. `*` can only be in the node
+/// part (a context never contains one), so a plain substring test is enough.
+fn has_wildcard_key(nodes: &BTreeMap<String, bool>) -> bool {
+    nodes.keys().any(|key| key.contains('*'))
+}
+
 /// The map key for a node plus its context. A global node is the bare name; a
 /// context-specific one is `node#context`. A node can never contain `#`
 /// ([`valid_node`]), so the split is unambiguous, and an empty context is the
@@ -265,7 +271,12 @@ fn split_key(key: &str) -> (&str, Option<&str>) {
 /// specificity a context-specific entry beats a global one. The search is
 /// confined to one holder, so a child group's grant still beats its parent's
 /// deny under the holder ordering.
-fn lookup(nodes: &BTreeMap<String, bool>, node: &str, context: Option<&str>) -> Option<bool> {
+fn lookup(
+    nodes: &BTreeMap<String, bool>,
+    has_wildcards: bool,
+    node: &str,
+    context: Option<&str>,
+) -> Option<bool> {
     let ctx = context.filter(|c| !c.is_empty());
     if let Some(ctx) = ctx {
         if let Some(v) = nodes.get(&node_key(node, Some(ctx))) {
@@ -275,10 +286,17 @@ fn lookup(nodes: &BTreeMap<String, bool>, node: &str, context: Option<&str>) -> 
     if let Some(v) = nodes.get(&node_key(node, None)) {
         return Some(*v);
     }
+    // Nothing can match without a wildcard key; skip the linear scan on the
+    // common all-exact holder.
+    if !has_wildcards {
+        return None;
+    }
 
-    // No exact match: the longest matching wildcard decides. Context-specific
-    // is preferred to global at the same length.
-    let mut best: Option<(bool, usize, bool)> = None;
+    // No exact match: the **most specific** wildcard decides. Specificity is
+    // the length of the prefix, and only at equal length does a
+    // context-specific pattern beat a global one. `*` (length 0) is least
+    // specific.
+    let mut best: Option<(usize, bool, bool)> = None;
     for (key, value) in nodes {
         let (pattern, key_ctx) = split_key(key);
         if !wildcard_matches(pattern, node) {
@@ -288,13 +306,13 @@ fn lookup(nodes: &BTreeMap<String, bool>, node: &str, context: Option<&str>) -> 
         if key_ctx.is_some() && !contextual {
             continue;
         }
-        let rank = (contextual, wildcard_len(pattern), *value);
+        let rank = (wildcard_len(pattern), contextual, *value);
         let better = match best {
             None => true,
-            Some((best_ctx, best_len, _)) => match (rank.0, best_ctx) {
-                (true, false) => true,
-                (false, true) => false,
-                _ => rank.1 > best_len,
+            Some((best_len, best_ctx, _)) => match rank.0.cmp(&best_len) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                std::cmp::Ordering::Equal => rank.1 && !best_ctx,
             },
         };
         if better {
@@ -394,6 +412,11 @@ pub struct Group {
     /// Explicit nodes, encoded by [`node_key`] (`node` or `node#context`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     nodes: BTreeMap<String, bool>,
+    /// Whether any node is a wildcard pattern. Rebuilt on load/normalize and
+    /// on every write, so a read can skip the wildcard scan entirely when the
+    /// holder has only exact nodes.
+    #[serde(skip)]
+    wildcards: bool,
     /// Prefix/suffix/weight meta.
     #[serde(default, skip_serializing_if = "Meta::is_empty")]
     meta: Meta,
@@ -437,7 +460,7 @@ impl Group {
 
     /// A node on this group, context-aware.
     pub fn node(&self, node: &str, context: Option<&str>) -> Option<bool> {
-        lookup(&self.nodes, node, context)
+        lookup(&self.nodes, self.wildcards, node, context)
     }
 
     /// Set (or clear, with `None`) a node on this group.
@@ -451,6 +474,7 @@ impl Group {
                 self.nodes.remove(&key);
             }
         }
+        self.wildcards = has_wildcard_key(&self.nodes);
     }
 
     /// Set this group's meta by key.
@@ -486,6 +510,9 @@ pub struct Player {
     /// Explicit nodes, encoded by [`node_key`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     nodes: BTreeMap<String, bool>,
+    /// Whether any node is a wildcard pattern; see [`Group`].
+    #[serde(skip)]
+    wildcards: bool,
     /// The player's own meta, which outranks every group's.
     #[serde(default, skip_serializing_if = "Meta::is_empty")]
     meta: Meta,
@@ -494,7 +521,7 @@ pub struct Player {
 impl Player {
     /// A node on this player, context-aware.
     pub fn node(&self, node: &str, context: Option<&str>) -> Option<bool> {
-        lookup(&self.nodes, node, context)
+        lookup(&self.nodes, self.wildcards, node, context)
     }
 
     /// The player's meta.
@@ -524,12 +551,16 @@ impl Player {
 /// through this one lens.
 trait Holder {
     fn holder_nodes(&self) -> &BTreeMap<String, bool>;
+    fn holder_wildcards(&self) -> bool;
     fn holder_meta(&self) -> &Meta;
 }
 
 impl Holder for Player {
     fn holder_nodes(&self) -> &BTreeMap<String, bool> {
         &self.nodes
+    }
+    fn holder_wildcards(&self) -> bool {
+        self.wildcards
     }
     fn holder_meta(&self) -> &Meta {
         &self.meta
@@ -539,6 +570,9 @@ impl Holder for Player {
 impl Holder for Group {
     fn holder_nodes(&self) -> &BTreeMap<String, bool> {
         &self.nodes
+    }
+    fn holder_wildcards(&self) -> bool {
+        self.wildcards
     }
     fn holder_meta(&self) -> &Meta {
         &self.meta
@@ -587,6 +621,10 @@ impl Store {
             group.level = Level::new(group.level.get());
             group.parents.sort();
             group.parents.dedup();
+            group.wildcards = has_wildcard_key(&group.nodes);
+        }
+        for player in self.players.values_mut() {
+            player.wildcards = has_wildcard_key(&player.nodes);
         }
         let op = self
             .groups
@@ -598,6 +636,7 @@ impl Store {
                 priority: 0,
                 parents: Vec::new(),
                 nodes: BTreeMap::new(),
+                wildcards: false,
                 meta: Meta::default(),
                 members: BTreeMap::new(),
             });
@@ -712,9 +751,31 @@ impl Store {
         self.groups.keys().cloned().collect()
     }
 
-    /// Every player name the store knows, sorted.
+    /// Every player name the store knows, sorted: explicit player records and
+    /// every group member, so an offline member with no own nodes still
+    /// completes and appears in `/lp`.
     pub fn player_names(&self) -> Vec<String> {
-        self.players.keys().cloned().collect()
+        let mut names: BTreeSet<String> = self.players.keys().cloned().collect();
+        for group in self.groups.values() {
+            names.extend(group.members.keys().cloned());
+        }
+        names.into_iter().collect()
+    }
+
+    /// A user's direct group memberships with their address bindings, whatever
+    /// the querying address is. `/lp user <name> info` lists these so a bound
+    /// membership (`root@10.0.0.7`) is visible even before an address matches.
+    pub fn memberships_of(&self, name: &str) -> Vec<(String, Option<String>)> {
+        let key = name.to_ascii_lowercase();
+        self.groups
+            .values()
+            .filter_map(|group| {
+                group
+                    .members
+                    .get(&key)
+                    .map(|member| (group.id.clone(), member.addr.clone()))
+            })
+            .collect()
     }
 
     /// Every node name the store knows: declared defaults plus explicit
@@ -748,6 +809,7 @@ impl Store {
                 priority: 0,
                 parents: Vec::new(),
                 nodes: BTreeMap::new(),
+                wildcards: false,
                 meta: Meta::default(),
                 members: BTreeMap::new(),
             },
@@ -841,6 +903,13 @@ impl Store {
 
     /// Set a user's direct groups, replacing the previous set. Validates every
     /// group before touching membership, so a bad name changes nothing.
+    ///
+    /// Address bindings are **preserved** for groups the user is already in:
+    /// `parent set` changes which groups a user is in, never whether an
+    /// existing membership is address-bound. A group that is newly added is a
+    /// bare membership; this mirrors [`Store::add_member`]'s add-only rule and
+    /// keeps `parent set op` from turning `root@10.0.0.7` into a root from any
+    /// address.
     pub fn set_user_groups(&mut self, name: &str, groups: &[String]) -> Result<(), String> {
         let name = name.trim();
         if name.is_empty() {
@@ -852,6 +921,13 @@ impl Store {
             }
         }
         let key = name.to_ascii_lowercase();
+        // Keep the binding of every group the user is already a member of.
+        let mut bindings: BTreeMap<String, Option<String>> = BTreeMap::new();
+        for group in self.groups.values() {
+            if let Some(member) = group.members.get(&key) {
+                bindings.insert(group.id.clone(), member.addr.clone());
+            }
+        }
         for group in self.groups.values_mut() {
             group.members.remove(&key);
         }
@@ -862,11 +938,12 @@ impl Store {
             }
         }
         for id in unique {
+            let addr = bindings.get(id).cloned().flatten();
             self.groups
                 .get_mut(id)
                 .expect("validated above")
                 .members
-                .insert(key.clone(), Member { addr: None });
+                .insert(key.clone(), Member { addr });
         }
         Ok(())
     }
@@ -933,6 +1010,7 @@ impl Store {
                 player.nodes.remove(&node_key(node, context));
             }
         }
+        player.wildcards = has_wildcard_key(&player.nodes);
         if player.is_empty() && player.meta.is_empty() {
             self.players.remove(&name.to_ascii_lowercase());
         }
@@ -1119,7 +1197,12 @@ impl Store {
         context: Option<&str>,
     ) -> Option<bool> {
         for holder in self.holders(name, ip) {
-            if let Some(value) = lookup(holder.holder_nodes(), node, context) {
+            if let Some(value) = lookup(
+                holder.holder_nodes(),
+                holder.holder_wildcards(),
+                node,
+                context,
+            ) {
                 return Some(value);
             }
         }
@@ -1135,7 +1218,7 @@ impl Store {
         context: Option<&str>,
     ) -> Option<(bool, NodeSource)> {
         if let Some(player) = self.player(name) {
-            if let Some(value) = lookup(&player.nodes, node, context) {
+            if let Some(value) = lookup(&player.nodes, player.wildcards, node, context) {
                 return Some((value, NodeSource::Player(name.to_string())));
             }
         }
@@ -1146,7 +1229,7 @@ impl Store {
             .map(|g| g.id.clone())
             .collect();
         for group in self.group_order(roots) {
-            if let Some(value) = lookup(&group.nodes, node, context) {
+            if let Some(value) = lookup(&group.nodes, group.wildcards, node, context) {
                 return Some((value, NodeSource::Group(group.id.clone())));
             }
         }
@@ -1163,7 +1246,7 @@ impl Store {
     ) -> Option<(bool, NodeSource)> {
         let group = self.groups.get(group)?;
         for holder in self.group_order(vec![group.id.clone()]) {
-            if let Some(value) = lookup(&holder.nodes, node, context) {
+            if let Some(value) = lookup(&holder.nodes, holder.wildcards, node, context) {
                 return Some((value, NodeSource::Group(holder.id.clone())));
             }
         }
@@ -1185,8 +1268,9 @@ impl Store {
             .collect()
     }
 
-    /// The parents of `id`, or every reachable ancestor excluding `id` itself.
-    pub fn group_parents(&self, id: &str) -> Vec<String> {
+    /// The **direct** parents of `id` (not the transitive ancestors; use
+    /// [`Store::group_order`] for those).
+    pub fn direct_parents(&self, id: &str) -> Vec<String> {
         self.groups
             .get(id)
             .map(|g| g.parents.clone())
@@ -1544,6 +1628,13 @@ pub fn node_default(node: &str) -> Option<NodeDefault> {
 #[cfg(feature = "plugins")]
 pub struct AdminService;
 
+/// Parse an address string for the admin service. An absent, empty or
+/// malformed value is "no address", exactly as [`Group::contains`] treats it.
+#[cfg(feature = "plugins")]
+fn parse_addr(addr: Option<&str>) -> Option<IpAddr> {
+    addr.and_then(|value| value.trim().parse::<IpAddr>().ok())
+}
+
 #[cfg(feature = "plugins")]
 fn node_entries<'a>(
     nodes: impl Iterator<Item = (&'a str, Option<&'a str>, bool)>,
@@ -1573,17 +1664,23 @@ impl aether_plugin::permissions::PermissionsAdmin for AdminService {
         snapshot_store().known_nodes()
     }
 
-    fn user(&self, name: &str) -> Option<aether_plugin::permissions::UserInfo> {
+    fn user(&self, name: &str, addr: Option<&str>) -> Option<aether_plugin::permissions::UserInfo> {
         let name = name.trim();
         if name.is_empty() {
             return None;
         }
+        let ip = parse_addr(addr);
         let store = snapshot_store();
         Some(aether_plugin::permissions::UserInfo {
             name: name.to_ascii_lowercase(),
-            level: store.level_of(name, None).get(),
-            groups: store.groups_of(name, None),
-            inherited_groups: store.inherited_groups(name, None),
+            level: store.level_of(name, ip).get(),
+            groups: store.groups_of(name, ip),
+            inherited_groups: store.inherited_groups(name, ip),
+            memberships: store
+                .memberships_of(name)
+                .into_iter()
+                .map(|(group, addr)| aether_plugin::permissions::Membership { group, addr })
+                .collect(),
             nodes: node_entries(store.player(name).map(|p| p.nodes()).into_iter().flatten()),
         })
     }
@@ -1612,14 +1709,16 @@ impl aether_plugin::permissions::PermissionsAdmin for AdminService {
     fn check_user(
         &self,
         name: &str,
+        addr: Option<&str>,
         node: &str,
         context: Option<&str>,
     ) -> aether_plugin::permissions::Check {
         use aether_plugin::permissions::{Check, Source};
+        let ip = parse_addr(addr);
         let store = snapshot_store();
-        let level = store.level_of(name, None);
-        let value = store.resolve(level, name, None, node, context, 0);
-        let source = match store.explicit_source(name, None, node, context) {
+        let level = store.level_of(name, ip);
+        let value = store.resolve(level, name, ip, node, context, 0);
+        let source = match store.explicit_source(name, ip, node, context) {
             Some((_, NodeSource::Player(name))) => Source::User(name),
             Some((_, NodeSource::Group(id))) => Source::Group(id),
             None => Source::Default,
@@ -2666,6 +2765,84 @@ parents = ["ghost"]
         let _ = std::fs::remove_file(path.with_extension("toml.tmp"));
     }
 
+    #[test]
+    fn a_longer_global_wildcard_beats_a_shorter_context_wildcard() {
+        let mut s = Store::new();
+        s.create_group("wild", Level::NONE).unwrap();
+        s.add_member("wild", "alice", None).unwrap();
+        s.declare_node("a.b.c", NodeDefault::Deny).unwrap();
+        s.declare_node("a.d.c", NodeDefault::Deny).unwrap();
+
+        // A narrow global allow beats a broad context deny.
+        s.set_group_node("wild", "a.b.*", None, Some(true)).unwrap();
+        s.set_group_node("wild", "a.*", Some("overworld"), Some(false))
+            .unwrap();
+        assert!(s.resolve(
+            s.level_of("alice", None),
+            "alice",
+            None,
+            "a.b.c",
+            Some("overworld"),
+            0
+        ));
+        // Elsewhere only the global pattern applies.
+        assert!(s.resolve(
+            s.level_of("alice", None),
+            "alice",
+            None,
+            "a.b.c",
+            Some("nether"),
+            0
+        ));
+
+        // And the other way round: a narrow global deny beats a broad context
+        // allow, while the broad pattern still decides its own branches.
+        s.set_group_node("wild", "a.b.*", None, Some(false))
+            .unwrap();
+        s.set_group_node("wild", "a.*", Some("overworld"), Some(true))
+            .unwrap();
+        assert!(!s.resolve(
+            s.level_of("alice", None),
+            "alice",
+            None,
+            "a.b.c",
+            Some("overworld"),
+            0
+        ));
+        assert!(s.resolve(
+            s.level_of("alice", None),
+            "alice",
+            None,
+            "a.d.c",
+            Some("overworld"),
+            0
+        ));
+    }
+
+    #[test]
+    fn parent_set_preserves_an_existing_address_binding() {
+        let mut s = Store::new();
+        s.create_group("staff", Level::new(2)).unwrap();
+        s.create_group("extra", Level::NONE).unwrap();
+        s.add_member("staff", "root", Some("10.0.0.7")).unwrap();
+
+        // `parent set` on the same group must not clear the binding.
+        s.set_user_groups("root", &["staff".into()]).unwrap();
+        assert_eq!(s.level_of("root", None), Level::NONE);
+        assert_eq!(s.level_of("root", ip("10.0.0.7")), Level::new(2));
+        assert!(s.group("staff").unwrap().contains("root", ip("10.0.0.7")));
+        assert!(!s.group("staff").unwrap().contains("root", ip("10.0.0.8")));
+
+        // Adding a second group is a bare membership; it does not widen the
+        // bound one either.
+        s.set_user_groups("root", &["staff".into(), "extra".into()])
+            .unwrap();
+        assert_eq!(s.level_of("root", None), Level::NONE);
+        assert_eq!(s.level_of("root", ip("10.0.0.7")), Level::new(2));
+        assert!(!s.group("staff").unwrap().contains("root", None));
+        assert!(s.group("extra").unwrap().contains("root", None));
+    }
+
     #[cfg(feature = "plugins")]
     #[test]
     fn the_admin_service_reads_writes_and_names_the_source() {
@@ -2680,24 +2857,24 @@ parents = ["ghost"]
             .unwrap();
         admin.add_user_group("alice", "service").unwrap();
 
-        let info = admin.user("alice").expect("a user view");
+        let info = admin.user("alice", None).expect("a user view");
         assert_eq!(info.groups, vec!["service".to_string()]);
         assert_eq!(info.inherited_groups, vec!["service".to_string()]);
-        let check = admin.check_user("alice", "service.child", None);
+        let check = admin.check_user("alice", None, "service.child", None);
         assert!(check.value);
         assert_eq!(check.source, Source::Group("service".into()));
 
         admin
             .set_user_node("alice", "service.child", None, false)
             .unwrap();
-        let check = admin.check_user("alice", "service.child", None);
+        let check = admin.check_user("alice", None, "service.child", None);
         assert!(!check.value);
         assert_eq!(check.source, Source::User("alice".into()));
 
         admin
             .unset_user_node("alice", "service.child", None)
             .unwrap();
-        assert!(admin.check_user("alice", "service.child", None).value);
+        assert!(admin.check_user("alice", None, "service.child", None).value);
 
         let group = admin.group("service").expect("a group view");
         assert!(group.members.contains(&"alice".to_string()));

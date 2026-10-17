@@ -438,6 +438,12 @@ mod imp {
                 .collect()
         }
 
+        fn player_address(&self, _plugin: &str, player: u64) -> Option<String> {
+            self.by_session(player)
+                .and_then(|h| h.ip)
+                .map(|ip| ip.to_string())
+        }
+
         /// The core command registry, so a command registered through the SDK's
         /// builder is dispatched and permission-checked like a core one. The
         /// ownership and duplicate rules live in the registry.

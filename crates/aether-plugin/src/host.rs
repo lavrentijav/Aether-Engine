@@ -211,6 +211,15 @@ pub trait HostBackend: Send + Sync {
         Vec::new()
     }
 
+    /// The address an online player connected from, if the host knows it.
+    ///
+    /// Used by the `/lp` admin UI so an address-bound membership
+    /// (`root@10.0.0.7`) resolves for the player who is actually online. The
+    /// default is `None`, which makes the view name-only.
+    fn player_address(&self, _plugin: &str, _player: u64) -> Option<String> {
+        None
+    }
+
     /// A change counter for `[plugins.<id>]`, so a dependent can detect a
     /// reload cheaply. The default is constant (no reloads).
     fn config_revision(&self, _plugin: &str) -> u64 {
@@ -1482,6 +1491,8 @@ impl LoadedPlugin {
     /// A plugin-channel message. Native plugins subscribed to
     /// `on-plugin-message` are called in order; the frozen WASM world has no
     /// callback, so a WASM plugin is a no-op here.
+    /// Call a native plugin's tab-completion hook. A wasm plugin has no
+    /// completion export in the frozen world and answers nothing.
     fn call_on_complete(
         &mut self,
         services: &Arc<ServiceRegistry>,
@@ -1513,6 +1524,7 @@ impl LoadedPlugin {
         }
     }
 
+    /// `on-plugin-message`: a plugin-channel payload from a player.
     fn call_on_plugin_message(
         &mut self,
         services: &Arc<ServiceRegistry>,
