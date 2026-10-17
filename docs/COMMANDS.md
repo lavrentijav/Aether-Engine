@@ -12,7 +12,7 @@ Every command Aether knows, grouped by category: the ones that run today and the
 
 **Legend:** ✅ working · 🚧 pending (`CMD-nn` is the task that will implement it). **Node** is the permission node and **Op** the vanilla operator level (0 everyone … 4 owner); for a pending command the stub enforces exactly them. **Gate** is what the server checks *today*: `node` (enforced node/op), `operator` (the legacy operator-only check — Node/Op are the intended target, not yet enforced), or `everyone` (no requirement; Node/Op are the intended target).
 
-**Totals:** 113 commands — 45 working, 68 pending.
+**Totals:** 113 commands — 49 working, 64 pending.
 
 ## Contents
 
@@ -94,7 +94,7 @@ Blocks, environment and world rules.
 
 | Command | Aliases | Status | Gate | Node | Op | Usage |
 | --- | --- | --- | --- | --- | --- | --- |
-| `/time` | – | ✅ working | `operator` | `minecraft.command.time` | 2 | `/time [set] <day,noon,night,midnight,ticks>` |
+| `/time` | – | ✅ working | `node` | `minecraft.command.time` | 2 | `/time <add,set,query> [...]` |
 | `/setblock` | – | ✅ working | `node` | `minecraft.command.setblock` | 2 | `/setblock <pos> <block> [destroy\|keep\|replace\|strict]` |
 | `/fill` | – | ✅ working | `node` | `minecraft.command.fill` | 2 | `/fill <from> <to> <block> [destroy\|hollow\|keep\|outline\|replace\|strict] \| <from> <to> <block> replace <filter> [destroy\|hollow\|keep\|outline\|strict]` |
 | `/clone` | – | ✅ working | `node` | `minecraft.command.clone` | 2 | `/clone [from <dimension>] <begin> <end> [to <dimension>] <destination> [strict] [replace\|masked\|filtered <filter>] [force\|move\|normal]` |

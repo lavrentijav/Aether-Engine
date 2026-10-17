@@ -12,7 +12,7 @@
 
 **Легенда:** ✅ работает · 🚧 ожидает (`CMD-nn` — задача, которая её реализует). **Узел** — правомочие, а **Op** — ванильный уровень оператора (0 — всем … 4 — владельцу); для ожидающей команды заглушка требует ровно их. **Gate** — что сервер проверяет *сегодня*: `node` (узел/op применяются), `operator` (прежняя проверка «только оператор» — узел/op это цель, пока не применяются) или `everyone` (требований нет; узел/op — цель).
 
-**Итого:** 113 команд — 45 работают, 68 ожидают.
+**Итого:** 113 команд — 49 работают, 64 ожидают.
 
 ## Содержание
 
@@ -94,7 +94,7 @@
 
 | Команда | Синонимы | Статус | Gate | Узел | Op | Использование |
 | --- | --- | --- | --- | --- | --- | --- |
-| `/time` | – | ✅ работает | `operator` | `minecraft.command.time` | 2 | `/time [set] <day,noon,night,midnight,ticks>` |
+| `/time` | – | ✅ работает | `node` | `minecraft.command.time` | 2 | `/time <add,set,query> [...]` |
 | `/setblock` | – | ✅ работает | `node` | `minecraft.command.setblock` | 2 | `/setblock <pos> <block> [destroy\|keep\|replace\|strict]` |
 | `/fill` | – | ✅ работает | `node` | `minecraft.command.fill` | 2 | `/fill <from> <to> <block> [destroy\|hollow\|keep\|outline\|replace\|strict] \| <from> <to> <block> replace <filter> [destroy\|hollow\|keep\|outline\|strict]` |
 | `/clone` | – | ✅ работает | `node` | `minecraft.command.clone` | 2 | `/clone [from <dimension>] <begin> <end> [to <dimension>] <destination> [strict] [replace\|masked\|filtered <filter>] [force\|move\|normal]` |
