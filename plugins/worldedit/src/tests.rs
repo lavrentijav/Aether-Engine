@@ -105,6 +105,7 @@ impl FakeHost {
             "air",
             "water",
             "oak_stairs",
+            "oak_log",
             "grass_block",
         ];
         known.contains(&bare).then(|| format!("minecraft:{bare}"))
@@ -1006,7 +1007,7 @@ fn stack_copies_in_a_direction_in_one_revision() {
 
 #[test]
 fn a_stack_over_the_limit_is_refused_before_it_starts() {
-    let mut f = Fixture::new(5);
+    let mut f = Fixture::new(3);
     let p = player();
     f.set(&p, [0, 0, 0], [1, 0, 0]);
     let lines = f.command(&p, "stack", &["2", "east"]);
@@ -1169,6 +1170,7 @@ fn a_clipboard_over_the_limit_is_refused_before_any_edit_starts() {
         p.id,
         Clipboard {
             world: "minecraft:overworld".to_string(),
+            origin: [0, 0, 0],
             offset: [0, 0, 0],
             size: [6, 1, 1],
             blocks: vec!["minecraft:stone".to_string(); 6],
@@ -1220,4 +1222,80 @@ fn the_clipboard_pattern_uses_the_copied_blocks() {
     assert!(!error(&lines), "{lines:?}");
     assert_eq!(f.host.block(10, 0, 0), "minecraft:stone");
     assert_eq!(f.host.block(11, 0, 0), "minecraft:dirt");
+}
+
+#[test]
+fn rotate_pivots_about_the_copy_origin_when_the_player_is_not_at_a_corner() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    f.host.put((10, 0, 10), "minecraft:stone");
+    f.host.put((11, 0, 10), "minecraft:glass");
+    f.host.put((12, 0, 10), "minecraft:dirt");
+    {
+        let mut view = f.host.view.lock().unwrap();
+        view.x = 11.0;
+        view.z = 10.0;
+    }
+    f.set(&p, [10, 0, 10], [12, 0, 10]);
+    assert!(!error(&f.command(&p, "copy", &[])));
+    assert!(!error(&f.command(&p, "rotate", &["90"])));
+    let lines = f.command(&p, "paste", &["-o"]);
+    assert!(!error(&lines), "{lines:?}");
+    // The bar rotates about the player (origin at x=11, z=10), not about its
+    // minimum corner: it now runs north-south through x=11.
+    assert_eq!(f.host.block(11, 0, 9), "minecraft:stone");
+    assert_eq!(f.host.block(11, 0, 10), "minecraft:glass");
+    assert_eq!(f.host.block(11, 0, 11), "minecraft:dirt");
+    assert_eq!(f.host.block(10, 0, 9), "minecraft:air");
+}
+
+#[test]
+fn a_rotated_paste_transforms_stairs_and_log_axes() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    f.host
+        .put((0, 0, 0), "minecraft:oak_stairs[facing=north,half=bottom]");
+    f.host.put((1, 0, 0), "minecraft:oak_log[axis=x]");
+    f.set(&p, [0, 0, 0], [1, 0, 0]);
+    assert!(!error(&f.command(&p, "copy", &[])));
+    assert!(!error(&f.command(&p, "rotate", &["90"])));
+    f.host.view.lock().unwrap().x = 5.0;
+    let lines = f.command(&p, "paste", &["-o"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(
+        f.host.block(5, 0, 0),
+        "minecraft:oak_stairs[facing=east,half=bottom]"
+    );
+    assert_eq!(f.host.block(5, 0, 1), "minecraft:oak_log[axis=z]");
+}
+
+#[test]
+fn a_legal_brush_is_limited_by_its_exact_cell_count_not_its_bounding_cube() {
+    // A radius-6 sphere covers 925 cells; its bounding cube is 2,197. With a
+    // 1,000-block limit the brush is legal.
+    let mut f = Fixture::new(1_000);
+    let p = player();
+    *f.backend.held.lock().unwrap() = Some("minecraft:blaze_rod".to_string());
+    let lines = f.command(&p, "brush", &["sphere", "stone", "6"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert!(matches!(f.interact(&p, [100, 0, 100]), Decision::Cancel(_)));
+    assert_eq!(f.host.commits(), 1);
+    assert_eq!(f.host.block(100, 0, 100), "minecraft:stone");
+    assert_eq!(f.host.block(106, 0, 100), "minecraft:stone");
+    assert_eq!(f.host.block(107, 0, 100), "minecraft:air");
+}
+
+#[test]
+fn a_stack_that_exactly_fits_the_limit_is_accepted() {
+    // Two source blocks stacked three times writes six cells; the source is
+    // not part of the edit.
+    let mut f = Fixture::new(6);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:stone");
+    f.host.put((1, 0, 0), "minecraft:dirt");
+    f.set(&p, [0, 0, 0], [1, 0, 0]);
+    let lines = f.command(&p, "stack", &["3", "east"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.begins(), 1);
+    assert_eq!(f.host.commits(), 1);
 }

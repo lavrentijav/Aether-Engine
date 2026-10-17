@@ -118,18 +118,29 @@ else shifts it by the same delta.
 `//cut` copies the selection and then replaces it with air in one atomic
 revision. The clipboard still holds the cut blocks, including air.
 
-`//rotate <y> [x] [z]` rotates the clipboard around the box centre in 90°
-steps. Angles are applied in Y, X, Z order; every angle must be a multiple of
-90 (negative angles and full turns are accepted). `//flip [dir]` mirrors along
-the axis named by the direction: north/south flips Z, east/west flips X,
-up/down flips Y; without a direction it uses the player's facing. Flipping
-twice with the same direction returns the original.
+`//rotate <y> [x] [z]` rotates the clipboard **about the copy origin** (the
+player's position when `//copy` ran), which is what WorldEdit does, in 90°
+steps. The origin-relative offset is transformed with the footprint, so a
+bar copied from its middle still passes through the origin after a rotation
+instead of pivoting about its old minimum corner. Angles are applied in Y, X,
+Z order; every angle must be a multiple of 90 (negative angles and full turns
+are accepted). `//flip [dir]` mirrors about the same origin along the axis
+named by the direction: north/south flips Z, east/west flips X, up/down flips
+Y; without a direction it uses the player's facing. Flipping twice with the
+same direction returns the original.
+
+Both transforms also rotate or mirror directional block states: `facing`,
+`axis` (logs, pillars), stair `shape` left/right, chest `type`, rail/jigsaw
+compass shapes, sign/banner `rotation`, and `half`/`type` top/bottom under a
+vertical mirror. A rotation about X or Z that would turn a horizontal rail
+into a vertical one leaves that state unchanged, because vanilla has no such
+state.
 
 `//stack <n> [dir]` copies the selection `n` times in a direction, stepping by
 the selection's size on that axis. It is one bulk commit. The default direction
 is the player's facing; the selection is expanded to cover the source and all
-copies. A stack whose total volume exceeds the limit is refused before the
-edit starts.
+copies. A stack whose written volume (the copies only; the source is
+unchanged) exceeds the limit is refused before the edit starts.
 
 `//move <n> [dir]` (also `//move <dir> <n>`) moves the selection by `n` blocks
 in one atomic revision: the source becomes air and the destination receives
@@ -140,10 +151,15 @@ Both the source and destination cells are region-checked.
 
 `//schem save <name>` writes the clipboard as a gzip-NBT `.schem` file
 (Sponge schematic version 2: `Version`, `DataVersion`, `Width`, `Height`,
-`Length`, `Offset`, `Palette`, `PaletteMax`, `BlockData` and an empty
-`BlockEntities` list). `//schem load <name>` reads one back; `//schem list`
-prints the names; `//schem paste <name>` loads and pastes in one command,
-accepting the same `-a`/`-o`/`-s` flags.
+`Length`, `Offset` = the absolute minimum point, `Palette`, `PaletteMax`,
+`BlockData`, an empty `BlockEntities` list and a `Metadata` compound with
+`WEOffsetX/Y/Z` = the minimum relative to the copy origin). `//schem load
+<name>` reads one back, preferring that metadata for relative placement so a
+real WorldEdit file lands at the player; `//schem list` prints the names;
+`//schem paste <name>` loads and pastes in one command, accepting the same
+`-a`/`-o`/`-s` flags. The reader caps the inflated size and checks the
+dimensions against the volume limit before allocating the block vector, so a
+crafted or simply huge file cannot exhaust memory.
 
 Names are a single file stem: ASCII letters, digits, `_` and `-`, at most 64
 characters. The host validates the name again and writes under
@@ -161,6 +177,10 @@ directory. The files survive a restart because the plugin sends bytes over the
 - `//brush smooth [radius]` — default radius 3; removes blocks inside the
   sphere, optionally restricted by the mask.
 - `//brush clear` removes the bound brush.
+
+The volume limit counts the brush's exact lattice cells, not its bounding
+cube: a radius-6 sphere is 925 blocks, not 2,197, so it is accepted under a
+1,000-block limit. The count stops as soon as it exceeds the limit.
 - `//brush` with no arguments prints the current brush.
 
 `//mask <filter>` / `/mask <filter>` sets a brush mask with the same filter
@@ -264,13 +284,17 @@ selection from another world, the wand and its two clicks, absolute and
 relative positions, `#existing`/`#pos1`/`#clipboard` patterns, and the
 op-level/capability manifest. For CMD-36b it adds: copy/paste in place and
 after the player moves, the `-a`/`-o`/`-s` paste semantics, rotate
-90/180/270 plus an invalid angle, flip twice and every axis, stack direction
-and its limit, both move argument orders and source clearing, cut filling the
-clipboard and clearing the selection, schematic save/load/list/paste across a
-plugin restart, gzip-NBT round-trip and rejection of a non-gzip/truncated file,
-brush application through the bulk path with undo, brush limit and region
-denial, a mask-limited brush, empty-clipboard errors and an over-limit
-clipboard refused before any edit starts.
+90/180/270 plus an invalid angle, the rotation pivot with the player away from
+the minimum corner, directional state transforms (stairs, log axis, rails),
+flip twice and every axis, stack direction and its exact written volume, both
+move argument orders and source clearing, cut filling the clipboard and
+clearing the selection, schematic save/load/list/paste across a plugin restart,
+an external WorldEdit/Sponge v2 fixture (absolute `Offset`, metadata-relative
+placement), gzip-NBT round-trip and rejection of a non-gzip/truncated/oversized
+file and a decompression bomb, brush application through the bulk path with
+undo, the exact brush lattice count at the limit, brush and region denial, a
+mask-limited brush, empty-clipboard errors and an over-limit clipboard refused
+before any edit starts.
 
 The server suite covers the real service over the core
 `BulkEdit`/journal (one revision, undo restores exactly), the core and

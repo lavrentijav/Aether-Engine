@@ -129,6 +129,14 @@ pub fn to_bytes(clipboard: &Clipboard) -> Result<Vec<u8>, String> {
         }
     }
 
+    // Sponge v2 top-level `Offset` is the absolute minimum point, while
+    // `Metadata.WEOffset*` is that minimum relative to the clipboard origin.
+    // WorldEdit writes both and reads the metadata for relative placement.
+    let minimum = [
+        clipboard.origin[0] + clipboard.offset[0],
+        clipboard.origin[1] + clipboard.offset[1],
+        clipboard.origin[2] + clipboard.offset[2],
+    ];
     let mut w = Writer::new();
     w.header(10, "Schematic");
     w.named_int("Version", 2);
@@ -136,11 +144,16 @@ pub fn to_bytes(clipboard: &Clipboard) -> Result<Vec<u8>, String> {
     w.named_short("Width", width as i16);
     w.named_short("Height", height as i16);
     w.named_short("Length", length as i16);
-    w.named_int_array("Offset", &clipboard.offset);
+    w.named_int_array("Offset", &minimum);
     w.named_int("PaletteMax", palette.len() as i32);
     w.palette("Palette", &palette);
     w.named_byte_array("BlockData", &data);
     w.named_empty_list("BlockEntities", 10);
+    w.header(10, "Metadata");
+    w.named_int("WEOffsetX", clipboard.offset[0]);
+    w.named_int("WEOffsetY", clipboard.offset[1]);
+    w.named_int("WEOffsetZ", clipboard.offset[2]);
+    w.u8(0);
     w.u8(0);
 
     Ok(gzip(&w.bytes))
@@ -168,7 +181,7 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-fn gunzip(data: &[u8]) -> Result<Vec<u8>, String> {
+fn gunzip(data: &[u8], limit: usize) -> Result<Vec<u8>, String> {
     if data.len() < 18 || data[0] != 0x1f || data[1] != 0x8b || data[2] != 8 {
         return Err("not a gzip stream".to_string());
     }
@@ -200,7 +213,7 @@ fn gunzip(data: &[u8]) -> Result<Vec<u8>, String> {
     if i > end {
         return Err("truncated gzip body".to_string());
     }
-    miniz_oxide::inflate::decompress_to_vec(&data[i..end])
+    miniz_oxide::inflate::decompress_to_vec_with_limit(&data[i..end], limit)
         .map_err(|e| format!("cannot inflate schematic: {e:?}"))
 }
 
@@ -263,6 +276,21 @@ impl<'a> Reader<'a> {
         String::from_utf8(bytes.to_vec()).map_err(|_| "invalid UTF-8 in NBT".to_string())
     }
 
+    /// Check a declared element count against the bytes actually left, so a
+    /// crafted NBT header cannot make us pre-allocate gigabytes that the
+    /// payload never had.
+    fn declared_len(&self, len: i32, stride: usize) -> Result<usize, String> {
+        if len < 0 {
+            return Err("negative NBT length".to_string());
+        }
+        let len = len as usize;
+        let remaining = self.data.len().saturating_sub(self.pos);
+        if len > remaining / stride.max(1) {
+            return Err("NBT length exceeds the payload".to_string());
+        }
+        Ok(len)
+    }
+
     fn value(&mut self, tag: u8) -> Result<Nbt, String> {
         Ok(match tag {
             1 => Nbt::Byte(self.u8()? as i8),
@@ -273,19 +301,15 @@ impl<'a> Reader<'a> {
             6 => Nbt::Double(self.f64()?),
             7 => {
                 let len = self.i32()?;
-                if len < 0 {
-                    return Err("negative NBT byte-array length".to_string());
-                }
-                Nbt::ByteArray(self.take(len as usize)?.to_vec())
+                let len = self.declared_len(len, 1)?;
+                Nbt::ByteArray(self.take(len)?.to_vec())
             }
             8 => Nbt::String(self.string()?),
             9 => {
                 let element = self.u8()?;
                 let len = self.i32()?;
-                if len < 0 {
-                    return Err("negative NBT list length".to_string());
-                }
-                let mut values = Vec::with_capacity(len as usize);
+                let len = self.declared_len(len, 1)?;
+                let mut values = Vec::with_capacity(len);
                 for _ in 0..len {
                     values.push(self.value(element)?);
                 }
@@ -306,10 +330,8 @@ impl<'a> Reader<'a> {
             }
             11 => {
                 let len = self.i32()?;
-                if len < 0 {
-                    return Err("negative NBT int-array length".to_string());
-                }
-                let mut values = Vec::with_capacity(len as usize);
+                let len = self.declared_len(len, 4)?;
+                let mut values = Vec::with_capacity(len);
                 for _ in 0..len {
                     values.push(self.i32()?);
                 }
@@ -317,10 +339,8 @@ impl<'a> Reader<'a> {
             }
             12 => {
                 let len = self.i32()?;
-                if len < 0 {
-                    return Err("negative NBT long-array length".to_string());
-                }
-                let mut values = Vec::with_capacity(len as usize);
+                let len = self.declared_len(len, 8)?;
+                let mut values = Vec::with_capacity(len);
                 for _ in 0..len {
                     values.push(self.i64()?);
                 }
@@ -362,8 +382,12 @@ fn int(map: &BTreeMap<String, Nbt>, name: &str) -> Result<i32, String> {
     }
 }
 
-pub fn from_bytes(bytes: &[u8]) -> Result<Clipboard, String> {
-    let raw = gunzip(bytes)?;
+pub fn from_bytes(bytes: &[u8], max_volume: usize) -> Result<Clipboard, String> {
+    // A schematic cell is at least one varint byte, but a large palette and the
+    // NBT envelope add overhead. Cap the inflate so a crafted file cannot
+    // allocate without bound before the volume limit is even read.
+    let limit = max_volume.max(1).saturating_mul(32).saturating_add(1 << 20);
+    let raw = gunzip(bytes, limit)?;
     let mut reader = Reader::new(&raw);
     let tag = reader.u8()?;
     if tag != 10 {
@@ -411,6 +435,11 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Clipboard, String> {
         .checked_mul(size[1])
         .and_then(|n| n.checked_mul(size[2]))
         .ok_or_else(|| "schematic dimensions are too large".to_string())?;
+    if volume > max_volume.max(1) {
+        return Err(format!(
+            "schematic of {volume} blocks exceeds the limit of {max_volume}"
+        ));
+    }
     let mut names = BTreeMap::new();
     for (name, value) in palette {
         if let Nbt::Int(index) = value {
@@ -429,7 +458,11 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Clipboard, String> {
     if pos != data.len() {
         return Err("BlockData has trailing bytes".to_string());
     }
-    let offset = match root.get("Offset") {
+    // Sponge v2: `Offset` is the absolute minimum, `Metadata.WEOffset*` is the
+    // minimum relative to the origin. Prefer the metadata for placement, so a
+    // real WorldEdit file lands at the player rather than at its world
+    // coordinates; files without metadata keep their historical behaviour.
+    let minimum = match root.get("Offset") {
         Some(Nbt::IntArray(values)) if values.len() == 3 => [values[0], values[1], values[2]],
         Some(Nbt::IntArray(values)) => {
             return Err(format!("Offset has {} entries", values.len()));
@@ -437,8 +470,31 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Clipboard, String> {
         Some(_) => return Err("Offset is not an int array".to_string()),
         None => [0, 0, 0],
     };
+    let metadata = match root.get("Metadata") {
+        Some(nbt @ Nbt::Compound(_)) => Some(compound(nbt, "Metadata")?),
+        Some(_) => return Err("Metadata is not a compound".to_string()),
+        None => None,
+    };
+    let relative = metadata.and_then(|metadata| {
+        let x = int(metadata, "WEOffsetX").ok()?;
+        let y = int(metadata, "WEOffsetY").ok()?;
+        let z = int(metadata, "WEOffsetZ").ok()?;
+        Some([x, y, z])
+    });
+    let (origin, offset) = match relative {
+        Some(offset) => (
+            [
+                minimum[0].saturating_sub(offset[0]),
+                minimum[1].saturating_sub(offset[1]),
+                minimum[2].saturating_sub(offset[2]),
+            ],
+            offset,
+        ),
+        None => ([0, 0, 0], minimum),
+    };
     Ok(Clipboard {
         world: String::new(),
+        origin,
         offset,
         size,
         blocks,
@@ -452,6 +508,7 @@ mod tests {
     fn clipboard() -> Clipboard {
         Clipboard {
             world: "overworld".to_string(),
+            origin: [100, 64, -50],
             offset: [1, -2, 3],
             size: [2, 1, 2],
             blocks: vec![
@@ -468,23 +525,115 @@ mod tests {
         let original = clipboard();
         let bytes = to_bytes(&original).unwrap();
         assert_eq!(&bytes[..3], &[0x1f, 0x8b, 0x08]);
-        let loaded = from_bytes(&bytes).unwrap();
+        let loaded = from_bytes(&bytes, 1_000_000).unwrap();
         assert_eq!(loaded.world, "");
+        assert_eq!(loaded.origin, original.origin);
         assert_eq!(loaded.offset, original.offset);
         assert_eq!(loaded.size, original.size);
         assert_eq!(loaded.blocks, original.blocks);
+
+        // Sponge v2 semantics: the top-level Offset is the absolute minimum,
+        // the metadata carries the origin-relative offset.
+        let raw = gunzip(&bytes, 1 << 20).unwrap();
+        let mut reader = Reader::new(&raw);
+        assert_eq!(reader.u8().unwrap(), 10);
+        let _ = reader.string().unwrap();
+        let root = reader.value(10).unwrap();
+        let root = compound(&root, "root").unwrap();
+        let Some(Nbt::IntArray(minimum)) = root.get("Offset") else {
+            panic!("Offset is an int array");
+        };
+        assert_eq!(minimum, &vec![101, 62, -47]);
+        let metadata = compound(root.get("Metadata").unwrap(), "Metadata").unwrap();
+        assert_eq!(int(metadata, "WEOffsetX").unwrap(), 1);
+        assert_eq!(int(metadata, "WEOffsetY").unwrap(), -2);
+        assert_eq!(int(metadata, "WEOffsetZ").unwrap(), 3);
+    }
+
+    // A `Schematic` v2 gzip-NBT file shaped like the ones WorldEdit/Sponge
+    // writes (absolute top-level `Offset`, origin-relative `Metadata`), built
+    // with an external gzip implementation rather than our own writer.
+    const WORLDEDIT_FIXTURE: &[u8] = &[
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x4d, 0x8e, 0xdd, 0x4a, 0xc3,
+        0x40, 0x10, 0x85, 0x4f, 0xb2, 0xd8, 0x98, 0x2d, 0xa2, 0xcf, 0xe0, 0x63, 0x14, 0x84, 0x52,
+        0x5a, 0xe8, 0x85, 0x45, 0x41, 0xb0, 0xfe, 0x50, 0xca, 0xb0, 0x99, 0x24, 0x43, 0xdb, 0x5d,
+        0xc8, 0xce, 0x85, 0x4f, 0xe9, 0x2b, 0xc5, 0x4d, 0x2a, 0xd5, 0x8b, 0x81, 0x39, 0x1f, 0x73,
+        0xce, 0x1c, 0x8b, 0xf2, 0xc5, 0xb5, 0x7c, 0x22, 0x15, 0x67, 0x50, 0xbc, 0x72, 0x17, 0x25,
+        0x78, 0x00, 0xb9, 0xc1, 0x74, 0x49, 0x4a, 0x17, 0x72, 0xb7, 0xcb, 0x71, 0xb5, 0x95, 0x4a,
+        0x5b, 0xe4, 0x39, 0x26, 0x6b, 0x96, 0xa6, 0x55, 0x64, 0x69, 0x7d, 0x64, 0xdf, 0x24, 0x9a,
+        0x4d, 0x31, 0x79, 0xaa, 0xeb, 0xc8, 0x9a, 0xec, 0x26, 0x4d, 0x95, 0x66, 0xde, 0xf7, 0xfd,
+        0xb7, 0x81, 0x7d, 0xa6, 0x23, 0xab, 0xf2, 0x86, 0xbe, 0x86, 0x6c, 0x8b, 0xe2, 0x17, 0x18,
+        0xdc, 0x9e, 0xc4, 0xb3, 0xeb, 0xa8, 0xd6, 0x59, 0xd4, 0xe0, 0x19, 0xa3, 0xfb, 0xfe, 0x8f,
+        0x06, 0x3a, 0xec, 0xa3, 0x92, 0x74, 0xf1, 0xb3, 0x26, 0x27, 0xbe, 0x79, 0xf0, 0xa1, 0xd3,
+        0x76, 0x97, 0xee, 0x32, 0x14, 0x28, 0x17, 0xc7, 0xe0, 0x0e, 0x43, 0xd5, 0x21, 0x19, 0x59,
+        0x89, 0x9b, 0x91, 0xac, 0xbc, 0x8a, 0x0a, 0x47, 0x3b, 0x04, 0x5a, 0x5c, 0x6f, 0x58, 0xa9,
+        0x4a, 0x57, 0x06, 0xe5, 0x76, 0x75, 0xee, 0xf9, 0x96, 0xca, 0xf5, 0xff, 0xf4, 0xfb, 0xf9,
+        0xf7, 0x45, 0x7f, 0x8c, 0x89, 0xf8, 0x01, 0xb8, 0x74, 0xf1, 0x7c, 0x24, 0x01, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn a_worldedit_file_uses_the_metadata_for_relative_placement() {
+        let loaded = from_bytes(WORLDEDIT_FIXTURE, 1_000_000).unwrap();
+        assert_eq!(loaded.origin, [101, 64, -52]);
+        assert_eq!(loaded.offset, [-1, 0, 2]);
+        assert_eq!(loaded.size, [2, 1, 1]);
+        assert_eq!(
+            loaded.blocks,
+            vec![
+                "minecraft:stone".to_string(),
+                "minecraft:oak_stairs[facing=north]".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn an_oversized_schematic_is_refused_before_allocating_its_cells() {
+        let mut palette = BTreeMap::new();
+        palette.insert("minecraft:stone".to_string(), 0);
+        let mut w = Writer::new();
+        w.header(10, "Schematic");
+        w.named_short("Width", 100);
+        w.named_short("Height", 100);
+        w.named_short("Length", 100);
+        w.named_int_array("Offset", &[0, 0, 0]);
+        w.palette("Palette", &palette);
+        w.named_byte_array("BlockData", &[]);
+        w.u8(0);
+        let bytes = gzip(&w.bytes);
+        let err = from_bytes(&bytes, 10).unwrap_err();
+        assert!(err.contains("exceeds the limit"), "{err}");
+    }
+
+    #[test]
+    fn a_declared_length_larger_than_the_payload_is_refused_before_allocating() {
+        let mut w = Writer::new();
+        w.header(10, "Schematic");
+        w.header(11, "Offset");
+        w.i32(1_000_000_000);
+        w.u8(0);
+        let bytes = gzip(&w.bytes);
+        let err = from_bytes(&bytes, 1_000_000).unwrap_err();
+        assert!(err.contains("payload"), "{err}");
+    }
+
+    #[test]
+    fn a_decompression_bomb_is_capped() {
+        let raw = vec![0u8; 2 << 20];
+        let bytes = gzip(&raw);
+        let err = from_bytes(&bytes, 1).unwrap_err();
+        assert!(err.contains("inflate"), "{err}");
     }
 
     #[test]
     fn a_non_gzip_file_is_refused() {
-        assert!(from_bytes(b"not a schematic").is_err());
-        assert!(from_bytes(&[]).is_err());
+        assert!(from_bytes(b"not a schematic", 1_000_000).is_err());
+        assert!(from_bytes(&[], 1_000_000).is_err());
     }
 
     #[test]
     fn a_truncated_payload_is_refused() {
         let mut bytes = to_bytes(&clipboard()).unwrap();
         bytes.truncate(bytes.len() - 20);
-        assert!(from_bytes(&bytes).is_err());
+        assert!(from_bytes(&bytes, 1_000_000).is_err());
     }
 }

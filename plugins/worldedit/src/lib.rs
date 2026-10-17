@@ -384,6 +384,7 @@ impl WorldEditPlugin {
         }
         Ok(Clipboard {
             world: view.world,
+            origin: pos,
             offset,
             size,
             blocks,
@@ -956,7 +957,8 @@ impl WorldEditPlugin {
         let clipboard = self.capture_clipboard(ctx.id, p, host.as_ref())?;
         let max = host.max_volume(ctx.id);
         let blocks = clipboard.volume();
-        let expected = blocks.saturating_mul(copies as u128 + 1);
+        // Only the copies are written; the source selection is unchanged.
+        let expected = blocks.saturating_mul(copies as u128);
         if expected > max as u128 {
             return Err(format!(
                 "stack of {expected} blocks exceeds the limit of {max}"
@@ -1144,7 +1146,7 @@ impl WorldEditPlugin {
                 let bytes = host
                     .load_schematic(ctx.id, name)?
                     .ok_or_else(|| format!("no schematic named `{name}`"))?;
-                let clipboard = schematic::from_bytes(&bytes)?;
+                let clipboard = schematic::from_bytes(&bytes, host.max_volume(ctx.id))?;
                 let size = clipboard.size;
                 self.clipboards.insert(p.id, clipboard);
                 Ok(vec![format!(
@@ -1184,7 +1186,7 @@ impl WorldEditPlugin {
                 let bytes = host
                     .load_schematic(ctx.id, &name)?
                     .ok_or_else(|| format!("no schematic named `{name}`"))?;
-                let clipboard = schematic::from_bytes(&bytes)?;
+                let clipboard = schematic::from_bytes(&bytes, host.max_volume(ctx.id))?;
                 let view = view(host.as_ref(), ctx.id, p)?;
                 let pos = player_block(&view);
                 let base = shift(
@@ -1295,10 +1297,10 @@ impl WorldEditPlugin {
             other => return Err(format!("unknown brush `{other}`")),
         };
         let max = host.max_volume(ctx.id);
-        if brush.estimated_volume() > max as u128 {
+        let volume = brush.volume_capped(max as u128);
+        if volume > max as u128 {
             return Err(format!(
-                "brush of {} blocks exceeds the limit of {max}",
-                brush.estimated_volume()
+                "brush of {volume} blocks exceeds the limit of {max}"
             ));
         }
         let summary = format!("Brush: {:?} radius {}", brush.kind, brush.radius);
@@ -1343,10 +1345,10 @@ impl WorldEditPlugin {
             .ok_or_else(|| "no brush bound".to_string())?;
         let host = host(ctx)?;
         let max = host.max_volume(ctx.id);
-        if brush.estimated_volume() > max as u128 {
+        let volume = brush.volume_capped(max as u128);
+        if volume > max as u128 {
             return Err(format!(
-                "brush of {} blocks exceeds the limit of {max}",
-                brush.estimated_volume()
+                "brush of {volume} blocks exceeds the limit of {max}"
             ));
         }
         let mask = self.masks.get(&p.id).cloned();
