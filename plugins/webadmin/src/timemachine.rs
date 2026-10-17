@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use aether_world::journal::{ActorId, EventBody};
+use aether_world::journal::ActorId;
 use aether_world::{BlockStateId, StorageError};
 
 use crate::map::{blocks_per_pixel, Surface, Tile, TileKey};
@@ -113,15 +113,10 @@ impl TimeMachine {
     pub fn block_history(&self, x: i32, y: i32, z: i32) -> Result<Vec<BlockChange>, StorageError> {
         let mut out = Vec::new();
         for e in self.history.column_events(x >> 4, z >> 4)? {
-            if let EventBody::BlockSet {
-                x: ex,
-                y: ey,
-                z: ez,
-                from,
-                to,
-            } = e.body
-            {
-                if (ex, ey, ez) == (x, y, z) {
+            // Expands a bulk revision into one entry per change at this block,
+            // so a `/fill` shows up in the block's timeline like any edit.
+            e.body.for_each_block_change(&mut |cx, cy, cz, from, to| {
+                if (cx, cy, cz) == (x, y, z) {
                     out.push(BlockChange {
                         seq: e.seq,
                         at_ms: e.at_ms,
@@ -130,7 +125,7 @@ impl TimeMachine {
                         to,
                     });
                 }
-            }
+            });
         }
         Ok(out)
     }
@@ -172,9 +167,17 @@ impl TimeMachine {
         let (cz0, cz1) = ((z as i64 - r) >> 4, (z as i64 + r) >> 4);
         let mut out = Vec::new();
         let mut scanned = 0usize;
+        // A bulk revision is indexed under **every** column it touches, so a
+        // multi-column revision is met once per column in this scan. Expand it
+        // only on the first sighting: otherwise each in-radius change would be
+        // returned k times and the scan budget spent k times over.
+        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
         'scan: for ccx in cx0..=cx1 {
             for ccz in cz0..=cz1 {
                 for e in self.history.column_events(ccx as i32, ccz as i32)? {
+                    if !seen.insert(e.seq) {
+                        continue;
+                    }
                     if scanned >= budget {
                         break 'scan;
                     }
@@ -182,29 +185,21 @@ impl TimeMachine {
                     if e.at_ms < since_ms || e.at_ms > until_ms {
                         continue;
                     }
-                    let EventBody::BlockSet {
-                        x: ex,
-                        y,
-                        z: ez,
-                        from,
-                        to,
-                    } = e.body
-                    else {
-                        continue;
-                    };
-                    let (dx, dz) = ((ex as i64 - x as i64), (ez as i64 - z as i64));
-                    if dx * dx + dz * dz > r * r {
-                        continue;
-                    }
-                    out.push(ChangeRecord {
-                        seq: e.seq,
-                        at_ms: e.at_ms,
-                        actor: e.actor,
-                        x: ex,
-                        y,
-                        z: ez,
-                        from,
-                        to,
+                    // A bulk revision contributes one record per change.
+                    e.body.for_each_block_change(&mut |ex, y, ez, from, to| {
+                        let (dx, dz) = ((ex as i64 - x as i64), (ez as i64 - z as i64));
+                        if dx * dx + dz * dz <= r * r {
+                            out.push(ChangeRecord {
+                                seq: e.seq,
+                                at_ms: e.at_ms,
+                                actor: e.actor,
+                                x: ex,
+                                y,
+                                z: ez,
+                                from,
+                                to,
+                            });
+                        }
                     });
                 }
             }
@@ -323,18 +318,13 @@ impl TimeMachine {
     fn column_timeline(&self, x: i32, z: i32, at: AtSeq) -> Result<ColumnTimeline, StorageError> {
         let mut events: BTreeMap<i32, Vec<(u64, BlockStateId, BlockStateId)>> = BTreeMap::new();
         for e in self.history.column_events(x >> 4, z >> 4)? {
-            if let EventBody::BlockSet {
-                x: ex,
-                y,
-                z: ez,
-                from,
-                to,
-            } = e.body
-            {
+            // A bulk revision contributes a `(seq, from, to)` row for every
+            // change at this column, so the time machine replays it.
+            e.body.for_each_block_change(&mut |ex, y, ez, from, to| {
                 if ex == x && ez == z {
                     events.entry(y).or_default().push((e.seq, from, to));
                 }
-            }
+            });
         }
         let mut states = BTreeMap::new();
         for (y, list) in events {
@@ -497,6 +487,52 @@ mod tests {
         // A different time is a different cache entry.
         let _ = t.tile_at(TileKey::new(0, 0, 0), AtSeq(1), 2).unwrap();
         assert_eq!(t.cached_tiles(), 2);
+    }
+
+    #[test]
+    fn a_bulk_revision_replays_in_the_time_machine() {
+        // Finding 5: block history, `block_at` and area changes all expand a
+        // bulk revision, so the time machine does not show the pre-bulk state
+        // as "now".
+        let w = flat();
+        let seq = w
+            .journal()
+            .append(
+                ALICE,
+                EventBody::BlockGroup {
+                    changes: vec![
+                        aether_world::journal::BlockChange {
+                            x: 0,
+                            y: 3,
+                            z: 0,
+                            from: ids::GRASS_BLOCK,
+                            to: ids::STONE,
+                        },
+                        // A second column, so the revision is indexed under
+                        // both and an area scan meets it twice.
+                        aether_world::journal::BlockChange {
+                            x: 20,
+                            y: 3,
+                            z: 0,
+                            from: ids::GRASS_BLOCK,
+                            to: ids::DIRT,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        let t = tm(w);
+        let h = t.block_history(0, 3, 0).unwrap();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].to, ids::STONE);
+        assert_eq!(t.block_at(0, 3, 0, AtSeq(0)).unwrap(), ids::GRASS_BLOCK);
+        assert_eq!(t.block_at(0, 3, 0, AtSeq(seq)).unwrap(), ids::STONE);
+        // The multi-column revision must be expanded once, not once per
+        // column it is indexed under.
+        let ch = t.changes_in_area(10, 0, 32, 0, u64::MAX, 100).unwrap();
+        assert_eq!(ch.len(), 2, "both changes, no duplicates: {ch:?}");
+        let xs: Vec<i32> = ch.iter().map(|c| c.x).collect();
+        assert_eq!(xs, vec![0, 20]);
     }
 
     #[test]

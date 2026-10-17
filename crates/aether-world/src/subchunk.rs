@@ -101,6 +101,28 @@ impl SubChunk {
         self.redstone.set(m, props.redstone);
     }
 
+    /// Set many local positions in one pass, resolving each id's properties
+    /// through `props_of`.
+    ///
+    /// The chunk setter behind a bulk edit: one call for a whole section's
+    /// worth of changes instead of a [`SubChunk::set`] per block, so the
+    /// caller holds the world's cache lock once for the batch. Positions
+    /// outside `0..16` on any axis are skipped rather than panicking, letting
+    /// a caller hand a mixed batch without pre-filtering. A repeated position
+    /// keeps the last change, exactly as sequential `set` calls would.
+    pub fn set_many(
+        &mut self,
+        changes: &[(usize, usize, usize, BlockStateId)],
+        props_of: &dyn Fn(BlockStateId) -> BlockProperties,
+    ) {
+        for &(x, y, z, id) in changes {
+            if x >= DIM || y >= DIM || z >= DIM {
+                continue;
+            }
+            self.set(x, y, z, id, props_of(id));
+        }
+    }
+
     /// The `SolidMask`.
     #[inline]
     pub fn solid_mask(&self) -> &Mask {

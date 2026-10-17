@@ -14,6 +14,7 @@
 //! logic every version shares.
 
 pub mod auth;
+pub mod bulk;
 pub mod chatlog;
 pub mod commands;
 pub mod config;

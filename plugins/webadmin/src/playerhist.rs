@@ -64,11 +64,20 @@ impl HistoryQuery {
             return false;
         }
         if let Some((cx, cz, r)) = self.area {
-            let Some((x, _, z)) = e.position() else {
-                return false;
+            let rr = r as i64 * r as i64;
+            let within = |x: i32, z: i32| {
+                let (dx, dz) = ((x as i64 - cx as i64), (z as i64 - cz as i64));
+                dx * dx + dz * dz <= rr
             };
-            let (dx, dz) = ((x as i64 - cx as i64), (z as i64 - cz as i64));
-            if dx * dx + dz * dz > r as i64 * r as i64 {
+            // A block change (single or inside a bulk revision) counts as in
+            // the area when any of its positions is; an item event, by the
+            // place it names.
+            let mut hit = e.position().is_some_and(|(x, _, z)| within(x, z));
+            if !hit {
+                e.body
+                    .for_each_block_change(&mut |x, _, z, _, _| hit |= within(x, z));
+            }
+            if !hit {
                 return false;
             }
         }
@@ -118,6 +127,9 @@ pub fn action(e: &Event) -> &'static str {
         EventBody::ItemDestroy { .. } => "destroy",
         EventBody::ItemMerge { .. } => "merge",
         EventBody::ItemDerive { .. } => "craft",
+        // A bulk edit is one operation; the page labels it as such rather than
+        // guessing place/break from a single change.
+        EventBody::BlockGroup { .. } => "bulk",
         EventBody::ChatMessage { kind, .. } => match kind {
             ChatKind::Public => "chat",
             ChatKind::Private => "message",
@@ -273,5 +285,41 @@ mod tests {
         let last2 = query(&w, &HistoryQuery::default().by(ALICE).limit(2)).unwrap();
         assert_eq!(last2.len(), 2);
         assert_eq!(last2[1].position().unwrap().0, 4);
+    }
+
+    #[test]
+    fn a_bulk_revision_is_listed_and_found_by_area() {
+        // Finding 5: a bulk revision is one event; its area membership is
+        // decided by any change that lands in the radius.
+        let w = world();
+        w.journal()
+            .append(
+                ALICE,
+                EventBody::BlockGroup {
+                    changes: vec![
+                        aether_world::journal::BlockChange {
+                            x: 2,
+                            y: 10,
+                            z: 0,
+                            from: ids::AIR,
+                            to: ids::STONE,
+                        },
+                        aether_world::journal::BlockChange {
+                            x: 500,
+                            y: 10,
+                            z: 0,
+                            from: ids::AIR,
+                            to: ids::STONE,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        let near = query(&w, &HistoryQuery::default().by(ALICE).near(0, 0, 8)).unwrap();
+        assert_eq!(near.len(), 1, "the change at x=2 is inside the radius");
+        assert_eq!(action(&near[0]), "bulk");
+
+        let far = query(&w, &HistoryQuery::default().by(ALICE).near(900, 900, 5)).unwrap();
+        assert!(far.is_empty(), "nothing near the far corner");
     }
 }
