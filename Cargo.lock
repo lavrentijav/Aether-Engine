@@ -149,6 +149,7 @@ dependencies = [
  "aether-api",
  "aether-menus-plugin",
  "aether-ops",
+ "aether-physics",
  "aether-plugin",
  "aether-sdk-plugin",
  "aether-sidebar-plugin",

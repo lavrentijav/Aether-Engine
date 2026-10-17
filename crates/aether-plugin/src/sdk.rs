@@ -43,6 +43,11 @@ pub use bindings::aether::sdk::messages::TitleTimes;
 pub use bindings::aether::sdk::players::{Pos, TeleportCause};
 pub use bindings::Services;
 
+/// The `players.teleport` capability (CMD-31): a dependent must be granted it
+/// for a teleport to move an online player. Shared so the SDK service layer's
+/// gate and the host backend's defense-in-depth check name the same string.
+pub const CAP_PLAYERS_TELEPORT: &str = "players.teleport";
+
 /// An empty history page: no events, no continuation cursor. The neutral
 /// answer a host without history support (`None` provider, stripped build)
 /// returns, so a dependent sees an empty history rather than a trap.
