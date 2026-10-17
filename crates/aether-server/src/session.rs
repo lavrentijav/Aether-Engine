@@ -15,7 +15,7 @@ use aether_api::{block_ids, FjallStore, JournalActor, Player, Vector3, World};
 use aether_world::BlockStateId;
 
 use crate::config::Config;
-use crate::players::{PosLook, SharedRegistry};
+use crate::players::{PlayerHandle, PosLook, SharedRegistry};
 use crate::proto::{read_packet, Conn, PacketIn};
 use crate::protocol::{self, BlockSource, ClientEvent, JoinParams, ProtocolCodec, ServerEvent};
 use crate::stored::{self, Stored};
@@ -793,31 +793,18 @@ fn play_loop(
         match event {
             ClientEvent::Move(mut pos) => {
                 let before = handle.pos();
-                // Team collision rules are enforced server-side as well as in
-                // the client's own prediction: a move that would enter another
-                // player's box is refused (and the client is teleported back)
-                // when the mover's team says the two collide. A player already
-                // overlapping is never trapped, so they can always walk apart.
-                if !player_boxes_overlap(before, pos) {
-                    let blocked = registry.snapshot().into_iter().any(|other| {
-                        other.entity_id != handle.entity_id
-                            && !other.game().dead
-                            && player_boxes_overlap(pos, other.pos())
-                            && crate::team::collides(world, &handle.name, &other.name)
-                    });
-                    if blocked {
-                        pos = before;
-                        handle.emit(
-                            &ServerEvent::Teleport {
-                                x: before.x,
-                                y: before.y,
-                                z: before.z,
-                                yaw: before.yaw,
-                                pitch: before.pitch,
-                            },
-                            world,
-                        );
-                    }
+                if team_collision_blocks(handle, registry, world, before, pos) {
+                    pos = before;
+                    handle.emit(
+                        &ServerEvent::Teleport {
+                            x: before.x,
+                            y: before.y,
+                            z: before.z,
+                            yaw: before.yaw,
+                            pitch: before.pitch,
+                        },
+                        world,
+                    );
                 }
                 handle.set_pos(pos);
                 if full {
@@ -1918,6 +1905,46 @@ fn would_bury_a_player(
         .snapshot()
         .iter()
         .any(|p| stands_in_block(p.pos(), x, y, z))
+}
+
+/// Whether a move by `handle` from `before` to `to` would enter another
+/// player's box whose team collision rules forbid it.
+///
+/// Vanilla's `EntitySelector.pushableBy` combines **both** sides' rules, so
+/// the check loads one [`crate::team::TeamIndex`] per move and asks it about
+/// every overlapping player. A spectator (on either side) never collides, and
+/// a player already overlapping is never trapped: they can always walk apart,
+/// and only a move that would create a new overlap is refused.
+pub(crate) fn team_collision_blocks(
+    handle: &PlayerHandle,
+    registry: &SharedRegistry,
+    world: &DemoWorld,
+    before: PosLook,
+    to: PosLook,
+) -> bool {
+    let mover = {
+        let st = handle.game();
+        (st.dead, st.mode)
+    };
+    if mover.0 || mover.1 == crate::protocol::GameMode::Spectator {
+        return false;
+    }
+    if player_boxes_overlap(before, to) {
+        return false;
+    }
+    let teams = crate::team::TeamIndex::load(world);
+    registry.snapshot().into_iter().any(|other| {
+        if other.entity_id == handle.entity_id {
+            return false;
+        }
+        {
+            let st = other.game();
+            if st.dead || st.mode == crate::protocol::GameMode::Spectator {
+                return false;
+            }
+        }
+        player_boxes_overlap(to, other.pos()) && teams.collides(&handle.name, &other.name)
+    })
 }
 
 /// Whether two players' 0.6 × 1.8 boxes overlap.

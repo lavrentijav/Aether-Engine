@@ -17,7 +17,7 @@
 //! `/team join`. Membership therefore survives a logout with no player-save
 //! migration.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use aether_world::KvBackend;
 use serde::{Deserialize, Serialize};
@@ -74,8 +74,11 @@ impl Color {
         "reset",
     ];
 
-    /// Parse a `ChatFormatting` name the way `ColorArgument` does: lower-case
-    /// it, drop every non-letter, and match the enum name.
+    /// Parse a `ChatFormatting` name the way `ColorArgument` does:
+    /// `ChatFormatting.getByName` lower-cases the input, drops every
+    /// non-letter, and matches the cleaned enum name. That is why
+    /// `dark-blue`/`DARKBLUE` resolve to `dark_blue`, while a trailing extra
+    /// word is left in the cleaned string and fails the lookup.
     pub fn parse(s: &str) -> Option<Color> {
         let cleaned: String = s
             .chars()
@@ -377,6 +380,126 @@ pub fn remove(world: &DemoWorld, name: &str) -> bool {
     world.delete_meta(&key(name)).is_ok()
 }
 
+/// A read-only snapshot of every team, with a member → team index.
+///
+/// The hot paths (a player's movement, a death message, an entity-selector
+/// snapshot) need several lookups in a row. Loading the whole `TM` prefix once
+/// and answering from memory keeps them from rescanning and JSON-decoding the
+/// store per lookup; a new snapshot is taken per operation, so a `/team`
+/// change is visible on the very next one.
+pub struct TeamIndex {
+    teams: Vec<Team>,
+    member_team: HashMap<String, usize>,
+}
+
+impl TeamIndex {
+    /// Load every team once.
+    pub fn load(world: &DemoWorld) -> TeamIndex {
+        TeamIndex::from_teams(all(world))
+    }
+
+    /// Build an index over already-loaded teams (also the unit-test seam).
+    pub fn from_teams(teams: Vec<Team>) -> TeamIndex {
+        let mut member_team = HashMap::new();
+        for (i, team) in teams.iter().enumerate() {
+            for member in &team.members {
+                member_team.entry(member.clone()).or_insert(i);
+            }
+        }
+        TeamIndex { teams, member_team }
+    }
+
+    /// Every team, sorted by name.
+    pub fn teams(&self) -> &[Team] {
+        &self.teams
+    }
+
+    /// The team a scoreboard name belongs to, if any.
+    pub fn team_of(&self, member: &str) -> Option<&Team> {
+        self.member_team
+            .get(member)
+            .and_then(|&i| self.teams.get(i))
+    }
+
+    /// The team name a member belongs to, if any.
+    pub fn team_name_of(&self, member: &str) -> Option<String> {
+        self.team_of(member).map(|t| t.name.clone())
+    }
+
+    /// The collision rule that applies to `member`; unteamed is `always`.
+    pub fn collision_rule_of(&self, member: &str) -> CollisionRule {
+        self.team_of(member)
+            .map(|t| t.collision_rule)
+            .unwrap_or(CollisionRule::Always)
+    }
+
+    /// Whether the two names are on the same team.
+    pub fn same_team(&self, a: &str, b: &str) -> bool {
+        match (self.team_of(a), self.team_of(b)) {
+            (Some(a), Some(b)) => a.name == b.name,
+            _ => false,
+        }
+    }
+
+    /// Whether `mover` and `target` collide, combining **both** sides' rules
+    /// the way vanilla's `EntitySelector.pushableBy` does: `never` on either
+    /// side disables pushing, `pushOwnTeam` on either side requires the same
+    /// team, and `pushOtherTeams` on either side requires different teams.
+    /// Two `always` sides (including two unteamed entities) collide.
+    pub fn collides(&self, mover: &str, target: &str) -> bool {
+        let mover_rule = self.collision_rule_of(mover);
+        let target_rule = self.collision_rule_of(target);
+        if mover_rule == CollisionRule::Never || target_rule == CollisionRule::Never {
+            return false;
+        }
+        let same = self.same_team(mover, target);
+        if (mover_rule == CollisionRule::PushOwnTeam || target_rule == CollisionRule::PushOwnTeam)
+            && !same
+        {
+            return false;
+        }
+        if (mover_rule == CollisionRule::PushOtherTeams
+            || target_rule == CollisionRule::PushOtherTeams)
+            && same
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Whether two players may damage each other under their teams'
+    /// friendly-fire rules. `false` only when both are on the *same* team with
+    /// friendly fire off.
+    pub fn allows_damage(&self, attacker: &str, target: &str) -> bool {
+        let Some(team) = self.team_of(attacker) else {
+            return true;
+        };
+        if !team.members.contains(target) {
+            return true;
+        }
+        team.friendly_fire
+    }
+
+    /// Whether `viewer` should see the death message of `victim`, under the
+    /// victim's team `deathMessageVisibility`.
+    ///
+    /// `HideForOtherTeams` hides the chat line from the victim as well:
+    /// vanilla's `PlayerList.a(victim, message)` skips the victim in that
+    /// branch (the victim still gets the death screen). The other rules match.
+    pub fn death_message_visible(&self, victim: &str, viewer: &str) -> bool {
+        let Some(team) = self.team_of(victim) else {
+            return true;
+        };
+        let same = team.members.contains(viewer);
+        match team.death_message_visibility {
+            Visibility::Always => true,
+            Visibility::Never => false,
+            Visibility::HideForOwnTeam => !same,
+            Visibility::HideForOtherTeams => same && viewer != victim,
+        }
+    }
+}
+
 /// The team a scoreboard name belongs to, if any.
 pub fn team_of(world: &DemoWorld, member: &str) -> Option<Team> {
     all(world).into_iter().find(|t| t.members.contains(member))
@@ -390,51 +513,18 @@ pub fn team_name_of(world: &DemoWorld, member: &str) -> Option<String> {
 /// Whether two players may damage each other under their teams' friendly-fire
 /// rules. `false` only when both are on the *same* team with friendly fire off.
 pub fn allows_damage(world: &DemoWorld, attacker: &str, target: &str) -> bool {
-    let Some(team) = team_of(world, attacker) else {
-        return true;
-    };
-    if !team.members.contains(target) {
-        return true;
-    }
-    team.friendly_fire
+    TeamIndex::load(world).allows_damage(attacker, target)
 }
 
-/// Whether `mover`'s team collides with `other` under the collision rules.
-///
-/// Vanilla's `CollisionRule` decides whether an entity is pushed by another:
-/// `always` collides with everybody, `never` with nobody, `pushOwnTeam` only
-/// with teammates and `pushOtherTeams` only with non-teammates. The mover's
-/// team is authoritative; an unteamed mover falls back to the other side's
-/// rule, and two unteamed entities keep this server's historical (no
-/// player–player collision) behaviour.
-pub fn collides(world: &DemoWorld, mover: &str, other: &str) -> bool {
-    let same = team_of(world, mover).is_some_and(|t| t.members.contains(other));
-    match team_of(world, mover).map(|t| t.collision_rule) {
-        Some(CollisionRule::Always) => true,
-        Some(CollisionRule::Never) => false,
-        Some(CollisionRule::PushOwnTeam) => same,
-        Some(CollisionRule::PushOtherTeams) => !same,
-        None => match team_of(world, other).map(|t| t.collision_rule) {
-            Some(CollisionRule::Always) => true,
-            Some(CollisionRule::PushOtherTeams) => true,
-            Some(CollisionRule::Never | CollisionRule::PushOwnTeam) | None => false,
-        },
-    }
+/// Whether `mover` and `target` collide, loading one snapshot. Hot loops
+/// should hold a [`TeamIndex`] and call its method instead.
+pub fn collides(world: &DemoWorld, mover: &str, target: &str) -> bool {
+    TeamIndex::load(world).collides(mover, target)
 }
 
-/// Whether `viewer` should see the death message of `victim`, under the
-/// victim's team `deathMessageVisibility`.
+/// Whether `viewer` should see `victim`'s death message, loading one snapshot.
 pub fn death_message_visible(world: &DemoWorld, victim: &str, viewer: &str) -> bool {
-    let Some(team) = team_of(world, victim) else {
-        return true;
-    };
-    let same = team.members.contains(viewer);
-    match team.death_message_visibility {
-        Visibility::Always => true,
-        Visibility::Never => false,
-        Visibility::HideForOwnTeam => !same,
-        Visibility::HideForOtherTeams => same,
-    }
+    TeamIndex::load(world).death_message_visible(victim, viewer)
 }
 
 /// The scoreboard name of a non-player entity: vanilla's
@@ -488,9 +578,13 @@ mod tests {
     fn colours_parse_the_way_color_argument_does() {
         assert_eq!(Color::parse("dark_blue"), Some(Color::DarkBlue));
         assert_eq!(Color::parse("DARKBLUE"), Some(Color::DarkBlue));
+        // `ChatFormatting.getByName` lower-cases and strips non-letters, so
+        // these two spellings resolve to the same colour.
         assert_eq!(Color::parse("dark-blue"), Some(Color::DarkBlue));
         assert_eq!(Color::parse("reset"), Some(Color::Reset));
         assert_eq!(Color::parse("bold"), None);
+        // Trailing letters are not stripped: this is not `dark_blue`.
+        assert_eq!(Color::parse("dark_blue_extra"), None);
         assert_eq!(Color::Red.id(), 12);
         assert_eq!(Color::Reset.id(), 21);
     }
@@ -505,6 +599,66 @@ mod tests {
         team.suffix = ">".into();
         assert_eq!(team.formatted_display_name(), "§c[red]");
         assert_eq!(team.format_player_name("Alice"), "§c<Alice>§r");
+    }
+
+    fn team(name: &str, rule: CollisionRule, members: &[&str]) -> Team {
+        let mut team = Team::new(name);
+        team.collision_rule = rule;
+        team.members = members.iter().map(|m| m.to_string()).collect();
+        team
+    }
+
+    #[test]
+    fn collision_rules_combine_both_sides_like_pushable_by() {
+        let index = TeamIndex::from_teams(vec![
+            team("red", CollisionRule::Always, &["red"]),
+            team("red_own", CollisionRule::PushOwnTeam, &["own_a", "own_b"]),
+            team(
+                "red_other",
+                CollisionRule::PushOtherTeams,
+                &["other_a", "other_b"],
+            ),
+            team("black", CollisionRule::Never, &["black"]),
+            team("blue", CollisionRule::Always, &["blue"]),
+            team("pair", CollisionRule::Always, &["pair_a", "pair_b"]),
+        ]);
+
+        // always / always, including two unteamed names.
+        assert!(index.collides("red", "blue"));
+        assert!(index.collides("nobody", "other"));
+        assert!(index.collides("pair_a", "pair_b"));
+
+        // `never` on either side disables pushing.
+        assert!(!index.collides("red", "black"));
+        assert!(!index.collides("black", "red"));
+        assert!(!index.collides("black", "black"));
+
+        // `pushOwnTeam` on either side requires the same team.
+        assert!(index.collides("own_a", "own_b"));
+        assert!(!index.collides("red", "own_a"));
+        assert!(!index.collides("own_a", "red"));
+
+        // `pushOtherTeams` on either side requires different teams.
+        assert!(index.collides("red", "other_a"));
+        assert!(index.collides("other_a", "red"));
+        assert!(!index.collides("other_a", "other_b"));
+        assert!(!index.collides("other_b", "other_a"));
+
+        // Conflicting own/other requirements can never be satisfied.
+        assert!(!index.collides("own_a", "other_a"));
+        assert!(!index.collides("other_a", "own_a"));
+    }
+
+    #[test]
+    fn a_team_index_finds_members_and_answers_death_visibility() {
+        let mut red = team("red", CollisionRule::Always, &["alice", "bob"]);
+        red.death_message_visibility = Visibility::HideForOtherTeams;
+        let index = TeamIndex::from_teams(vec![red]);
+        assert_eq!(index.team_name_of("bob").as_deref(), Some("red"));
+        assert!(!index.death_message_visible("alice", "alice"));
+        assert!(index.death_message_visible("alice", "bob"));
+        assert!(!index.death_message_visible("alice", "carol"));
+        assert!(index.death_message_visible("carol", "carol"));
     }
 
     #[test]

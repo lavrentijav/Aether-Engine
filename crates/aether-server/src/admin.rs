@@ -570,11 +570,11 @@ impl Target {
 /// The CMD-06b selector source over the live player registry.
 struct OnlineSource<'a> {
     registry: &'a SharedRegistry,
-    world: &'a DemoWorld,
+    teams: crate::team::TeamIndex,
     executor: Option<EntityRef>,
 }
 
-fn player_ref(handle: &PlayerHandle, world: &DemoWorld) -> EntityRef {
+fn player_ref(handle: &PlayerHandle, teams: &crate::team::TeamIndex) -> EntityRef {
     let pos = handle.pos();
     let st = handle.game();
     let tags = st.tags.iter().cloned().collect();
@@ -591,7 +591,7 @@ fn player_ref(handle: &PlayerHandle, world: &DemoWorld) -> EntityRef {
         pos: Vector3::new(pos.x, pos.y, pos.z),
         rotation: Rotation::new(pos.yaw, pos.pitch),
         tags,
-        team: crate::team::team_name_of(world, &handle.name),
+        team: teams.team_name_of(&handle.name),
         gamemode: Some(Gamemode::from(mode)),
         level,
         scores: Vec::new(),
@@ -610,7 +610,7 @@ impl SelectorSource for OnlineSource<'_> {
         self.registry
             .snapshot()
             .iter()
-            .map(|handle| player_ref(handle, self.world))
+            .map(|handle| player_ref(handle, &self.teams))
             .collect()
     }
 }
@@ -620,10 +620,12 @@ fn online_source<'a>(
     world: &'a DemoWorld,
     source: Source<'a>,
 ) -> OnlineSource<'a> {
+    let teams = crate::team::TeamIndex::load(world);
+    let executor = source.player().map(|p| player_ref(p, &teams));
     OnlineSource {
         registry,
-        world,
-        executor: source.player().map(|p| player_ref(p, world)),
+        teams,
+        executor,
     }
 }
 

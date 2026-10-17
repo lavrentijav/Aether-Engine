@@ -64,7 +64,14 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
             let t = r.read_remainder()?;
             Ok((Value::Text(t.clone()), t))
         }
-        ArgKind::String | ArgKind::Quotable => {
+        // `StringArgumentType.word()`: quotes are ordinary characters, not a
+        // quoted-string syntax. Only `quotable` and the message kinds read a
+        // quoted span.
+        ArgKind::String => {
+            let t = read_required(r)?;
+            Ok((Value::Text(t.clone()), t))
+        }
+        ArgKind::Quotable => {
             let t = r.read_string_arg()?;
             Ok((Value::Text(t.clone()), t))
         }

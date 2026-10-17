@@ -360,11 +360,11 @@ fn pretty(kind: &str) -> String {
 
 struct WorldSource<'a> {
     registry: &'a SharedRegistry,
-    world: &'a DemoWorld,
+    teams: team::TeamIndex,
     executor: Option<EntityRef>,
 }
 
-fn player_ref(handle: &PlayerHandle, world: &DemoWorld) -> EntityRef {
+fn player_ref(handle: &PlayerHandle, teams: &team::TeamIndex) -> EntityRef {
     let pos = handle.pos();
     // One guard for every field read from the player state: two `handle.game()`
     // temporaries in one struct literal would live to the end of the
@@ -383,7 +383,7 @@ fn player_ref(handle: &PlayerHandle, world: &DemoWorld) -> EntityRef {
         pos: Vector3::new(pos.x, pos.y, pos.z),
         rotation: Rotation::new(pos.yaw, pos.pitch),
         tags,
-        team: team::team_name_of(world, &handle.name),
+        team: teams.team_name_of(&handle.name),
         gamemode: Some(Gamemode::from(mode)),
         level,
         scores: Vec::new(),
@@ -402,14 +402,14 @@ impl SelectorSource for WorldSource<'_> {
         self.registry
             .snapshot()
             .iter()
-            .map(|p| player_ref(p, self.world))
+            .map(|p| player_ref(p, &self.teams))
             .collect()
     }
 
     fn entities(&self) -> Vec<EntityRef> {
         entities::selectable()
             .into_iter()
-            .map(|e| entity_ref(e, self.world))
+            .map(|e| entity_ref(e, &self.teams))
             .collect()
     }
 }
@@ -417,7 +417,7 @@ impl SelectorSource for WorldSource<'_> {
 /// A non-player entity as a selector snapshot. Its scoreboard name is the
 /// hyphenated UUID, so a team membership recorded by `/team join` is visible
 /// to `@e[team=…]`.
-pub(crate) fn entity_ref(e: entities::Selectable, world: &DemoWorld) -> EntityRef {
+pub(crate) fn entity_ref(e: entities::Selectable, teams: &team::TeamIndex) -> EntityRef {
     EntityRef {
         id: e.id,
         uuid: e.uuid,
@@ -428,7 +428,7 @@ pub(crate) fn entity_ref(e: entities::Selectable, world: &DemoWorld) -> EntityRe
         pos: e.pos,
         rotation: Rotation::new(e.yaw, e.pitch),
         tags: e.tags,
-        team: crate::team::team_name_of(world, &crate::team::uuid_name(e.uuid)),
+        team: teams.team_name_of(&crate::team::uuid_name(e.uuid)),
         gamemode: None,
         level: 0,
         scores: Vec::new(),
@@ -439,10 +439,12 @@ pub(crate) fn entity_ref(e: entities::Selectable, world: &DemoWorld) -> EntityRe
 }
 
 fn world_source<'a>(ctx: &'a Ctx) -> WorldSource<'a> {
+    let teams = team::TeamIndex::load(ctx.world);
+    let executor = ctx.player().map(|p| player_ref(p, &teams));
     WorldSource {
         registry: ctx.registry,
-        world: ctx.world,
-        executor: ctx.player().map(|p| player_ref(p, ctx.world)),
+        teams,
+        executor,
     }
 }
 

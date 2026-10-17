@@ -171,16 +171,18 @@ pub(crate) fn death_message(
     source: &str,
     attacker: Option<i32>,
     registry: &SharedRegistry,
-    world: &DemoWorld,
+    teams: &crate::team::TeamIndex,
 ) -> String {
-    let name = crate::team::team_of(world, &target.name)
+    let name = teams
+        .team_of(&target.name)
         .map(|t| t.format_player_name(&target.name))
         .unwrap_or_else(|| target.name.clone());
     let killer = attacker.and_then(|a| {
         registry
             .by_entity(a)
             .map(|p| {
-                crate::team::team_of(world, &p.name)
+                teams
+                    .team_of(&p.name)
                     .map(|t| t.format_player_name(&p.name))
                     .unwrap_or_else(|| p.name.clone())
             })
@@ -223,7 +225,9 @@ pub fn die(
     registry: &SharedRegistry,
     world: &DemoWorld,
 ) {
-    let text = death_message(target, source, attacker, registry, world);
+    // One team snapshot for the message formatting and every recipient test.
+    let teams = crate::team::TeamIndex::load(world);
+    let text = death_message(target, source, attacker, registry, &teams);
     crate::log::info(&format!("[death] {text}"));
     crate::plugins::after_entity_death(target.entity_id as u64, attacker.map(|a| a as u64));
     // Death clears every effect; tell the client before the respawn screen
@@ -278,7 +282,7 @@ pub fn die(
     // itself already carries both players' team prefix/colour.
     let ev = ServerEvent::Chat(text);
     for viewer in registry.snapshot() {
-        if crate::team::death_message_visible(world, &target.name, &viewer.name) {
+        if teams.death_message_visible(&target.name, &viewer.name) {
             viewer.emit(&ev, world);
         }
     }

@@ -1939,7 +1939,8 @@ fn non_player_team_members_are_visible_to_selectors() {
         alive: true,
         tags: Vec::new(),
     };
-    let snapshot = crate::commands::team_tag::entity_ref(entity, &env.world);
+    let snapshot =
+        crate::commands::team_tag::entity_ref(entity, &crate::team::TeamIndex::load(&env.world));
     assert_eq!(snapshot.team.as_deref(), Some("red"));
 }
 
@@ -2019,4 +2020,79 @@ fn team_arguments_resolve_before_selectors_and_components() {
         one(&env, &env.tester, "/team modify missing prefix {"),
         "Invalid component: unterminated compound at byte 1"
     );
+}
+
+#[test]
+fn spectators_never_take_part_in_team_collision() {
+    use crate::players::PosLook;
+    use crate::protocol::GameMode;
+
+    let env = env();
+    let at = |x: f64| PosLook {
+        x,
+        y: 64.0,
+        z: 0.5,
+        yaw: 0.0,
+        pitch: 0.0,
+        on_ground: true,
+    };
+    env.tester.set_pos(at(0.5));
+    env.bob.set_pos(at(2.5));
+
+    // Two unteamed players collide under vanilla's default `always`.
+    assert!(crate::session::team_collision_blocks(
+        &env.tester,
+        &env.registry,
+        &env.world,
+        at(0.5),
+        at(2.5)
+    ));
+
+    // A spectator is not pushable.
+    env.bob.game().mode = GameMode::Spectator;
+    assert!(!crate::session::team_collision_blocks(
+        &env.tester,
+        &env.registry,
+        &env.world,
+        at(0.5),
+        at(2.5)
+    ));
+
+    // A moving spectator is not blocked either.
+    env.bob.game().mode = GameMode::Survival;
+    env.tester.game().mode = GameMode::Spectator;
+    assert!(!crate::session::team_collision_blocks(
+        &env.tester,
+        &env.registry,
+        &env.world,
+        at(0.5),
+        at(2.5)
+    ));
+
+    // An already-overlapping pair can always walk apart.
+    env.tester.game().mode = GameMode::Survival;
+    env.bob.set_pos(at(0.7));
+    assert!(!crate::session::team_collision_blocks(
+        &env.tester,
+        &env.registry,
+        &env.world,
+        at(0.5),
+        at(0.7)
+    ));
+}
+
+#[test]
+fn word_arguments_do_not_accept_quoted_spans() {
+    let env = env();
+    let commands = crate::commands::tree::tree();
+    // `brigadier:string` word: the quote is an ordinary character, so a
+    // quoted phrase leaves trailing input and does not parse. This matches
+    // vanilla's `StringArgumentType.word()`.
+    assert!(commands
+        .parse("/tag @s add \"two words\"", &env.tester)
+        .is_err());
+    assert!(commands
+        .parse("/team add \"red team\"", &env.tester)
+        .is_err());
+    assert!(commands.parse("/tag @s add two", &env.tester).is_ok());
 }
