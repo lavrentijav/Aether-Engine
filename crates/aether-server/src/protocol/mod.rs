@@ -519,17 +519,26 @@ pub enum ServerEvent<'a> {
     /// client's rain/thunder levels.
     Weather { rain: bool, thunder: bool },
     /// The world border, as one Initialize World Border packet. Sent at join
-    /// and after every edit; `old_diameter`/`new_diameter`/`speed` describe a
-    /// running resize, `speed` in ticks.
+    /// and after a size change; `old_diameter`/`new_diameter`/`speed` describe
+    /// a running resize, `speed` in ticks. A non-size edit uses one of the
+    /// focused events below so it cannot cancel a running animation.
     WorldBorder {
         x: f64,
         z: f64,
         old_diameter: f64,
         new_diameter: f64,
-        speed: i32,
+        speed: i64,
         warning_blocks: i32,
         warning_time: i32,
     },
+    /// Set just the world border centre, leaving its size animation alone.
+    WorldBorderCenter { x: f64, z: f64 },
+    /// Set just the world border diameter, immediately.
+    WorldBorderSize { diameter: f64 },
+    /// Set just the warning distance, in blocks.
+    WorldBorderWarningDistance { blocks: i32 },
+    /// Set just the warning time, in ticks.
+    WorldBorderWarningTime { ticks: i32 },
     /// The world spawn point, for the compass and respawn screen.
     SpawnPosition { x: i32, y: i32, z: i32, yaw: f32 },
     /// Every slot of a window plus the stack on the cursor.

@@ -295,6 +295,8 @@ pub mod lang {
 
     /// `argument.integer.low`.
     pub const ARG_INTEGER_LOW: &str = "Integer must not be less than %s: found %s";
+    /// `argument.integer.big`.
+    pub const ARG_INTEGER_BIG: &str = "Integer must not be more than %s: found %s";
     /// `argument.float.low`.
     pub const ARG_FLOAT_LOW: &str = "Float must not be less than %s: found %s";
     /// `argument.double.low`.
@@ -303,6 +305,8 @@ pub mod lang {
     pub const ARG_DOUBLE_BIG: &str = "Double must not be more than %s: found %s";
     /// `argument.time.tick_count_too_low`.
     pub const ARG_TIME_TOO_LOW: &str = "The tick count must not be less than %s: found %s";
+    /// `argument.pos.outofbounds`.
+    pub const POS_OUT_OF_BOUNDS: &str = "That position is outside the allowed boundaries.";
     /// `commands.summon.success`.
     pub const SUMMON_SUCCESS: &str = "Summoned new %s";
     /// `commands.kill.success.single`.

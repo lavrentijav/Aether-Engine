@@ -516,17 +516,13 @@ fn parse_time(r: &mut StringReader) -> Result<(Value, String), ParseError> {
     let value: f64 = body
         .parse()
         .map_err(|_| ParseError::Argument(format!("Invalid time '{t}'")))?;
-    // `Math.round(amount * ticksPerUnit)`, not a truncation.
+    // `Math.round(amount * ticksPerUnit)`, not a truncation. Brigadier's time
+    // argument is an `int`: saturate instead of wrapping, so
+    // `/time set 3000000000` cannot turn negative on the way in. The minimum
+    // is per-command (`time()` is 0, `time(1)` is 1), so it is checked by the
+    // executor rather than here.
     let ticks = (value * per).round() as i64;
-    // `TimeArgumentType.time()` has a minimum of 0.
-    if ticks < 0 {
-        return Err(ParseError::Argument(format!(
-            "The tick count must not be less than 0: found {t}"
-        )));
-    }
-    // Brigadier's time argument is an `int`: saturate instead of wrapping, so
-    // `/time set 3000000000` cannot turn negative on the way in.
-    let ticks = ticks.clamp(0, i64::from(i32::MAX));
+    let ticks = ticks.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
     Ok((Value::Int(ticks as i32), t))
 }
 
@@ -763,14 +759,10 @@ mod tests {
                 "{bad} => {e:?}"
             );
         }
-        // `TimeArgumentType.time()` has a minimum of 0.
-        for bad in ["-1", "-1t", "-0.6t"] {
-            let e = err(ArgKind::Time, bad);
-            assert!(
-                matches!(&e, ParseError::Argument(m) if m.contains("less than 0")),
-                "{bad} => {e:?}"
-            );
-        }
+        // The minimum is the argument's flag (`time()` 0, `time(1)` 1) and is
+        // checked by the command, so a negative still parses here.
+        assert_eq!(value(ArgKind::Time, "-1").unwrap(), Value::Int(-1));
+        assert_eq!(value(ArgKind::Time, "-1t").unwrap(), Value::Int(-1));
         // Exactly zero is fine.
         assert_eq!(value(ArgKind::Time, "0t").unwrap(), Value::Int(0));
     }

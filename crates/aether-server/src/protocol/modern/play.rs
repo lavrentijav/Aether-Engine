@@ -446,6 +446,10 @@ fn abilities(v: &Version, mode: GameMode) -> PacketOut {
 /// release simply renders no border packet rather than one at a wrong id.
 struct BorderIds {
     initialize: i32,
+    center: i32,
+    size: i32,
+    warning_delay: i32,
+    warning_reach: i32,
     spawn_position: i32,
 }
 
@@ -453,6 +457,10 @@ fn border_ids(v: &Version) -> Option<BorderIds> {
     if v.gen == Gen::V1_21_11 {
         Some(BorderIds {
             initialize: 0x2a,
+            center: 0x56,
+            size: 0x58,
+            warning_delay: 0x59,
+            warning_reach: 0x5a,
             spawn_position: 0x5f,
         })
     } else {
@@ -813,11 +821,44 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
                 .f64(*z)
                 .f64(*old_diameter)
                 .f64(*new_diameter)
-                .var_int(*speed)
+                // `speed` is a VarLong in `ClientboundInitializeBorderPacket`.
+                .var_long(*speed)
                 // `getAbsoluteMaxSize`, the portal reach vanilla sends.
                 .var_int(29_999_984)
                 .var_int(*warning_blocks)
                 .var_int(*warning_time);
+            vec![p]
+        }
+        ServerEvent::WorldBorderCenter { x, z } => {
+            let Some(ids) = border_ids(v) else {
+                return Some(Vec::new());
+            };
+            let mut p = PacketOut::new(ids.center);
+            p.f64(*x).f64(*z);
+            vec![p]
+        }
+        ServerEvent::WorldBorderSize { diameter } => {
+            let Some(ids) = border_ids(v) else {
+                return Some(Vec::new());
+            };
+            let mut p = PacketOut::new(ids.size);
+            p.f64(*diameter);
+            vec![p]
+        }
+        ServerEvent::WorldBorderWarningDistance { blocks } => {
+            let Some(ids) = border_ids(v) else {
+                return Some(Vec::new());
+            };
+            let mut p = PacketOut::new(ids.warning_reach);
+            p.var_int(*blocks);
+            vec![p]
+        }
+        ServerEvent::WorldBorderWarningTime { ticks } => {
+            let Some(ids) = border_ids(v) else {
+                return Some(Vec::new());
+            };
+            let mut p = PacketOut::new(ids.warning_delay);
+            p.var_int(*ticks);
             vec![p]
         }
         ServerEvent::SpawnPosition { x, y, z, yaw } => {
@@ -1509,7 +1550,7 @@ mod tests {
                 new_diameter: 200.0,
                 speed: 40,
                 warning_blocks: 5,
-                warning_time: 15,
+                warning_time: 300,
             },
         )
         .unwrap();
@@ -1522,7 +1563,29 @@ mod tests {
         assert_eq!(pin.var_int().unwrap(), 40, "speed in ticks");
         assert_eq!(pin.var_int().unwrap(), 29_999_984);
         assert_eq!(pin.var_int().unwrap(), 5);
-        assert_eq!(pin.var_int().unwrap(), 15);
+        assert_eq!(pin.var_int().unwrap(), 300, "warning time is in ticks");
+
+        // A focused edit carries one field and cannot cancel the resize.
+        let center = encode(v, &ServerEvent::WorldBorderCenter { x: 3.0, z: 4.0 }).unwrap();
+        assert_eq!(center[0].body()[0], 0x56, "world_border_center");
+        let mut pin = crate::proto::PacketIn::new(&center[0].body()[1..]);
+        assert_eq!(pin.f64().unwrap(), 3.0);
+        assert_eq!(pin.f64().unwrap(), 4.0);
+
+        let size = encode(v, &ServerEvent::WorldBorderSize { diameter: 42.0 }).unwrap();
+        assert_eq!(size[0].body()[0], 0x58, "world_border_size");
+        let mut pin = crate::proto::PacketIn::new(&size[0].body()[1..]);
+        assert_eq!(pin.f64().unwrap(), 42.0);
+
+        let warn = encode(v, &ServerEvent::WorldBorderWarningTime { ticks: 600 }).unwrap();
+        assert_eq!(warn[0].body()[0], 0x59, "world_border_warning_delay");
+        let mut pin = crate::proto::PacketIn::new(&warn[0].body()[1..]);
+        assert_eq!(pin.var_int().unwrap(), 600);
+
+        let reach = encode(v, &ServerEvent::WorldBorderWarningDistance { blocks: 12 }).unwrap();
+        assert_eq!(reach[0].body()[0], 0x5a, "world_border_warning_reach");
+        let mut pin = crate::proto::PacketIn::new(&reach[0].body()[1..]);
+        assert_eq!(pin.var_int().unwrap(), 12);
 
         let pkts = encode(
             v,

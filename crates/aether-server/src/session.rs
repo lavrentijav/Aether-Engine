@@ -1599,13 +1599,20 @@ pub(crate) fn after_spawn(
         world,
     );
     let border = crate::commands::world_env::world_border();
+    // A client joining mid-resize is given the remaining animation, not an
+    // immediate size that would snap the border and lose the lerp.
+    let (old_diameter, new_diameter, speed) = if border.resizing() {
+        (border.size, border.target_size, border.lerp_ticks())
+    } else {
+        (border.size, border.size, 0)
+    };
     handle.emit(
         &ServerEvent::WorldBorder {
             x: border.center_x,
             z: border.center_z,
-            old_diameter: border.size,
-            new_diameter: border.size,
-            speed: 0,
+            old_diameter,
+            new_diameter,
+            speed,
             warning_blocks: border.warning_distance,
             warning_time: border.warning_time,
         },
