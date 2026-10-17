@@ -13,6 +13,11 @@
 
 use crate::protocol::nbt::Nbt;
 
+/// The deepest nesting the SNBT parser accepts. `/tellraw`'s component parser
+/// has its own budget, but the text has to be turned into `Nbt` first, so the
+/// stack bound has to hold here too.
+pub const MAX_DEPTH: usize = 128;
+
 /// Why an SNBT string could not be parsed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnbtError {
@@ -32,7 +37,11 @@ impl std::error::Error for SnbtError {}
 
 /// Parse a complete SNBT value, rejecting trailing input.
 pub fn parse(text: &str) -> Result<Nbt, SnbtError> {
-    let mut p = Parser { text, pos: 0 };
+    let mut p = Parser {
+        text,
+        pos: 0,
+        depth: 0,
+    };
     p.skip_ws();
     let v = p.value()?;
     p.skip_ws();
@@ -56,6 +65,7 @@ pub fn parse_compound(text: &str) -> Result<Nbt, SnbtError> {
 struct Parser<'a> {
     text: &'a str,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -100,6 +110,17 @@ impl Parser<'_> {
     }
 
     fn value(&mut self) -> Result<Nbt, SnbtError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            self.depth -= 1;
+            return Err(self.err("SNBT is nested too deeply"));
+        }
+        let result = self.value_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn value_inner(&mut self) -> Result<Nbt, SnbtError> {
         self.skip_ws();
         match self.peek() {
             Some('{') => self.compound(),

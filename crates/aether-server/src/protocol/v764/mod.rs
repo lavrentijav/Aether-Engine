@@ -314,6 +314,12 @@ impl ProtocolCodec for Codec {
                 p.bool(false); // not an action-bar message
                 vec![p]
             }
+            ServerEvent::ChatComponent(c) => {
+                let mut p = PacketOut::new(PLAY_SYSTEM_CHAT);
+                p.string(&c.to_json());
+                p.bool(false); // not an action-bar message
+                vec![p]
+            }
             // Everything else — entities, combat, health, hunger, windows,
             // effects — is the shared gameplay path, driven by this version's
             // ids and its pre-1.20.5 layout gates.

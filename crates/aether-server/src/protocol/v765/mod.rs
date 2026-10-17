@@ -308,6 +308,14 @@ impl ProtocolCodec for Codec {
                 p.bytes(&nbt::string(text).to_network()).bool(false);
                 vec![p]
             }
+            ServerEvent::ChatComponent(c) => {
+                // 1.20.3–1.21.4 NBT components still spell the style fields
+                // `clickEvent`/`hoverEvent`.
+                let mut p = PacketOut::new(PLAY_SYSTEM_CHAT);
+                p.bytes(&c.to_nbt(super::text::NbtForm::Legacy).to_network())
+                    .bool(false);
+                vec![p]
+            }
             // Everything else — entities, combat, health, hunger, windows,
             // effects — is the shared gameplay path, driven by this version's
             // ids and its pre-1.20.5 layout gates.
@@ -731,6 +739,38 @@ mod tests {
             Codec.resolve_reported_item(spear, crate::inventory::item("minecraft:trident")),
             spear,
         );
+    }
+
+    #[test]
+    fn legacy_item_and_entity_hovers_are_wrapped_in_contents() {
+        use crate::protocol::text::{HoverEvent, TextComponent};
+        let uuid = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
+        for hover in [
+            HoverEvent::Item {
+                id: "minecraft:stone".into(),
+                count: 1,
+                tag: None,
+                components: None,
+            },
+            HoverEvent::Entity {
+                kind: "minecraft:pig".into(),
+                id: uuid.into(),
+                name: None,
+            },
+        ] {
+            let mut component = TextComponent::text("x");
+            component.style.hover_event = Some(hover);
+            let (_id, body) = encode_one(&ServerEvent::ChatComponent(Box::new(component)));
+            assert!(
+                body.windows(8).any(|w| w == b"contents"),
+                "1.20.3–1.21.4 require the contents wrapper"
+            );
+            assert!(
+                body.windows(9).any(|w| w == b"show_item")
+                    || body.windows(11).any(|w| w == b"show_entity"),
+                "the hover action must be present"
+            );
+        }
     }
 
     #[test]

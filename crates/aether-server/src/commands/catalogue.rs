@@ -760,7 +760,7 @@ pub const CATALOGUE: &[Command] = &[
         "minecraft.command.msg",
         0,
         Category::Data,
-        "/msg <player> <message>",
+        "/msg <targets> <message>",
     ),
     pend(
         "data",
@@ -804,30 +804,27 @@ pub const CATALOGUE: &[Command] = &[
         Category::Data,
         "/teammsg <message>",
     ),
-    pend(
+    imp_node(
         "say",
         &[],
         "minecraft.command.say",
         2,
-        "CMD-17",
         Category::Data,
         "/say <message>",
     ),
-    pend(
+    imp(
         "me",
         &[],
         "minecraft.command.me",
         0,
-        "CMD-17",
         Category::Data,
         "/me <action>",
     ),
-    pend(
+    imp_node(
         "tellraw",
         &[],
         "minecraft.command.tellraw",
         2,
-        "CMD-17",
         Category::Data,
         "/tellraw <targets> <message>",
     ),

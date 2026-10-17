@@ -791,6 +791,7 @@ fn build() -> CommandTree {
     children.extend(crate::game::commands_player::nodes());
     children.extend(crate::commands::team_tag::nodes());
     children.extend(super::effects::nodes());
+    children.extend(crate::commands::text::nodes());
     children.extend(crate::commands::world_env::nodes());
     children.extend(super::world_edit::nodes());
     children.extend(crate::economy::commands::nodes());

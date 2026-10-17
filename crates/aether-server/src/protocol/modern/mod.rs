@@ -484,6 +484,19 @@ impl ProtocolCodec for Codec {
                 p.bytes(&super::nbt::string(text).to_network()).bool(false); // not an action-bar overlay
                 vec![p]
             }
+            ServerEvent::ChatComponent(c) => {
+                // 1.21.5 renamed the style fields (`click_event`,
+                // `hover_event`); the releases between 1.20.3 and 1.21.4 read
+                // the older camel-case NBT spelling.
+                let form = if self.0.gen >= Gen::V1_21_5 {
+                    super::text::NbtForm::Modern
+                } else {
+                    super::text::NbtForm::Legacy
+                };
+                let mut p = PacketOut::new(self.0.packets.cb_system_chat);
+                p.bytes(&c.to_nbt(form).to_network()).bool(false); // system chat, not action bar
+                vec![p]
+            }
             ServerEvent::PluginMessage { channel, data } => {
                 // An older release whose table carries no custom-payload id
                 // sends nothing rather than a packet with id -1.
@@ -1235,6 +1248,39 @@ mod tests {
             0x00,
             "velocity at rest is one zero byte"
         );
+    }
+
+    #[test]
+    fn a_rich_chat_component_is_an_anonymous_nbt_compound() {
+        use crate::protocol::text::{ClickEvent, HoverEvent, Style, TextComponent};
+        let component = TextComponent {
+            content: crate::protocol::text::Content::Text("hi".into()),
+            style: Style {
+                color: Some("red".into()),
+                click_event: Some(ClickEvent::RunCommand("/say hi".into())),
+                hover_event: Some(HoverEvent::Text(Box::new(TextComponent::text("tip")))),
+                ..Style::default()
+            },
+            extra: Vec::new(),
+        };
+        let world = chunk::tests_support::Empty;
+        let pkts = C.encode(&ServerEvent::ChatComponent(Box::new(component)), &world);
+        let mut wire = Vec::new();
+        pkts[0].write_to(&mut wire, None).unwrap();
+        let mut pin = crate::proto::PacketIn::new(&wire);
+        pin.var_int().unwrap(); // frame length
+        assert_eq!(
+            pin.var_int().unwrap(),
+            version::V1_21_11.packets.cb_system_chat
+        );
+        let body = pin.rest(64 * 1024).unwrap();
+        assert_eq!(body[0], 0x0a, "TAG_Compound, anonymous root");
+        // The 1.21.5+ field names and the new click-event field.
+        assert!(body.windows(11).any(|w| w == b"click_event"));
+        assert!(body.windows(11).any(|w| w == b"hover_event"));
+        assert!(body.windows(7).any(|w| w == b"command"));
+        assert!(body.windows(4).any(|w| w == b"text"));
+        assert_eq!(*body.last().unwrap(), 0, "not an action bar");
     }
 
     #[test]

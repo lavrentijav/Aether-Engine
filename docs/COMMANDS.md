@@ -12,7 +12,7 @@ Every command Aether knows, grouped by category: the ones that run today and the
 
 **Legend:** ✅ working · 🚧 pending (`CMD-nn` is the task that will implement it). **Node** is the permission node and **Op** the vanilla operator level (0 everyone … 4 owner); for a pending command the stub enforces exactly them. **Gate** is what the server checks *today*: `node` (enforced node/op), `operator` (the legacy operator-only check — Node/Op are the intended target, not yet enforced), or `everyone` (no requirement; Node/Op are the intended target).
 
-**Totals:** 112 commands — 65 working, 47 pending.
+**Totals:** 112 commands — 68 working, 44 pending.
 
 ## Contents
 
@@ -116,15 +116,15 @@ Data, scoreboard, teams and chat.
 
 | Command | Aliases | Status | Gate | Node | Op | Usage |
 | --- | --- | --- | --- | --- | --- | --- |
-| `/msg` | `tell`, `w` | ✅ working | `everyone` | `minecraft.command.msg` | 0 | `/msg <player> <message>` |
+| `/msg` | `tell`, `w` | ✅ working | `everyone` | `minecraft.command.msg` | 0 | `/msg <targets> <message>` |
 | `/data` | – | 🚧 pending CMD-14 | `node` | `minecraft.command.data` | 2 | `/data <get,merge,modify,remove> <target> <path> [...]` |
 | `/scoreboard` | – | 🚧 pending CMD-15 | `node` | `minecraft.command.scoreboard` | 2 | `/scoreboard <objectives,players> [...]` |
 | `/tag` | – | ✅ working | `node` | `minecraft.command.tag` | 2 | `/tag <targets> <add\|remove> <name> \| <targets> list` |
 | `/team` | – | ✅ working | `node` | `minecraft.command.team` | 2 | `/team <list,add,remove,empty,join,leave,modify> [...]` |
 | `/teammsg` | `tm` | ✅ working | `everyone` | `minecraft.command.teammsg` | 0 | `/teammsg <message>` |
-| `/say` | – | 🚧 pending CMD-17 | `node` | `minecraft.command.say` | 2 | `/say <message>` |
-| `/me` | – | 🚧 pending CMD-17 | `node` | `minecraft.command.me` | 0 | `/me <action>` |
-| `/tellraw` | – | 🚧 pending CMD-17 | `node` | `minecraft.command.tellraw` | 2 | `/tellraw <targets> <message>` |
+| `/say` | – | ✅ working | `node` | `minecraft.command.say` | 2 | `/say <message>` |
+| `/me` | – | ✅ working | `everyone` | `minecraft.command.me` | 0 | `/me <action>` |
+| `/tellraw` | – | ✅ working | `node` | `minecraft.command.tellraw` | 2 | `/tellraw <targets> <message>` |
 | `/title` | – | 🚧 pending CMD-17 | `node` | `minecraft.command.title` | 2 | `/title <targets> <title,subtitle,actionbar,times,reset> [...]` |
 | `/bossbar` | – | 🚧 pending CMD-17 | `node` | `minecraft.command.bossbar` | 2 | `/bossbar <add,get,list,remove,set> [...]` |
 | `/dialog` | – | 🚧 pending CMD-17 | `node` | `minecraft.command.dialog` | 2 | `/dialog show <targets> <dialog>` |

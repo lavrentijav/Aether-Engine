@@ -163,6 +163,14 @@ impl ProtocolCodec for Codec {
                     .u8(0); // position: normal chat
                 vec![p]
             }
+            ServerEvent::ChatComponent(c) => {
+                // 1.8 predates the `contents` hover wrapper: item/entity
+                // hovers are a single `value` SNBT string.
+                let mut p = PacketOut::new(0x02);
+                p.string(&c.to_json_form(super::text::JsonForm::Legacy8))
+                    .u8(0); // position: normal chat
+                vec![p]
+            }
             // Gameplay events this version does not render.
             _ => Vec::new(),
         }
@@ -726,6 +734,82 @@ mod tests {
         match Codec.decode(&pkt, prev) {
             ClientEvent::KeepAlive(id) => assert_eq!(id, 42),
             _ => panic!("expected a keep-alive"),
+        }
+    }
+
+    #[test]
+    fn a_rich_component_keeps_json_hover_value_for_1_8() {
+        use crate::protocol::text::{ClickEvent, HoverEvent, TextComponent};
+        struct Empty;
+        impl BlockSource for Empty {
+            fn block_at(&self, _x: i32, _y: i32, _z: i32) -> BlockStateId {
+                BlockStateId::AIR
+            }
+        }
+        let mut component = TextComponent::text("x");
+        component.style.click_event = Some(ClickEvent::RunCommand("/say hi".into()));
+        component.style.hover_event = Some(HoverEvent::Text(Box::new(TextComponent::text("tip"))));
+        let packets = Codec.encode(&ServerEvent::ChatComponent(Box::new(component)), &Empty);
+        assert_eq!(packets.len(), 1);
+        let mut wire = Vec::new();
+        packets[0].write_to(&mut wire, None).unwrap();
+        let mut pin = crate::proto::PacketIn::new(&wire);
+        pin.var_int().unwrap(); // frame length
+        assert_eq!(pin.var_int().unwrap(), 0x02);
+        let text = pin.string().unwrap();
+        assert!(
+            text.contains(r#""hoverEvent":{"action":"show_text","value":{"text":"tip"}}"#),
+            "{text}"
+        );
+        assert!(!text.contains("contents"), "1.8 reads `value`: {text}");
+        assert!(
+            text.contains(r#""clickEvent":{"action":"run_command","value":"/say hi"}"#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn legacy_item_and_entity_hovers_are_value_snbt_for_1_8() {
+        use crate::protocol::text::{HoverEvent, TextComponent};
+        struct Empty;
+        impl BlockSource for Empty {
+            fn block_at(&self, _x: i32, _y: i32, _z: i32) -> BlockStateId {
+                BlockStateId::AIR
+            }
+        }
+        let uuid = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
+        let item = HoverEvent::Item {
+            id: "minecraft:stone".into(),
+            count: 1,
+            tag: None,
+            components: None,
+        };
+        let entity = HoverEvent::Entity {
+            kind: "minecraft:pig".into(),
+            id: uuid.into(),
+            name: None,
+        };
+        for (hover, want) in [
+            (
+                item,
+                r#""value":"{id:\"minecraft:stone\",Count:1b}""#.to_string(),
+            ),
+            (
+                entity,
+                format!(r#""value":"{{type:\"minecraft:pig\",id:\"{uuid}\"}}""#),
+            ),
+        ] {
+            let mut component = TextComponent::text("x");
+            component.style.hover_event = Some(hover);
+            let packets = Codec.encode(&ServerEvent::ChatComponent(Box::new(component)), &Empty);
+            let mut wire = Vec::new();
+            packets[0].write_to(&mut wire, None).unwrap();
+            let mut pin = crate::proto::PacketIn::new(&wire);
+            pin.var_int().unwrap();
+            pin.var_int().unwrap();
+            let text = pin.string().unwrap();
+            assert!(text.contains(&want), "{text}");
+            assert!(!text.contains("contents"), "{text}");
         }
     }
 

@@ -298,6 +298,11 @@ impl ProtocolCodec for Codec {
                 p.u8(0);
                 vec![p]
             }
+            ServerEvent::ChatComponent(c) => {
+                let mut p = PacketOut::new(IDS_SYSTEM_CHAT);
+                p.string(&c.to_json()).u8(0);
+                vec![p]
+            }
             // Gameplay events this version does not render.
             _ => Vec::new(),
         }
@@ -602,6 +607,72 @@ mod tests {
         // The action varint leads, then the entry count and the UUID.
         assert_eq!(body[0], 4, "action: remove_player");
         assert_eq!(body.len(), 1 + 1 + 16);
+    }
+
+    #[test]
+    fn legacy_item_and_entity_hovers_use_the_contents_wrapper() {
+        use crate::protocol::text::{HoverEvent, TextComponent};
+        let uuid = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
+        let item = HoverEvent::Item {
+            id: "minecraft:stone".into(),
+            count: 1,
+            tag: None,
+            components: None,
+        };
+        let entity = HoverEvent::Entity {
+            kind: "minecraft:pig".into(),
+            id: uuid.into(),
+            name: None,
+        };
+        for (hover, want) in [
+            (
+                item,
+                r#""contents":{"id":"minecraft:stone","count":1}"#.to_string(),
+            ),
+            (
+                entity,
+                format!(r#""contents":{{"type":"minecraft:pig","id":"{uuid}"}}"#),
+            ),
+        ] {
+            let mut component = TextComponent::text("x");
+            component.style.hover_event = Some(hover);
+            let (_id, body) = encode_one(&ServerEvent::ChatComponent(Box::new(component)));
+            let mut pin = crate::proto::PacketIn::new(&body);
+            let text = pin.string().unwrap();
+            assert!(text.contains(&want), "{text}");
+            assert!(!text.contains(r#""value":"{id:"#), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_rich_chat_component_is_json_in_this_generation() {
+        use crate::protocol::text::{ClickEvent, Content, HoverEvent, Style, TextComponent};
+        let component = TextComponent {
+            content: Content::Text("hi".into()),
+            style: Style {
+                color: Some("red".into()),
+                click_event: Some(ClickEvent::RunCommand("/say hi".into())),
+                hover_event: Some(HoverEvent::Text(Box::new(TextComponent::text("tip")))),
+                ..Style::default()
+            },
+            extra: Vec::new(),
+        };
+        let (id, body) = encode_one(&ServerEvent::ChatComponent(Box::new(component)));
+        assert_eq!(id, IDS_SYSTEM_CHAT);
+        let mut pin = crate::proto::PacketIn::new(&body);
+        let text = pin.string().unwrap();
+        assert_eq!(pin.u8().unwrap(), 0, "not an action bar");
+        assert_eq!(pin.remaining(), 0);
+        assert!(text.contains(r#""text":"hi""#));
+        assert!(text.contains(r#""color":"red""#));
+        assert!(
+            text.contains(r#""clickEvent":{"action":"run_command","value":"/say hi"}"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""hoverEvent":{"action":"show_text","contents":{"text":"tip"}}"#),
+            "{text}"
+        );
     }
 
     #[test]

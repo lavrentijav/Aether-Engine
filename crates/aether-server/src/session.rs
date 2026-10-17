@@ -1121,11 +1121,22 @@ fn play_loop(
                 // Log and journal only the chat that was actually delivered
                 // (a plugin veto above returns before this point).
                 crate::chatlog::log_chat(handle, &text, world);
-                let line = match crate::team::team_of(world, &handle.name) {
-                    Some(team) => format!("<{}> {}", team.format_player_name(&handle.name), text),
-                    None => format!("<{}> {}", handle.name, text),
+                // `chat.type.text` — `<name> text`. The name carries the
+                // CMD-16 team prefix/suffix; both arguments are literal
+                // components, never text re-parsed as a component, so a name
+                // cannot inject a click/hover event.
+                let name = match crate::team::team_of(world, &handle.name) {
+                    Some(team) => team.format_player_name(&handle.name),
+                    None => handle.name.clone(),
                 };
-                let ev = ServerEvent::Chat(line);
+                let line = crate::protocol::text::TextComponent::translate(
+                    "chat.type.text",
+                    vec![
+                        crate::protocol::text::TextComponent::text(name),
+                        crate::protocol::text::TextComponent::text(text),
+                    ],
+                );
+                let ev = ServerEvent::ChatComponent(Box::new(line));
                 handle.emit(&ev, world);
                 registry.broadcast_except(handle.entity_id, &ev, world);
             }

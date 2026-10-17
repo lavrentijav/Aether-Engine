@@ -49,10 +49,6 @@ pub fn nodes() -> Vec<Node> {
         tree::simple("kill", &[], Requirement::None, exec_kill),
         tree::simple("spawn", &[], Requirement::None, exec_spawn),
         tree::with_usage(
-            tree::greedy("msg", &["tell", "w"], Requirement::None, exec_msg),
-            "<player> <message>",
-        ),
-        tree::with_usage(
             tree::greedy("teleport", &["tp"], Requirement::Fn(require_op), exec_tp),
             "<x> <y> <z> | <player>",
         ),
@@ -115,14 +111,6 @@ fn exec_kill(ctx: &mut Ctx) -> Reply {
 fn exec_spawn(ctx: &mut Ctx) -> Reply {
     match ctx.player() {
         Some(handle) => Reply(spawn(handle, ctx.registry, ctx.world)),
-        None => ctx.needs_player(),
-    }
-}
-
-fn exec_msg(ctx: &mut Ctx) -> Reply {
-    let args = ctx.refs();
-    match ctx.player() {
-        Some(handle) => Reply(msg(&args, handle, ctx.registry, ctx.world)),
         None => ctx.needs_player(),
     }
 }
@@ -298,48 +286,6 @@ pub fn spawn(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld
     let s = crate::session::world_spawn(world);
     teleport(handle, registry, world, s.x, s.y, s.z);
     vec!["Teleported to spawn".into()]
-}
-
-/// `/msg <player> <message>` and its `/tell` `/w` aliases: a private message
-/// to exactly one player.
-///
-/// The sender and the recipient each see their own side of it, and the line is
-/// logged and journalled (CH1). A target that is not a player is refused, as
-/// in vanilla; targeting yourself is allowed.
-pub fn msg(
-    args: &[&str],
-    handle: &PlayerHandle,
-    registry: &SharedRegistry,
-    world: &DemoWorld,
-) -> Vec<String> {
-    let Some(name) = args.first().copied() else {
-        return vec!["/msg <player> <message>".into()];
-    };
-    let message = args[1..].join(" ");
-    if message.is_empty() {
-        return vec!["/msg <player> <message>".into()];
-    }
-    match registry
-        .snapshot()
-        .into_iter()
-        .find(|p| p.name.eq_ignore_ascii_case(name))
-    {
-        Some(target) => {
-            crate::chatlog::log_private(handle, &target, &message, world);
-            target.emit(
-                &ServerEvent::Chat(lang::format(
-                    lang::MESSAGE_INCOMING,
-                    &[&handle.name, &message],
-                )),
-                world,
-            );
-            vec![lang::format(
-                lang::MESSAGE_OUTGOING,
-                &[&target.name, &message],
-            )]
-        }
-        None => vec![format!("{name} is not online")],
-    }
 }
 
 /// `/tp <x> <y> <z>` or `/tp <player>`.

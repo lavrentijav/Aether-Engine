@@ -297,6 +297,13 @@ impl ProtocolCodec for Codec {
                     .uuid(0);
                 vec![p]
             }
+            ServerEvent::ChatComponent(c) => {
+                let mut p = PacketOut::new(PLAY_CHAT);
+                p.string(&c.to_json())
+                    .u8(1) // position: system message
+                    .uuid(0);
+                vec![p]
+            }
             // Gameplay events this version does not render.
             _ => Vec::new(),
         }
