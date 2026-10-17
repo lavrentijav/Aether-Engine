@@ -756,6 +756,8 @@ mod tests {
                         Prop::None => {}
                         Prop::VarInt => properties.push(pin.var_int().unwrap()),
                         Prop::Byte => properties.push(pin.u8().unwrap() as i32),
+                        // Numeric parsers are read by the branch above.
+                        Prop::Integer => unreachable!("numeric parser decoded above"),
                         Prop::Time => properties.push(pin.i32().unwrap()),
                     }
                 }

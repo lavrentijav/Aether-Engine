@@ -1558,13 +1558,6 @@ mod tests {
         }
     }
 
-    /// Whether any node in `node`'s subtree has an executor.
-    fn has_executor(node: &tree::Node) -> bool {
-        node.children
-            .iter()
-            .any(|c| c.executor.is_some() || has_executor(c))
-    }
-
     #[test]
     fn every_implemented_entry_has_a_real_executor() {
         fn has_executor(node: &tree::Node) -> bool {
