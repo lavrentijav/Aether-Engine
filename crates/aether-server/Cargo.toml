@@ -100,6 +100,11 @@ harness = false
 test = false
 
 [[bench]]
+name = "region_index"
+harness = false
+test = false
+
+[[bench]]
 name = "rtp"
 harness = false
 test = false
