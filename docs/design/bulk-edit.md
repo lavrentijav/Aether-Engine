@@ -115,10 +115,23 @@ section by section (one cache read lock each), so a commit landing between two
 copies produced a column whose lower half was before the edit and upper half
 after. `ColumnView` now asks the source for a whole-column snapshot
 (`BlockSource::copy_column` → `World::copy_column_sections`), which materialises
-the column and then copies every section under **one** read lock. `main` has no
-incremental light engine yet, so that snapshot is also what the per-column light
-pass reads; a test commits changes to two sections from a writer thread while
-reading both from a `ColumnView` and requires them to agree.
+the column and then copies every section under **one** read lock. The
+compat-pack wrapper forwards that snapshot too (`CarrierView::copy_column`
+remaps every state), so a client with the pack does not fall back to torn
+per-section copies. `main` has no incremental light engine yet, so that
+snapshot is also what the per-column light pass reads; a test commits changes
+to two sections from a writer thread while reading both from a `ColumnView` and
+requires them to agree.
+
+**A large commit still pauses concurrent reads once.** `plan` reads every
+`from` cell, and `World::apply_block_changes` takes the world cache **write**
+lock for the whole batch, so a gameplay read on another thread waits for that
+apply. The publish settle no longer waits behind the commit: it takes
+`COMMIT_LOCK` with `try_lock` and leaves the job queued when a commit owns it.
+What remains is the one-off cache-lock pause, measured by the commit bench
+(≈0.8 s for a 1M-block fill in release on the reference builder). A fully
+non-blocking commit would need per-section shard locks or a chunked apply, which
+would give up the single-batch atomic write; it is not claimed here.
 
 ## Publishing (CMD-30b)
 
@@ -142,23 +155,29 @@ budget.
 
 A job has three phases, in this order:
 
-1. **Settle.** For every changed cell, re-run the placement shape rule on the
-   cell itself (`placement::reshape`) and on its six *unchanged* neighbours.
-   Changed neighbours are skipped because their own reshape covers them; an
-   interior cell of a solid fill therefore does no neighbour work at all. The
-   corrections are applied as one batch (`World::apply_block_changes`), not
-   journalled as separate acts: they are a derived consequence of the one
-   revision, not a second user edit. This reuses the existing placement pass,
-   not a per-block full recompute.
+1. **Settle, to a fixed point.** Seed the changed cells and re-run the
+   placement shape rule (`placement::reshape`) on each. Applying those
+   corrections can change a neighbour's shape, and some shapes depend on a
+   neighbour's *shape*, not only its block (a chest's `type` pairs with the
+   neighbour's `type`). A single pass is therefore not enough: each correction
+   re-queues its six neighbours, and the frontier is drained until no cell
+   changes, before any re-send starts. Corrections are applied in batches
+   (`World::apply_block_changes`), and the frontier is seeded from the
+   **applied** batch, so a cell processed earlier in the same slice with the
+   old state is re-checked. Corrections are not journalled as separate acts:
+   they are a derived consequence of the one revision, not a second user edit.
+   This reuses the existing placement pass, not a per-block full recompute.
+   A chest-run test pins that the published state is a reshape fixed point.
 2. **Re-send.** The touched `16³` sections are collected while settling and
    collapsed to distinct chunk columns. The wire protocol has a column packet,
    not a section packet, so one packet carries every changed section of its
    column; a column is **never sent twice** even when many of its sections
    changed. That is stronger than "one packet per section" and avoids the
-   per-block packet storm. Re-sending the column also re-runs the codec's light
-   pass for it, which is the engine's current lighting model: incremental
-   relight/cross-column propagation (S4) has not landed, so no separate light
-   packet is sent.
+   per-block packet storm. Re-sending the column re-runs the **modern** codecs'
+   light pass for it, which is the engine's current lighting model for 1.21+;
+   1.17/1.18 send their pre-existing full-bright light packet and 1.8 uses
+   `FullBright`. Incremental relight/cross-column propagation (S4) has not
+   landed, so no separate light packet is sent.
 3. **Hooks.** One callback per changed block: `after-block-break` when the
    result is air, `after-block-place` for every other change. This is the
    per-block choice (not batched), so a plugin that counts changes sees exactly
@@ -173,8 +192,9 @@ incremental or cached light engine: the only primitive is
 `aether_world::light::column::compute_column`, which recomputes a whole
 column's sky and block light from its blocks, and the codecs call it while
 encoding a column packet. Publishing therefore gets fresh light for the
-affected region by re-sending every touched column — no separate `Light Update`
-packet is sent because there is no incremental light state to send. This is
+affected region from the **modern** codecs by re-sending every touched column —
+no separate `Light Update` packet is sent because there is no incremental light
+state to send, and the pre-1.21 codecs were already full-bright. This is
 tested end to end at the primitive level
 (`a_published_edit_rebuilds_the_affected_columns_light`): a bulk-placed
 glowstone leaves block light 15 in its cell and 14 next to it after the
@@ -186,28 +206,40 @@ updates; the publisher's `resend_column` is the single call site to route
 through it.
 
 The budget is configurable under `[bulk]`: `cells_per_tick`,
-`columns_per_tick`, `hooks_per_tick` (defaults `8192`, `4`, `8192`). Each is a
-hard per-tick cap; a job resumes where it stopped, so an edit larger than the
+`columns_per_tick`, `hooks_per_tick` (defaults `4096`, `4`, `8192`). Each is a
+per-tick safety cap; a job resumes where it stopped, so an edit larger than the
 budget always eventually completes. The defaults are set from the measured
-**worst** step, not the cheapest one (`cargo-locked bench -p aether-server
---bench bulk_edit`):
+**worst** steps on the shared reference builder (`cargo-locked bench
+-p aether-server --bench bulk_edit`):
 
-| step | measured (reference builder) |
+| step | measured |
 |---|---|
-| `settle_step` (8,192 dense cells) | ≈ 7 ms |
-| `settle_to_resend_step_real_encoder` (remainder + 4 columns through the real 1.21.11 codec, one viewer) | ≈ 7–8 ms |
-| `hooks_step` (8,192 callbacks) | ≈ 5 µs |
-| `sparse_settle_step` (8,192 isolated cells, up to seven `reshape` calls each) | ≈ 16 ms |
+| `settle_step` (4,096 dense cells) | ≈ 1.0 ms |
+| `last_settle_slice` (final full 4,096-cell seed slice) | ≈ 1.5 ms |
+| `frontier_to_resend_step_real_encoder` (fixed-point slice + 4 columns through the real 1.21.11 codec, one viewer) | ≈ 3.4 ms |
+| `hooks_step` (8,192 **sink calls**, not plugin dispatch) | ≈ 0.8 ms |
+| `sparse_settle_step` (4,096 isolated cells; stone neighbours, reshape is a no-op) | ≈ 1.2 ms |
+| `fence_sparse_settle_step` (4,096 fixed-point checks, each on a fence with six fence neighbours) | ≈ 2.4 ms |
 
-`cells_per_tick` bounds changed cells, not reshape work, which is why the sparse
-case is separate. `columns_per_tick` is a **send per viewer**: `ServerSink`
-broadcasts a `ChunkColumn` and the registry encodes it once per online client,
-so the wall-clock cost scales with the audience. Four columns leaves room for a
-handful of viewers in one tick; on a large server lower it (the work just takes
-more ticks). With the defaults a 1M-block fill is 123 settle slices
-(`1,000,000 / 8,192` rounds up), 49 column sends (13 ticks at four per tick) and
-123 hook slices — the publication completes over a few seconds and never takes
-an unbounded tick. The commit half is separate and off-tick, above.
+The fence case is the worst shape work: each frontier position does four-to-six
+neighbour reads and a `with_props`. It is the number the default is chosen
+against; at 4,096 cells the measured worst step stays around 2–4 ms, under a
+tenth of the 50 ms tick, with room for many viewers' column encodes. The hook number measures the
+sink only; in production each call goes through the plugin host (`HOST` mutex +
+plugin code), whose cost is unbounded in plugin code, which is why
+`hooks_per_tick` is a safety cap rather than a time guarantee. `columns_per_tick`
+is a **send per viewer**: `ServerSink` broadcasts a `ChunkColumn` and the
+registry encodes it once per online client, so wall-clock cost scales with the
+audience; lower it on a crowded server (the work just spans more ticks). The
+bench's `frontier_to_resend` step is the actual combined worst step — a full
+fixed-point slice followed by four encodes — because re-sends only start after
+the frontier has drained, not right after the last seed slice.
+
+With the defaults a 1M-block fill is 245 seed slices (`1,000,000 / 4,096` rounds
+up), a proportional fixed-point frontier, 49 column sends (13 ticks at four per
+tick) and 123 hook slices; publication completes over a few seconds and never
+takes an unbounded tick. The commit half is separate and off-tick, above, and
+its one-off cache-write pause is documented there.
 
 ## Format version
 

@@ -56,6 +56,16 @@
 //! is what the tick budget covers: [`BulkPublisher`] re-settles derived
 //! shapes, re-sends the touched columns and fires the after-* hooks in bounded
 //! slices across ticks.
+//!
+//! A huge commit still pauses concurrent world reads once, for the duration of
+//! its batch: `plan` reads a million cells and `World::apply_block_changes`
+//! holds the world cache **write** lock for the whole apply, so a gameplay
+//! `get_block` on another thread waits for it. The publish settle uses
+//! `COMMIT_LOCK::try_lock` and yields while a commit owns it, so a tick never
+//! queues behind the commit's plan/apply; the world cache lock is the remaining
+//! one-off pause (measured with the commit bench: ≈0.8 s for 1M in release).
+//! A fully non-blocking commit needs per-section locking or chunked applies,
+//! which would give up the atomic single-batch write; that is not claimed here.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::{Mutex, OnceLock};
@@ -151,6 +161,26 @@ static COMMIT_LOCK: Mutex<()> = Mutex::new(());
 
 fn commit_guard() -> std::sync::MutexGuard<'static, ()> {
     COMMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Take the commit lock only if it is free. The tick's settle phase uses this
+/// and yields (the job stays queued) when a large commit owns the lock, rather
+/// than blocking the tick for the rest of that commit.
+fn try_commit_guard() -> Option<std::sync::MutexGuard<'static, ()>> {
+    // `cargo test` runs the bulk tests in parallel and many of them hold this
+    // lock through a commit; a yield here would make settle progress depend on
+    // test scheduling rather than on the code under test. The production path
+    // is the `try_lock` below; tests take the same blocking lock commits do.
+    #[cfg(test)]
+    {
+        Some(commit_guard())
+    }
+    #[cfg(not(test))]
+    match COMMIT_LOCK.try_lock() {
+        Ok(g) => Some(g),
+        Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
 }
 
 /// The changes a commit actually made, in addition to its [`BulkResult`].
@@ -676,7 +706,7 @@ pub struct PublishBudget {
 impl Default for PublishBudget {
     fn default() -> Self {
         Self {
-            cells: 8_192,
+            cells: 4_096,
             columns: 4,
             hooks: 8_192,
         }
@@ -713,10 +743,13 @@ const NEIGHBOURS: [(i32, i32, i32); 6] = [
 /// Kept as a trait so the publisher can be tested without a socket, the game
 /// tick, or a plugin host. The server implementation is [`ServerSink`].
 pub trait PublishSink {
-    /// Re-send one whole chunk column. Lighting is recomputed by the codec's
-    /// normal column encoder, which is this engine's light pass: incremental
-    /// relight (S4) has not landed, so re-sending the column is the correct
-    /// and only way to update it.
+    /// Re-send one whole chunk column. The **modern** codecs recompute the
+    /// column's sky/block light while encoding it, which is this engine's only
+    /// light pass: incremental relight (S4) has not landed, so re-sending the
+    /// column is the correct and only way to update its light. The 1.17/1.18
+    /// codecs send their pre-existing full-bright light packet, and 1.8 uses
+    /// `FullBright`; for those, a re-send does not recompute light either
+    /// before or after this change.
     fn resend_column(&mut self, cx: i32, cz: i32);
     /// One changed block became air.
     fn after_block_break(&mut self, actor: JournalActor, x: i32, y: i32, z: i32, was: BlockStateId);
@@ -751,6 +784,28 @@ impl PublishProgress {
     }
 }
 
+/// The state a cell should have after its neighbours settled, and the change
+/// if that differs from what the world holds. Shared by the seed slice and the
+/// fixed-point frontier.
+fn settle_cell<B: KvBackend, G: ChunkGenerator>(
+    world: &World<B, G>,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> (BlockStateId, Option<BlockChange>) {
+    let was = world.get_block(x, y, z);
+    let get = |nx: i32, ny: i32, nz: i32| world.get_block(nx, ny, nz);
+    let now = crate::placement::reshape(was, x, y, z, &get);
+    let correction = (now != was).then_some(BlockChange {
+        x,
+        y,
+        z,
+        from: was,
+        to: now,
+    });
+    (now, correction)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Settle,
@@ -768,6 +823,13 @@ struct PublishJob {
     phase: Phase,
     /// Settle cursor into `changes`.
     cursor: usize,
+    /// Fixed-point frontier: positions whose shape may still change because a
+    /// neighbour changed. A chest's `type` depends on a neighbour's `type`, so
+    /// settling each cell once is not enough; this queue is drained until no
+    /// shape changes, and only then does the re-send phase start.
+    frontier: VecDeque<Pos>,
+    /// Positions currently in `frontier`, for deduplication.
+    queued: HashSet<Pos>,
     /// Every section touched by an original change or a settled neighbour.
     sections: BTreeSet<SectionKey>,
     /// Distinct columns and how many touched sections each holds.
@@ -791,6 +853,8 @@ impl PublishJob {
             final_to,
             phase: Phase::Settle,
             cursor: 0,
+            frontier: VecDeque::new(),
+            queued: HashSet::new(),
             sections,
             columns: Vec::new(),
             column_cursor: 0,
@@ -798,10 +862,24 @@ impl PublishJob {
         }
     }
 
-    fn is_changed(&self, x: i32, y: i32, z: i32) -> bool {
-        self.changes
+    /// Record the settled state of a changed cell for the hook phase.
+    fn note_final(&mut self, x: i32, y: i32, z: i32, now: BlockStateId) {
+        if let Ok(i) = self
+            .changes
             .binary_search_by_key(&(x, y, z), |c| (c.x, c.y, c.z))
-            .is_ok()
+        {
+            self.final_to[i] = now;
+        }
+    }
+
+    /// Add the six touching cells to the fixed-point frontier.
+    fn enqueue_neighbours(&mut self, x: i32, y: i32, z: i32) {
+        for (dx, dy, dz) in NEIGHBOURS {
+            let p = (x + dx, y + dy, z + dz);
+            if self.queued.insert(p) {
+                self.frontier.push_back(p);
+            }
+        }
     }
 
     /// Settle a bounded slice of the changed cells, then (when the whole edit
@@ -817,7 +895,8 @@ impl PublishJob {
         loop {
             match self.phase {
                 Phase::Settle => {
-                    if self.cursor >= self.changes.len() {
+                    let seeding = self.cursor < self.changes.len();
+                    if !seeding && self.frontier.is_empty() {
                         self.phase = Phase::Resend;
                         self.build_columns();
                         continue;
@@ -826,74 +905,75 @@ impl PublishJob {
                     // reads current block states and then writes shape
                     // corrections unconditionally; without the lock a commit
                     // landing in between could be overwritten by a correction
-                    // derived from the older state.
-                    let _guard = commit_guard();
-                    let end = self
-                        .cursor
-                        .saturating_add(budget.cells.max(1))
-                        .min(self.changes.len());
+                    // derived from the older state. `try_lock` matters for the
+                    // tick: a huge off-tick commit owns this lock for its whole
+                    // plan+apply, and the tick must skip publication for those
+                    // ticks rather than freeze behind it.
+                    let Some(_guard) = try_commit_guard() else {
+                        return false;
+                    };
                     let mut corrections = Vec::new();
-                    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
-                    for i in self.cursor..end {
-                        let c = self.changes[i];
-                        let get = |x: i32, y: i32, z: i32| world.get_block(x, y, z);
-                        // A bulk write bypasses placement's own `reshape` call,
-                        // so settle the changed cell itself as well as its
-                        // neighbours. The cell is already in the world: the
-                        // commit applied every block before publication started.
-                        let was = world.get_block(c.x, c.y, c.z);
-                        let now = crate::placement::reshape(was, c.x, c.y, c.z, &get);
-                        self.final_to[i] = now;
-                        if now != was {
-                            corrections.push(BlockChange {
-                                x: c.x,
-                                y: c.y,
-                                z: c.z,
-                                from: was,
-                                to: now,
-                            });
+                    if seeding {
+                        let end = self
+                            .cursor
+                            .saturating_add(budget.cells.max(1))
+                            .min(self.changes.len());
+                        for i in self.cursor..end {
+                            let c = self.changes[i];
+                            let (now, correction) = settle_cell(world, c.x, c.y, c.z);
+                            self.final_to[i] = now;
+                            if let Some(change) = correction {
+                                self.sections.insert((c.x >> 4, c.y >> 4, c.z >> 4));
+                                corrections.push(change);
+                            }
                         }
-                        // The same six-neighbour shape pass placement uses
-                        // (`placement::reshape`), but the changed cells in
-                        // that set get their own reshape above. Skipping them
-                        // before the read matters: an interior cell of a
-                        // solid fill has six changed neighbours and needs no
-                        // neighbour work at all.
-                        for (dx, dy, dz) in NEIGHBOURS {
-                            let (nx, ny, nz) = (c.x + dx, c.y + dy, c.z + dz);
-                            if self.is_changed(nx, ny, nz) {
-                                continue;
-                            }
-                            let was_n = world.get_block(nx, ny, nz);
-                            let to = crate::placement::reshape(was_n, nx, ny, nz, &get);
-                            if to == was_n || !seen.insert((nx, ny, nz)) {
-                                continue;
-                            }
-                            self.sections.insert((nx >> 4, ny >> 4, nz >> 4));
-                            corrections.push(BlockChange {
-                                x: nx,
-                                y: ny,
-                                z: nz,
-                                from: was_n,
-                                to,
-                            });
+                        world.apply_block_changes(&corrections);
+                        // Enqueue **after** the batch is applied. Enqueueing
+                        // while computing lets a position queued early in the
+                        // slice be popped later in the same slice and read the
+                        // pre-batch state, then never be re-checked. Applying
+                        // first and seeding from the final positions avoids
+                        // that lost wake-up. Every touched cell seeds the
+                        // frontier, because even an unchanged neighbour can
+                        // hold a shape that depends on it (a chest's type).
+                        for i in self.cursor..end {
+                            let c = self.changes[i];
+                            self.enqueue_neighbours(c.x, c.y, c.z);
+                        }
+                        progress.settled += end - self.cursor;
+                        self.cursor = end;
+                        // The seeding budget is spent even if the slice was the
+                        // last one; the frontier starts on the next step.
+                        return false;
+                    }
+                    // Fixed-point pass: re-check positions whose neighbour
+                    // changed, until no cell changes shape.
+                    let mut checked = 0usize;
+                    while checked < budget.cells.max(1) {
+                        let Some((x, y, z)) = self.frontier.pop_front() else {
+                            break;
+                        };
+                        self.queued.remove(&(x, y, z));
+                        checked += 1;
+                        let (now, correction) = settle_cell(world, x, y, z);
+                        if let Some(change) = correction {
+                            self.sections.insert((x >> 4, y >> 4, z >> 4));
+                            self.note_final(x, y, z, now);
+                            corrections.push(change);
                         }
                     }
-                    // Derived shape corrections are not a second user action:
-                    // they are part of publishing the one committed revision,
-                    // so they are applied as a batch, not journalled. The
-                    // journal still records the edit itself (CMD-30a).
                     world.apply_block_changes(&corrections);
-                    progress.settled += end - self.cursor;
-                    self.cursor = end;
-                    if self.cursor >= self.changes.len() {
-                        // The whole edit is settled; re-sends use a different
-                        // budget field, so they may start in this same step.
+                    // Seed from the **applied** corrections, so a cell that was
+                    // processed earlier in this slice with the old state is
+                    // re-queued once its neighbour's correction lands.
+                    for change in &corrections {
+                        self.enqueue_neighbours(change.x, change.y, change.z);
+                    }
+                    if self.frontier.is_empty() {
                         self.phase = Phase::Resend;
                         self.build_columns();
                         continue;
                     }
-                    // The cell budget is spent; resume here next tick.
                     return false;
                 }
                 Phase::Resend => {
@@ -986,6 +1066,24 @@ impl BulkPublisher {
 
     pub fn is_empty(&self) -> bool {
         self.jobs.is_empty()
+    }
+
+    /// Seeds not yet settled in the oldest job.
+    pub fn pending_seeds(&self) -> usize {
+        self.jobs
+            .front()
+            .map(|j| j.changes.len().saturating_sub(j.cursor))
+            .unwrap_or(0)
+    }
+
+    /// Fixed-point re-checks still queued in the oldest job.
+    pub fn pending_frontier(&self) -> usize {
+        self.jobs.front().map(|j| j.frontier.len()).unwrap_or(0)
+    }
+
+    /// Whether the oldest job is still in the settle phase.
+    pub fn is_settling(&self) -> bool {
+        self.jobs.front().is_some_and(|j| j.phase == Phase::Settle)
     }
 
     /// Publish at most one budget's worth of work, across as many queued jobs
@@ -1256,8 +1354,78 @@ mod tests {
         assert_eq!(world.get_block(17, 40, 1), block_ids::SAND);
     }
 
+    /// Serialises tests that touch the process-global publish queue (undo
+    /// auto-enqueues) and starts them from a clean queue, so one test cannot
+    /// drain or inherit another's jobs.
+    fn lock_global_queue() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut queue = publisher().lock().unwrap_or_else(|e| e.into_inner());
+        queue.jobs.clear();
+        guard
+    }
+
+    fn chest_type(world: &TestWorld, x: i32, z: i32) -> String {
+        let name = props::state_name(world.get_block(x, 20, z).raw()).unwrap_or_default();
+        name.split("type=")
+            .nth(1)
+            .and_then(|s| s.split(',').next())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn a_chest_run_settles_to_a_reshape_fixed_point() {
+        // r1 finding 1: chest `type` depends on a neighbour chest's `type`, so
+        // a single pass can record a shape a later neighbour correction
+        // invalidates. The published "after" must be a fixed point of
+        // `placement::reshape` over the final world.
+        let world = world();
+        // The lone middle chest is already there; stage the outer two as a
+        // bulk edit. The temporary writes just mint the south-facing states.
+        world
+            .set_block(1, 20, 2, "minecraft:chest[facing=south]")
+            .unwrap();
+        world
+            .set_block(0, 20, 2, "minecraft:chest[facing=south]")
+            .unwrap();
+        let left = world.get_block(0, 20, 2);
+        world
+            .set_block(2, 20, 2, "minecraft:chest[facing=south]")
+            .unwrap();
+        let right = world.get_block(2, 20, 2);
+        world.set_block(0, 20, 2, "minecraft:air").unwrap();
+        world.set_block(2, 20, 2, "minecraft:air").unwrap();
+
+        let mut edit = BulkEdit::new(actor(1));
+        edit.set(&world, 0, 20, 2, left).unwrap();
+        edit.set(&world, 2, 20, 2, right).unwrap();
+        let committed = edit.commit_with_changes(&world).unwrap();
+
+        let mut publisher = BulkPublisher::new();
+        publisher.enqueue(committed.actor, committed.changes);
+        let mut sink = RecordingSink::default();
+        publish_all(&mut publisher, &world, &mut sink, PublishBudget::default());
+
+        let get = |x: i32, y: i32, z: i32| world.get_block(x, y, z);
+        for x in 0..3 {
+            let state = world.get_block(x, 20, 2);
+            assert_eq!(
+                crate::placement::reshape(state, x, 20, 2, &get),
+                state,
+                "chest at {x} is not at a shape fixed point: {}",
+                props::state_name(state.raw()).unwrap_or_default()
+            );
+        }
+        let paired = (0..3)
+            .filter(|x| chest_type(&world, *x, 2) != "single")
+            .count();
+        assert_eq!(paired, 2, "three chests form exactly one pair");
+    }
+
     #[test]
     fn undo_inverts_the_commit_exactly() {
+        let _q = lock_global_queue();
         let world = world();
         // Seed a non-trivial pre-state.
         world.set_block(2, 20, 2, "minecraft:dirt").unwrap();
@@ -1278,6 +1446,7 @@ mod tests {
 
     #[test]
     fn undo_records_the_state_it_actually_replaces() {
+        let _q = lock_global_queue();
         let world = world();
         let mut history = BulkHistory::new(4);
         let mut edit = BulkEdit::new(actor(1));
@@ -1302,6 +1471,7 @@ mod tests {
 
     #[test]
     fn undo_works_after_the_record_spilled_from_memory() {
+        let _q = lock_global_queue();
         let world = world();
         let mut history = BulkHistory::new(2);
         let mut first_id = 0;
@@ -1322,6 +1492,7 @@ mod tests {
 
     #[test]
     fn undo_of_an_unknown_revision_is_an_error() {
+        let _q = lock_global_queue();
         let world = world();
         let mut history = BulkHistory::new(4);
         assert!(matches!(
@@ -1433,6 +1604,7 @@ mod tests {
         // A small deterministic LCG stands in for a property test's random
         // source; the claim is the same: whatever was edited, undo restores
         // every cell byte-for-byte.
+        let _q = lock_global_queue();
         let world = world();
         let mut seed: u64 = 0x1234_5678_9abc_def0;
         let mut next = || {
@@ -2035,16 +2207,23 @@ mod tests {
         publisher.enqueue(committed.actor, committed.changes);
         let mut sink = RecordingSink::default();
         // Directly constructed, not via config: all three fields zero.
-        let p = publisher.step(
-            &world,
-            &mut sink,
-            PublishBudget {
-                cells: 0,
-                columns: 0,
-                hooks: 0,
-            },
-        );
-        assert!(p.finished + p.settled + p.columns + p.hooks > 0);
+        let mut made_progress = false;
+        for _ in 0..100 {
+            let p = publisher.step(
+                &world,
+                &mut sink,
+                PublishBudget {
+                    cells: 0,
+                    columns: 0,
+                    hooks: 0,
+                },
+            );
+            made_progress |= p.finished + p.settled + p.columns + p.hooks > 0;
+            if publisher.is_empty() {
+                break;
+            }
+        }
+        assert!(made_progress);
         assert!(
             publisher.is_empty(),
             "a clamped budget still makes progress"
@@ -2206,6 +2385,7 @@ mod tests {
 
     #[test]
     fn undo_is_published_and_restores_derived_neighbour_shapes() {
+        let _q = lock_global_queue();
         let world = world();
         world.set_block(0, 20, 0, "minecraft:oak_fence").unwrap();
         let fence = aether_world::registry::blocks::default_state("minecraft:oak_fence").unwrap();

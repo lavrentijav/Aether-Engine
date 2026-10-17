@@ -8,15 +8,16 @@
 //! * `bulk_publish/*` — the tick-visible half, split by the phase a real tick
 //!   can be in when the budget ends:
 //!   - `settle_step`: one default settle slice;
-//!   - `settle_to_resend_step`: the step that finishes the last slice and then
-//!     re-sends the touched columns **through the real 1.21.11 column
-//!     encoder** (palette + light + compression framing), the worst combined
-//!     settle/re-send step;
-//!   - `hooks_step`: a step that only fires `hooks_per_tick` callbacks;
-//!   - `sparse_settle_step`: the worst shape-settle case — changed cells are
-//!     isolated, so each pays the cell reshape plus six unchanged neighbours
-//!     (up to seven `reshape` calls per budgeted cell), unlike the dense fill
-//!     whose interior cells have only changed neighbours.
+//!   - `last_settle_slice`: the final full seed slice of a dense edit;
+//!   - `frontier_to_resend_step_real_encoder`: the worst combined step — a
+//!     full fixed-point frontier slice followed by `columns_per_tick` encodes;
+//!   - `hooks_step`: a step that only fires `hooks_per_tick` **sink calls**
+//!     (not plugin dispatch — that cost lives in the plugin host and is
+//!     unbounded in plugin code);
+//!   - `sparse_settle_step` and `fence_sparse_settle_step`: isolated changed
+//!     cells, with unchanged neighbours that are stone (reshape is a no-op) and
+//!     fences (four-six neighbour reads plus `with_props` each), the latter
+//!     being the worst shape case.
 //!
 //! Setup (building the committed change list, and for the phase benches the
 //! earlier slices) is excluded by `iter_batched`, so each number is the work a
@@ -207,11 +208,36 @@ fn bench_bulk_publish(c: &mut Criterion) {
     let source = BenchSource(&world);
     let codec = codec_for(773).expect("the 1.21.11 codec");
 
-    // A job whose default settle slice is one slice short of finishing, so
-    // the measured step settles the remainder and enters Resend in the same
-    // tick. Disjoint from `dense`, or the fill would be a no-op (already
-    // stone) and the first slice would finish the whole job.
-    let transition = committed_fill(&world, 0, 200, 0, 63, 201, 65);
+    // A fence-heavy sparse edit: even coordinates are changed fences, odd
+    // neighbours are pre-existing fences, so every frontier reshape does the
+    // expensive connection work rather than a stone fast path.
+    let fence = aether_world::registry::blocks::default_state("minecraft:oak_fence").unwrap();
+    // Fill every odd coordinate in the region with a fence, so each changed
+    // (even-coordinate) cell has six unchanged fence neighbours.
+    for x in 0..64 {
+        for z in 0..64 {
+            for y in 300..332 {
+                if x % 2 == 1 || y % 2 == 1 || z % 2 == 1 {
+                    world.set_block(x, y, z, "minecraft:oak_fence").unwrap();
+                }
+            }
+        }
+    }
+    let mut fence_edit = BulkEdit::new(JournalActor(1));
+    let mut fences = 0;
+    'find: for x in (0..64).step_by(2) {
+        for z in (0..64).step_by(2) {
+            for y in (300..332).step_by(2) {
+                fence_edit.set(&world, x, y, z, fence).unwrap();
+                fences += 1;
+                if fences == 8_192 {
+                    break 'find;
+                }
+            }
+        }
+    }
+    let sparse_fence = fence_edit.commit_with_changes(&world).unwrap();
+    debug_assert_eq!(sparse_fence.result.changed, 8_192);
 
     let mut group = c.benchmark_group("bulk_publish");
     group.throughput(Throughput::Elements(blocks));
@@ -234,14 +260,40 @@ fn bench_bulk_publish(c: &mut Criterion) {
         )
     });
 
-    group.bench_function("settle_to_resend_step_real_encoder", |b| {
+    group.bench_function("last_settle_slice", |b| {
         b.iter_batched(
             || {
                 let mut publisher = BulkPublisher::new();
-                publisher.enqueue(transition.actor, transition.changes.clone());
+                publisher.enqueue(dense.actor, dense.changes.clone());
                 let mut sink = CountingSink::default();
-                let first = publisher.step(&world, &mut sink, PublishBudget::default());
-                debug_assert_eq!(first.remaining, 1, "the first slice must not finish it");
+                // 65,536 = 16 x 4,096: leave the final full seed slice.
+                for _ in 0..15 {
+                    publisher.step(&world, &mut sink, PublishBudget::default());
+                }
+                publisher
+            },
+            |mut publisher| {
+                let mut sink = CountingSink::default();
+                let progress = publisher.step(&world, &mut sink, PublishBudget::default());
+                black_box((progress, sink.columns, sink.hooks))
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("frontier_to_resend_step_real_encoder", |b| {
+        b.iter_batched(
+            || {
+                let mut publisher = BulkPublisher::new();
+                publisher.enqueue(dense.actor, dense.changes.clone());
+                let mut sink = CountingSink::default();
+                // Settle every seed, then drain the frontier down to one
+                // default slice so the measured step does a full frontier
+                // pass and enters Resend in the same tick.
+                while publisher.pending_seeds() > 0 || publisher.pending_frontier() > 4_096 {
+                    let p = publisher.step(&world, &mut sink, PublishBudget::default());
+                    debug_assert_eq!(p.columns, 0, "still settling");
+                }
                 publisher
             },
             |mut publisher| {
@@ -312,6 +364,28 @@ fn bench_bulk_publish(c: &mut Criterion) {
             || {
                 let mut publisher = BulkPublisher::new();
                 publisher.enqueue(sparse.actor, sparse.changes.clone());
+                publisher
+            },
+            |mut publisher| {
+                let mut sink = CountingSink::default();
+                let progress = publisher.step(&world, &mut sink, PublishBudget::default());
+                black_box((progress, sink.columns, sink.hooks))
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("fence_sparse_settle_step", |b| {
+        b.iter_batched(
+            || {
+                let mut publisher = BulkPublisher::new();
+                publisher.enqueue(sparse_fence.actor, sparse_fence.changes.clone());
+                let mut sink = CountingSink::default();
+                // The seed slice only reshapes changed cells; the expensive
+                // six-neighbour pass is the frontier step measured here.
+                while publisher.pending_seeds() > 0 {
+                    publisher.step(&world, &mut sink, PublishBudget::default());
+                }
                 publisher
             },
             |mut publisher| {
