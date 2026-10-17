@@ -216,20 +216,12 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
             }
         }
         ArgKind::Particle => {
-            // A particle id, then an optional `{…}` options object. Vanilla
-            // skips whitespace before the `{`, so `dust {…}` is the same
-            // argument as `dust{…}`; when no object follows, the cursor is
-            // left before that whitespace for the next argument.
-            let start = r.cursor;
-            let mut t = read_component(r)?;
-            let after_id = r.cursor;
-            r.skip_whitespace();
-            if r.peek() == Some('{') {
-                t.push_str(&r.read_component_token());
-            } else {
-                r.cursor = after_id;
-            }
-            Ok((Value::Text(t.clone()), r.text_from(start)))
+            // A particle id, then an optional `{…}` options object with **no
+            // whitespace** between them (`ParticleArgument` checks for `{`
+            // immediately after the id). Kept whole so the executor can hand
+            // the tail to its own parser.
+            let t = read_component(r)?;
+            Ok((Value::Text(t.clone()), t))
         }
         ArgKind::ScoreHolder => {
             let t = read_selector_token(r)?;

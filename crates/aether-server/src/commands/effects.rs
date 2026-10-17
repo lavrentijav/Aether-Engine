@@ -561,20 +561,21 @@ fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
         );
     };
     // Brigadier validates the bounded numeric arguments as it reads them,
-    // before the executor runs, so a negative count or speed wins over an
-    // unknown particle or an unresolvable position.
-    let count = int_arg(ctx, 4).unwrap_or(0);
-    if count < 0 {
-        return ctx.fail(lang::format(
-            lang::ARG_INTEGER_LOW,
-            &["0", &count.to_string()],
-        ));
-    }
+    // before the executor runs, so a negative speed or count wins over an
+    // unknown particle or an unresolvable position. `speed` is read before
+    // `count`.
     let speed = float_arg(ctx, 3).unwrap_or(0.0);
     if speed < 0.0 {
         return ctx.fail(lang::format(
             lang::ARG_FLOAT_LOW,
             &[&fmt_float(0.0), &fmt_float(speed)],
+        ));
+    }
+    let count = int_arg(ctx, 4).unwrap_or(0);
+    if count < 0 {
+        return ctx.fail(lang::format(
+            lang::ARG_INTEGER_LOW,
+            &["0", &count.to_string()],
         ));
     }
 
@@ -595,9 +596,8 @@ fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
             Err(detail) => return ctx.fail(invalid_options(detail)),
         }
     } else {
-        if options_text.is_some() {
-            return ctx.fail(invalid_options("this particle has no options"));
-        }
+        // Vanilla's `MapCodec.unit` ignores an object on a simple particle
+        // (`/particle flame{color:1}` is accepted and the object dropped).
         ParticleOptions::None
     };
 
@@ -638,8 +638,12 @@ fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
     };
     // `force` widens the range to 512 blocks; it does not target the whole
     // server, and the same range applies to explicitly selected viewers.
+    // Vanilla also skips a target in another level, so the sender's world
+    // scopes the set when the command has one.
+    let world = ctx.player().map(|handle| handle.world().to_string());
     let recipients: Vec<Arc<PlayerHandle>> = recipients
         .into_iter()
+        .filter(|handle| world.as_deref().map_or(true, |w| handle.world() == w))
         .filter(|handle| in_range(handle))
         .collect();
     if recipients.is_empty() {

@@ -1570,9 +1570,11 @@ fn particle_and_sound_commands_route_through_the_tree() {
             "/particle vibration{destination:{type:\"minecraft:block\",pos:[1,2,3]},arrival_in_ticks:10}",
             "minecraft:vibration",
         ),
-        // Vanilla allows whitespace before the options object, and an
-        // integer colour instead of a float list.
-        ("/particle dust {color:16711680,scale:1.0}", "minecraft:dust"),
+        // An integer colour is accepted as well as a float list.
+        ("/particle dust{color:16711680,scale:1.0}", "minecraft:dust"),
+        // Vanilla's `MapCodec.unit` ignores an options object on a simple
+        // particle.
+        ("/particle flame{color:1}", "minecraft:flame"),
         // count 0 means "as many as the client can render".
         ("/particle flame 0 64 0 0.5 0.5 0.5 0 0", "minecraft:flame"),
         // 1.21.11's registry name for ids 106/107 is `detection`.
@@ -1610,9 +1612,10 @@ fn particle_and_sound_commands_route_through_the_tree() {
             .starts_with("Can't parse particle options:"),
         "a bad colour list is an options error"
     );
-    assert_eq!(
-        one(&env, who, "/particle flame{color:1}"),
-        "Can't parse particle options: this particle has no options"
+    // No whitespace may separate the id from its options object.
+    assert_ne!(
+        one(&env, who, "/particle dust {color:[1.0,0.0,0.0],scale:1.0}"),
+        "Displaying particle minecraft:dust"
     );
     for bad in [
         "/particle block{block_state:\"minecraft:not_a_block\"}",

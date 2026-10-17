@@ -222,8 +222,8 @@ pub static PARTICLE_GROUPS: &[ParticleGroup] = &[
             ("minecraft:shriek", 99),
             ("minecraft:egg_crack", 100),
             ("minecraft:dust_plume", 101),
-            ("minecraft:trial_spawner_detected_player", 102),
-            ("minecraft:trial_spawner_detected_player_ominous", 103),
+            ("minecraft:trial_spawner_detection", 102),
+            ("minecraft:trial_spawner_detection_ominous", 103),
             ("minecraft:vault_connection", 104),
             ("minecraft:dust_pillar", 105),
             ("minecraft:ominous_spawning", 106),
@@ -337,8 +337,8 @@ pub static PARTICLE_GROUPS: &[ParticleGroup] = &[
             ("minecraft:shriek", 100),
             ("minecraft:egg_crack", 101),
             ("minecraft:dust_plume", 102),
-            ("minecraft:trial_spawner_detected_player", 103),
-            ("minecraft:trial_spawner_detected_player_ominous", 104),
+            ("minecraft:trial_spawner_detection", 103),
+            ("minecraft:trial_spawner_detection_ominous", 104),
             ("minecraft:vault_connection", 105),
             ("minecraft:dust_pillar", 106),
             ("minecraft:ominous_spawning", 107),
@@ -454,8 +454,8 @@ pub static PARTICLE_GROUPS: &[ParticleGroup] = &[
             ("minecraft:shriek", 101),
             ("minecraft:egg_crack", 102),
             ("minecraft:dust_plume", 103),
-            ("minecraft:trial_spawner_detected_player", 104),
-            ("minecraft:trial_spawner_detected_player_ominous", 105),
+            ("minecraft:trial_spawner_detection", 104),
+            ("minecraft:trial_spawner_detection_ominous", 105),
             ("minecraft:vault_connection", 106),
             ("minecraft:dust_pillar", 107),
             ("minecraft:ominous_spawning", 108),
@@ -572,8 +572,8 @@ pub static PARTICLE_GROUPS: &[ParticleGroup] = &[
             ("minecraft:shriek", 102),
             ("minecraft:egg_crack", 103),
             ("minecraft:dust_plume", 104),
-            ("minecraft:trial_spawner_detected_player", 105),
-            ("minecraft:trial_spawner_detected_player_ominous", 106),
+            ("minecraft:trial_spawner_detection", 105),
+            ("minecraft:trial_spawner_detection_ominous", 106),
             ("minecraft:vault_connection", 107),
             ("minecraft:dust_pillar", 108),
             ("minecraft:ominous_spawning", 109),
@@ -2982,6 +2982,7 @@ mod tests {
             particle_id(774, "minecraft:trial_spawner_detection"),
             Some(106)
         );
+        assert!(particle_exists("minecraft:trial_spawner_detection"));
         assert!(!particle_exists("minecraft:trial_spawner_detected_player"));
     }
 
