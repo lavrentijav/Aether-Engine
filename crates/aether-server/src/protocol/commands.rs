@@ -556,6 +556,24 @@ fn write_tree_for(p: &mut PacketOut, t: &CommandTree, parsers: Parsers) {
             ArgProperties::Flags(flags) => {
                 p.u8(flags);
             }
+            ArgProperties::IntegerBounds { min, max } => {
+                // Brigadier's `IntegerArgumentType` flags: bit 0 min, bit 1
+                // max, each followed by its `i32` when set.
+                let mut flags = 0u8;
+                if min.is_some() {
+                    flags |= 0x01;
+                }
+                if max.is_some() {
+                    flags |= 0x02;
+                }
+                p.u8(flags);
+                if let Some(min) = min {
+                    p.i32(min);
+                }
+                if let Some(max) = max {
+                    p.i32(max);
+                }
+            }
             ArgProperties::Time => {
                 // No field at all on the releases before 1.19.4.
                 if parsers.time_min() {
@@ -591,14 +609,15 @@ mod tests {
         None,
         VarInt,
         Byte,
+        Integer,
         Time,
     }
 
     fn prop_shape(name: &str, time_min: bool) -> Prop {
         match name {
             "brigadier:string" => Prop::VarInt,
-            "brigadier:integer"
-            | "brigadier:long"
+            "brigadier:integer" => Prop::Integer,
+            "brigadier:long"
             | "brigadier:float"
             | "brigadier:double"
             | "minecraft:entity"
@@ -650,6 +669,16 @@ mod tests {
                     Prop::None => {}
                     Prop::VarInt => properties.push(pin.var_int().unwrap()),
                     Prop::Byte => properties.push(pin.u8().unwrap() as i32),
+                    Prop::Integer => {
+                        let flags = pin.u8().unwrap();
+                        properties.push(flags as i32);
+                        if flags & 0x01 != 0 {
+                            properties.push(pin.i32().unwrap());
+                        }
+                        if flags & 0x02 != 0 {
+                            properties.push(pin.i32().unwrap());
+                        }
+                    }
                     Prop::Time => properties.push(pin.i32().unwrap()),
                 }
             }
@@ -1011,12 +1040,17 @@ mod tests {
             ArgKind::GreedyString,
             ArgKind::Message,
             ArgKind::Integer,
+            ArgKind::IntegerRange {
+                min: Some(0),
+                max: Some(10),
+            },
             ArgKind::Long,
             ArgKind::Float,
             ArgKind::Double,
             ArgKind::Bool,
             ArgKind::Entity,
             ArgKind::Entities,
+            ArgKind::Players,
             ArgKind::BlockPos,
             ArgKind::Vec3(true),
             ArgKind::Vec2(true),
@@ -1101,6 +1135,15 @@ mod tests {
                             }
                             Prop::Byte => {
                                 let _ = pin.u8().unwrap();
+                            }
+                            Prop::Integer => {
+                                let flags = pin.u8().unwrap();
+                                if flags & 0x01 != 0 {
+                                    let _ = pin.i32().unwrap();
+                                }
+                                if flags & 0x02 != 0 {
+                                    let _ = pin.i32().unwrap();
+                                }
                             }
                             Prop::Time => {
                                 let _ = pin.i32().unwrap();

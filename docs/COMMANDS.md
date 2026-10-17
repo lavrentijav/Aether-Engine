@@ -53,7 +53,7 @@ Server control and information.
 | `/save-on` | – | ✅ working | `node` | `minecraft.command.save-on` | 4 | `/save-on` |
 | `/save-off` | – | ✅ working | `node` | `minecraft.command.save-off` | 4 | `/save-off` |
 | `/list` | – | ✅ working | `everyone` | `minecraft.command.list` | 0 | `/list [uuids]` |
-| `/seed` | – | ✅ working | `node` | `minecraft.command.seed` | 2 | `/seed [<world>]` |
+| `/seed` | – | ✅ working | `node` | `minecraft.command.seed` | 2 | `/seed` |
 | `/version` | – | ✅ working | `node` | `minecraft.command.version` | 2 | `/version` |
 | `/setidletimeout` | – | ✅ working | `node` | `minecraft.command.setidletimeout` | 3 | `/setidletimeout <minutes>` |
 | `/transfer` | – | ✅ working | `node` | `minecraft.command.transfer` | 3 | `/transfer <hostname> [port] [players]` |

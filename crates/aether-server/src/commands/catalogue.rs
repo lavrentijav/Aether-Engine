@@ -403,7 +403,7 @@ pub const CATALOGUE: &[Command] = &[
         "minecraft.command.seed",
         2,
         Category::Server,
-        "/seed [<world>]",
+        "/seed",
     ),
     imp_node(
         "version",

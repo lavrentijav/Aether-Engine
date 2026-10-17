@@ -200,6 +200,10 @@ fn every_argument_kind_parses_a_valid_word() {
         ArgKind::GreedyString,
         ArgKind::Message,
         ArgKind::Integer,
+        ArgKind::IntegerRange {
+            min: Some(0),
+            max: Some(10),
+        },
         ArgKind::Long,
         ArgKind::Float,
         ArgKind::Double,
@@ -207,6 +211,7 @@ fn every_argument_kind_parses_a_valid_word() {
         ArgKind::Enum(&["a", "b"]),
         ArgKind::Entity,
         ArgKind::Entities,
+        ArgKind::Players,
         ArgKind::BlockPos,
         ArgKind::Vec3(true),
         ArgKind::Vec2(true),
@@ -231,7 +236,11 @@ fn every_argument_kind_parses_a_valid_word() {
     ];
     for &kind in kinds {
         let text = match kind {
-            ArgKind::Integer | ArgKind::Long | ArgKind::Float | ArgKind::Double => "1",
+            ArgKind::Integer
+            | ArgKind::IntegerRange { .. }
+            | ArgKind::Long
+            | ArgKind::Float
+            | ArgKind::Double => "1",
             ArgKind::Bool => "true",
             ArgKind::Enum(_) => "a",
             ArgKind::BlockPos | ArgKind::Vec3(_) => "~0 ~ ~",
@@ -281,11 +290,23 @@ fn the_wire_parser_and_properties_match_each_kind() {
     assert_eq!(ArgKind::BlockPos.properties(), ArgProperties::None);
     // The numeric bounds flags, and the entity/score-holder flags.
     assert_eq!(ArgKind::Integer.properties(), ArgProperties::Flags(0));
+    assert_eq!(
+        ArgKind::IntegerRange {
+            min: Some(0),
+            max: Some(65535)
+        }
+        .properties(),
+        ArgProperties::IntegerBounds {
+            min: Some(0),
+            max: Some(65535)
+        }
+    );
     assert_eq!(ArgKind::Long.properties(), ArgProperties::Flags(0));
     assert_eq!(ArgKind::Float.properties(), ArgProperties::Flags(0));
     assert_eq!(ArgKind::Double.properties(), ArgProperties::Flags(0));
     assert_eq!(ArgKind::Entity.properties(), ArgProperties::Flags(0x01));
     assert_eq!(ArgKind::Entities.properties(), ArgProperties::Flags(0x00));
+    assert_eq!(ArgKind::Players.properties(), ArgProperties::Flags(0x02));
     assert_eq!(
         ArgKind::ScoreHolder.properties(),
         ArgProperties::Flags(0x00)
@@ -306,6 +327,10 @@ const ALL_KINDS: &[ArgKind] = &[
     ArgKind::GreedyString,
     ArgKind::Message,
     ArgKind::Integer,
+    ArgKind::IntegerRange {
+        min: Some(0),
+        max: Some(10),
+    },
     ArgKind::Long,
     ArgKind::Float,
     ArgKind::Double,
@@ -313,6 +338,7 @@ const ALL_KINDS: &[ArgKind] = &[
     ArgKind::Enum(&["a", "b"]),
     ArgKind::Entity,
     ArgKind::Entities,
+    ArgKind::Players,
     ArgKind::BlockPos,
     ArgKind::Vec3(true),
     ArgKind::Vec2(true),

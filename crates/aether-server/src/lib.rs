@@ -63,16 +63,16 @@ use session::DemoWorld;
 
 /// Flush dirty sub-chunks to disk every `secs` seconds. A clean stop
 /// (SIGINT/SIGTERM, see [`ops`]) flushes too; this bounds what a crash loses.
-fn spawn_autosave(world: Arc<DemoWorld>, secs: u64) {
+fn spawn_autosave(world: Arc<DemoWorld>, registry: SharedRegistry, secs: u64) {
     let period = Duration::from_secs(secs.max(1));
     std::thread::spawn(move || loop {
         std::thread::sleep(period);
         if !commands::server::autosave_enabled() {
             continue;
         }
-        // The scheduled queues are not part of the world's dirty set, so they
-        // are written here, beside the chunks they belong to.
-        if let Err(e) = commands::server::save_world(&world) {
+        // Players and the scheduled queues are not part of the world's dirty
+        // set, so they are written here, beside the chunks they belong to.
+        if let Err(e) = commands::server::save_all(&world, &registry) {
             log::error(&format!("autosave failed: {e}"));
         }
     });
@@ -333,7 +333,11 @@ pub fn run() -> std::process::ExitCode {
     ));
     warn_if_exposed(&cfg);
 
-    spawn_autosave(Arc::clone(&world), cfg.server.autosave_secs);
+    spawn_autosave(
+        Arc::clone(&world),
+        Arc::clone(&registry),
+        cfg.server.autosave_secs,
+    );
     ops::install_signal_handlers();
     ops::spawn_shutdown(Arc::clone(&registry), Arc::clone(&world));
     ops::spawn_monitor(

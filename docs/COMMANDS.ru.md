@@ -53,7 +53,7 @@
 | `/save-on` | – | ✅ работает | `node` | `minecraft.command.save-on` | 4 | `/save-on` |
 | `/save-off` | – | ✅ работает | `node` | `minecraft.command.save-off` | 4 | `/save-off` |
 | `/list` | – | ✅ работает | `everyone` | `minecraft.command.list` | 0 | `/list [uuids]` |
-| `/seed` | – | ✅ работает | `node` | `minecraft.command.seed` | 2 | `/seed [<world>]` |
+| `/seed` | – | ✅ работает | `node` | `minecraft.command.seed` | 2 | `/seed` |
 | `/version` | – | ✅ работает | `node` | `minecraft.command.version` | 2 | `/version` |
 | `/setidletimeout` | – | ✅ работает | `node` | `minecraft.command.setidletimeout` | 3 | `/setidletimeout <minutes>` |
 | `/transfer` | – | ✅ работает | `node` | `minecraft.command.transfer` | 3 | `/transfer <hostname> [port] [players]` |

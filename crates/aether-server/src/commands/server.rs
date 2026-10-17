@@ -13,11 +13,13 @@
 //! /publish [allow-commands] [gamemode] [port]
 //! ```
 //!
-//! The wording is 1.21.11 `en_us`. `/publish` is registered by the dedicated
-//! server in vanilla and fails there (`commands.publish.failed`), which is the
-//! behaviour kept here. `/save-all` and `/stop` use the same save and stop paths
-//! as the signal handler, so the console, RCON, a player and SIGTERM all leave
-//! the world in the same state.
+//! The wording and grammar are 1.21.11 `en_us` and `commands.json`. Note that
+//! 1.21.11's `/seed` takes **no** argument (the brief's `[<world>]` form is not
+//! in the release), so the declared tree is bare `/seed`. `/publish` exists on
+//! the dedicated server and fails there (`commands.publish.failed`), which is
+//! the behaviour kept here. `/save-all` and `/stop` use the same save and stop
+//! paths as the signal handler, so the console, RCON, a player and SIGTERM all
+//! leave the world in the same state.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -49,7 +51,6 @@ mod text {
     pub const TRANSFER_NO_PLAYERS: &str = "Must specify at least one player to transfer";
     pub const PUBLISH_FAILED: &str = "Unable to host local game";
     pub const NO_PLAYER: &str = "No player was found";
-    pub const UNKNOWN_DIMENSION: &str = "Unknown dimension '%s'";
 }
 
 /// Automatic saves (the periodic chunk/clock flush and player snapshots).
@@ -80,9 +81,23 @@ fn set_idle_timeout_minutes(minutes: u64) {
     IDLE_TIMEOUT_MINUTES.store(minutes, Ordering::Relaxed);
 }
 
-/// Flush the world the way an autosave or `/save-all` does.
-pub(crate) fn save_world(world: &DemoWorld) -> Result<(), String> {
+/// Save every online player's state as well as the world, as `/save-all` (and
+/// vanilla's autosave) does.
+pub(crate) fn save_all(
+    world: &DemoWorld,
+    registry: &crate::players::SharedRegistry,
+) -> Result<(), String> {
     let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for player in registry.snapshot() {
+        if player.full() {
+            crate::session::save_inventory(&player, world);
+            crate::session::save_player(&player, world);
+        }
+    }
+    flush_world(world)
+}
+
+fn flush_world(world: &DemoWorld) -> Result<(), String> {
     crate::game::blockticks::save(world);
     crate::game::fluids::save(world);
     crate::game::tick::save_time(world);
@@ -117,21 +132,26 @@ pub(crate) fn nodes() -> Vec<Node> {
             .executable(exec_list)
             .then(Builder::literal("uuids").executable(exec_list_uuids))
             .build(),
-        tree::with_usage(
-            Builder::literal("seed")
-                .requires(requirement(2, "minecraft.command.seed"))
-                .executable(exec_seed)
-                .then(Builder::arg("world", tree::ArgKind::ResourceLocation).executable(exec_seed))
-                .build(),
-            "[<world>]",
-        ),
+        Builder::literal("seed")
+            .requires(requirement(2, "minecraft.command.seed"))
+            .executable(exec_seed)
+            .build(),
         Builder::literal("version")
             .requires(requirement(2, "minecraft.command.version"))
             .executable(exec_version)
             .build(),
         Builder::literal("setidletimeout")
             .requires(requirement(3, "minecraft.command.setidletimeout"))
-            .then(Builder::arg("minutes", tree::ArgKind::Integer).executable(exec_setidletimeout))
+            .then(
+                Builder::arg(
+                    "minutes",
+                    tree::ArgKind::IntegerRange {
+                        min: Some(0),
+                        max: None,
+                    },
+                )
+                .executable(exec_setidletimeout),
+            )
             .build(),
         Builder::literal("transfer")
             .requires(requirement(3, "minecraft.command.transfer"))
@@ -139,12 +159,18 @@ pub(crate) fn nodes() -> Vec<Node> {
                 Builder::arg("hostname", tree::ArgKind::Quotable)
                     .executable(exec_transfer)
                     .then(
-                        Builder::arg("port", tree::ArgKind::Integer)
-                            .executable(exec_transfer)
-                            .then(
-                                Builder::arg("players", tree::ArgKind::Entities)
-                                    .executable(exec_transfer),
-                            ),
+                        Builder::arg(
+                            "port",
+                            tree::ArgKind::IntegerRange {
+                                min: Some(1),
+                                max: Some(65535),
+                            },
+                        )
+                        .executable(exec_transfer)
+                        .then(
+                            Builder::arg("players", tree::ArgKind::Players)
+                                .executable(exec_transfer),
+                        ),
                     ),
             )
             .build(),
@@ -158,8 +184,14 @@ pub(crate) fn nodes() -> Vec<Node> {
                         Builder::arg("gamemode", tree::ArgKind::Gamemode)
                             .executable(exec_publish)
                             .then(
-                                Builder::arg("port", tree::ArgKind::Integer)
-                                    .executable(exec_publish),
+                                Builder::arg(
+                                    "port",
+                                    tree::ArgKind::IntegerRange {
+                                        min: Some(0),
+                                        max: Some(65535),
+                                    },
+                                )
+                                .executable(exec_publish),
                             ),
                     ),
             )
@@ -173,7 +205,7 @@ fn exec_stop(_ctx: &mut Ctx) -> Reply {
 }
 
 fn exec_save_all(ctx: &mut Ctx) -> Reply {
-    match save_world(ctx.world) {
+    match save_all(ctx.world, ctx.registry) {
         Ok(()) => Reply::one(text::SAVED),
         Err(e) => {
             crate::log::error(&format!("save-all failed: {e}"));
@@ -217,11 +249,9 @@ fn list(ctx: &Ctx, uuids: bool) -> Reply {
             None => true,
         })
         .collect();
-    players.sort_by(|a, b| {
-        a.name
-            .to_ascii_lowercase()
-            .cmp(&b.name.to_ascii_lowercase())
-    });
+    // Vanilla prints the player list in connection order; entity ids are
+    // allocated in that order.
+    players.sort_by_key(|player| player.entity_id);
     let names: Vec<String> = players
         .iter()
         .map(|player| {
@@ -248,15 +278,7 @@ fn list(ctx: &Ctx, uuids: bool) -> Reply {
     ))
 }
 
-fn exec_seed(ctx: &mut Ctx) -> Reply {
-    if let Some(arg) = ctx.args.first() {
-        let Value::ResourceLocation(world) = &arg.value else {
-            return ctx.fail(lang::format(text::UNKNOWN_DIMENSION, &[&arg.text]));
-        };
-        if world != "minecraft:overworld" {
-            return ctx.fail(lang::format(text::UNKNOWN_DIMENSION, &[&arg.text]));
-        }
-    }
+fn exec_seed(_ctx: &mut Ctx) -> Reply {
     Reply::one(lang::format(text::SEED, &[&crate::seed().to_string()]))
 }
 
@@ -534,6 +556,14 @@ mod tests {
         assert_eq!(one(&env, "/save-all flush"), text::SAVED);
         assert_eq!(one(&env, "/save-off"), text::SAVE_DISABLED);
         assert_eq!(one(&env, "/save-all"), text::SAVED);
+        // Vanilla's save-all writes the online players too, not only chunks.
+        assert!(
+            env.world
+                .get_meta(&crate::game::player::key(env.tester.uuid))
+                .unwrap()
+                .is_some(),
+            "the player state was saved"
+        );
     }
 
     #[test]
@@ -542,7 +572,7 @@ mod tests {
         std::thread::scope(|scope| {
             for _ in 0..2 {
                 scope.spawn(|| {
-                    save_world(&env.world).expect("a concurrent save succeeds");
+                    save_all(&env.world, &env.registry).expect("a concurrent save succeeds");
                 });
             }
         });
@@ -571,7 +601,7 @@ mod tests {
         assert_eq!(
             one(&env, "/list"),
             format!(
-                "There are 2 of a max of {} players online: bob, tester",
+                "There are 2 of a max of {} players online: tester, bob",
                 crate::max_players()
             )
         );
@@ -593,16 +623,18 @@ mod tests {
     }
 
     #[test]
-    fn seed_uses_the_config_seed_and_refuses_unloaded_dimensions() {
+    fn seed_uses_the_config_seed_and_takes_no_argument() {
         let env = env(774);
+        // 1.21.11 `commands.json` declares `/seed` with no argument; the
+        // brief's `[<world>]` form is not in the release.
         assert_eq!(one(&env, "/seed"), format!("Seed: {}", crate::seed()));
         assert_eq!(
-            one(&env, "/seed overworld"),
-            format!("Seed: {}", crate::seed())
+            err(&env, "/seed overworld"),
+            "Incorrect argument for command"
         );
         assert_eq!(
             err(&env, "/seed the_nether"),
-            "Unknown dimension 'the_nether'"
+            "Incorrect argument for command"
         );
     }
 
@@ -698,6 +730,17 @@ mod tests {
             err(&env, "/transfer example.com 25565 @a[distance=1000..]"),
             text::TRANSFER_NO_PLAYERS
         );
+        // The argument is `EntityArgument.players`; a non-player selector is
+        // refused, and a type=player narrowing is accepted.
+        assert_eq!(
+            err(&env, "/transfer example.com 25565 @e[type=minecraft:cow]"),
+            "Only players may be affected by this command, but the provided selector includes entities"
+        );
+        assert_eq!(
+            one(&env, "/transfer example.com 25565 @a[name=tester]"),
+            "Transferring tester to example.com:25565"
+        );
+        assert!(wait_disconnected(&env.tester));
     }
 
     #[test]
@@ -707,6 +750,14 @@ mod tests {
         assert_eq!(
             err(&env, "/publish true creative 25565"),
             text::PUBLISH_FAILED
+        );
+        assert_eq!(
+            err(&env, "/publish true creative 70000"),
+            "Integer must not be more than 65535: found 70000"
+        );
+        assert_eq!(
+            err(&env, "/publish true creative -1"),
+            "Integer must not be less than 0: found -1"
         );
     }
 

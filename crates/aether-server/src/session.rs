@@ -780,7 +780,6 @@ fn play_loop(
             }
         };
         last_heard = Instant::now();
-        handle.touch_input();
         // The client's resource-pack status, if its codec reports one. Only a
         // `successfully_loaded` client may be shown carrier states, so the
         // moment it loads the pack the whole view is re-sent with carriers —
@@ -795,6 +794,12 @@ fn play_loop(
         let full = handle.full();
         let dead = full && handle.game().dead;
         let event = handle.codec.decode(&pkt, handle.pos());
+        // Vanilla's idle clock is reset by actions, not by the keep-alive
+        // replies the client sends on its own, so an AFK client still times
+        // out.
+        if !matches!(&event, ClientEvent::KeepAlive(_)) {
+            handle.touch_input();
+        }
         // Whatever this packet does to items — a click, a drop, a craft, a
         // block placed from the hand — is journalled when the scope ends.
         let _items = (full && may_move_items(&event))

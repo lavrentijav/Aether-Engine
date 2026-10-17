@@ -260,6 +260,16 @@ pub enum ArgKind {
     Entity,
     /// `minecraft:entities`.
     Entities,
+    /// `minecraft:entity` restricted to players, multiple
+    /// (`EntityArgument.players`).
+    Players,
+    /// `brigadier:integer` with vanilla's bounds.
+    IntegerRange {
+        /// The smallest accepted value, if bounded below.
+        min: Option<i32>,
+        /// The largest accepted value, if bounded above.
+        max: Option<i32>,
+    },
     /// `minecraft:block_pos`.
     BlockPos,
     /// `minecraft:vec3`. The flag is vanilla's `centerIntegers`: `true` (the
@@ -332,12 +342,12 @@ impl ArgKind {
             // CMD task gives the kind that data.
             ArgKind::ResourceOrTag => "brigadier:string",
             ArgKind::Message => "minecraft:message",
-            ArgKind::Integer => "brigadier:integer",
+            ArgKind::Integer | ArgKind::IntegerRange { .. } => "brigadier:integer",
             ArgKind::Long => "brigadier:long",
             ArgKind::Float => "brigadier:float",
             ArgKind::Double => "brigadier:double",
             ArgKind::Bool => "brigadier:bool",
-            ArgKind::Entity | ArgKind::Entities => "minecraft:entity",
+            ArgKind::Entity | ArgKind::Entities | ArgKind::Players => "minecraft:entity",
             ArgKind::BlockPos => "minecraft:block_pos",
             ArgKind::Vec3(_) => "minecraft:vec3",
             ArgKind::Vec2(_) => "minecraft:vec2",
@@ -408,13 +418,16 @@ impl ArgKind {
             | ArgKind::Rotation
             | ArgKind::Uuid => ArgProperties::None,
             // The numeric kinds write a flags byte with the min/max bits;
-            // neither is present.
+            // an unbounded one has neither bit set.
             ArgKind::Integer | ArgKind::Long | ArgKind::Float | ArgKind::Double => {
                 ArgProperties::Flags(0)
             }
-            // `0x01` is "single", as vanilla writes `EntityArgumentType`.
+            ArgKind::IntegerRange { min, max } => ArgProperties::IntegerBounds { min, max },
+            // `0x01` is "single", `0x02` "players", as vanilla writes
+            // `EntityArgumentType`.
             ArgKind::Entity => ArgProperties::Flags(0x01),
             ArgKind::Entities => ArgProperties::Flags(0x00),
+            ArgKind::Players => ArgProperties::Flags(0x02),
             ArgKind::ScoreHolder => ArgProperties::Flags(0x00),
             // An `i32` minimum from 1.19.4 on, and no field before that; the
             // serializer decides from the codec's parser generation.
@@ -442,9 +455,16 @@ pub enum ArgProperties {
     None,
     /// A VarInt: the string mode (`0` word, `1` quotable, `2` greedy).
     VarInt(i32),
-    /// A single flags byte: the numeric bounds bits, or the entity and
-    /// score-holder flags.
+    /// A single flags byte: the entity and score-holder flags.
     Flags(u8),
+    /// A flags byte followed by the bounded `i32` values it announces: the
+    /// `brigadier:integer` min/max form.
+    IntegerBounds {
+        /// The lower bound, when present (`0x01`).
+        min: Option<i32>,
+        /// The upper bound, when present (`0x02`).
+        max: Option<i32>,
+    },
     /// An `i32` minimum — `minecraft:time` from 1.19.4 on, and no field at all
     /// before that.
     Time,
