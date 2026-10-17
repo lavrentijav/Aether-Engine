@@ -81,16 +81,11 @@ pub fn spawn_shutdown(registry: SharedRegistry, world: Arc<DemoWorld>) {
             crate::plugins::shutdown();
             let players = registry.snapshot();
             for p in &players {
-                if p.full() {
-                    crate::session::save_inventory(p, &world);
-                    crate::session::save_player(p, &world);
-                }
                 p.disconnect("server stopping");
             }
-            crate::game::tick::save_time(&world);
-            crate::game::blockticks::save(&world);
-            crate::game::fluids::save(&world);
-            match world.flush() {
+            // The same locked save `/save-all` and the autosave use, so a
+            // `/save-all` racing `/stop` cannot flush at the same time.
+            match crate::commands::server::save_players_and_world(&world, &players) {
                 Ok(()) => crate::log::info(&format!(
                     "stopped cleanly ({} player(s) saved)",
                     players.len()

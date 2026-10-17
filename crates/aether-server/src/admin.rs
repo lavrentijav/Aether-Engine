@@ -545,20 +545,20 @@ pub fn admit(name: &str, uuid: u128, ip: Option<IpAddr>, cfg: &Config) -> Result
 // ---------------------------------------------------------------------------
 
 /// A resolved command target: an online handle, or an offline profile.
-enum Target {
+pub(crate) enum Target {
     Online(Arc<PlayerHandle>),
     Offline { name: String, uuid: u128 },
 }
 
 impl Target {
-    fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         match self {
             Target::Online(handle) => &handle.name,
             Target::Offline { name, .. } => name,
         }
     }
 
-    fn uuid(&self) -> u128 {
+    pub(crate) fn uuid(&self) -> u128 {
         match self {
             Target::Online(handle) => handle.uuid,
             Target::Offline { uuid, .. } => *uuid,
@@ -619,7 +619,7 @@ fn online_source<'a>(registry: &'a SharedRegistry, source: Source<'a>) -> Online
 ///
 /// A selector only names online players; a plain name may name an offline
 /// profile when `allow_offline` (operators, bans, pardons, whitelist).
-fn resolve_targets(
+pub(crate) fn resolve_targets(
     registry: &SharedRegistry,
     source: Source<'_>,
     text: &str,

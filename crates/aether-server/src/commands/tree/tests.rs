@@ -200,6 +200,10 @@ fn every_argument_kind_parses_a_valid_word() {
         ArgKind::GreedyString,
         ArgKind::Message,
         ArgKind::Integer,
+        ArgKind::IntegerRange {
+            min: Some(0),
+            max: Some(10),
+        },
         ArgKind::Long,
         ArgKind::Float,
         ArgKind::Double,
@@ -207,6 +211,7 @@ fn every_argument_kind_parses_a_valid_word() {
         ArgKind::Enum(&["a", "b"]),
         ArgKind::Entity,
         ArgKind::Entities,
+        ArgKind::Players,
         ArgKind::BlockPos,
         ArgKind::Vec3(true),
         ArgKind::Vec2(true),
@@ -231,7 +236,11 @@ fn every_argument_kind_parses_a_valid_word() {
     ];
     for &kind in kinds {
         let text = match kind {
-            ArgKind::Integer | ArgKind::Long | ArgKind::Float | ArgKind::Double => "1",
+            ArgKind::Integer
+            | ArgKind::IntegerRange { .. }
+            | ArgKind::Long
+            | ArgKind::Float
+            | ArgKind::Double => "1",
             ArgKind::Bool => "true",
             ArgKind::Enum(_) => "a",
             ArgKind::BlockPos | ArgKind::Vec3(_) => "~0 ~ ~",
@@ -281,11 +290,23 @@ fn the_wire_parser_and_properties_match_each_kind() {
     assert_eq!(ArgKind::BlockPos.properties(), ArgProperties::None);
     // The numeric bounds flags, and the entity/score-holder flags.
     assert_eq!(ArgKind::Integer.properties(), ArgProperties::Flags(0));
+    assert_eq!(
+        ArgKind::IntegerRange {
+            min: Some(0),
+            max: Some(65535)
+        }
+        .properties(),
+        ArgProperties::IntegerBounds {
+            min: Some(0),
+            max: Some(65535)
+        }
+    );
     assert_eq!(ArgKind::Long.properties(), ArgProperties::Flags(0));
     assert_eq!(ArgKind::Float.properties(), ArgProperties::Flags(0));
     assert_eq!(ArgKind::Double.properties(), ArgProperties::Flags(0));
     assert_eq!(ArgKind::Entity.properties(), ArgProperties::Flags(0x01));
     assert_eq!(ArgKind::Entities.properties(), ArgProperties::Flags(0x00));
+    assert_eq!(ArgKind::Players.properties(), ArgProperties::Flags(0x02));
     assert_eq!(
         ArgKind::ScoreHolder.properties(),
         ArgProperties::Flags(0x00)
@@ -306,6 +327,10 @@ const ALL_KINDS: &[ArgKind] = &[
     ArgKind::GreedyString,
     ArgKind::Message,
     ArgKind::Integer,
+    ArgKind::IntegerRange {
+        min: Some(0),
+        max: Some(10),
+    },
     ArgKind::Long,
     ArgKind::Float,
     ArgKind::Double,
@@ -313,6 +338,7 @@ const ALL_KINDS: &[ArgKind] = &[
     ArgKind::Enum(&["a", "b"]),
     ArgKind::Entity,
     ArgKind::Entities,
+    ArgKind::Players,
     ArgKind::BlockPos,
     ArgKind::Vec3(true),
     ArgKind::Vec2(true),
@@ -1302,11 +1328,10 @@ fn help_renders_from_the_tree_with_usages_and_stub_marks() {
         one(&env, &env.tester, "/help gm"),
         "/gamemode (gm) <gamemode> [<targets>]"
     );
-    // A specified-but-unimplemented command is listed and marked. (`/stop` and
-    // `/save-all` are CMD-07 now, so a CMD-09 stub like `/save-on` stands in.)
+    // A specified-but-unimplemented command is listed and marked.
     assert_eq!(
-        one(&env, &env.tester, "/help save-on"),
-        "/save-on — not implemented yet (CMD-09)"
+        one(&env, &env.tester, "/help xp"),
+        "/experience (xp) — not implemented yet (CMD-10)"
     );
     // The `?` alias routes to the same node.
     assert_eq!(
@@ -1348,7 +1373,7 @@ fn help_with_no_argument_lists_the_visible_tree_paged() {
     );
     assert!(
         all.iter()
-            .any(|l| l.contains("/save-on (not implemented yet)")),
+            .any(|l| l.contains("/experience (xp) (not implemented yet)")),
         "{all:?}"
     );
     // `all_help` left the pager on the last page; run `/help` again so the
@@ -1465,18 +1490,18 @@ fn a_function_is_silenced_while_a_player_keeps_their_errors() {
 fn the_stub_registry_is_on_the_tree() {
     let env = env();
     // A specified-but-unimplemented command answers with its task id, and its
-    // op level is enforced by the tree. (`/stop` and `/save-all` are CMD-07.)
-    assert_eq!(
-        one(&env, &env.tester, "/save-on"),
-        "/save-on is not implemented yet (CMD-09)"
-    );
-    assert_eq!(
-        one(&env, &env.bob, "/save-on"),
-        "You do not have permission to run this command."
-    );
+    // op level is enforced by the tree.
     assert_eq!(
         one(&env, &env.tester, "/xp"),
         "/experience is not implemented yet (CMD-10)"
+    );
+    assert_eq!(
+        one(&env, &env.bob, "/xp"),
+        "You do not have permission to run this command."
+    );
+    assert_eq!(
+        one(&env, &env.tester, "/attribute"),
+        "/attribute is not implemented yet (CMD-10)"
     );
 }
 

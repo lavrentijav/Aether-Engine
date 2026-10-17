@@ -98,6 +98,8 @@ pub struct PlayerHandle {
     /// The last measured keep-alive round trip, in milliseconds. Read by the
     /// `%ping%` placeholder; `0` until the first reply arrives.
     ping_ms: std::sync::atomic::AtomicU32,
+    /// When anything last arrived from this client, for `/setidletimeout`.
+    last_input: Mutex<std::time::Instant>,
     /// Staff accountability state: vanish, spectate and the anti-xray
     /// override. See [`crate::staff`].
     staff: crate::staff::StaffState,
@@ -130,6 +132,16 @@ impl PlayerHandle {
     /// first reply).
     pub fn ping(&self) -> u32 {
         self.ping_ms.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record that the client sent something, for `/setidletimeout`.
+    pub fn touch_input(&self) {
+        *self.last_input.lock().unwrap() = std::time::Instant::now();
+    }
+
+    /// How long this client has been silent.
+    pub fn idle_for(&self) -> std::time::Duration {
+        self.last_input.lock().unwrap().elapsed()
     }
 
     /// Borrow this player's chat/command logging rate limiter. See
@@ -446,6 +458,20 @@ impl PlayerHandle {
             .flatten()
     }
 
+    /// Send the vanilla Transfer packet and close the connection once it has
+    /// been written. `false` when the socket was already closed.
+    pub fn transfer(&self, host: &str, port: u16, world: &dyn BlockSource) -> bool {
+        let frames = self.render(
+            &ServerEvent::Transfer {
+                host: host.to_string(),
+                port,
+            },
+            world,
+        );
+        self.outbox
+            .push_then_close(frames, "Transferred to another server")
+    }
+
     /// Disconnect this player: their socket is shut down and their own thread
     /// leaves the game. The first reason given is the one logged.
     pub fn disconnect(&self, reason: &str) {
@@ -519,6 +545,7 @@ impl PlayerHandle {
             sidebar: Mutex::new(None),
             tab: Mutex::new(None),
             ping_ms: std::sync::atomic::AtomicU32::new(0),
+            last_input: Mutex::new(std::time::Instant::now()),
             staff: crate::staff::StaffState::default(),
             chat_log: Mutex::new(crate::chatlog::LogLimiter::new()),
         })
@@ -567,6 +594,7 @@ impl Registry {
             sidebar: Mutex::new(None),
             tab: Mutex::new(None),
             ping_ms: std::sync::atomic::AtomicU32::new(0),
+            last_input: Mutex::new(std::time::Instant::now()),
             staff: crate::staff::StaffState::default(),
             chat_log: Mutex::new(crate::chatlog::LogLimiter::new()),
         });

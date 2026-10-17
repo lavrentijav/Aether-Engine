@@ -1905,7 +1905,7 @@ mod imp {
             // specified-but-unimplemented stubs alike.
             let names = super::reserved_command_names();
             assert!(names.iter().any(|n| n == "give"), "implemented core name");
-            assert!(names.iter().any(|n| n == "stop"), "CMD-09 stub");
+            assert!(names.iter().any(|n| n == "stop"), "core server command");
             assert!(names.iter().any(|n| n == "xp"), "a stub alias");
             assert!(!names.iter().any(|n| n == "hello"));
         }

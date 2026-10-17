@@ -73,6 +73,8 @@ pub struct Packets {
     /// voice plugin to carry the Simple Voice Chat and Plasmo Voice handshake.
     /// `-1` on a release whose id this table does not carry.
     pub cb_custom_payload: i32,
+    /// The clientbound transfer packet, added in 1.20.5 (766).
+    pub cb_transfer: i32,
     pub sb_accept_teleportation: i32,
     pub sb_chat_command: i32,
     pub sb_chat_command_signed: i32,
@@ -773,6 +775,17 @@ mod tests {
         assert_eq!(V26_1.packets.sb_attack, 1);
         assert_eq!(V26_3.packets.sb_swing, -1);
         assert!(V26_3.packets.sb_punch > 0);
+        // Transfer arrived in 1.20.5 and moved in 1.21.3, 1.21.9 and 26.3.
+        assert_eq!(V1_20_2.packets.cb_transfer, -1);
+        assert_eq!(V1_20_4.packets.cb_transfer, -1);
+        assert_eq!(V1_20_5.packets.cb_transfer, 0x73);
+        assert_eq!(V1_21_1.packets.cb_transfer, 0x73);
+        assert_eq!(V1_21_3.packets.cb_transfer, 0x7A);
+        assert_eq!(V1_21_9.packets.cb_transfer, 0x7F);
+        assert_eq!(V1_21_11.packets.cb_transfer, 0x7F);
+        assert_eq!(V26_1.packets.cb_transfer, 0x81);
+        assert_eq!(V26_2.packets.cb_transfer, 0x81);
+        assert_eq!(V26_3.packets.cb_transfer, 0x84);
     }
 
     #[test]

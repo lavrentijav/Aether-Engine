@@ -42,6 +42,8 @@ struct Queue {
     bytes: usize,
     /// Why the connection was closed, once it has been.
     closed: Option<String>,
+    /// Why the connection should close after the queued frames are written.
+    closing: Option<String>,
 }
 
 /// One connection's outgoing queue.
@@ -68,6 +70,7 @@ impl Outbox {
                 frames: VecDeque::new(),
                 bytes: 0,
                 closed: None,
+                closing: None,
             }),
             ready: Condvar::new(),
             room: Condvar::new(),
@@ -92,7 +95,7 @@ impl Outbox {
     /// [`LIMIT`].
     pub fn push(&self, frames: Vec<Vec<u8>>) -> bool {
         let mut q = self.queue.lock().unwrap();
-        if q.closed.is_some() {
+        if q.closed.is_some() || q.closing.is_some() {
             return false;
         }
         let size: usize = frames.iter().map(Vec::len).sum();
@@ -104,6 +107,28 @@ impl Outbox {
         }
         q.bytes += size;
         q.frames.extend(frames);
+        self.ready.notify_one();
+        true
+    }
+
+    /// Queue `frames` and close once they have been written, which is how the
+    /// vanilla Transfer packet is followed by a disconnect without dropping
+    /// the packet. Returns `false` when the connection is already closing.
+    pub fn push_then_close(&self, frames: Vec<Vec<u8>>, reason: &str) -> bool {
+        let mut q = self.queue.lock().unwrap();
+        if q.closed.is_some() || q.closing.is_some() {
+            return false;
+        }
+        let size: usize = frames.iter().map(Vec::len).sum();
+        if q.bytes + size > LIMIT {
+            let message = format!("not reading ({} MiB queued)", q.bytes >> 20);
+            drop(q);
+            self.close(&message);
+            return false;
+        }
+        q.bytes += size;
+        q.frames.extend(frames);
+        q.closing = Some(reason.to_string());
         self.ready.notify_one();
         true
     }
@@ -135,6 +160,7 @@ impl Outbox {
         if q.closed.is_none() {
             q.closed = Some(reason.to_string());
         }
+        q.closing = None;
         q.frames.clear();
         q.bytes = 0;
         drop(q);
@@ -158,10 +184,19 @@ impl Outbox {
         loop {
             let batch: Vec<Vec<u8>> = {
                 let mut q = self.queue.lock().unwrap();
-                while q.frames.is_empty() && q.closed.is_none() {
+                while q.frames.is_empty() && q.closed.is_none() && q.closing.is_none() {
                     q = self.ready.wait(q).unwrap();
                 }
                 if q.closed.is_some() {
+                    return;
+                }
+                if q.frames.is_empty() {
+                    if let Some(reason) = q.closing.take() {
+                        q.closed = Some(reason);
+                        drop(q);
+                        self.socket.shutdown();
+                        self.room.notify_all();
+                    }
                     return;
                 }
                 q.frames.drain(..).collect()
@@ -213,6 +248,23 @@ mod tests {
         let mut got = [0u8; 5];
         client.read_exact(&mut got).unwrap();
         assert_eq!(&got, b"abcde");
+    }
+
+    #[test]
+    fn a_close_after_drain_writes_the_last_frames_before_shutting_down() {
+        let (conn, mut client) = pair();
+        let out = Outbox::start(conn, "t").unwrap();
+        assert!(out.push_then_close(vec![b"transfer".to_vec()], "transferred"));
+        let mut got = [0u8; 8];
+        client.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"transfer");
+        for _ in 0..100 {
+            if out.closed().as_deref() == Some("transferred") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the connection did not close after the frame was written");
     }
 
     #[test]

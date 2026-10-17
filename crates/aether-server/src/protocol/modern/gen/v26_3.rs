@@ -7,6 +7,7 @@ use crate::protocol::nbt::Nbt;
 pub static PACKETS: Packets = Packets {
     sb_custom_payload: -1,
     cb_custom_payload: -1,
+    cb_transfer: 132,
     cb_add_entity: 1,
     cb_animate: 2,
     cb_swing_animation: 123,
