@@ -158,6 +158,11 @@ interface players {
     by-name: func(name: string) -> option<player>;
     /// An online player by session entity id.
     by-id: func(id: u64) -> option<player>;
+    /// A player's 128-bit UUID, split into low/high halves for the component
+    /// model. `none` when the player is offline or the host cannot resolve it.
+    /// A plugin keys persistent per-player state (stats, playtime, a link code)
+    /// by UUID, so a rename (CMD-38) maps to the same record.
+    uuid: func(p: player) -> option<tuple<u64, u64>>;
     /// The last known name of a possibly-offline player.
     offline-name: func(uuid-low: u64, uuid-high: u64) -> option<string>;
     /// Move a player, searching for a safe spot; error reason on failure.

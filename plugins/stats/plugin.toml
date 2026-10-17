@@ -4,10 +4,37 @@ name = "Stats"
 version = "0.1.0"
 api = "0.1"
 entry = "stats.wasm"
+# Loads after gameplay plugins that feed history; the value only orders event
+# calls. No `before-*` here, so it never competes for a veto.
 priority = 50
 
-capabilities = ["log", "config", "supports", "storage.kv", "players", "history.read"]
+# `log`/`config`/`supports`/`storage.kv` are the raw host imports; `history.read`
+# is the PA2 capability the SDK history service gates on.
+capabilities = ["log", "config", "supports", "storage.kv", "history.read"]
 
-subscribe = ["on-command"]
+# The SDK services this plugin calls; the host refuses the load if any is
+# absent. `commands` to register the commands, `history` to read the journal,
+# `players` to resolve a UUID (so a rename maps to the same record),
+# `permissions` for `stats.stats.others`, `scheduler` for the refresh.
+requires = [
+    "sdk.commands@0.1",
+    "sdk.history@0.1",
+    "sdk.permissions@0.1",
+    "sdk.players@0.1",
+    "sdk.scheduler@0.1",
+]
 
-commands = ["stats", "leaderboard", "lb", "playtime"]
+# `on-command` answers the commands; join/leave checkpoint playtime; `on-tick`
+# polls the scheduler and refreshes the aggregates on its timer (never on the
+# command path).
+subscribe = ["on-command", "after-player-join", "after-player-leave", "on-tick"]
+tick_period = 20
+
+# The permission node each command registers under. `/stats <other>` and
+# `/playtime <other>` additionally require `stats.stats.others` at run time.
+commands = [
+    { name = "stats", node = "stats.stats", op = 0 },
+    { name = "leaderboard", node = "stats.leaderboard", op = 0 },
+    { name = "lb", node = "stats.leaderboard", op = 0 },
+    { name = "playtime", node = "stats.playtime", op = 0 },
+]

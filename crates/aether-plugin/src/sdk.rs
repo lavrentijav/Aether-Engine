@@ -136,6 +136,13 @@ pub trait PlayersService: Send + Sync {
     fn by_name(&self, caller: &str, name: &str) -> Option<Player>;
     /// An online player by session entity id.
     fn by_id(&self, caller: &str, id: u64) -> Option<Player>;
+    /// A player's 128-bit UUID split into low/high halves. The default is
+    /// `None`: a host (or a test) without an identity store answers neutrally,
+    /// and a provider that cannot resolve the player says so rather than
+    /// inventing an id.
+    fn uuid(&self, _caller: &str, _p: &Player) -> Option<(u64, u64)> {
+        None
+    }
     /// A possibly-offline player's last known name.
     fn offline_name(&self, caller: &str, uuid_low: u64, uuid_high: u64) -> Option<String>;
     /// Move a player, searching for a safe spot.
@@ -652,6 +659,16 @@ impl bindings::aether::sdk::players::Host for StoreData {
             Some(svc) => svc.by_id(&self.plugin, id),
             None => {
                 self.service_unavailable(PLAYERS_SERVICE, "by-id");
+                None
+            }
+        }
+    }
+
+    fn uuid(&mut self, p: Player) -> Option<(u64, u64)> {
+        match players(&self.services) {
+            Some(svc) => svc.uuid(&self.plugin, &p),
+            None => {
+                self.service_unavailable(PLAYERS_SERVICE, "uuid");
                 None
             }
         }

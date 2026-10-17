@@ -42,6 +42,11 @@ members = [
     # plugin is a normal Rust crate linked in-process, so unlike the WASM
     # examples it is a workspace member and builds with `cargo test`.
     "plugins/examples/hello-native",
+    # The stats plugin (CMD-47), a WASM component for deployment. It is also a
+    # workspace member so its pure aggregation/playtime model runs under
+    # `cargo test` without a WebAssembly toolchain; the component glue is
+    # `#[cfg(target_arch = "wasm32")]`.
+    "plugins/stats",
 ]
 
 # The example plugins are separate WebAssembly components: they target
