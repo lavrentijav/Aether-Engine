@@ -27,6 +27,7 @@ struct FakeHost {
     begins: AtomicUsize,
     commits: AtomicUsize,
     journal: Mutex<HashMap<u64, Vec<(Pos, String, String)>>>,
+    schematics: Mutex<BTreeMap<String, Vec<u8>>>,
 }
 
 impl FakeHost {
@@ -49,6 +50,7 @@ impl FakeHost {
             begins: AtomicUsize::new(0),
             commits: AtomicUsize::new(0),
             journal: Mutex::new(HashMap::new()),
+            schematics: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -142,6 +144,18 @@ impl WorldEditHost for FakeHost {
             let overlap = (0..3).all(|axis| min[axis] <= rmax[axis] && max[axis] >= rmin[axis]);
             if overlap {
                 return Err("That area is protected.".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn check_cells(&self, _caller: &str, _player: u64, cells: &[[i32; 3]]) -> Result<(), String> {
+        if let Some((rmin, rmax)) = *self.region.lock().unwrap() {
+            for pos in cells {
+                let inside = (0..3).all(|axis| pos[axis] >= rmin[axis] && pos[axis] <= rmax[axis]);
+                if inside {
+                    return Err("That area is protected.".to_string());
+                }
             }
         }
         Ok(())
@@ -331,6 +345,22 @@ impl WorldEditHost for FakeHost {
         }
         Ok(out)
     }
+
+    fn save_schematic(&self, _caller: &str, name: &str, bytes: &[u8]) -> Result<(), String> {
+        self.schematics
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), bytes.to_vec());
+        Ok(())
+    }
+
+    fn load_schematic(&self, _caller: &str, name: &str) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.schematics.lock().unwrap().get(name).cloned())
+    }
+
+    fn list_schematics(&self, _caller: &str) -> Vec<String> {
+        self.schematics.lock().unwrap().keys().cloned().collect()
+    }
 }
 
 #[derive(Default)]
@@ -467,6 +497,22 @@ impl Fixture {
         };
         self.plugin.after_player_leave(&mut ctx, p);
     }
+
+    fn reboot(&mut self) {
+        let backend: Arc<dyn HostBackend> = self.backend.clone();
+        let config = self.config.clone();
+        let services = Arc::clone(&self.services);
+        let mut plugin = WorldEditPlugin::default();
+        let mut ctx = NativeContext {
+            id: ID,
+            capabilities: &[],
+            config: &config,
+            services: &services,
+            backend: &backend,
+        };
+        plugin.init(&mut ctx).unwrap();
+        self.plugin = plugin;
+    }
 }
 
 fn player() -> Player {
@@ -597,11 +643,16 @@ fn destructive_commands_require_op_two_and_selection_stays_public() {
             .unwrap_or_else(|| panic!("{name} is declared"))
             .op()
     };
-    for name in ["wand", "pos1", "pos2", "sel", "expand", "contract"] {
+    for name in [
+        "wand", "pos1", "pos2", "sel", "expand", "contract", "copy", "rotate", "flip", "mask",
+    ] {
         assert_eq!(level(name), 0, "{name} does not write the world");
     }
-    for name in ["set", "replace", "walls", "outline", "undo", "redo"] {
-        assert_eq!(level(name), 2, "{name} writes the world or its history");
+    for name in [
+        "set", "replace", "walls", "outline", "cut", "paste", "stack", "move", "schem", "brush",
+        "undo", "redo",
+    ] {
+        assert_eq!(level(name), 2, "{name} writes the world, files or history");
     }
     assert!(!manifest.capabilities.iter().any(|c| c == "storage.kv"));
     assert!(!manifest.capabilities.iter().any(|c| c == "supports"));
@@ -811,4 +862,362 @@ fn the_registered_service_is_resolvable_by_name_and_version() {
         WORLDEDIT_SERVICE_VERSION
     )));
     assert!(worldedit::host(&services).is_some());
+}
+
+#[test]
+fn copy_and_paste_at_the_same_place_and_after_the_player_moves() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:stone");
+    f.host.put((1, 0, 0), "minecraft:dirt");
+    f.host.put((0, 1, 0), "minecraft:glass");
+    f.set(&p, [0, 0, 0], [1, 1, 0]);
+    let lines = f.command(&p, "copy", &[]);
+    assert!(!error(&lines), "{lines:?}");
+
+    for pos in [(0, 0, 0), (1, 0, 0), (0, 1, 0)] {
+        f.host.put(pos, "minecraft:air");
+    }
+    let lines = f.command(&p, "paste", &["-o"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.block(0, 0, 0), "minecraft:stone");
+    assert_eq!(f.host.block(1, 0, 0), "minecraft:dirt");
+    assert_eq!(f.host.block(0, 1, 0), "minecraft:glass");
+
+    f.host.view.lock().unwrap().x = 5.0;
+    let lines = f.command(&p, "paste", &["-o"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.block(5, 0, 0), "minecraft:stone");
+    assert_eq!(f.host.block(6, 0, 0), "minecraft:dirt");
+    assert_eq!(f.host.block(5, 1, 0), "minecraft:glass");
+}
+
+#[test]
+fn paste_defaults_to_air_and_a_skips_air_and_o_overwrites() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:stone");
+    f.host.put((1, 0, 0), "minecraft:air");
+    f.set(&p, [0, 0, 0], [1, 0, 0]);
+    assert!(!error(&f.command(&p, "copy", &[])));
+
+    f.host.put((5, 0, 0), "minecraft:dirt");
+    f.host.put((6, 0, 0), "minecraft:dirt");
+    f.host.view.lock().unwrap().x = 5.0;
+    assert!(!error(&f.command(&p, "paste", &[])));
+    assert_eq!(f.host.block(5, 0, 0), "minecraft:dirt");
+    assert_eq!(f.host.block(6, 0, 0), "minecraft:dirt");
+
+    assert!(!error(&f.command(&p, "paste", &["-o"])));
+    assert_eq!(f.host.block(5, 0, 0), "minecraft:stone");
+    assert_eq!(f.host.block(6, 0, 0), "minecraft:air");
+
+    f.host.put((5, 0, 0), "minecraft:dirt");
+    f.host.put((6, 0, 0), "minecraft:glass");
+    assert!(!error(&f.command(&p, "paste", &["-a", "-o", "-s"])));
+    assert_eq!(f.host.block(5, 0, 0), "minecraft:stone");
+    assert_eq!(f.host.block(6, 0, 0), "minecraft:glass");
+    let lines = f.command(&p, "sel", &[]);
+    assert!(
+        lines[0].contains("5 0 0") && lines[0].contains("6 0 0"),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn rotate_turns_the_clipboard_and_refuses_a_non_right_angle() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:stone");
+    f.host.put((1, 0, 0), "minecraft:dirt");
+    f.set(&p, [0, 0, 0], [1, 0, 0]);
+    assert!(!error(&f.command(&p, "copy", &[])));
+    let original = f.plugin.clipboards.get(&p.id).cloned().unwrap();
+
+    assert!(!error(&f.command(&p, "rotate", &["90"])));
+    let rotated = f.plugin.clipboards.get(&p.id).cloned().unwrap();
+    assert_eq!(rotated.size, [1, 1, 2]);
+    assert_eq!(rotated.get(0, 0, 0), Some("minecraft:stone"));
+    assert_eq!(rotated.get(0, 0, 1), Some("minecraft:dirt"));
+
+    assert!(!error(&f.command(&p, "paste", &["-o"])));
+    assert_eq!(f.host.block(0, 0, 0), "minecraft:stone");
+    assert_eq!(f.host.block(0, 0, 1), "minecraft:dirt");
+
+    let lines = f.command(&p, "rotate", &["45"]);
+    assert!(error(&lines), "{lines:?}");
+    assert_eq!(f.plugin.clipboards.get(&p.id), Some(&rotated));
+
+    assert!(!error(&f.command(&p, "rotate", &["270"])));
+    assert_eq!(f.plugin.clipboards.get(&p.id), Some(&original));
+    assert!(!error(&f.command(&p, "rotate", &["90", "0", "0"])));
+    assert_eq!(f.plugin.clipboards.get(&p.id).unwrap().size, [1, 1, 2]);
+}
+
+#[test]
+fn flip_uses_an_axis_and_twice_returns_the_original() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:stone");
+    f.host.put((2, 0, 0), "minecraft:dirt");
+    f.set(&p, [0, 0, 0], [2, 0, 0]);
+    assert!(!error(&f.command(&p, "copy", &[])));
+    let original = f.plugin.clipboards.get(&p.id).cloned().unwrap();
+
+    assert!(!error(&f.command(&p, "flip", &["east"])));
+    let flipped = f.plugin.clipboards.get(&p.id).cloned().unwrap();
+    assert_eq!(flipped.get(2, 0, 0), Some("minecraft:stone"));
+    assert_eq!(flipped.get(0, 0, 0), Some("minecraft:dirt"));
+    assert!(!error(&f.command(&p, "flip", &["west"])));
+    assert_eq!(f.plugin.clipboards.get(&p.id), Some(&original));
+
+    assert!(!error(&f.command(&p, "flip", &["up"])));
+    assert!(!error(&f.command(&p, "flip", &["down"])));
+    assert_eq!(f.plugin.clipboards.get(&p.id), Some(&original));
+    let lines = f.command(&p, "flip", &["sideways"]);
+    assert!(error(&lines), "{lines:?}");
+}
+
+#[test]
+fn stack_copies_in_a_direction_in_one_revision() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:stone");
+    f.host.put((1, 0, 0), "minecraft:dirt");
+    f.set(&p, [0, 0, 0], [1, 0, 0]);
+    let lines = f.command(&p, "stack", &["2", "east"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.commits(), 1);
+    assert_eq!(f.host.journal_len(), 1);
+    for (x, block) in [
+        (2, "minecraft:stone"),
+        (3, "minecraft:dirt"),
+        (4, "minecraft:stone"),
+        (5, "minecraft:dirt"),
+    ] {
+        assert_eq!(f.host.block(x, 0, 0), block);
+    }
+    let lines = f.command(&p, "sel", &[]);
+    assert!(
+        lines[0].contains("0 0 0") && lines[0].contains("5 0 0"),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_stack_over_the_limit_is_refused_before_it_starts() {
+    let mut f = Fixture::new(5);
+    let p = player();
+    f.set(&p, [0, 0, 0], [1, 0, 0]);
+    let lines = f.command(&p, "stack", &["2", "east"]);
+    assert!(error(&lines), "{lines:?}");
+    assert_eq!(f.host.begins(), 0);
+    assert_eq!(f.host.commits(), 0);
+}
+
+#[test]
+fn move_accepts_both_argument_orders_and_clears_the_source() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:stone");
+    f.host.put((1, 0, 0), "minecraft:dirt");
+    f.set(&p, [0, 0, 0], [1, 0, 0]);
+    let lines = f.command(&p, "move", &["2", "east"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.commits(), 1);
+    assert_eq!(f.host.block(0, 0, 0), "minecraft:air");
+    assert_eq!(f.host.block(1, 0, 0), "minecraft:air");
+    assert_eq!(f.host.block(2, 0, 0), "minecraft:stone");
+    assert_eq!(f.host.block(3, 0, 0), "minecraft:dirt");
+
+    f.set(&p, [10, 0, 0], [11, 0, 0]);
+    f.host.put((10, 0, 0), "minecraft:stone");
+    f.host.put((11, 0, 0), "minecraft:dirt");
+    let lines = f.command(&p, "move", &["south", "1"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.block(10, 0, 0), "minecraft:air");
+    assert_eq!(f.host.block(10, 0, 1), "minecraft:stone");
+    assert_eq!(f.host.block(11, 0, 1), "minecraft:dirt");
+}
+
+#[test]
+fn cut_fills_the_clipboard_and_clears_the_selection() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:stone");
+    f.host.put((1, 0, 0), "minecraft:dirt");
+    f.set(&p, [0, 0, 0], [1, 0, 0]);
+    let lines = f.command(&p, "cut", &[]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.block(0, 0, 0), "minecraft:air");
+    assert_eq!(f.host.block(1, 0, 0), "minecraft:air");
+    assert_eq!(f.plugin.clipboards.get(&p.id).unwrap().volume(), 2);
+
+    f.host.view.lock().unwrap().x = 5.0;
+    assert!(!error(&f.command(&p, "paste", &["-o"])));
+    assert_eq!(f.host.block(5, 0, 0), "minecraft:stone");
+    assert_eq!(f.host.block(6, 0, 0), "minecraft:dirt");
+}
+
+#[test]
+fn schematic_save_load_list_and_paste_survive_a_restart() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:stone");
+    f.host.put((1, 0, 0), "minecraft:oak_stairs[facing=north]");
+    f.set(&p, [0, 0, 0], [1, 0, 0]);
+    assert!(!error(&f.command(&p, "copy", &[])));
+    let lines = f.command(&p, "schem", &["save", "house"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert!(f.host.schematics.lock().unwrap().contains_key("house"));
+
+    for pos in [(0, 0, 0), (1, 0, 0)] {
+        f.host.put(pos, "minecraft:air");
+    }
+    let lines = f.command(&p, "schem", &["list"]);
+    assert!(lines[0].contains("house"), "{lines:?}");
+
+    f.reboot();
+    let lines = f.command(&p, "schem", &["load", "house"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.plugin.clipboards.get(&p.id).unwrap().size, [2, 1, 1]);
+    let lines = f.command(&p, "schem", &["paste", "house"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.block(0, 0, 0), "minecraft:stone");
+    assert_eq!(f.host.block(1, 0, 0), "minecraft:oak_stairs[facing=north]");
+
+    let lines = f.command(&p, "schem", &["load", "missing"]);
+    assert!(error(&lines), "{lines:?}");
+    let lines = f.command(&p, "schem", &["save", "../escape"]);
+    assert!(error(&lines), "{lines:?}");
+}
+
+#[test]
+fn a_brush_applies_through_the_bulk_path_and_undo_restores_it() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    *f.backend.held.lock().unwrap() = Some("minecraft:blaze_rod".to_string());
+    let lines = f.command(&p, "brush", &["sphere", "stone", "1"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert!(matches!(f.interact(&p, [10, 0, 10]), Decision::Cancel(_)));
+    assert_eq!(f.host.block(10, 0, 10), "minecraft:stone");
+    assert_eq!(f.host.block(11, 0, 10), "minecraft:stone");
+    assert_eq!(f.host.block(10, 1, 10), "minecraft:stone");
+    assert_eq!(f.host.block(11, 1, 10), "minecraft:air");
+    assert_eq!(f.host.commits(), 1);
+    let lines = f.command(&p, "undo", &[]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.block(10, 0, 10), "minecraft:air");
+}
+
+#[test]
+fn a_brush_over_the_limit_or_in_a_region_is_refused() {
+    let mut f = Fixture::new(5);
+    let p = player();
+    *f.backend.held.lock().unwrap() = Some("minecraft:blaze_rod".to_string());
+    let lines = f.command(&p, "brush", &["sphere", "stone", "1"]);
+    assert!(error(&lines), "{lines:?}");
+    assert_eq!(f.host.begins(), 0);
+
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    *f.backend.held.lock().unwrap() = Some("minecraft:blaze_rod".to_string());
+    assert!(!error(&f.command(&p, "brush", &["sphere", "stone", "1"])));
+    f.host.set_region([10, 0, 10], [12, 2, 12]);
+    assert!(matches!(f.interact(&p, [10, 0, 10]), Decision::Cancel(_)));
+    assert_eq!(f.host.begins(), 0);
+    assert_eq!(f.host.block(10, 0, 10), "minecraft:air");
+}
+
+#[test]
+fn a_brush_mask_limits_the_cells_it_changes() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    *f.backend.held.lock().unwrap() = Some("minecraft:blaze_rod".to_string());
+    f.host.put((10, 0, 10), "minecraft:stone");
+    f.host.put((11, 0, 10), "minecraft:dirt");
+    assert!(!error(&f.command(&p, "mask", &["stone"])));
+    assert!(!error(&f.command(&p, "brush", &["smooth", "1"])));
+    assert!(matches!(f.interact(&p, [10, 0, 10]), Decision::Cancel(_)));
+    assert_eq!(f.host.block(10, 0, 10), "minecraft:air");
+    assert_eq!(f.host.block(11, 0, 10), "minecraft:dirt");
+}
+
+#[test]
+fn an_empty_clipboard_errors_for_every_clipboard_command() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    for (name, args) in [
+        ("paste", &[][..]),
+        ("rotate", &["90"][..]),
+        ("flip", &[][..]),
+        ("schem", &["save", "empty"][..]),
+    ] {
+        let lines = f.command(&p, name, args);
+        assert!(error(&lines), "{name}: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("clipboard")), "{lines:?}");
+    }
+    assert_eq!(f.host.begins(), 0);
+    assert_eq!(f.host.commits(), 0);
+}
+
+#[test]
+fn a_clipboard_over_the_limit_is_refused_before_any_edit_starts() {
+    let mut f = Fixture::new(5);
+    let p = player();
+    f.plugin.clipboards.insert(
+        p.id,
+        Clipboard {
+            world: "minecraft:overworld".to_string(),
+            offset: [0, 0, 0],
+            size: [6, 1, 1],
+            blocks: vec!["minecraft:stone".to_string(); 6],
+        },
+    );
+    let lines = f.command(&p, "paste", &["-o"]);
+    assert!(error(&lines), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("exceeds the limit")),
+        "{lines:?}"
+    );
+    assert_eq!(f.host.begins(), 0);
+    assert_eq!(f.host.commits(), 0);
+}
+
+#[test]
+fn a_paste_in_a_protected_region_is_refused_and_undo_works_after_a_legal_one() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:stone");
+    f.set(&p, [0, 0, 0], [0, 0, 0]);
+    assert!(!error(&f.command(&p, "copy", &[])));
+
+    f.host.view.lock().unwrap().x = 10.0;
+    f.host.set_region([10, 0, 0], [10, 2, 0]);
+    let lines = f.command(&p, "paste", &["-o"]);
+    assert!(error(&lines), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("protected")), "{lines:?}");
+    assert_eq!(f.host.block(10, 0, 0), "minecraft:air");
+
+    f.host.view.lock().unwrap().x = 30.0;
+    assert!(!error(&f.command(&p, "paste", &["-o"])));
+    assert_eq!(f.host.block(30, 0, 0), "minecraft:stone");
+    let lines = f.command(&p, "undo", &[]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.block(30, 0, 0), "minecraft:air");
+}
+
+#[test]
+fn the_clipboard_pattern_uses_the_copied_blocks() {
+    let mut f = Fixture::new(10_000);
+    let p = player();
+    f.host.put((0, 0, 0), "minecraft:stone");
+    f.host.put((1, 0, 0), "minecraft:dirt");
+    f.set(&p, [0, 0, 0], [1, 0, 0]);
+    assert!(!error(&f.command(&p, "copy", &[])));
+    f.set(&p, [10, 0, 0], [11, 0, 0]);
+    let lines = f.command(&p, "set", &["#clipboard"]);
+    assert!(!error(&lines), "{lines:?}");
+    assert_eq!(f.host.block(10, 0, 0), "minecraft:stone");
+    assert_eq!(f.host.block(11, 0, 0), "minecraft:dirt");
 }

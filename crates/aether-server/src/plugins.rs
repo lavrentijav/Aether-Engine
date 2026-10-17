@@ -1191,10 +1191,12 @@ mod imp {
             })
             .and_then(|value| value.trim().parse::<usize>().ok())
             .unwrap_or(crate::bulk::DEFAULT_MAX_BLOCKS);
-        let worldedit = Arc::new(crate::worldedit::Host::new(
+        let schematic_dir = std::path::Path::new(&cfg.server.world_dir).join("schematics");
+        let worldedit = Arc::new(crate::worldedit::Host::with_schematics(
             Arc::clone(world),
             Arc::clone(registry),
             worldedit_max,
+            Some(schematic_dir),
         ));
         if let Err(e) = aether_plugin::worldedit::register_host(host.services(), worldedit) {
             crate::log::warn(&format!("worldedit service not registered: {e}"));
