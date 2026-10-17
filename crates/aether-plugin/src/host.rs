@@ -428,12 +428,37 @@ pub trait HostBackend: Send + Sync {
     // The defaults are neutral: a host with no region store accepts the write
     // and reports no regions, which keeps a test backend small.
 
-    /// Add or replace a region owned by `plugin`. Replacing another plugin's
-    /// region id is refused by the host.
-    fn region_upsert(&self, _plugin: &str, _region: &crate::region::RegionInfo) {}
+    /// Add or replace a region owned by `plugin`.
+    ///
+    /// The ownership test and the write are atomic in the host: replacing a
+    /// core-created region (`source: None`) or another plugin's region is
+    /// refused with a [`crate::RegionWriteError`].
+    fn region_upsert(
+        &self,
+        _plugin: &str,
+        _region: &crate::region::RegionInfo,
+    ) -> std::result::Result<(), crate::RegionWriteError> {
+        Ok(())
+    }
 
-    /// Remove a region owned by `plugin`. A missing id, or one owned by another
-    /// plugin, is a no-op.
+    /// Insert a region owned by `plugin`, refusing **atomically** when a region
+    /// from the same plugin already overlaps its box.
+    ///
+    /// This is the claim insert: the overlap test and the write share the
+    /// store's writer lock, so two competing claim attempts cannot both win.
+    /// Overlapping a region from another plugin is allowed (the core's priority
+    /// chain decides the protection verdict). The default is a plain upsert for
+    /// hosts that cannot offer the stronger guarantee.
+    fn region_insert(
+        &self,
+        plugin: &str,
+        region: &crate::region::RegionInfo,
+    ) -> std::result::Result<(), crate::RegionWriteError> {
+        self.region_upsert(plugin, region)
+    }
+
+    /// Remove a region owned by `plugin`. A missing id, a core-owned region or
+    /// another plugin's region is a no-op.
     fn region_remove(&self, _plugin: &str, _id: u64) {}
 
     /// The region with `id`, if it exists.

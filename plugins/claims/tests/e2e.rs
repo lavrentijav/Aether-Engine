@@ -8,12 +8,12 @@ use std::sync::{Arc, Mutex};
 
 use aether_plugin::{
     Decision, HostBackend, LogLevel, NativeContext, NativePlugin, Player, RegionInfo,
-    ServiceRegistry,
+    RegionWriteError, ServiceRegistry,
 };
 
 use aether_claims_plugin::{
-    registration, NODE_ABANDON, NODE_ABANDON_ALL, NODE_ADMIN, NODE_CLAIM, NODE_LIST,
-    NODE_LIST_OTHERS, PLUGIN_ID,
+    registration, CLAIM_ID_MASK, CLAIM_ID_NAMESPACE, NODE_ABANDON, NODE_ABANDON_ALL, NODE_ADMIN,
+    NODE_CLAIM, NODE_LIST, NODE_LIST_OTHERS, PLUGIN_ID,
 };
 
 const OVERWORLD: &str = "minecraft:overworld";
@@ -25,6 +25,7 @@ struct Mock {
     kv: Mutex<HashMap<String, Vec<u8>>>,
     regions: Mutex<BTreeMap<u64, RegionInfo>>,
     messages: Mutex<Vec<(u64, String)>>,
+    logs: Mutex<Vec<(LogLevel, String)>>,
     config: Mutex<BTreeMap<String, String>>,
 }
 
@@ -85,6 +86,15 @@ impl Mock {
     fn add_region(&self, region: RegionInfo) {
         self.regions.lock().unwrap().insert(region.id, region);
     }
+
+    fn logs(&self) -> Vec<String> {
+        self.logs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, message)| message.clone())
+            .collect()
+    }
 }
 
 fn same_world(a: &str, b: &str) -> bool {
@@ -118,7 +128,9 @@ impl HostBackend for Mock {
             .collect()
     }
 
-    fn log(&self, _plugin: &str, _level: LogLevel, _message: &str) {}
+    fn log(&self, _plugin: &str, level: LogLevel, message: &str) {
+        self.logs.lock().unwrap().push((level, message.to_string()));
+    }
 
     fn config(&self, _plugin: &str, key: &str) -> Option<String> {
         self.config.lock().unwrap().get(key).cloned()
@@ -150,10 +162,47 @@ impl HostBackend for Mock {
             .push((player, text.to_string()));
     }
 
-    fn region_upsert(&self, plugin: &str, region: &RegionInfo) {
+    fn region_upsert(&self, plugin: &str, region: &RegionInfo) -> Result<(), RegionWriteError> {
+        let mut regions = self.regions.lock().unwrap();
+        if let Some(existing) = regions.get(&region.id) {
+            match existing.source.as_deref() {
+                Some(source) if source == plugin => {}
+                Some(source) => return Err(RegionWriteError::OwnedByOther(source.to_string())),
+                None => return Err(RegionWriteError::OwnedByCore),
+            }
+        }
         let mut region = region.clone();
         region.source = Some(plugin.to_string());
-        self.regions.lock().unwrap().insert(region.id, region);
+        regions.insert(region.id, region);
+        Ok(())
+    }
+
+    fn region_insert(&self, plugin: &str, region: &RegionInfo) -> Result<(), RegionWriteError> {
+        let mut regions = self.regions.lock().unwrap();
+        if let Some(existing) = regions.get(&region.id) {
+            match existing.source.as_deref() {
+                Some(source) if source == plugin => {}
+                Some(source) => return Err(RegionWriteError::OwnedByOther(source.to_string())),
+                None => return Err(RegionWriteError::OwnedByCore),
+            }
+        }
+        // Serialised by this one mutex, the mock mirrors the core's atomic
+        // same-plugin overlap rule so a competing-claim test is meaningful.
+        let blocked = regions.values().any(|existing| {
+            existing.id != region.id
+                && existing.source.as_deref() == Some(plugin)
+                && same_world(&existing.world, &region.world)
+                && (0..3).all(|axis| {
+                    existing.min[axis] <= region.max[axis] && region.min[axis] <= existing.max[axis]
+                })
+        });
+        if blocked {
+            return Err(RegionWriteError::Overlap);
+        }
+        let mut region = region.clone();
+        region.source = Some(plugin.to_string());
+        regions.insert(region.id, region);
+        Ok(())
     }
 
     fn region_remove(&self, plugin: &str, id: u64) {
@@ -255,7 +304,7 @@ fn claim_command_creates_a_chunk_and_inspects_it_next_time() {
     let mut plugin = new_plugin(&backend);
 
     let lines = command(&mut plugin, &backend, &alice, "claim", &[]);
-    assert!(lines[0].contains("Claim #1 created"), "{lines:?}");
+    assert!(lines[0].contains("created"), "{lines:?}");
     let claims = backend.claim_regions();
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].min, [0, -64, 0]);
@@ -278,7 +327,7 @@ fn a_claim_can_cross_chunk_borders() {
     let mut plugin = new_plugin(&backend);
 
     let lines = command(&mut plugin, &backend, &alice, "claim", &["1"]);
-    assert!(lines[0].contains("Claim #1 created"), "{lines:?}");
+    assert!(lines[0].contains("created"), "{lines:?}");
     let claims = backend.claim_regions();
     assert_eq!(claims[0].min, [14, -64, 14]);
     assert_eq!(claims[0].max, [16, 383, 16]);
@@ -339,7 +388,7 @@ fn a_worldguard_region_overlap_is_allowed_and_claims_keep_their_priority() {
     backend.add_region(station);
 
     let lines = command(&mut plugin, &backend, &alice, "claim", &[]);
-    assert!(lines[0].contains("Claim #1 created"), "{lines:?}");
+    assert!(lines[0].contains("created"), "{lines:?}");
     let claims = backend.claim_regions();
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].priority, 20);
@@ -560,7 +609,7 @@ fn the_golden_shovel_claims_on_the_second_click_and_can_be_reset() {
         20,
         "minecraft:golden_shovel",
     );
-    assert!(backend.last_message().contains("Claim #1 created"));
+    assert!(backend.last_message().contains("created"));
     let claims = backend.claim_regions();
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].min, [10, -64, 10]);
@@ -706,4 +755,152 @@ fn a_player_without_the_node_cannot_claim() {
     );
     assert!(matches!(decision, Decision::Allow));
     assert!(backend.last_message().contains("permission"));
+}
+
+#[test]
+fn a_claim_id_owned_by_another_plugin_is_skipped_not_overwritten() {
+    let backend = Arc::new(Mock::default());
+    backend.add_player(1, "Alice", 0.0, 0.0);
+    backend.grant_all(1);
+    // Another plugin already owns the first namespaced serial.
+    let taken = CLAIM_ID_NAMESPACE | 1;
+    backend.add_region(RegionInfo {
+        id: taken,
+        source: Some("regions".to_string()),
+        world: OVERWORLD.to_string(),
+        min: [-32, -64, -32],
+        max: [31, 383, 31],
+        priority: 100,
+        flags: BTreeMap::new(),
+        members: Vec::new(),
+        owners: vec!["Staff".to_string()],
+    });
+    let alice = player(1, "Alice");
+    let mut plugin = new_plugin(&backend);
+
+    let lines = command(&mut plugin, &backend, &alice, "claim", &[]);
+    assert!(lines[0].contains("created"), "{lines:?}");
+    let claims = backend.claim_regions();
+    assert_eq!(claims.len(), 1);
+    assert_ne!(claims[0].id, taken, "the taken id must not be reused");
+    assert_eq!(claims[0].id & !CLAIM_ID_MASK, CLAIM_ID_NAMESPACE);
+    assert_eq!(
+        backend.regions.lock().unwrap().get(&taken).unwrap().source,
+        Some("regions".to_string()),
+        "the other plugin's region must be untouched"
+    );
+}
+
+#[test]
+fn two_players_racing_for_the_same_land_install_exactly_one_claim() {
+    let backend = Arc::new(Mock::default());
+    backend.add_player(1, "Alice", 0.0, 0.0);
+    backend.add_player(2, "Bob", 0.0, 0.0);
+    backend.grant_all(1);
+    backend.grant_all(2);
+
+    let run = |id: u64, name: &'static str| {
+        let backend = Arc::clone(&backend);
+        std::thread::spawn(move || {
+            let mut plugin = new_plugin(&backend);
+            let who = player(id, name);
+            command(&mut plugin, &backend, &who, "claim", &[]).join("\n")
+        })
+    };
+    let alice = run(1, "Alice");
+    let bob = run(2, "Bob");
+    let alice = alice.join().unwrap();
+    let bob = bob.join().unwrap();
+
+    let created = [&alice, &bob]
+        .iter()
+        .filter(|lines| lines.contains("created"))
+        .count();
+    assert_eq!(created, 1, "alice: {alice}\nbob: {bob}");
+    // The loser either saw the winner's region in the pre-check ("owned by")
+    // or lost the atomic insert ("already claimed"); either way it must not
+    // have installed a second claim.
+    let refused = [&alice, &bob]
+        .iter()
+        .filter(|lines| lines.contains("already claimed") || lines.contains("owned by"))
+        .count();
+    assert_eq!(refused, 1, "alice: {alice}\nbob: {bob}");
+    assert_eq!(
+        backend.claim_regions().len(),
+        1,
+        "only one competing claim may be installed"
+    );
+}
+
+#[test]
+fn leaving_clears_the_pending_corner_and_the_abandon_confirmation() {
+    let backend = Arc::new(Mock::default());
+    backend.add_player(1, "Alice", 0.0, 0.0);
+    backend.grant_all(1);
+    let alice = player(1, "Alice");
+    let mut plugin = new_plugin(&backend);
+
+    // A pending corner must not survive the session.
+    use_block(
+        &mut plugin,
+        &backend,
+        &alice,
+        10,
+        10,
+        "minecraft:golden_shovel",
+    );
+    assert!(backend.last_message().contains("First corner"));
+    with_ctx(&backend, |ctx| plugin.after_player_leave(ctx, &alice));
+    backend.clear_messages();
+    use_block(
+        &mut plugin,
+        &backend,
+        &alice,
+        20,
+        20,
+        "minecraft:golden_shovel",
+    );
+    assert!(
+        backend.last_message().contains("First corner"),
+        "the second click must start a new selection, not complete the old one"
+    );
+    assert_eq!(backend.claim_regions().len(), 0);
+
+    // An armed confirmation must not let a reused id abandon without asking.
+    command(&mut plugin, &backend, &alice, "claim", &[]);
+    let lines = command(&mut plugin, &backend, &alice, "abandonallclaims", &[]);
+    assert!(lines[0].contains("again"), "{lines:?}");
+    with_ctx(&backend, |ctx| plugin.after_player_leave(ctx, &alice));
+    let joined = player(1, "Alice");
+    let lines = command(&mut plugin, &backend, &joined, "abandonallclaims", &[]);
+    assert!(
+        lines[0].contains("again"),
+        "confirmation must reset on leave: {lines:?}"
+    );
+    assert_eq!(backend.claim_regions().len(), 1);
+}
+
+#[test]
+fn invalid_config_is_reported_and_the_default_is_kept() {
+    let backend = Arc::new(Mock::default());
+    backend.add_player(1, "Alice", 0.0, 0.0);
+    backend.grant_all(1);
+    *backend.config.lock().unwrap() = BTreeMap::from([
+        ("max-claims".to_string(), "-1".to_string()),
+        ("max-claim-size".to_string(), "-5".to_string()),
+        ("max-radius".to_string(), "not-a-number".to_string()),
+        ("priority".to_string(), "999999999999".to_string()),
+    ]);
+    let alice = player(1, "Alice");
+    let mut plugin = new_plugin(&backend);
+
+    let logs = backend.logs().join("\n");
+    for key in ["max-claims", "max-claim-size", "max-radius", "priority"] {
+        assert!(logs.contains(key), "missing warning for {key}: {logs}");
+    }
+    // The defaults still work.
+    let lines = command(&mut plugin, &backend, &alice, "claim", &[]);
+    assert!(lines[0].contains("created"), "{lines:?}");
+    assert_eq!(backend.claim_regions().len(), 1);
+    assert_eq!(backend.claim_regions()[0].priority, 10);
 }

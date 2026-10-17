@@ -13,6 +13,7 @@ capabilities = ["log", "config", "supports", "storage.kv", "world.read", "region
 subscribe = [
     "before-use-block",
     "on-command",
+    "after-player-leave",
 ]
 
 commands = ["claim", "abandonclaim", "abandonallclaims", "claimslist"]

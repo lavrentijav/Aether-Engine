@@ -12,6 +12,7 @@
 //! the region's source, so one plugin can never remove another's region.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 /// A cuboid region in one world, as a plugin sees it.
 ///
@@ -72,5 +73,39 @@ impl RegionInfo {
     /// Whether this region belongs to `plugin`.
     pub fn is_from(&self, plugin: &str) -> bool {
         self.source.as_deref() == Some(plugin)
+    }
+}
+
+/// Why a plugin's region write was refused.
+///
+/// The host applies the ownership rule atomically: a plugin may only replace or
+/// remove a region it created. A core-created region and another plugin's
+/// region are both protected, and a claim insert may additionally be refused
+/// because the land is already taken.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegionWriteError {
+    /// The id belongs to a region created directly in the core.
+    OwnedByCore,
+    /// The id belongs to another plugin's region.
+    OwnedByOther(String),
+    /// The box overlaps an existing region the plugin's insert must avoid.
+    Overlap,
+    /// The host has no region store (a test backend that did not implement the
+    /// hooks), so nothing was written.
+    Unavailable,
+}
+
+impl fmt::Display for RegionWriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegionWriteError::OwnedByCore => {
+                write!(f, "the region id is owned by the core")
+            }
+            RegionWriteError::OwnedByOther(source) => {
+                write!(f, "the region id belongs to `{source}`")
+            }
+            RegionWriteError::Overlap => write!(f, "the land is already claimed"),
+            RegionWriteError::Unavailable => write!(f, "the host has no region store"),
+        }
     }
 }

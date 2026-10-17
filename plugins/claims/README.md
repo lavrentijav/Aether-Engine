@@ -78,10 +78,15 @@ limit; an invalid or too-large radius is refused before anything is written.
 ## Persistence and files
 
 Claim state lives in the plugin KV (`storage.kv`) under `claim:<id>` as one
-compact JSON record, plus `next-id`. On startup the plugin loads every record
-and replays it into the core region index. Abandoning a claim deletes both the
-KV record and its region; `/abandonallclaims` is intentionally two-step so a
-typo cannot wipe a player's land.
+compact JSON record, plus `next-id`. Ids live in a claims-namespaced range
+(`0x434C4149_00000000 | serial`) and are probed against the core region store,
+so they cannot collide with the `regions` plugin's ids; a refused or reassigned
+id is retried rather than silently persisted. On startup the plugin loads every
+record and replays it into the core region index, reassigning any record whose
+id another plugin now owns. Abandoning a claim deletes both the KV record and
+its region; `/abandonallclaims` is intentionally two-step so a typo cannot wipe
+a player's land. Pending shovel corners and armed confirmations are cleared when
+the player leaves.
 
 Files:
 

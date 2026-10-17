@@ -49,7 +49,7 @@ use std::fmt;
 pub use host::{discover, HostBackend, HostConfig, PluginHost};
 pub use manifest::{Manifest, ManifestFile, PluginTier};
 pub use native::{NativeContext, NativePlugin, NativeRegistration};
-pub use region::RegionInfo;
+pub use region::{RegionInfo, RegionWriteError};
 pub use service::{ServiceRef, ServiceRegistry};
 
 /// Re-exported event types, so the server and the examples name the same WIT

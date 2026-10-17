@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use aether_plugin::manifest::{CommandDecl, Manifest, PluginTier};
 use aether_plugin::{
     Decision, LogLevel, NativeContext, NativePlugin, NativeRegistration, Player, RegionInfo,
+    RegionWriteError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +67,17 @@ const CONFIRM_WINDOW: Duration = Duration::from_secs(30);
 const WORLD_MIN_Y: i32 = -64;
 const WORLD_MAX_Y: i32 = 383;
 
+/// Claim ids live in a plugin-namespaced high range, so the claims plugin and
+/// the WorldGuard-style `regions` plugin cannot collide by both counting from
+/// one. The low 32 bits are the persistent serial.
+pub const CLAIM_ID_NAMESPACE: u64 = 0x434C_4149_0000_0000;
+/// The serial part of a claim id (the low 32 bits).
+pub const CLAIM_ID_MASK: u64 = 0x0000_0000_FFFF_FFFF;
+
+/// How many id candidates a single allocation or install tries before giving
+/// up. Free ids are normally found on the first attempt.
+const ID_ATTEMPTS: usize = 64;
+
 /// The plugin manifest. The protection events are not listed: the core already
 /// checks the region index for every break/place/use, and adding a second check
 /// here would only duplicate it. Only the block right-click (the golden shovel)
@@ -86,7 +98,11 @@ pub fn manifest() -> Manifest {
             "world.read".to_string(),
             "regions".to_string(),
         ],
-        subscribe: vec!["before-use-block".to_string(), "on-command".to_string()],
+        subscribe: vec![
+            "before-use-block".to_string(),
+            "on-command".to_string(),
+            "after-player-leave".to_string(),
+        ],
         commands: vec![
             CommandDecl::Detailed {
                 name: COMMAND_CLAIM.to_string(),
@@ -158,8 +174,11 @@ struct Claim {
 
 impl Claim {
     fn area(&self) -> i64 {
-        (i64::from(self.max_x) - i64::from(self.min_x) + 1)
-            * (i64::from(self.max_z) - i64::from(self.min_z) + 1)
+        let width = i64::from(self.max_x) - i64::from(self.min_x) + 1;
+        let depth = i64::from(self.max_z) - i64::from(self.min_z) + 1;
+        // Persisted claims are bounded by `create_claim`, but a hand-edited or
+        // damaged record must not panic the tick.
+        width.saturating_mul(depth).max(0)
     }
 
     fn contains(&self, world: &str, x: i32, z: i32) -> bool {
@@ -231,35 +250,30 @@ impl Default for ClaimsPlugin {
 
 impl NativePlugin for ClaimsPlugin {
     fn init(&mut self, ctx: &mut NativeContext) -> Result<(), String> {
-        self.settings = Settings {
-            max_claims: config_uint(ctx, "max-claims").unwrap_or(self.settings.max_claims),
-            max_claim_size: config_int(ctx, "max-claim-size")
-                .unwrap_or(self.settings.max_claim_size),
-            max_radius: config_int(ctx, "max-radius")
-                .map(|v| v.clamp(0, i64::from(i32::MAX)) as i32)
-                .unwrap_or(self.settings.max_radius),
-            priority: config_int(ctx, "priority")
-                .map(|v| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
-                .unwrap_or(self.settings.priority),
-        };
+        self.settings = load_settings(ctx);
 
-        let mut claims = BTreeMap::new();
+        // Read every persisted claim first, then install them one at a time so
+        // an id reassignment (or a corrupted record) is handled in isolation.
+        let mut pending = Vec::new();
         for key in ctx.backend.kv_list(ctx.id, KEY_PREFIX) {
             let Some(bytes) = ctx.backend.kv_get(ctx.id, &key) else {
                 continue;
             };
             match serde_json::from_slice::<Claim>(&bytes) {
-                Ok(claim) => {
-                    claims.insert(claim.id, claim);
-                }
+                Ok(claim) => pending.push(claim),
                 Err(e) => ctx.log(
                     LogLevel::Warn,
                     &format!("ignoring damaged claim `{key}`: {e}"),
                 ),
             }
         }
+        pending.sort_by_key(|claim| claim.id);
 
-        let highest = claims.keys().next_back().copied().unwrap_or(0);
+        let highest = pending
+            .iter()
+            .map(|claim| claim.id & CLAIM_ID_MASK)
+            .max()
+            .unwrap_or(0);
         let stored = ctx
             .backend
             .kv_get(ctx.id, KEY_NEXT_ID)
@@ -267,11 +281,27 @@ impl NativePlugin for ClaimsPlugin {
             .and_then(|text| text.trim().parse::<u64>().ok())
             .unwrap_or(1);
         self.next_id = stored.max(highest.saturating_add(1)).max(1);
-        self.claims = claims;
+        self.claims.clear();
 
-        for claim in self.claims.values() {
-            ctx.backend
-                .region_upsert(ctx.id, &claim.region(self.settings.priority));
+        for claim in pending {
+            let old_id = claim.id;
+            let Some(installed) = self.install_existing(ctx, claim) else {
+                continue;
+            };
+            if installed.id != old_id {
+                // The old id collided with another plugin's region (or came
+                // from the pre-namespace format): move the record to the new id
+                // so the next restart replays without a reassignment.
+                ctx.backend
+                    .kv_delete(ctx.id, &format!("{KEY_PREFIX}{old_id}"));
+                if let Err(e) = save_claim(ctx, &installed) {
+                    ctx.log(
+                        LogLevel::Error,
+                        &format!("claim #{} could not be re-saved: {e}", installed.id),
+                    );
+                }
+            }
+            self.claims.insert(installed.id, installed);
         }
 
         ctx.log(
@@ -352,6 +382,14 @@ impl NativePlugin for ClaimsPlugin {
         Decision::Cancel(String::new())
     }
 
+    fn after_player_leave(&mut self, _ctx: &mut NativeContext, p: &Player) {
+        // Both maps are keyed by the session entity id. Drop the pending corner
+        // and any armed `/abandonallclaims` confirmation so a later session that
+        // reuses the id cannot inherit them.
+        self.selections.remove(&p.id);
+        self.confirmations.remove(&p.id);
+    }
+
     fn on_command(
         &mut self,
         ctx: &mut NativeContext,
@@ -374,6 +412,90 @@ impl NativePlugin for ClaimsPlugin {
 }
 
 impl ClaimsPlugin {
+    /// The next free claim id in the plugin's namespaced range.
+    ///
+    /// The counter is persisted so a restart does not reuse an id, and the
+    /// candidate is probed against the core store so an id another plugin
+    /// already owns is skipped. The insert itself is atomic (see
+    /// [`ClaimsPlugin::install_existing`]), so a probe race is still refused.
+    fn allocate_id(&mut self, ctx: &mut NativeContext) -> Result<u64, String> {
+        for _ in 0..ID_ATTEMPTS {
+            let serial = self.next_id & CLAIM_ID_MASK;
+            let serial = if serial == 0 { 1 } else { serial };
+            self.next_id = if serial >= CLAIM_ID_MASK {
+                1
+            } else {
+                serial + 1
+            };
+            let id = CLAIM_ID_NAMESPACE | serial;
+            if ctx.backend.region_get(ctx.id, id).is_none() {
+                ctx.backend
+                    .kv_put(ctx.id, KEY_NEXT_ID, self.next_id.to_string().as_bytes());
+                return Ok(id);
+            }
+        }
+        Err("Could not allocate a claim id; try again.".to_string())
+    }
+
+    /// Install a persisted claim, reassigning its id when it is not namespaced
+    /// or the id already belongs to another plugin. Returns the claim with the
+    /// id actually installed, or `None` when the record cannot be installed
+    /// (already logged).
+    fn install_existing(&mut self, ctx: &mut NativeContext, claim: Claim) -> Option<Claim> {
+        let mut claim = claim;
+        let mut needs_new_id = claim.id & !CLAIM_ID_MASK != CLAIM_ID_NAMESPACE;
+        for _ in 0..ID_ATTEMPTS {
+            if needs_new_id {
+                match self.allocate_id(ctx) {
+                    Ok(id) => claim.id = id,
+                    Err(e) => {
+                        ctx.log(
+                            LogLevel::Error,
+                            &format!("claim `{}` could not get an id: {e}", claim.bounds()),
+                        );
+                        return None;
+                    }
+                }
+            }
+            match ctx
+                .backend
+                .region_insert(ctx.id, &claim.region(self.settings.priority))
+            {
+                Ok(()) => return Some(claim),
+                Err(RegionWriteError::OwnedByCore | RegionWriteError::OwnedByOther(_)) => {
+                    needs_new_id = true;
+                }
+                Err(RegionWriteError::Overlap) => {
+                    ctx.log(
+                        LogLevel::Error,
+                        &format!(
+                            "claim #{} ({}) overlaps another claim; not installed",
+                            claim.id,
+                            claim.bounds()
+                        ),
+                    );
+                    return None;
+                }
+                Err(RegionWriteError::Unavailable) => {
+                    ctx.log(
+                        LogLevel::Error,
+                        "claim region store is unavailable; claims not installed",
+                    );
+                    return None;
+                }
+            }
+        }
+        ctx.log(
+            LogLevel::Error,
+            &format!(
+                "claim #{} ({}) could not be installed after {ID_ATTEMPTS} attempts",
+                claim.id,
+                claim.bounds()
+            ),
+        );
+        None
+    }
+
     fn claim_command(
         &mut self,
         ctx: &mut NativeContext,
@@ -439,8 +561,11 @@ impl ClaimsPlugin {
         max_x: i32,
         max_z: i32,
     ) -> Vec<String> {
-        let area =
-            (i64::from(max_x) - i64::from(min_x) + 1) * (i64::from(max_z) - i64::from(min_z) + 1);
+        let width = i64::from(max_x) - i64::from(min_x) + 1;
+        let depth = i64::from(max_z) - i64::from(min_z) + 1;
+        let Some(area) = width.checked_mul(depth) else {
+            return vec!["Claim is too large.".to_string()];
+        };
         if area > self.settings.max_claim_size {
             return vec![format!(
                 "Claim is too large: {area} blocks is {} over the {} block limit.",
@@ -472,12 +597,12 @@ impl ClaimsPlugin {
             return vec![format!("That land is already claimed by {owner}.")];
         }
 
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
-        ctx.backend
-            .kv_put(ctx.id, KEY_NEXT_ID, self.next_id.to_string().as_bytes());
-        let claim = Claim {
-            id,
+        // The overlap check above is only for the friendly owner message. The
+        // insert below is atomic in the host store, so two competing claims
+        // cannot both win; an id that belongs to another plugin is retried with
+        // the next namespaced serial.
+        let mut claim = Claim {
+            id: 0,
             owner: p.name.clone(),
             world: world.to_string(),
             min_x,
@@ -485,18 +610,46 @@ impl ClaimsPlugin {
             max_x,
             max_z,
         };
-        match serde_json::to_vec(&claim) {
-            Ok(bytes) => ctx
+        let mut installed = false;
+        for _ in 0..ID_ATTEMPTS {
+            match self.allocate_id(ctx) {
+                Ok(id) => claim.id = id,
+                Err(e) => return vec![e],
+            }
+            match ctx
                 .backend
-                .kv_put(ctx.id, &format!("{KEY_PREFIX}{id}"), &bytes),
-            Err(e) => return vec![format!("Could not save the claim: {e}")],
+                .region_insert(ctx.id, &claim.region(self.settings.priority))
+            {
+                Ok(()) => {
+                    installed = true;
+                    break;
+                }
+                Err(RegionWriteError::Overlap) => {
+                    return vec!["That land is already claimed.".to_string()]
+                }
+                Err(RegionWriteError::OwnedByCore | RegionWriteError::OwnedByOther(_)) => {
+                    // The id is taken between the probe and the insert; try the
+                    // next serial rather than persisting an ineffective claim.
+                    continue;
+                }
+                Err(RegionWriteError::Unavailable) => {
+                    return vec!["Claim protection is unavailable on this host.".to_string()]
+                }
+            }
         }
-        ctx.backend
-            .region_upsert(ctx.id, &claim.region(self.settings.priority));
-        self.claims.insert(id, claim.clone());
+        if !installed {
+            return vec!["Could not allocate a claim id; try again.".to_string()];
+        }
+        if let Err(e) = save_claim(ctx, &claim) {
+            // Never keep a protection region with no persisted claim behind it.
+            ctx.backend.region_remove(ctx.id, claim.id);
+            return vec![format!("Could not save the claim: {e}")];
+        }
+        self.claims.insert(claim.id, claim.clone());
         self.confirmations.remove(&p.id);
         vec![format!(
-            "Claim #{id} created: {} in {}, {area} blocks.",
+            "Claim #{} created: {} in {}, {area} blocks.",
+            claim.id,
             claim.bounds(),
             claim.world
         )]
@@ -685,14 +838,106 @@ fn inspect_lines(claim: &Claim, p: &Player) -> Vec<String> {
     ]
 }
 
-fn config_int(ctx: &NativeContext, key: &str) -> Option<i64> {
+/// Persist one claim under its current id.
+fn save_claim(ctx: &NativeContext, claim: &Claim) -> Result<(), String> {
+    let bytes = serde_json::to_vec(claim).map_err(|e| e.to_string())?;
+    ctx.backend
+        .kv_put(ctx.id, &format!("{KEY_PREFIX}{}", claim.id), &bytes);
+    Ok(())
+}
+
+/// An operator config value: the native `[plugins.claims] config` map first,
+/// then the backend's `config` import.
+fn config_value(ctx: &NativeContext, key: &str) -> Option<String> {
     ctx.config
         .get(key)
         .cloned()
         .or_else(|| ctx.backend.config(ctx.id, key))
-        .and_then(|value| value.trim().parse::<i64>().ok())
 }
 
-fn config_uint(ctx: &NativeContext, key: &str) -> Option<usize> {
-    config_int(ctx, key).and_then(|value| usize::try_from(value).ok())
+/// Read the settings, warning loudly on every value that is not usable instead
+/// of silently substituting the default.
+fn load_settings(ctx: &mut NativeContext) -> Settings {
+    let mut settings = Settings::default();
+
+    if let Some(raw) = config_value(ctx, "max-claims") {
+        match raw.trim().parse::<usize>() {
+            Ok(value) => settings.max_claims = value,
+            Err(_) => ctx.log(
+                LogLevel::Warn,
+                &format!(
+                    "invalid `max-claims` value `{raw}`: expected a non-negative whole number; \
+                     using {}",
+                    settings.max_claims
+                ),
+            ),
+        }
+    }
+
+    if let Some(raw) = config_value(ctx, "max-claim-size") {
+        match raw.trim().parse::<i64>() {
+            Ok(value) if value > 0 => settings.max_claim_size = value,
+            _ => ctx.log(
+                LogLevel::Warn,
+                &format!(
+                    "invalid `max-claim-size` value `{raw}`: expected a positive whole number; \
+                     using {}",
+                    settings.max_claim_size
+                ),
+            ),
+        }
+    }
+
+    if let Some(raw) = config_value(ctx, "max-radius") {
+        match raw.trim().parse::<i64>() {
+            Ok(value) if value >= 0 => {
+                if value > i64::from(i32::MAX) {
+                    ctx.log(
+                        LogLevel::Warn,
+                        &format!(
+                            "`max-radius` value `{raw}` is out of range; using {}",
+                            i32::MAX
+                        ),
+                    );
+                    settings.max_radius = i32::MAX;
+                } else {
+                    settings.max_radius = value as i32;
+                }
+            }
+            _ => ctx.log(
+                LogLevel::Warn,
+                &format!(
+                    "invalid `max-radius` value `{raw}`: expected a non-negative whole number; \
+                     using {}",
+                    settings.max_radius
+                ),
+            ),
+        }
+    }
+
+    if let Some(raw) = config_value(ctx, "priority") {
+        match raw.trim().parse::<i64>() {
+            Ok(value) if (i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&value) => {
+                settings.priority = value as i32;
+            }
+            _ => ctx.log(
+                LogLevel::Warn,
+                &format!(
+                    "invalid `priority` value `{raw}`: expected a 32-bit whole number; using {}",
+                    settings.priority
+                ),
+            ),
+        }
+    }
+
+    // A square claim larger than `max-claim-size` can never be created, so a
+    // larger configured radius only produces a confusing area error later.
+    // Clamp it to the largest radius that can still fit the size limit.
+    let side = (settings.max_claim_size.max(1) as f64).sqrt() as i64;
+    let largest_useful = ((side - 1) / 2).clamp(0, i64::from(i32::MAX)) as i32;
+    if settings.max_radius > largest_useful {
+        settings.max_radius = largest_useful;
+    }
+
+    settings
 }

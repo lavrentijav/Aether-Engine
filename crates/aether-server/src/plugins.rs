@@ -735,50 +735,41 @@ mod imp {
 
         /// Insert or replace a region owned by `plugin`.
         ///
-        /// The host stamps `plugin` as the source; a plugin may not overwrite a
-        /// region another plugin owns, even if the numeric id collides, so one
-        /// plugin can never silently steal another's protection.
-        fn region_upsert(&self, plugin: &str, info: &aether_plugin::RegionInfo) {
-            let store = crate::region::store();
-            let id = crate::region::RegionId(info.id);
-            if let Some(existing) = store.snapshot().get(id) {
-                if let Some(source) = existing.source.as_deref() {
-                    if source != plugin {
-                        crate::log::warn(&format!(
-                            "plugin `{plugin}`: region id {} belongs to `{source}`; refused",
-                            info.id
-                        ));
-                        return;
-                    }
-                }
-            }
-            let mut region = crate::region::Region::new(
-                id,
-                info.world.clone(),
-                crate::region::BlockPos::new(info.min[0], info.min[1], info.min[2]),
-                crate::region::BlockPos::new(info.max[0], info.max[1], info.max[2]),
-            );
-            region.priority = info.priority;
-            region.source = Some(plugin.to_string());
-            for (name, allowed) in &info.flags {
-                region.flags.set(name.clone(), *allowed);
-            }
-            region.members = info.members.iter().cloned().collect();
-            region.owners = info.owners.iter().cloned().collect();
-            store.upsert(region);
+        /// The host stamps `plugin` as the source. The ownership test and the
+        /// write are atomic in the store, so a plugin can never overwrite a
+        /// core-created region (`source: None`) or another plugin's region,
+        /// even if the numeric id collides.
+        fn region_upsert(
+            &self,
+            plugin: &str,
+            info: &aether_plugin::RegionInfo,
+        ) -> std::result::Result<(), aether_plugin::RegionWriteError> {
+            let region = core_region(plugin, info);
+            crate::region::store()
+                .upsert_owned(plugin, region)
+                .map_err(map_region_error)
         }
 
-        /// Remove a region, but only when `plugin` owns it.
+        /// Atomically insert a claim-style region: refuses when a region from
+        /// the same plugin already overlaps the box. Regions from other plugins
+        /// may overlap and are decided by the core's priority chain.
+        fn region_insert(
+            &self,
+            plugin: &str,
+            info: &aether_plugin::RegionInfo,
+        ) -> std::result::Result<(), aether_plugin::RegionWriteError> {
+            let region = core_region(plugin, info);
+            crate::region::store()
+                .insert_owned_if_free(plugin, region, |existing| {
+                    existing.source.as_deref() == Some(plugin)
+                })
+                .map_err(map_region_error)
+        }
+
+        /// Remove a region, but only when `plugin` owns it. Atomic in the
+        /// store; a missing, core-owned or foreign region is left alone.
         fn region_remove(&self, plugin: &str, id: u64) {
-            let store = crate::region::store();
-            let rid = crate::region::RegionId(id);
-            let owned = store
-                .snapshot()
-                .get(rid)
-                .is_some_and(|r| r.source.as_deref() == Some(plugin));
-            if owned {
-                store.remove(rid);
-            }
+            crate::region::store().remove_owned(plugin, crate::region::RegionId(id));
         }
 
         fn region_get(&self, _plugin: &str, id: u64) -> Option<aether_plugin::RegionInfo> {
@@ -797,18 +788,44 @@ mod imp {
         ) -> Vec<aether_plugin::RegionInfo> {
             let index = crate::region::store().snapshot();
             index
-                .regions()
-                .filter(|region| {
-                    crate::region::same_world(&region.world, world)
-                        && region.min.x <= max[0]
-                        && min[0] <= region.max.x
-                        && region.min.y <= max[1]
-                        && min[1] <= region.max.y
-                        && region.min.z <= max[2]
-                        && min[2] <= region.max.z
-                })
+                .overlapping_box(
+                    world,
+                    crate::region::BlockPos::new(min[0], min[1], min[2]),
+                    crate::region::BlockPos::new(max[0], max[1], max[2]),
+                )
+                .into_iter()
                 .map(|region| region_info(region))
                 .collect()
+        }
+    }
+
+    /// The core region a plugin write describes, with the caller as its source.
+    fn core_region(plugin: &str, info: &aether_plugin::RegionInfo) -> crate::region::Region {
+        let mut region = crate::region::Region::new(
+            crate::region::RegionId(info.id),
+            info.world.clone(),
+            crate::region::BlockPos::new(info.min[0], info.min[1], info.min[2]),
+            crate::region::BlockPos::new(info.max[0], info.max[1], info.max[2]),
+        );
+        region.priority = info.priority;
+        region.source = Some(plugin.to_string());
+        for (name, allowed) in &info.flags {
+            region.flags.set(name.clone(), *allowed);
+        }
+        region.members = info.members.iter().cloned().collect();
+        region.owners = info.owners.iter().cloned().collect();
+        region
+    }
+
+    /// The plugin-facing error for a refused core write.
+    fn map_region_error(error: crate::region::RegionEditError) -> aether_plugin::RegionWriteError {
+        use crate::region::RegionEditError;
+        match error {
+            RegionEditError::OwnedByCore => aether_plugin::RegionWriteError::OwnedByCore,
+            RegionEditError::OwnedByOther(source) => {
+                aether_plugin::RegionWriteError::OwnedByOther(source)
+            }
+            RegionEditError::Overlap => aether_plugin::RegionWriteError::Overlap,
         }
     }
 
