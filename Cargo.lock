@@ -279,6 +279,7 @@ name = "aether-worldedit-plugin"
 version = "0.1.0"
 dependencies = [
  "aether-plugin",
+ "miniz_oxide",
 ]
 
 [[package]]
