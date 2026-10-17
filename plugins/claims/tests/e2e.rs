@@ -179,18 +179,14 @@ impl HostBackend for Mock {
 
     fn region_insert(&self, plugin: &str, region: &RegionInfo) -> Result<(), RegionWriteError> {
         let mut regions = self.regions.lock().unwrap();
-        if let Some(existing) = regions.get(&region.id) {
-            match existing.source.as_deref() {
-                Some(source) if source == plugin => {}
-                Some(source) => return Err(RegionWriteError::OwnedByOther(source.to_string())),
-                None => return Err(RegionWriteError::OwnedByCore),
-            }
+        // A fresh insert never reuses an id, even one from the same plugin.
+        if regions.contains_key(&region.id) {
+            return Err(RegionWriteError::IdTaken);
         }
         // Serialised by this one mutex, the mock mirrors the core's atomic
         // same-plugin overlap rule so a competing-claim test is meaningful.
         let blocked = regions.values().any(|existing| {
-            existing.id != region.id
-                && existing.source.as_deref() == Some(plugin)
+            existing.source.as_deref() == Some(plugin)
                 && same_world(&existing.world, &region.world)
                 && (0..3).all(|axis| {
                     existing.min[axis] <= region.max[axis] && region.min[axis] <= existing.max[axis]
@@ -793,43 +789,47 @@ fn a_claim_id_owned_by_another_plugin_is_skipped_not_overwritten() {
 
 #[test]
 fn two_players_racing_for_the_same_land_install_exactly_one_claim() {
-    let backend = Arc::new(Mock::default());
-    backend.add_player(1, "Alice", 0.0, 0.0);
-    backend.add_player(2, "Bob", 0.0, 0.0);
-    backend.grant_all(1);
-    backend.grant_all(2);
+    // Repeat the race: the failure this covers was intermittent, so one run is
+    // not evidence. Every round is a fresh store, as in a fresh server.
+    for round in 0..100 {
+        let backend = Arc::new(Mock::default());
+        backend.add_player(1, "Alice", 0.0, 0.0);
+        backend.add_player(2, "Bob", 0.0, 0.0);
+        backend.grant_all(1);
+        backend.grant_all(2);
 
-    let run = |id: u64, name: &'static str| {
-        let backend = Arc::clone(&backend);
-        std::thread::spawn(move || {
-            let mut plugin = new_plugin(&backend);
-            let who = player(id, name);
-            command(&mut plugin, &backend, &who, "claim", &[]).join("\n")
-        })
-    };
-    let alice = run(1, "Alice");
-    let bob = run(2, "Bob");
-    let alice = alice.join().unwrap();
-    let bob = bob.join().unwrap();
+        let run = |id: u64, name: &'static str| {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                let mut plugin = new_plugin(&backend);
+                let who = player(id, name);
+                command(&mut plugin, &backend, &who, "claim", &[]).join("\n")
+            })
+        };
+        let alice = run(1, "Alice");
+        let bob = run(2, "Bob");
+        let alice = alice.join().unwrap();
+        let bob = bob.join().unwrap();
 
-    let created = [&alice, &bob]
-        .iter()
-        .filter(|lines| lines.contains("created"))
-        .count();
-    assert_eq!(created, 1, "alice: {alice}\nbob: {bob}");
-    // The loser either saw the winner's region in the pre-check ("owned by")
-    // or lost the atomic insert ("already claimed"); either way it must not
-    // have installed a second claim.
-    let refused = [&alice, &bob]
-        .iter()
-        .filter(|lines| lines.contains("already claimed") || lines.contains("owned by"))
-        .count();
-    assert_eq!(refused, 1, "alice: {alice}\nbob: {bob}");
-    assert_eq!(
-        backend.claim_regions().len(),
-        1,
-        "only one competing claim may be installed"
-    );
+        let created = [&alice, &bob]
+            .iter()
+            .filter(|lines| lines.contains("created"))
+            .count();
+        assert_eq!(created, 1, "round {round}: alice: {alice}\nbob: {bob}");
+        // The loser either saw the winner's region in the pre-check ("owned
+        // by") or lost the atomic insert ("already claimed"); either way it
+        // must not have installed a second claim.
+        let refused = [&alice, &bob]
+            .iter()
+            .filter(|lines| lines.contains("already claimed") || lines.contains("owned by"))
+            .count();
+        assert_eq!(refused, 1, "round {round}: alice: {alice}\nbob: {bob}");
+        assert_eq!(
+            backend.claim_regions().len(),
+            1,
+            "round {round}: only one competing claim may be installed"
+        );
+    }
 }
 
 #[test]

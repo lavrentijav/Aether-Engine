@@ -120,8 +120,11 @@ A plugin subscribes in its manifest; unsubscribed events cost nothing (no call).
   `region_get` / `regions_overlapping` let a trusted native model plugin (`regions`, `claims`) feed
   and query the core region index (CMD-29) without depending on `aether-server`. Writes are atomic
   in the store: the host stamps the plugin id as the region source, refuses to replace a
-  core-created (`source: None`) or another plugin's region, and `region_insert` additionally refuses
-  an overlap with the caller's own regions under the same lock (the claim-insert guarantee).
+  core-created (`source: None`) or another plugin's region, and `region_insert` is a *fresh* insert
+  that refuses any occupied id (even the caller's own) plus an overlap with the caller's own
+  regions under the same lock (the claim-insert guarantee). Startup replay uses the idempotent
+  `region_upsert` instead, and `region_allocate_serial` hands out collision-free ids across plugin
+  instances and threads.
   `regions_overlapping` is the chunk-index box query, not a full scan. A block right-click carries a
   matching native-only `before-use-block` event (the golden shovel needs a target cell, which the
   air-use event does not have).

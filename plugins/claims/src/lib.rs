@@ -412,29 +412,34 @@ impl NativePlugin for ClaimsPlugin {
 }
 
 impl ClaimsPlugin {
-    /// The next free claim id in the plugin's namespaced range.
+    /// The next claim id in the plugin's namespaced range.
     ///
-    /// The counter is persisted so a restart does not reuse an id, and the
-    /// candidate is probed against the core store so an id another plugin
-    /// already owns is skipped. The insert itself is atomic (see
-    /// [`ClaimsPlugin::install_existing`]), so a probe race is still refused.
+    /// The serial comes from the host's process-wide allocator, which is atomic
+    /// across plugin instances and threads, so two instances that would each
+    /// start counting at one cannot choose the same id. `next_id` is the local
+    /// floor and is persisted for diagnostics; the allocator never goes below
+    /// it, so a restart does not reuse a serial. A candidate another plugin
+    /// already owns is skipped by the caller's retry when the fresh insert is
+    /// refused.
     fn allocate_id(&mut self, ctx: &mut NativeContext) -> Result<u64, String> {
-        for _ in 0..ID_ATTEMPTS {
+        let floor = {
             let serial = self.next_id & CLAIM_ID_MASK;
-            let serial = if serial == 0 { 1 } else { serial };
-            self.next_id = if serial >= CLAIM_ID_MASK {
+            if serial == 0 {
                 1
             } else {
-                serial + 1
-            };
-            let id = CLAIM_ID_NAMESPACE | serial;
-            if ctx.backend.region_get(ctx.id, id).is_none() {
-                ctx.backend
-                    .kv_put(ctx.id, KEY_NEXT_ID, self.next_id.to_string().as_bytes());
-                return Ok(id);
+                serial
             }
-        }
-        Err("Could not allocate a claim id; try again.".to_string())
+        };
+        let serial = ctx.backend.region_allocate_serial(ctx.id, floor) & CLAIM_ID_MASK;
+        let serial = serial.max(1);
+        self.next_id = if serial >= CLAIM_ID_MASK {
+            1
+        } else {
+            serial + 1
+        };
+        ctx.backend
+            .kv_put(ctx.id, KEY_NEXT_ID, self.next_id.to_string().as_bytes());
+        Ok(CLAIM_ID_NAMESPACE | serial)
     }
 
     /// Install a persisted claim, reassigning its id when it is not namespaced
@@ -457,12 +462,20 @@ impl ClaimsPlugin {
                     }
                 }
             }
+            // Startup replay is idempotent: it may replace the plugin's own
+            // region with the same id, but it still may not take a core or
+            // foreign id. A fresh `/claim` uses `region_insert` instead, which
+            // refuses every occupied id.
             match ctx
                 .backend
-                .region_insert(ctx.id, &claim.region(self.settings.priority))
+                .region_upsert(ctx.id, &claim.region(self.settings.priority))
             {
                 Ok(()) => return Some(claim),
-                Err(RegionWriteError::OwnedByCore | RegionWriteError::OwnedByOther(_)) => {
+                Err(
+                    RegionWriteError::OwnedByCore
+                    | RegionWriteError::OwnedByOther(_)
+                    | RegionWriteError::IdTaken,
+                ) => {
                     needs_new_id = true;
                 }
                 Err(RegionWriteError::Overlap) => {
@@ -627,9 +640,14 @@ impl ClaimsPlugin {
                 Err(RegionWriteError::Overlap) => {
                     return vec!["That land is already claimed.".to_string()]
                 }
-                Err(RegionWriteError::OwnedByCore | RegionWriteError::OwnedByOther(_)) => {
-                    // The id is taken between the probe and the insert; try the
-                    // next serial rather than persisting an ineffective claim.
+                Err(
+                    RegionWriteError::IdTaken
+                    | RegionWriteError::OwnedByCore
+                    | RegionWriteError::OwnedByOther(_),
+                ) => {
+                    // The id is occupied; the host allocator hands out the next
+                    // serial on the retry, so the claim is never persisted under
+                    // an id that protects nothing.
                     continue;
                 }
                 Err(RegionWriteError::Unavailable) => {

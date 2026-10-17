@@ -561,7 +561,8 @@ impl RegionIndex {
     }
 
     /// Every region in `world` whose box overlaps the inclusive box
-    /// `min..=max`, highest priority first.
+    /// `min..=max`, in id order (not priority order — callers that need the
+    /// protection order run the regular priority chain).
     ///
     /// This is the box query a plugin model uses to refuse an overlapping
     /// claim. It walks only the chunk columns the box covers and deduplicates
@@ -729,6 +730,9 @@ pub enum RegionEditError {
     OwnedByCore,
     /// The id belongs to another plugin's region.
     OwnedByOther(String),
+    /// The id belongs to a region by the same plugin. A *fresh* insert never
+    /// reuses an occupied id; only an idempotent replay may replace its own.
+    IdTaken,
     /// The new box overlaps an existing region the caller asked to avoid.
     Overlap,
 }
@@ -742,6 +746,7 @@ impl std::fmt::Display for RegionEditError {
             RegionEditError::OwnedByOther(source) => {
                 write!(f, "the region id belongs to `{source}`")
             }
+            RegionEditError::IdTaken => write!(f, "the region id is already in use"),
             RegionEditError::Overlap => write!(f, "the region overlaps an existing region"),
         }
     }
@@ -826,17 +831,21 @@ impl RegionStore {
         Ok(())
     }
 
-    /// Insert a region owned by `plugin` when its id is free (or already the
-    /// plugin's) **and** no existing region matching `conflict` overlaps its
-    /// box. This is the atomic claim insert: the overlap test and the insert
-    /// run under the builder lock, so two callers cannot both claim the same
-    /// land.
+    /// Insert a **fresh** region owned by `plugin`. The id must be completely
+    /// free: any existing region with that id — including one this plugin
+    /// already owns — is refused with [`RegionEditError::IdTaken`]. The box must
+    /// also not overlap an existing region matching `conflict`.
     ///
-    /// `conflict` sees the existing region and decides whether it blocks the
-    /// new one — claims pass "same plugin", so a claim may still overlap a
-    /// WorldGuard-style region from another plugin and let the priority chain
-    /// decide.
-    pub fn insert_owned_if_free(
+    /// This is the atomic claim insert: the id and overlap tests and the insert
+    /// share the builder lock, so two callers cannot both claim the same land or
+    /// the same id. `conflict` sees an existing region and decides whether it
+    /// blocks the new one — claims pass "same plugin", so a claim may still
+    /// overlap a WorldGuard-style region from another plugin and let the
+    /// priority chain decide.
+    ///
+    /// Unlike [`RegionStore::upsert_owned`], this never replaces anything. Use
+    /// `upsert_owned` for an idempotent startup replay.
+    pub fn insert_new_owned(
         &self,
         plugin: &str,
         mut region: Region,
@@ -848,13 +857,13 @@ impl RegionStore {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if let Some(error) = ownership_error(&current.regions, plugin, region.id) {
-            return Err(error);
+        if current.regions.contains_key(&region.id) {
+            return Err(RegionEditError::IdTaken);
         }
         if current
             .overlapping_box(&region.world, region.min, region.max)
             .into_iter()
-            .any(|handle| handle.id != region.id && conflict(handle))
+            .any(|handle| conflict(handle))
         {
             return Err(RegionEditError::Overlap);
         }
@@ -1545,7 +1554,7 @@ mod tests {
             .map(|id| {
                 let store = Arc::clone(&store);
                 std::thread::spawn(move || {
-                    store.insert_owned_if_free(
+                    store.insert_new_owned(
                         "claims",
                         region(id, (0, 0, 0), (15, 255, 15)).with_source("claims"),
                         |existing| existing.source.as_deref() == Some("claims"),
@@ -1563,6 +1572,41 @@ mod tests {
             results
                 .iter()
                 .filter(|r| **r == Err(RegionEditError::Overlap))
+                .count(),
+            9,
+            "{results:?}"
+        );
+        assert_eq!(store.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn insert_new_owned_refuses_the_same_id_even_for_the_same_plugin() {
+        // The same-id race: several attempts pick one fresh id before either
+        // insert lands. A fresh insert must refuse every occupied id, so
+        // exactly one may succeed and no earlier claim is silently replaced.
+        let store = Arc::new(RegionStore::new());
+        let workers: Vec<_> = (0..10u64)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                std::thread::spawn(move || {
+                    store.insert_new_owned(
+                        "claims",
+                        region(42, (0, 0, 0), (15, 255, 15)).with_source("claims"),
+                        |existing| existing.source.as_deref() == Some("claims"),
+                    )
+                })
+            })
+            .collect();
+        let results: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "{results:?}"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| **r == Err(RegionEditError::IdTaken))
                 .count(),
             9,
             "{results:?}"

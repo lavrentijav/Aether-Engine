@@ -441,20 +441,32 @@ pub trait HostBackend: Send + Sync {
         Ok(())
     }
 
-    /// Insert a region owned by `plugin`, refusing **atomically** when a region
-    /// from the same plugin already overlaps its box.
+    /// Insert a **fresh** region owned by `plugin`. The id must be free — any
+    /// occupied id, including one this plugin already owns, is refused with
+    /// [`crate::RegionWriteError::IdTaken`] — and the box must not overlap a
+    /// region from the same plugin.
     ///
-    /// This is the claim insert: the overlap test and the write share the
-    /// store's writer lock, so two competing claim attempts cannot both win.
-    /// Overlapping a region from another plugin is allowed (the core's priority
-    /// chain decides the protection verdict). The default is a plain upsert for
-    /// hosts that cannot offer the stronger guarantee.
+    /// The id and overlap tests and the write share the store's writer lock, so
+    /// two competing claim attempts cannot both win and a second insert can
+    /// never silently replace the first. Overlapping a region from another
+    /// plugin is allowed (the core's priority chain decides the protection
+    /// verdict). An idempotent startup replay uses [`HostBackend::region_upsert`]
+    /// instead.
     fn region_insert(
         &self,
         plugin: &str,
         region: &crate::region::RegionInfo,
     ) -> std::result::Result<(), crate::RegionWriteError> {
         self.region_upsert(plugin, region)
+    }
+
+    /// Allocate a globally unique region-id serial, at least `floor`.
+    ///
+    /// The host allocator is atomic across plugin instances and threads, so two
+    /// instances that would each start counting at one cannot pick the same id.
+    /// The default is the process-wide allocator in [`crate::region`].
+    fn region_allocate_serial(&self, _plugin: &str, floor: u64) -> u64 {
+        crate::region::allocate_serial(floor)
     }
 
     /// Remove a region owned by `plugin`. A missing id, a core-owned region or

@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A cuboid region in one world, as a plugin sees it.
 ///
@@ -88,6 +89,9 @@ pub enum RegionWriteError {
     OwnedByCore,
     /// The id belongs to another plugin's region.
     OwnedByOther(String),
+    /// The id is already occupied, including by a region the caller's own
+    /// plugin created. A fresh insert never reuses an id.
+    IdTaken,
     /// The box overlaps an existing region the plugin's insert must avoid.
     Overlap,
     /// The host has no region store (a test backend that did not implement the
@@ -104,8 +108,64 @@ impl fmt::Display for RegionWriteError {
             RegionWriteError::OwnedByOther(source) => {
                 write!(f, "the region id belongs to `{source}`")
             }
+            RegionWriteError::IdTaken => write!(f, "the region id is already in use"),
             RegionWriteError::Overlap => write!(f, "the land is already claimed"),
             RegionWriteError::Unavailable => write!(f, "the host has no region store"),
         }
+    }
+}
+
+/// The next globally unique region-id serial.
+///
+/// The allocator is process-wide and lock-free, so two plugin instances (or two
+/// threads) can never be handed the same serial. `floor` is the caller's next
+/// free serial — the value it would use after a restart — so allocation never
+/// goes backwards past a persisted id.
+static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
+
+/// Allocate a region-id serial at least `floor`.
+pub fn allocate_serial(floor: u64) -> u64 {
+    let mut current = NEXT_SERIAL.load(Ordering::Relaxed);
+    loop {
+        let candidate = current.max(floor).max(1);
+        match NEXT_SERIAL.compare_exchange_weak(
+            current,
+            candidate.saturating_add(1),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return candidate,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn allocated_serials_are_unique_across_threads() {
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| (0..1_000).map(|_| allocate_serial(1)).collect::<Vec<_>>())
+            })
+            .collect();
+        let mut seen = HashSet::new();
+        for worker in workers {
+            for serial in worker.join().unwrap() {
+                assert!(seen.insert(serial), "serial {serial} allocated twice");
+            }
+        }
+    }
+
+    #[test]
+    fn a_floor_never_reuses_a_persisted_serial() {
+        let floor = 1_000_000;
+        let first = allocate_serial(floor);
+        let second = allocate_serial(floor);
+        assert!(first >= floor);
+        assert!(second > first, "{first} then {second}");
     }
 }

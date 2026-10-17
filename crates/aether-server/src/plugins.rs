@@ -760,7 +760,7 @@ mod imp {
         ) -> std::result::Result<(), aether_plugin::RegionWriteError> {
             let region = core_region(plugin, info);
             crate::region::store()
-                .insert_owned_if_free(plugin, region, |existing| {
+                .insert_new_owned(plugin, region, |existing| {
                     existing.source.as_deref() == Some(plugin)
                 })
                 .map_err(map_region_error)
@@ -825,6 +825,7 @@ mod imp {
             RegionEditError::OwnedByOther(source) => {
                 aether_plugin::RegionWriteError::OwnedByOther(source)
             }
+            RegionEditError::IdTaken => aether_plugin::RegionWriteError::IdTaken,
             RegionEditError::Overlap => aether_plugin::RegionWriteError::Overlap,
         }
     }
