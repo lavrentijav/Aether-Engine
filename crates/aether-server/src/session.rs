@@ -333,11 +333,14 @@ fn login_and_play(
     if let Some(s) = &saved {
         player.yaw = s.yaw;
         player.pitch = s.pitch;
+    } else if let Some(spawn) = crate::game::world_spawn_override() {
+        // `/setworldspawn <pos> <angle>` only aims players who join after it.
+        player.yaw = spawn.angle;
     }
     let game_mode = saved
         .as_ref()
         .map(|s| s.mode)
-        .unwrap_or(cfg.server.game_mode);
+        .unwrap_or_else(crate::game::default_game_mode);
 
     // A release with a generated compat pack gets *that* pack; everyone else
     // keeps whatever `[resource_pack]` offers. `compat_offered` says which this
@@ -1585,6 +1588,49 @@ pub(crate) fn after_spawn(
         world,
     );
     handle.emit(&crate::game::time_event(), world);
+    // Weather, world border and the world spawn are process-wide state; a
+    // client needs all three to draw the sky, the border and the compass.
+    let weather = crate::commands::world_env::weather_state();
+    handle.emit(
+        &ServerEvent::Weather {
+            rain: weather.weather != crate::commands::world_env::Weather::Clear,
+            thunder: weather.weather == crate::commands::world_env::Weather::Thunder,
+        },
+        world,
+    );
+    let border = crate::commands::world_env::world_border();
+    // A client joining mid-resize is given the remaining animation, not an
+    // immediate size that would snap the border and lose the lerp.
+    let (old_diameter, new_diameter, speed) = if border.resizing() {
+        (border.size, border.target_size, border.lerp_ticks())
+    } else {
+        (border.size, border.size, 0)
+    };
+    handle.emit(
+        &ServerEvent::WorldBorder {
+            x: border.center_x,
+            z: border.center_z,
+            old_diameter,
+            new_diameter,
+            speed,
+            warning_blocks: border.warning_distance,
+            warning_time: border.warning_time,
+        },
+        world,
+    );
+    let spawn = world_spawn(world);
+    let spawn_yaw = crate::game::world_spawn_override()
+        .map(|s| s.angle)
+        .unwrap_or(0.0);
+    handle.emit(
+        &ServerEvent::SpawnPosition {
+            x: spawn.x.floor() as i32,
+            y: spawn.y.floor() as i32,
+            z: spawn.z.floor() as i32,
+            yaw: spawn_yaw,
+        },
+        world,
+    );
     // Permission level, as an entity event on the player's own entity: 24
     // is level 0, 28 level 4. Without it the client treats an operator as
     // anyone else — the F3+F4 switcher and F3+N refuse to open. The level is
@@ -2207,7 +2253,14 @@ fn find_spawn_y(world: &DemoWorld, x: i32, z: i32) -> f64 {
 
 /// Where new players appear: the first dry column found spiralling out
 /// from the origin, so nobody starts in the middle of an ocean.
-fn world_spawn(world: &DemoWorld) -> Vector3 {
+pub(crate) fn world_spawn(world: &DemoWorld) -> Vector3 {
+    if let Some(spawn) = crate::game::world_spawn_override() {
+        return Vector3::new(
+            f64::from(spawn.x) + 0.5,
+            f64::from(spawn.y),
+            f64::from(spawn.z) + 0.5,
+        );
+    }
     static SPAWN: std::sync::OnceLock<(i32, i32)> = std::sync::OnceLock::new();
     let (x, z) = *SPAWN.get_or_init(|| {
         for ring in 0..16i32 {

@@ -12,7 +12,7 @@ Every command Aether knows, grouped by category: the ones that run today and the
 
 **Legend:** ✅ working · 🚧 pending (`CMD-nn` is the task that will implement it). **Node** is the permission node and **Op** the vanilla operator level (0 everyone … 4 owner); for a pending command the stub enforces exactly them. **Gate** is what the server checks *today*: `node` (enforced node/op), `operator` (the legacy operator-only check — Node/Op are the intended target, not yet enforced), or `everyone` (no requirement; Node/Op are the intended target).
 
-**Totals:** 113 commands — 42 working, 71 pending.
+**Totals:** 113 commands — 46 working, 67 pending.
 
 ## Contents
 
@@ -94,7 +94,7 @@ Blocks, environment and world rules.
 
 | Command | Aliases | Status | Gate | Node | Op | Usage |
 | --- | --- | --- | --- | --- | --- | --- |
-| `/time` | – | ✅ working | `operator` | `minecraft.command.time` | 2 | `/time [set] <day,noon,night,midnight,ticks>` |
+| `/time` | – | ✅ working | `node` | `minecraft.command.time` | 2 | `/time <add,set,query> [...]` |
 | `/setblock` | – | 🚧 pending CMD-12 | `node` | `minecraft.command.setblock` | 2 | `/setblock <pos> <block> [mode]` |
 | `/fill` | – | 🚧 pending CMD-12 | `node` | `minecraft.command.fill` | 2 | `/fill <from> <to> <block> [mode]` |
 | `/clone` | – | 🚧 pending CMD-12 | `node` | `minecraft.command.clone` | 2 | `/clone <from> <to> <dest> [mask] [mode]` |
@@ -102,13 +102,13 @@ Blocks, environment and world rules.
 | `/place` | – | 🚧 pending CMD-12 | `node` | `minecraft.command.place` | 2 | `/place <feature,template> <pos> [...]` |
 | `/forceload` | – | 🚧 pending CMD-12 | `node` | `minecraft.command.forceload` | 2 | `/forceload <add,remove,query> <from> [to]` |
 | `/locate` | – | 🚧 pending CMD-13 | `node` | `minecraft.command.locate` | 2 | `/locate <structure,biome,poi> [...]` |
-| `/setworldspawn` | – | 🚧 pending CMD-13 | `node` | `minecraft.command.setworldspawn` | 2 | `/setworldspawn [pos] [angle]` |
-| `/worldborder` | – | 🚧 pending CMD-13 | `node` | `minecraft.command.worldborder` | 2 | `/worldborder <set,center,damage,get,warning> [...]` |
-| `/weather` | – | 🚧 pending CMD-13 | `node` | `minecraft.command.weather` | 2 | `/weather <clear,rain,thunder> [duration]` |
+| `/setworldspawn` | – | ✅ working | `node` | `minecraft.command.setworldspawn` | 2 | `/setworldspawn [<pos>] [<angle>]` |
+| `/worldborder` | – | ✅ working | `node` | `minecraft.command.worldborder` | 2 | `/worldborder <add,set,center,damage,get,warning> [...]` |
+| `/weather` | – | ✅ working | `node` | `minecraft.command.weather` | 2 | `/weather <clear,rain,thunder> [<duration>]` |
 | `/gamerule` | – | 🚧 pending CMD-13 | `node` | `minecraft.command.gamerule` | 2 | `/gamerule <rule> [value]` |
 | `/difficulty` | – | 🚧 pending CMD-13 | `node` | `minecraft.command.difficulty` | 2 | `/difficulty <peaceful,easy,normal,hard>` |
 | `/tick` | – | 🚧 pending CMD-13 | `node` | `minecraft.command.tick` | 3 | `/tick <rate,freeze,step,sprint,unfreeze,query> [...]` |
-| `/defaultgamemode` | – | 🚧 pending CMD-13 | `node` | `minecraft.command.defaultgamemode` | 2 | `/defaultgamemode <mode>` |
+| `/defaultgamemode` | – | ✅ working | `node` | `minecraft.command.defaultgamemode` | 2 | `/defaultgamemode <gamemode>` |
 | `/waypoint` | – | 🚧 pending CMD-13 | `node` | `minecraft.command.waypoint` | 2 | `/waypoint <list,modify>` |
 
 ## data

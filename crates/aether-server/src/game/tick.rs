@@ -59,8 +59,11 @@ pub fn start(registry: SharedRegistry, world: Arc<DemoWorld>) {
 
 fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng) {
     let now = super::AGE.fetch_add(1, Ordering::Relaxed) + 1;
-    super::set_time_of_day(super::time_of_day() + 1);
+    super::set_time_of_day(super::daylight_ticks() + 1);
     let night = super::is_night();
+    // Weather and the world border advance on the same clock; the border also
+    // damages anyone outside it once a second.
+    crate::commands::world_env::tick_world(registry, world);
 
     let actions = entities::tick(world, registry, now, !night);
     for a in actions {
@@ -142,7 +145,7 @@ fn tick_once(registry: &SharedRegistry, world: &DemoWorld, rng: &mut tables::Rng
 pub fn save_time(world: &DemoWorld) {
     let mut b = Vec::with_capacity(16);
     b.extend_from_slice(&super::now().to_be_bytes());
-    b.extend_from_slice(&super::time_of_day().to_be_bytes());
+    b.extend_from_slice(&super::daylight_ticks().to_be_bytes());
     let _ = world.put_meta(TIME_KEY, &b);
 }
 

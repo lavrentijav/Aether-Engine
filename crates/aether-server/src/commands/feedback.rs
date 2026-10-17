@@ -234,6 +234,79 @@ pub mod lang {
     pub const TIME_SET: &str = "Set the time to %s";
     /// `commands.time.query`.
     pub const TIME_QUERY: &str = "The time is %s";
+    /// `commands.weather.set.clear`.
+    pub const WEATHER_CLEAR: &str = "Set the weather to clear";
+    /// `commands.weather.set.rain`.
+    pub const WEATHER_RAIN: &str = "Set the weather to rain";
+    /// `commands.weather.set.thunder`.
+    pub const WEATHER_THUNDER: &str = "Set the weather to rain & thunder";
+    /// `commands.worldborder.get`.
+    pub const WORLDBORDER_GET: &str = "The world border is currently %s block(s) wide";
+    /// `commands.worldborder.center.success`.
+    pub const WORLDBORDER_CENTER_SUCCESS: &str = "Set the center of the world border to %s, %s";
+    /// `commands.worldborder.center.failed`.
+    pub const WORLDBORDER_CENTER_FAILED: &str =
+        "Nothing changed. The world border is already centered there";
+    /// `commands.worldborder.set.failed.small`.
+    pub const WORLDBORDER_FAILED_SMALL: &str = "World border cannot be smaller than 1 block wide";
+    /// `commands.worldborder.set.failed.big`.
+    pub const WORLDBORDER_FAILED_BIG: &str = "World border cannot be bigger than %s blocks wide";
+    /// `commands.worldborder.set.failed.far`.
+    pub const WORLDBORDER_FAILED_FAR: &str = "World border cannot be further out than %s blocks";
+    /// `commands.worldborder.set.failed.nochange`.
+    pub const WORLDBORDER_SET_NOCHANGE: &str =
+        "Nothing changed. The world border is already that size";
+    /// `commands.worldborder.set.immediate`.
+    pub const WORLDBORDER_SET_IMMEDIATE: &str = "Set the world border to %s block(s) wide";
+    /// `commands.worldborder.set.grow`.
+    pub const WORLDBORDER_SET_GROW: &str =
+        "Growing the world border to %s blocks wide over %s seconds";
+    /// `commands.worldborder.set.shrink`.
+    pub const WORLDBORDER_SET_SHRINK: &str =
+        "Shrinking the world border to %s block(s) wide over %s second(s)";
+    /// `commands.worldborder.damage.amount.success`.
+    pub const WORLDBORDER_DAMAGE_AMOUNT_SUCCESS: &str =
+        "Set the world border damage to %s per block each second";
+    /// `commands.worldborder.damage.amount.failed`.
+    pub const WORLDBORDER_DAMAGE_AMOUNT_FAILED: &str =
+        "Nothing changed. The world border damage is already that amount";
+    /// `commands.worldborder.damage.buffer.success`.
+    pub const WORLDBORDER_DAMAGE_BUFFER_SUCCESS: &str =
+        "Set the world border damage buffer to %s block(s)";
+    /// `commands.worldborder.damage.buffer.failed`.
+    pub const WORLDBORDER_DAMAGE_BUFFER_FAILED: &str =
+        "Nothing changed. The world border damage buffer is already that distance";
+    /// `commands.worldborder.warning.distance.success`.
+    pub const WORLDBORDER_WARNING_DISTANCE_SUCCESS: &str =
+        "Set the world border warning distance to %s block(s)";
+    /// `commands.worldborder.warning.distance.failed`.
+    pub const WORLDBORDER_WARNING_DISTANCE_FAILED: &str =
+        "Nothing changed. The world border warning is already that distance";
+    /// `commands.worldborder.warning.time.success`.
+    pub const WORLDBORDER_WARNING_TIME_SUCCESS: &str =
+        "Set the world border warning time to %s second(s)";
+    /// `commands.worldborder.warning.time.failed`.
+    pub const WORLDBORDER_WARNING_TIME_FAILED: &str =
+        "Nothing changed. The world border warning is already that amount of time";
+    /// `commands.setworldspawn.success`.
+    pub const SETWORLDSPAWN_SUCCESS: &str = "Set the world spawn point to %s, %s, %s [%s]";
+    /// `commands.defaultgamemode.success`.
+    pub const DEFAULTGAMEMODE_SUCCESS: &str = "The default game mode is now %s";
+
+    /// `argument.integer.low`.
+    pub const ARG_INTEGER_LOW: &str = "Integer must not be less than %s: found %s";
+    /// `argument.integer.big`.
+    pub const ARG_INTEGER_BIG: &str = "Integer must not be more than %s: found %s";
+    /// `argument.float.low`.
+    pub const ARG_FLOAT_LOW: &str = "Float must not be less than %s: found %s";
+    /// `argument.double.low`.
+    pub const ARG_DOUBLE_LOW: &str = "Double must not be less than %s: found %s";
+    /// `argument.double.big`.
+    pub const ARG_DOUBLE_BIG: &str = "Double must not be more than %s: found %s";
+    /// `argument.time.tick_count_too_low`.
+    pub const ARG_TIME_TOO_LOW: &str = "The tick count must not be less than %s: found %s";
+    /// `argument.pos.outofbounds`.
+    pub const POS_OUT_OF_BOUNDS: &str = "That position is outside the allowed boundaries.";
     /// `commands.summon.success`.
     pub const SUMMON_SUCCESS: &str = "Summoned new %s";
     /// `commands.kill.success.single`.

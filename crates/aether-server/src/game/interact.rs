@@ -331,7 +331,9 @@ pub fn use_block(handle: &PlayerHandle, world: &DemoWorld, x: i32, y: i32, z: i3
         handle.game().spawn = (x as f64 + 0.5, y as f64 + 1.0, z as f64 + 0.5);
         let _ = pos;
         if super::is_night() {
-            super::set_time_of_day(0);
+            // Next sunrise, keeping the absolute daylight counter whole so
+            // `/time query day` still counts the days slept through.
+            super::set_time_of_day((super::day() + 1) * 24_000);
             if let Some(r) = super::registry() {
                 r.broadcast(&super::time_event(), world);
                 r.broadcast(

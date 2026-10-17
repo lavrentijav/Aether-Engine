@@ -240,6 +240,7 @@ impl From<WireGameMode> for Gamemode {
         match g {
             WireGameMode::Survival => Gamemode::Survival,
             WireGameMode::Creative => Gamemode::Creative,
+            WireGameMode::Adventure => Gamemode::Adventure,
             WireGameMode::Spectator => Gamemode::Spectator,
         }
     }

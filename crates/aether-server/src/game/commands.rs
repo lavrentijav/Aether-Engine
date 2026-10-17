@@ -38,10 +38,6 @@ pub fn nodes() -> Vec<Node> {
             "<gamemode> [<targets>]",
         ),
         tree::with_usage(
-            tree::greedy("time", &[], Requirement::Fn(require_op), exec_time),
-            "set <day|noon|night|midnight|ticks>",
-        ),
-        tree::with_usage(
             tree::greedy("give", &[], Requirement::Fn(require_op), exec_give),
             "<item> [<count>]",
         ),
@@ -87,11 +83,6 @@ fn exec_gamemode(ctx: &mut Ctx) -> Reply {
         Some(handle) => Reply(gamemode(&args, handle, ctx.registry, ctx.world)),
         None => ctx.needs_player(),
     }
-}
-
-fn exec_time(ctx: &mut Ctx) -> Reply {
-    let args = ctx.refs();
-    Reply(time(&args, ctx.registry, ctx.world))
 }
 
 fn exec_give(ctx: &mut Ctx) -> Reply {
@@ -217,37 +208,9 @@ fn game_mode_name(mode: GameMode) -> &'static str {
     match mode {
         GameMode::Survival => lang::GAMEMODE_SURVIVAL,
         GameMode::Creative => lang::GAMEMODE_CREATIVE,
+        GameMode::Adventure => lang::GAMEMODE_ADVENTURE,
         GameMode::Spectator => lang::GAMEMODE_SPECTATOR,
     }
-}
-
-/// `/time [set] <day|noon|night|midnight|ticks>` or a query.
-pub fn time(args: &[&str], registry: &SharedRegistry, world: &DemoWorld) -> Vec<String> {
-    let t = match (args.first().copied(), args.get(1).copied()) {
-        (Some("set"), Some(v)) | (Some(v), None) => match v {
-            "day" => 1000,
-            "noon" => 6000,
-            "night" => 13000,
-            "midnight" => 18000,
-            n => match n.parse::<i64>() {
-                Ok(n) => n,
-                Err(_) => return vec!["/time set <day|noon|night|midnight|ticks>".into()],
-            },
-        },
-        _ => {
-            // The bare `/time` is a query, the closest vanilla analogue being
-            // `/time query daytime`; use its string (`commands.time.query`)
-            // rather than an invented one. CMD-13a ports the full
-            // `add/set/query` grammar onto the tree.
-            return vec![lang::format(
-                lang::TIME_QUERY,
-                &[&super::time_of_day().to_string()],
-            )];
-        }
-    };
-    super::set_time_of_day(t);
-    registry.broadcast(&super::time_event(), world);
-    vec![lang::format(lang::TIME_SET, &[&t.to_string()])]
 }
 
 /// `/give <item> [count]`.
@@ -329,10 +292,11 @@ pub fn kill(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld)
     Vec::new()
 }
 
-/// `/spawn`.
+/// `/spawn` — the world spawn, including a `/setworldspawn` override, so an
+/// online player follows a spawn an operator has just moved.
 pub fn spawn(handle: &PlayerHandle, registry: &SharedRegistry, world: &DemoWorld) -> Vec<String> {
-    let s = handle.game().spawn;
-    teleport(handle, registry, world, s.0, s.1, s.2);
+    let s = crate::session::world_spawn(world);
+    teleport(handle, registry, world, s.x, s.y, s.z);
     vec!["Teleported to spawn".into()]
 }
 
@@ -505,6 +469,7 @@ fn parse_mode(s: &str) -> Option<GameMode> {
     match s {
         "s" | "0" => Some(GameMode::Survival),
         "c" | "1" => Some(GameMode::Creative),
+        "a" | "2" => Some(GameMode::Adventure),
         other => other.parse().ok(),
     }
 }

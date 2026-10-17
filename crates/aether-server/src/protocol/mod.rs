@@ -514,6 +514,33 @@ pub enum ServerEvent<'a> {
     Experience { bar: f32, level: i32, total: i32 },
     /// World age and time of day, in ticks.
     Time { age: i64, time_of_day: i64 },
+    /// The weather the world is in. The codec sends the Game State Change
+    /// packets that start or stop the rain and the thunder, and set the
+    /// client's rain/thunder levels.
+    Weather { rain: bool, thunder: bool },
+    /// The world border, as one Initialize World Border packet. Sent at join
+    /// and after a size change; `old_diameter`/`new_diameter`/`speed` describe
+    /// a running resize, `speed` in ticks. A non-size edit uses one of the
+    /// focused events below so it cannot cancel a running animation.
+    WorldBorder {
+        x: f64,
+        z: f64,
+        old_diameter: f64,
+        new_diameter: f64,
+        speed: i64,
+        warning_blocks: i32,
+        warning_time: i32,
+    },
+    /// Set just the world border centre, leaving its size animation alone.
+    WorldBorderCenter { x: f64, z: f64 },
+    /// Set just the world border diameter, immediately.
+    WorldBorderSize { diameter: f64 },
+    /// Set just the warning distance, in blocks.
+    WorldBorderWarningDistance { blocks: i32 },
+    /// Set just the warning time, in ticks.
+    WorldBorderWarningTime { ticks: i32 },
+    /// The world spawn point, for the compass and respawn screen.
+    SpawnPosition { x: i32, y: i32, z: i32, yaw: f32 },
     /// Every slot of a window plus the stack on the cursor.
     WindowContents {
         window_id: u8,
@@ -867,6 +894,8 @@ pub enum GameMode {
     /// The client fills its own inventory and blocks break instantly.
     #[default]
     Creative,
+    /// Like survival, but the client refuses to break or place blocks.
+    Adventure,
     /// No collision and no interaction with the world; the admin flies freely
     /// and mobs ignore them. Entered by `/spectate`, which saves the previous
     /// mode and restores it on `/spectate off`.
@@ -879,6 +908,7 @@ impl GameMode {
         match self {
             GameMode::Survival => 0,
             GameMode::Creative => 1,
+            GameMode::Adventure => 2,
             GameMode::Spectator => 3,
         }
     }
@@ -898,6 +928,16 @@ impl GameMode {
     pub fn flies(self) -> bool {
         matches!(self, GameMode::Creative | GameMode::Spectator)
     }
+
+    /// The vanilla `gameMode.*` display name.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            GameMode::Survival => "Survival Mode",
+            GameMode::Creative => "Creative Mode",
+            GameMode::Adventure => "Adventure Mode",
+            GameMode::Spectator => "Spectator Mode",
+        }
+    }
 }
 
 impl std::str::FromStr for GameMode {
@@ -906,9 +946,10 @@ impl std::str::FromStr for GameMode {
         match s.trim().to_ascii_lowercase().as_str() {
             "survival" | "0" => Ok(GameMode::Survival),
             "creative" | "1" => Ok(GameMode::Creative),
+            "adventure" | "2" => Ok(GameMode::Adventure),
             "spectator" | "3" => Ok(GameMode::Spectator),
             other => Err(format!(
-                "`{other}` is not a game mode — use survival, creative or spectator"
+                "`{other}` is not a game mode — use survival, creative, adventure or spectator"
             )),
         }
     }

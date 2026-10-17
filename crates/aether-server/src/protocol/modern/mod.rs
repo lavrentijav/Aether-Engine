@@ -264,7 +264,7 @@ impl ProtocolCodec for Codec {
         let flags = match p.game_mode {
             super::GameMode::Creative => 0x01 | 0x04 | 0x08, // invulnerable | allow flying | creative
             super::GameMode::Spectator => 0x01 | 0x04,       // invulnerable | allow flying
-            super::GameMode::Survival => 0,
+            super::GameMode::Adventure | super::GameMode::Survival => 0,
         };
         PacketOut::new(self.0.packets.cb_player_abilities)
             .u8(flags)
@@ -675,6 +675,7 @@ impl ProtocolCodec for Codec {
             id if id == p.sb_change_game_mode => match pin.var_int() {
                 Ok(0) => ClientEvent::ChangeGameMode(super::GameMode::Survival),
                 Ok(1) => ClientEvent::ChangeGameMode(super::GameMode::Creative),
+                Ok(2) => ClientEvent::ChangeGameMode(super::GameMode::Adventure),
                 Ok(3) => ClientEvent::ChangeGameMode(super::GameMode::Spectator),
                 _ => ClientEvent::Ignored,
             },

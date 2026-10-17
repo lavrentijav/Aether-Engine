@@ -433,10 +433,39 @@ fn abilities(v: &Version, mode: GameMode) -> PacketOut {
     let flags = match mode {
         GameMode::Creative => 0x01 | 0x04 | 0x08,
         GameMode::Spectator => 0x01 | 0x04,
-        GameMode::Survival => 0,
+        GameMode::Adventure | GameMode::Survival => 0,
     };
     p.u8(flags).f32(0.05).f32(0.10);
     p
+}
+
+/// The world-border and spawn-position packet ids of one release.
+///
+/// They are not in the shared [`super::version::Packets`] table yet: the
+/// world border arrived before it and only 1.21.11 has been wired, so a newer
+/// release simply renders no border packet rather than one at a wrong id.
+struct BorderIds {
+    initialize: i32,
+    center: i32,
+    size: i32,
+    warning_delay: i32,
+    warning_reach: i32,
+    spawn_position: i32,
+}
+
+fn border_ids(v: &Version) -> Option<BorderIds> {
+    if v.gen == Gen::V1_21_11 {
+        Some(BorderIds {
+            initialize: 0x2a,
+            center: 0x56,
+            size: 0x58,
+            warning_delay: 0x59,
+            warning_reach: 0x5a,
+            spawn_position: 0x5f,
+        })
+    } else {
+        None
+    }
 }
 
 /// Encode a gameplay event, or `None` if it is not one of these.
@@ -762,6 +791,85 @@ pub fn encode(v: &Version, ev: &ServerEvent) -> Option<Vec<PacketOut>> {
                     p.bool(true);
                 }
             }
+            vec![p]
+        }
+        ServerEvent::Weather { rain, thunder } => {
+            // Start or stop the rain, then set both levels. `clear` must also
+            // lower the thunder, or the client keeps its storm sky.
+            let mut toggle = PacketOut::new(ids.cb_game_event);
+            toggle.u8(if *rain { 1 } else { 2 }).f32(0.0);
+            let mut rain_level = PacketOut::new(ids.cb_game_event);
+            rain_level.u8(7).f32(if *rain { 1.0 } else { 0.0 });
+            let mut thunder_level = PacketOut::new(ids.cb_game_event);
+            thunder_level.u8(8).f32(if *thunder { 1.0 } else { 0.0 });
+            vec![toggle, rain_level, thunder_level]
+        }
+        ServerEvent::WorldBorder {
+            x,
+            z,
+            old_diameter,
+            new_diameter,
+            speed,
+            warning_blocks,
+            warning_time,
+        } => {
+            let Some(ids) = border_ids(v) else {
+                return Some(Vec::new());
+            };
+            let mut p = PacketOut::new(ids.initialize);
+            p.f64(*x)
+                .f64(*z)
+                .f64(*old_diameter)
+                .f64(*new_diameter)
+                // `speed` is a VarLong in `ClientboundInitializeBorderPacket`.
+                .var_long(*speed)
+                // `getAbsoluteMaxSize`, the portal reach vanilla sends.
+                .var_int(29_999_984)
+                .var_int(*warning_blocks)
+                .var_int(*warning_time);
+            vec![p]
+        }
+        ServerEvent::WorldBorderCenter { x, z } => {
+            let Some(ids) = border_ids(v) else {
+                return Some(Vec::new());
+            };
+            let mut p = PacketOut::new(ids.center);
+            p.f64(*x).f64(*z);
+            vec![p]
+        }
+        ServerEvent::WorldBorderSize { diameter } => {
+            let Some(ids) = border_ids(v) else {
+                return Some(Vec::new());
+            };
+            let mut p = PacketOut::new(ids.size);
+            p.f64(*diameter);
+            vec![p]
+        }
+        ServerEvent::WorldBorderWarningDistance { blocks } => {
+            let Some(ids) = border_ids(v) else {
+                return Some(Vec::new());
+            };
+            let mut p = PacketOut::new(ids.warning_reach);
+            p.var_int(*blocks);
+            vec![p]
+        }
+        ServerEvent::WorldBorderWarningTime { ticks } => {
+            let Some(ids) = border_ids(v) else {
+                return Some(Vec::new());
+            };
+            let mut p = PacketOut::new(ids.warning_delay);
+            p.var_int(*ticks);
+            vec![p]
+        }
+        ServerEvent::SpawnPosition { x, y, z, yaw } => {
+            let Some(ids) = border_ids(v) else {
+                return Some(Vec::new());
+            };
+            let mut p = PacketOut::new(ids.spawn_position);
+            p.string("minecraft:overworld")
+                .i64(encode_position(i64::from(*x), i64::from(*y), i64::from(*z)))
+                .f32(*yaw)
+                .f32(0.0);
             vec![p]
         }
         ServerEvent::WindowContents {
@@ -1406,6 +1514,112 @@ mod tests {
             v.resolve_reported(spear, id("minecraft:diamond")),
             id("minecraft:diamond")
         );
+    }
+
+    #[test]
+    fn weather_border_and_spawn_position_reach_a_1_21_11_client() {
+        let v = &crate::protocol::modern::version::V1_21_11;
+
+        let pkts = encode(
+            v,
+            &ServerEvent::Weather {
+                rain: true,
+                thunder: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(pkts.len(), 3, "start rain, rain level, thunder level");
+        let body = pkts[0].body();
+        assert_eq!(body[0] as i32, v.packets.cb_game_event);
+        let mut pin = crate::proto::PacketIn::new(&body[1..]);
+        assert_eq!(pin.u8().unwrap(), 1, "start_raining");
+        assert_eq!(pin.f32().unwrap(), 0.0);
+        let mut pin = crate::proto::PacketIn::new(&pkts[1].body()[1..]);
+        assert_eq!(pin.u8().unwrap(), 7, "rain level change");
+        assert_eq!(pin.f32().unwrap(), 1.0);
+        let mut pin = crate::proto::PacketIn::new(&pkts[2].body()[1..]);
+        assert_eq!(pin.u8().unwrap(), 8, "thunder level change");
+        assert_eq!(pin.f32().unwrap(), 0.0);
+
+        let pkts = encode(
+            v,
+            &ServerEvent::WorldBorder {
+                x: 1.0,
+                z: 2.0,
+                old_diameter: 100.0,
+                new_diameter: 200.0,
+                speed: 40,
+                warning_blocks: 5,
+                warning_time: 300,
+            },
+        )
+        .unwrap();
+        assert_eq!(pkts[0].body()[0], 0x2a, "initialize_world_border");
+        let mut pin = crate::proto::PacketIn::new(&pkts[0].body()[1..]);
+        assert_eq!(pin.f64().unwrap(), 1.0);
+        assert_eq!(pin.f64().unwrap(), 2.0);
+        assert_eq!(pin.f64().unwrap(), 100.0);
+        assert_eq!(pin.f64().unwrap(), 200.0);
+        assert_eq!(pin.var_int().unwrap(), 40, "speed in ticks");
+        assert_eq!(pin.var_int().unwrap(), 29_999_984);
+        assert_eq!(pin.var_int().unwrap(), 5);
+        assert_eq!(pin.var_int().unwrap(), 300, "warning time is in ticks");
+
+        // A focused edit carries one field and cannot cancel the resize.
+        let center = encode(v, &ServerEvent::WorldBorderCenter { x: 3.0, z: 4.0 }).unwrap();
+        assert_eq!(center[0].body()[0], 0x56, "world_border_center");
+        let mut pin = crate::proto::PacketIn::new(&center[0].body()[1..]);
+        assert_eq!(pin.f64().unwrap(), 3.0);
+        assert_eq!(pin.f64().unwrap(), 4.0);
+
+        let size = encode(v, &ServerEvent::WorldBorderSize { diameter: 42.0 }).unwrap();
+        assert_eq!(size[0].body()[0], 0x58, "world_border_size");
+        let mut pin = crate::proto::PacketIn::new(&size[0].body()[1..]);
+        assert_eq!(pin.f64().unwrap(), 42.0);
+
+        let warn = encode(v, &ServerEvent::WorldBorderWarningTime { ticks: 600 }).unwrap();
+        assert_eq!(warn[0].body()[0], 0x59, "world_border_warning_delay");
+        let mut pin = crate::proto::PacketIn::new(&warn[0].body()[1..]);
+        assert_eq!(pin.var_int().unwrap(), 600);
+
+        let reach = encode(v, &ServerEvent::WorldBorderWarningDistance { blocks: 12 }).unwrap();
+        assert_eq!(reach[0].body()[0], 0x5a, "world_border_warning_reach");
+        let mut pin = crate::proto::PacketIn::new(&reach[0].body()[1..]);
+        assert_eq!(pin.var_int().unwrap(), 12);
+
+        let pkts = encode(
+            v,
+            &ServerEvent::SpawnPosition {
+                x: 10,
+                y: 64,
+                z: -3,
+                yaw: 90.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(pkts[0].body()[0], 0x5f, "spawn_position");
+        let mut pin = crate::proto::PacketIn::new(&pkts[0].body()[1..]);
+        assert_eq!(pin.string().unwrap(), "minecraft:overworld");
+        assert_eq!(pin.i64().unwrap(), encode_position(10, 64, -3));
+        assert_eq!(pin.f32().unwrap(), 90.0);
+        assert_eq!(pin.f32().unwrap(), 0.0);
+
+        // A release whose border ids are not wired yet gets no packet rather
+        // than one at the wrong id.
+        let newer = encode(
+            &crate::protocol::modern::version::V26_1,
+            &ServerEvent::WorldBorder {
+                x: 0.0,
+                z: 0.0,
+                old_diameter: 1.0,
+                new_diameter: 1.0,
+                speed: 0,
+                warning_blocks: 5,
+                warning_time: 15,
+            },
+        )
+        .unwrap();
+        assert!(newer.is_empty());
     }
 
     #[test]
