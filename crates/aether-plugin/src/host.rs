@@ -34,6 +34,26 @@ pub trait HostBackend: Send + Sync {
     fn kv_delete(&self, plugin: &str, key: &str);
     /// `storage.kv`: keys beginning with `prefix`.
     fn kv_list(&self, plugin: &str, prefix: &str) -> Vec<String>;
+    /// `storage.kv`: read `key`, telling a missing key from a failed read.
+    ///
+    /// [`Self::kv_get`] flattens both into `None`, which is fine for a cache
+    /// but not for protection state: a plugin that cannot tell "no regions
+    /// yet" from "the store is unreadable" must fail closed rather than
+    /// overwrite the persisted state with an empty one. The default forwards
+    /// to `kv_get` (so a test host still works); the server overrides it to
+    /// surface the real storage error.
+    fn kv_try_get(&self, plugin: &str, key: &str) -> std::result::Result<Option<Vec<u8>>, String> {
+        Ok(self.kv_get(plugin, key))
+    }
+    /// `storage.kv`: write `key`, reporting a failed write.
+    ///
+    /// The default forwards to [`Self::kv_put`] and succeeds, so a host with
+    /// no failure mode (a test) needs no change. A plugin that must not claim
+    /// success before the bytes are durable uses this instead.
+    fn kv_try_put(&self, plugin: &str, key: &str, value: &[u8]) -> std::result::Result<(), String> {
+        self.kv_put(plugin, key, value);
+        Ok(())
+    }
     /// `log`: a line tagged with `plugin`.
     fn log(&self, plugin: &str, level: LogLevel, message: &str);
     /// `config`: an operator value from `[plugins.<id>]`.
@@ -780,6 +800,44 @@ impl LoadedPlugin {
                     backend,
                 };
                 Ok(n.before_block_interact(&mut ctx, p, x, y, z, block))
+            }
+        }
+    }
+
+    /// The player started mining a block. Native-only, like
+    /// `before-block-interact`, and called **before** the core's region check
+    /// and before any break: a selection wand needs the click even on an
+    /// unbreakable or protected block. Calling it from the break itself would
+    /// be too late in survival.
+    #[allow(clippy::too_many_arguments)]
+    fn call_before_block_dig(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: &str,
+    ) -> std::result::Result<Decision, String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            Kind::Wasm { .. } => Ok(Decision::Allow),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                Ok(n.before_block_dig(&mut ctx, p, x, y, z, block))
             }
         }
     }
@@ -1751,6 +1809,22 @@ impl PluginHost {
     ) -> Decision {
         self.before(manifest::EVENT_BEFORE_BLOCK_INTERACT, |pl, s, b| {
             pl.call_before_block_interact(s, b, p, x, y, z, block)
+        })
+    }
+
+    /// `before-block-dig`: a native-only start-of-mining hook, called before
+    /// the region check and before a survival dig begins. A WASM plugin is
+    /// skipped, since its world has no such export.
+    pub fn before_block_dig(
+        &mut self,
+        p: &Player,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: &str,
+    ) -> Decision {
+        self.before(manifest::EVENT_BEFORE_BLOCK_DIG, |pl, s, b| {
+            pl.call_before_block_dig(s, b, p, x, y, z, block)
         })
     }
 

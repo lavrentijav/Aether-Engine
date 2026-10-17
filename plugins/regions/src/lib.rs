@@ -22,12 +22,17 @@
 //! useful selection tool itself. Holding the configured wand item (default
 //! `minecraft:golden_axe`), **left-click** a block sets point 1 and
 //! **right-click** a block sets point 2. Both clicks are cancelled so the wand
-//! never breaks or places anything. The bounds are normalized on every axis, so
-//! the order of the clicks does not matter. The selection is per session; only
+//! does not break, place, open or toggle anything. Point 1 is taken at the
+//! **start** of the dig (`before-block-dig`), before the region check and
+//! before a survival dig begins, so a protected or unbreakable block is still
+//! selectable. The bounds are normalized on every axis, so the order of the
+//! clicks does not matter. The selection is per session and is cleared after a
+//! successful `define`/`redefine`/`remove`, by `/rg cancel`, and on leave; only
 //! the regions themselves are persisted.
 //!
-//! `before-block-interact` is a **native-only** event: the frozen WASM
-//! `@0.1.0` world has no export for a right-click at a block, and the plugin
+//! `before-block-dig` and `before-block-interact` are **native-only** events:
+//! the frozen WASM `@0.1.0` world has no export for a start-of-dig or a
+//! right-click at a block, and the plugin
 //! declares it in `manifest().subscribe` like any other event.
 //!
 //! ## Persistence
@@ -95,28 +100,25 @@ pub fn manifest() -> Manifest {
             "config".to_string(),
             "supports".to_string(),
             "storage.kv".to_string(),
-            "world.read".to_string(),
             "players".to_string(),
         ],
         subscribe: vec![
-            "before-block-break".to_string(),
+            "before-block-dig".to_string(),
             "before-block-interact".to_string(),
-            "after-player-join".to_string(),
+            "after-player-leave".to_string(),
             "on-command".to_string(),
         ],
+        // The top-level command is public so the per-subcommand
+        // `worldguard.region.*` nodes are the only gate. Declaring it under
+        // `worldguard.region.info` would make a deny on `info` block `define`
+        // too, before the plugin ever sees the arguments.
         commands: vec![
-            CommandDecl::Detailed {
-                name: COMMAND_SHORT.to_string(),
-                node: NODE_INFO.to_string(),
-                op: 0,
-            },
-            CommandDecl::Detailed {
-                name: COMMAND_LONG.to_string(),
-                node: NODE_INFO.to_string(),
-                op: 0,
-            },
+            CommandDecl::Plain(COMMAND_SHORT.to_string()),
+            CommandDecl::Plain(COMMAND_LONG.to_string()),
         ],
         tick_period: 1,
+        // The protection itself is core; a fault in this plugin's wand must not
+        // veto every block break. A trap only disables the plugin's own hooks.
         deny_on_fault: false,
         tier: PluginTier::Native,
         requires: Vec::new(),
@@ -271,20 +273,32 @@ impl Regions {
         }
     }
 
-    fn load(&mut self, ctx: &mut NativeContext) {
+    /// Load the persisted set and rebuild the core index from it.
+    ///
+    /// A failed read or a corrupt value **refuses the load**: silently
+    /// starting empty would be fail-open for a protection feature and the
+    /// next mutation would overwrite the still-recoverable bytes.
+    fn load(&mut self, ctx: &mut NativeContext) -> Result<(), String> {
         self.wand_item = ctx
             .config
             .get("wand-item")
             .filter(|item| !item.trim().is_empty())
             .cloned()
             .unwrap_or_else(|| DEFAULT_WAND.to_string());
-        if let Some(bytes) = ctx.backend.kv_get(ctx.id, KV_REGIONS) {
-            match serde_json::from_slice::<StoredState>(&bytes) {
+        match ctx.backend.kv_try_get(ctx.id, KV_REGIONS) {
+            Ok(Some(bytes)) => match serde_json::from_slice::<StoredState>(&bytes) {
                 Ok(state) => self.state = state,
-                Err(e) => ctx.log(
-                    LogLevel::Warn,
-                    &format!("ignoring unreadable region state: {e}"),
-                ),
+                Err(e) => {
+                    let message = format!("region state is unreadable: {e}");
+                    ctx.log(LogLevel::Error, &message);
+                    return Err(message);
+                }
+            },
+            Ok(None) => {}
+            Err(e) => {
+                let message = format!("cannot read region state: {e}");
+                ctx.log(LogLevel::Error, &message);
+                return Err(message);
             }
         }
         // A record written by an older/hand-edited state must not make the
@@ -293,13 +307,22 @@ impl Regions {
         self.state.next_id = self.state.next_id.max(highest + 1).max(1);
         self.selections.clear();
         self.rebuild();
+        Ok(())
     }
 
-    fn save(&self, ctx: &NativeContext) {
-        match serde_json::to_vec(&self.state) {
-            Ok(bytes) => ctx.backend.kv_put(ctx.id, KV_REGIONS, &bytes),
-            Err(e) => ctx.log(LogLevel::Error, &format!("cannot encode region state: {e}")),
-        }
+    /// Write `next` and only then adopt it in memory.
+    ///
+    /// Persistence-first means a failed write leaves both the in-memory model
+    /// and the core index on the previous, still-persisted state, and the
+    /// command reports the error instead of claiming success.
+    fn persist(&mut self, ctx: &NativeContext, next: StoredState) -> Result<(), String> {
+        let bytes =
+            serde_json::to_vec(&next).map_err(|e| format!("cannot encode region state: {e}"))?;
+        ctx.backend
+            .kv_try_put(ctx.id, KV_REGIONS, &bytes)
+            .map_err(|e| format!("cannot write region state: {e}"))?;
+        self.state = next;
+        Ok(())
     }
 
     /// Publish the whole model into the core store. Used on load; edits publish
@@ -345,8 +368,9 @@ impl Regions {
             return Err(format!("region `{name}` already exists"));
         }
         let (min, max) = normalize(a, b);
-        let id = self.state.next_id;
-        self.state.next_id += 1;
+        let mut next = self.state.clone();
+        let id = next.next_id;
+        next.next_id += 1;
         let mut owners = BTreeSet::new();
         if !caller.name.is_empty() {
             owners.insert(caller.name.to_string());
@@ -362,20 +386,20 @@ impl Regions {
             members: BTreeSet::new(),
             flags: BTreeMap::new(),
         };
-        self.state
-            .regions
-            .insert(region.name.clone(), region.clone());
+        next.regions.insert(region.name.clone(), region.clone());
+        self.persist(ctx, next)?;
         self.publish(&region);
-        self.save(ctx);
         Ok(region)
     }
 
+    /// Move a region's bounds. The world is **kept** from the stored region:
+    /// the selection carries block coordinates but no dimension, so taking the
+    /// caller's current world would silently move a region created elsewhere.
     fn redefine(
         &mut self,
         ctx: &mut NativeContext,
         caller: Caller<'_>,
         name: &str,
-        world: &str,
         a: BlockPos,
         b: BlockPos,
     ) -> Result<StoredRegion, String> {
@@ -388,18 +412,16 @@ impl Regions {
         }
         let (min, max) = normalize(a, b);
         let updated = StoredRegion {
-            world: world.to_string(),
             min: xyz(min),
             max: xyz(max),
             ..previous
         };
         // One record, one core upsert, one KV write: an observer sees either
         // the old box or the new one, never a mix of the two.
-        self.state
-            .regions
-            .insert(updated.name.clone(), updated.clone());
+        let mut next = self.state.clone();
+        next.regions.insert(updated.name.clone(), updated.clone());
+        self.persist(ctx, next)?;
         self.publish(&updated);
-        self.save(ctx);
         Ok(updated)
     }
 
@@ -416,9 +438,10 @@ impl Regions {
         if !caller.may_edit(&region) {
             return Err(format!("you do not own region `{name}`"));
         }
-        self.state.regions.remove(name);
+        let mut next = self.state.clone();
+        next.regions.remove(name);
+        self.persist(ctx, next)?;
         self.store.remove(RegionId(region.id));
-        self.save(ctx);
         Ok(region)
     }
 
@@ -440,12 +463,17 @@ impl Regions {
             priority,
             ..previous
         };
-        self.state
-            .regions
-            .insert(updated.name.clone(), updated.clone());
+        let mut next = self.state.clone();
+        next.regions.insert(updated.name.clone(), updated.clone());
+        self.persist(ctx, next)?;
         self.publish(&updated);
-        self.save(ctx);
         Ok(updated)
+    }
+
+    /// Forget a player's two points (after a define/redefine/remove, on leave,
+    /// or via `/rg cancel`).
+    fn clear_selection(&mut self, player: u64) {
+        self.selections.remove(&player);
     }
 
     fn set_point(&mut self, player: u64, first: bool, pos: BlockPos) {
@@ -586,11 +614,15 @@ impl RegionsPlugin {
                     name: &p.name,
                     op: p.operator,
                 };
-                match self.regions.define(ctx, caller, name, OVERWORLD, a, b) {
-                    Ok(region) => vec![format!(
-                        "Created region `{}` (id {}).",
-                        region.name, region.id
-                    )],
+                let world = world_of(ctx, p);
+                match self.regions.define(ctx, caller, name, &world, a, b) {
+                    Ok(region) => {
+                        self.regions.clear_selection(p.id);
+                        vec![format!(
+                            "Created region `{}` (id {}).",
+                            region.name, region.id
+                        )]
+                    }
                     Err(e) => vec![format!("Cannot define region: {e}")],
                 }
             }
@@ -614,17 +646,20 @@ impl RegionsPlugin {
                     name: &p.name,
                     op: p.operator,
                 };
-                match self.regions.redefine(ctx, caller, name, OVERWORLD, a, b) {
-                    Ok(region) => vec![format!(
-                        "Moved region `{}` to [{}, {}, {}]..[{}, {}, {}].",
-                        region.name,
-                        region.min[0],
-                        region.min[1],
-                        region.min[2],
-                        region.max[0],
-                        region.max[1],
-                        region.max[2]
-                    )],
+                match self.regions.redefine(ctx, caller, name, a, b) {
+                    Ok(region) => {
+                        self.regions.clear_selection(p.id);
+                        vec![format!(
+                            "Moved region `{}` to [{}, {}, {}]..[{}, {}, {}].",
+                            region.name,
+                            region.min[0],
+                            region.min[1],
+                            region.min[2],
+                            region.max[0],
+                            region.max[1],
+                            region.max[2]
+                        )]
+                    }
                     Err(e) => vec![format!("Cannot redefine region: {e}")],
                 }
             }
@@ -643,10 +678,13 @@ impl RegionsPlugin {
                     op: p.operator,
                 };
                 match self.regions.remove(ctx, caller, name) {
-                    Ok(region) => vec![format!(
-                        "Removed region `{}`; the next protection check no longer sees it.",
-                        region.name
-                    )],
+                    Ok(region) => {
+                        self.regions.clear_selection(p.id);
+                        vec![format!(
+                            "Removed region `{}`; the next protection check no longer sees it.",
+                            region.name
+                        )]
+                    }
                     Err(e) => vec![format!("Cannot remove region: {e}")],
                 }
             }
@@ -711,6 +749,13 @@ impl RegionsPlugin {
                 }
                 self.regions.list(args.get(1).map(String::as_str))
             }
+            "cancel" => {
+                if args.len() != 1 {
+                    return vec!["Usage: /rg cancel".to_string()];
+                }
+                self.regions.clear_selection(p.id);
+                vec!["Wand selection cleared.".to_string()]
+            }
             "help" => usage(),
             other => vec![format!("Unknown region command `{other}`. Try /rg help.")],
         }
@@ -719,6 +764,15 @@ impl RegionsPlugin {
 
 fn permitted(ctx: &NativeContext, p: &Player, node: &str) -> bool {
     p.operator || ctx.backend.permission_check(ctx.id, p.id, node, 0)
+}
+
+/// The dimension the player is in, for a region created now. Falling back to
+/// the overworld keeps a host without `player_position` (a test) working.
+fn world_of(ctx: &NativeContext, p: &Player) -> String {
+    ctx.backend
+        .player_position(ctx.id, p.id)
+        .map(|(world, _, _, _)| world)
+        .unwrap_or_else(|| OVERWORLD.to_string())
 }
 
 fn denied(node: &str) -> String {
@@ -734,13 +788,14 @@ fn usage() -> Vec<String> {
         "  /rg priority <id> <n>  change its priority".to_string(),
         "  /rg info [<id>]        show one region, or the one you stand in".to_string(),
         "  /rg list [<player>]    list regions, optionally only one owner's".to_string(),
+        "  /rg cancel             clear the wand selection".to_string(),
         "Wand: hold the configured item and left-click point 1, right-click point 2.".to_string(),
     ]
 }
 
 impl NativePlugin for RegionsPlugin {
     fn init(&mut self, ctx: &mut NativeContext) -> Result<(), String> {
-        self.regions.load(ctx);
+        self.regions.load(ctx)?;
         ctx.log(
             LogLevel::Info,
             &format!(
@@ -756,7 +811,7 @@ impl NativePlugin for RegionsPlugin {
         ctx.log(LogLevel::Info, "regions plugin stopping");
     }
 
-    fn before_block_break(
+    fn before_block_dig(
         &mut self,
         ctx: &mut NativeContext,
         p: &Player,
@@ -776,6 +831,11 @@ impl NativePlugin for RegionsPlugin {
             &format!("First position set to ({}, {}, {}).", pos.x, pos.y, pos.z),
         );
         Decision::Cancel(String::new())
+    }
+
+    fn after_player_leave(&mut self, _ctx: &mut NativeContext, p: &Player) {
+        // Entity ids are reused; a new player must not inherit a selection.
+        self.regions.clear_selection(p.id);
     }
 
     fn before_block_interact(

@@ -14,20 +14,22 @@ tier = "native"
 priority = 20
 
 # The core provides these through the host backend. `players` covers
-# `player_position` for `/rg info`; `world.read` is reserved for the later
-# flags/shape work and is asked for but not granted by default (deny-by-default).
-capabilities = ["log", "config", "supports", "storage.kv", "world.read", "players"]
+# `player_position` for `/rg info`; the plugin reads no blocks, so `world.read`
+# is not asked for (deny-by-default would leave it ungranted anyway).
+capabilities = ["log", "config", "supports", "storage.kv", "players"]
 
 subscribe = [
-    "before-block-break",
-    # Native-only: right-click on a block, used by the internal wand. There is
-    # no matching export in the frozen WASM @0.1.0 world.
+    # Native-only: the start of a left click, used for wand point 1 before the
+    # block can break or the region check run. No matching WASM export.
+    "before-block-dig",
+    # Native-only: right-click on a block, used for wand point 2. There is no
+    # matching export in the frozen WASM @0.1.0 world.
     "before-block-interact",
-    "after-player-join",
+    "after-player-leave",
     "on-command",
 ]
 
-commands = [
-    { name = "rg", node = "worldguard.region.info", op = 0 },
-    { name = "region", node = "worldguard.region.info", op = 0 },
-]
+# The top-level command is public; the `worldguard.region.*` nodes gate the
+# individual subcommands inside the plugin, so a deny on `info` cannot block
+# `define` before the arguments are read.
+commands = ["rg", "region"]

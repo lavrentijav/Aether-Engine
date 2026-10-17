@@ -51,12 +51,12 @@
 //!
 //! ## Module home
 //!
-//! The index lives in the core rather than in `aether-api`, following CMD-01's
-//! precedent: the only consumer today is the core protection check (CMD-29b) and
-//! the command layer. The model types here are shaped so that moving them behind
-//! a plugin-boundary crate (`aether-api` / a service) is mechanical once the
-//! regions plugin (CMD-34/CMD-35) needs to insert regions; see
-//! `docs/tasks/CMD-29-region-index.md`.
+//! The index lives in this small, dependency-free crate rather than inside
+//! `aether-server`, because it has two consumers that must not depend on each
+//! other: the server's hot-path protection check (CMD-29b) and the native
+//! `plugins/regions` plugin (CMD-34/CMD-35). Both link the same
+//! [`RegionStore`], so the plugin edits the one index the check reads. See
+//! `docs/tasks/CMD-29-region-index.md` and `docs/tasks/CMD-34a-regions-model.md`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, RwLock};

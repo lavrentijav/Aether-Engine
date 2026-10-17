@@ -247,14 +247,22 @@ impl ProtocolCodec for Codec {
                 let Ok(item) = pin.u16() else {
                     return ClientEvent::Ignored;
                 };
+                let (bx, by, bz) = decode_position(packed);
+                let by = by - Y_OFFSET;
                 if item as i16 == -1 {
                     return ClientEvent::Ignored; // empty hand
                 }
                 let Some(block) = chunk::engine_id(item) else {
-                    return ClientEvent::Ignored; // not a block this engine has
+                    // A tool or item in hand: this packet is a right-click on
+                    // the clicked cell, not a placement. Report it so a native
+                    // selection wand sees the click (the core ignores it,
+                    // exactly as it ignored the old whole packet).
+                    return ClientEvent::UseBlock {
+                        x: bx,
+                        y: by,
+                        z: bz,
+                    };
                 };
-                let (bx, by, bz) = decode_position(packed);
-                let by = by - Y_OFFSET;
                 let (dx, dy, dz) = face_offset(face);
                 ClientEvent::Place {
                     x: bx + dx,
@@ -476,6 +484,17 @@ mod tests {
     }
     use super::*;
 
+    fn pos() -> PosLook {
+        PosLook {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: true,
+        }
+    }
+
     #[test]
     fn position_encoding_matches_1_8() {
         let enc = encode_position(8, 4, 8);
@@ -488,6 +507,36 @@ mod tests {
             let enc = encode_position(p.0 as i64, p.1 as i64, p.2 as i64);
             assert_eq!(decode_position(enc), p, "round trip {p:?}");
         }
+    }
+
+    #[test]
+    fn a_right_click_with_a_tool_reports_the_clicked_block() {
+        // Protocol 47's 0x08 names the held item's id. A non-block item (a
+        // golden axe, id 286) used to be dropped whole, so a native selection
+        // wand never saw point 2 on the main protocol. It now becomes a
+        // `UseBlock` naming the *clicked* cell (no face offset).
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_position(10, 64 + Y_OFFSET as i64, -7).to_be_bytes());
+        data.push(1); // face: up
+        data.extend_from_slice(&286u16.to_be_bytes()); // golden axe
+        let pkt = RawPacket { id: 0x08, data };
+        match Codec.decode(&pkt, pos()) {
+            ClientEvent::UseBlock { x, y, z } => assert_eq!((x, y, z), (10, 64, -7)),
+            _ => panic!("expected a tool right-click"),
+        }
+    }
+
+    #[test]
+    fn a_right_click_with_a_block_still_places_it() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_position(10, 64 + Y_OFFSET as i64, -7).to_be_bytes());
+        data.push(1); // face: up
+        data.extend_from_slice(&1u16.to_be_bytes()); // stone
+        let pkt = RawPacket { id: 0x08, data };
+        assert!(matches!(
+            Codec.decode(&pkt, pos()),
+            ClientEvent::Place { .. }
+        ));
     }
 
     #[test]

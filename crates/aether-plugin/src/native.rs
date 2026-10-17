@@ -135,6 +135,25 @@ pub trait NativePlugin: Send {
         Decision::Allow
     }
 
+    /// The player **started mining** a block, before the core's region check
+    /// and before a survival dig begins. Native-only, like
+    /// [`Self::before_block_interact`].
+    ///
+    /// [`Self::before_block_break`] fires only when the block actually breaks
+    /// (after the region check), which is too late — and unreachable for an
+    /// unbreakable or protected block — for a wand's first point.
+    fn before_block_dig(
+        &mut self,
+        _ctx: &mut NativeContext,
+        _p: &Player,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _block: &str,
+    ) -> Decision {
+        Decision::Allow
+    }
+
     fn before_attack(&mut self, _ctx: &mut NativeContext, _p: &Player, _target: u64) -> Decision {
         Decision::Allow
     }

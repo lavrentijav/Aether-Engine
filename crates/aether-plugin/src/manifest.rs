@@ -36,6 +36,10 @@ pub const EVENT_BEFORE_BLOCK_PLACE: &str = "before-block-place";
 /// The frozen WIT world has no such export, so only native plugins receive it
 /// (the regions plugin's internal wand is the first user).
 pub const EVENT_BEFORE_BLOCK_INTERACT: &str = "before-block-interact";
+/// A native-only event: the player started mining a block, before the region
+/// check and before a survival dig begins. The frozen WIT world has no such
+/// export, so only native plugins receive it.
+pub const EVENT_BEFORE_BLOCK_DIG: &str = "before-block-dig";
 pub const EVENT_BEFORE_USE_ITEM: &str = "before-use-item";
 pub const EVENT_BEFORE_ATTACK: &str = "before-attack";
 pub const EVENT_BEFORE_CHAT: &str = "before-chat";

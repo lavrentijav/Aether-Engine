@@ -118,6 +118,22 @@ mod imp {
                 .flatten()
         }
 
+        fn kv_try_get(&self, plugin: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
+            self.world
+                .journal()
+                .backend()
+                .get(&kv_key(plugin, key))
+                .map_err(|e| format!("kv-get failed: {e}"))
+        }
+
+        fn kv_try_put(&self, plugin: &str, key: &str, value: &[u8]) -> Result<(), String> {
+            self.world
+                .journal()
+                .backend()
+                .put(&kv_key(plugin, key), value)
+                .map_err(|e| format!("kv-put failed: {e}"))
+        }
+
         fn kv_put(&self, plugin: &str, key: &str, value: &[u8]) {
             if let Err(e) = self
                 .world
@@ -1319,6 +1335,21 @@ mod imp {
         })
     }
 
+    /// The player started mining a block, before the region check and before a
+    /// survival dig begins. A native plugin's selection wand uses this so the
+    /// point is set immediately, even on a protected or unbreakable block.
+    pub fn before_block_dig(
+        handle: &PlayerHandle,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: &str,
+    ) -> Option<String> {
+        with(None, |h| {
+            cancelled(h.before_block_dig(&player(handle), x, y, z, block))
+        })
+    }
+
     /// A right-click on a block, for a native plugin's selection wand. A
     /// cancelled click does not open, toggle or place anything.
     pub fn before_block_interact(
@@ -1683,6 +1714,15 @@ mod imp {
         None
     }
     pub fn before_use_item(_h: &PlayerHandle, _i: &str) -> Option<String> {
+        None
+    }
+    pub fn before_block_dig(
+        _h: &PlayerHandle,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _b: &str,
+    ) -> Option<String> {
         None
     }
     pub fn before_block_interact(

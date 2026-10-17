@@ -22,12 +22,19 @@ hot-path cuboid lookup and priority/flag check are the **core** implementation
 | priority | `/rg priority <id> <n>` | `worldguard.region.priority` |
 | info | `/rg info [<id>]` | `worldguard.region.info` |
 | list | `/rg list [<player>]` | `worldguard.region.list` |
+| cancel | `/rg cancel` | none |
+
+`/rg` itself is a public top-level command; the `worldguard.region.*` nodes
+gate the individual subcommands inside the plugin. A deny on `info` therefore
+cannot block `define` before the arguments are read.
 
 - `define` validates the id (`[A-Za-z0-9_-]`, 1–32 chars), rejects a duplicate,
-  and makes the caller the region's owner.
+  records the caller's current world, and makes the caller the region's owner.
 - `redefine` moves the bounds **atomically**: one new core index snapshot and
   one KV write. A reader holding an older snapshot keeps the old, whole box;
-  the next snapshot has the new, whole box. No half-applied box is visible.
+  the next snapshot has the new, whole box. No half-applied box is visible. It
+  keeps the region's stored world; a selection carries no dimension, so taking
+  the caller's current world would silently move a region created elsewhere.
 - `remove` publishes the removal immediately; callers already holding a
   snapshot keep answering from it until the next safe point, which is the
   core's documented snapshot contract.
@@ -53,9 +60,17 @@ useful selection tool itself:
 4. `/rg define <id>` or `/rg redefine <id>`.
 
 Both clicks are cancelled while holding the wand, so it never breaks, places,
-opens or toggles anything. Bounds are normalized on every axis, so the click
-order does not matter, and a selection may span chunk borders (the core index
-enters the cuboid into every chunk column it touches).
+opens or toggles anything. Point 1 is taken at the **start of the left click**
+(`before-block-dig`), before the region check and before a survival dig begins,
+so a protected or unbreakable block can still be selected; point 2 is taken on
+the right click (`before-block-interact`), including on 1.8.9 where a tool
+right-click used to be dropped by the codec. Bounds are normalized on every
+axis, so the click order does not matter, and a selection may span chunk
+borders (the core index enters the cuboid into every chunk column it touches).
+
+The selection is cleared after a successful `define`/`redefine`/`remove`, by
+`/rg cancel`, and when the player leaves (`after-player-leave`), so a reused
+session id cannot inherit someone else's points.
 
 The wand item is `[plugins.regions] config = { wand-item = "minecraft:wooden_axe" }`
 (`minecraft:` may be omitted). The selection is per session and is not
@@ -69,10 +84,16 @@ cell, which the wand needs.
 ## Persistence
 
 The whole region set is one JSON value in the plugin KV under the key
-`regions`. Every mutation updates the in-memory model, publishes one core
-snapshot and writes the key once. On `init` the plugin loads the key, rebuilds
-the core store from it, and keeps the stable numeric ids (the priority
-tie-break) and the next id counter. State therefore survives a server restart.
+`regions`. Every mutation writes the new value **first** and only then adopts
+it in memory and publishes one core snapshot, so a failed write leaves the
+previous, still-persisted state in place and the command reports the error. On
+`init` the plugin loads the key, rebuilds the core store from it, and keeps the
+stable numeric ids (the priority tie-break) and the next id counter. State
+therefore survives a server restart.
+
+Loading is fail-closed: an unreadable value or a failed KV read refuses the
+plugin load rather than starting with an empty set and overwriting recoverable
+bytes on the next edit.
 
 No world file is edited directly: the server's `storage.kv` backend owns the
 bytes, exactly like any other plugin state.
@@ -83,8 +104,9 @@ The server compiles the plugin behind its `plugins` feature and installs it in
 `install_native` (`crates/aether-server/src/plugins.rs`). It is enabled like any
 other plugin and still requires `[plugins] dir` to be set (the subsystem's
 master switch); `[plugins.regions] enabled = false` skips it. The plugin needs
-the `log`, `config`, `supports`, `storage.kv`, `world.read` and `players`
-capabilities; grants are deny-by-default like every plugin.
+the `log`, `config`, `supports`, `storage.kv` and `players` capabilities (it
+reads no blocks, so `world.read` is not requested); grants are deny-by-default
+like every plugin.
 
 ## Tests
 
@@ -94,9 +116,13 @@ cargo-locked test -p aether-region -p aether-regions-plugin
 
 The plugin suite covers a chunk-border-spanning define, an invalid/duplicate
 id, an atomic redefine (old snapshot vs new), per-world `list`, remove at the
-next safe point, an unowned region refusing a non-op edit, restart persistence,
-deterministic priorities and equal-priority ties, the two-click wand, and that
-the plugin edits the same core `RegionStore`/`RegionIndex` the check uses.
+next safe point, an unowned region refusing a non-op edit, restart persistence
+checked against the **new** store, deterministic priorities and equal-priority
+ties, the two-click wand (including its start-of-dig hook), selection reset and
+cancel, world preservation on redefine, failed-write rollback, fail-closed load,
+and that the plugin edits the same core `RegionStore`/`RegionIndex` the check
+uses. The 1.8.9 codec has its own test that a tool right-click becomes the
+selection event.
 
 ## Not in this slice
 

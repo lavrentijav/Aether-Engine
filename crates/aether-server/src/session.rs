@@ -831,8 +831,19 @@ fn play_loop(
                 // A dead player can do nothing but press the button above.
             }
             ClientEvent::StartDig { x, y, z, seq } => {
+                let name =
+                    crate::game::block_name(world, world.get_block(x, y, z)).unwrap_or_default();
                 if handle.inspecting() {
                     inspect(handle, registry, world, x, y, z);
+                } else if let Some(reason) =
+                    crate::plugins::before_block_dig(handle, x, y, z, &name)
+                {
+                    // A native plugin's selection wand takes the click before
+                    // the region check and before a survival dig starts, so a
+                    // protected or unbreakable block is still selectable.
+                    if !reason.is_empty() {
+                        handle.emit(&ServerEvent::Chat(reason), world);
+                    }
                 } else if interact::start_dig(handle, world, x, y, z) {
                     break_block(handle, registry, world, x, y, z);
                 }
@@ -982,6 +993,22 @@ fn play_loop(
                 // withholding it on a rejected placement is the one case
                 // where the client is left permanently out of step.
                 ack(handle, world, seq);
+            }
+            ClientEvent::UseBlock { x, y, z } => {
+                // A right-click with a non-block item (protocol 47). It cannot
+                // place anything, but a native plugin's wand needs the click.
+                // Without a plugin the old behaviour is unchanged: ignored.
+                if let Some(reason) = crate::plugins::before_block_interact(
+                    handle,
+                    x,
+                    y,
+                    z,
+                    &crate::game::block_name(world, world.get_block(x, y, z)).unwrap_or_default(),
+                ) {
+                    if !reason.is_empty() {
+                        handle.emit(&ServerEvent::Chat(reason), world);
+                    }
+                }
             }
             ClientEvent::HeldSlot(slot) => {
                 handle.set_held_slot(slot);
