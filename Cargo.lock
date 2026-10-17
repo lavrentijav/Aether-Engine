@@ -52,6 +52,7 @@ name = "aether-claims-plugin"
 version = "0.1.0"
 dependencies = [
  "aether-plugin",
+ "aether-region",
  "serde",
  "serde_json",
 ]

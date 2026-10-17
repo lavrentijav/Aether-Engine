@@ -16,4 +16,15 @@ subscribe = [
     "after-player-leave",
 ]
 
-commands = ["claim", "abandonclaim", "abandonallclaims", "claimslist"]
+commands = [
+    "claim",
+    "abandonclaim",
+    "abandonallclaims",
+    "claimslist",
+    "trust",
+    "containertrust",
+    "containerstrust",
+    "accesstrust",
+    "managetrust",
+    "untrust",
+]
