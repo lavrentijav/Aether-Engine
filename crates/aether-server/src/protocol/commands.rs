@@ -1047,6 +1047,7 @@ mod tests {
                 requirement: Requirement::None,
                 executor: None,
                 usage: None,
+                bounds: None,
                 task: None,
                 children,
             },

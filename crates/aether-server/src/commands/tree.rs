@@ -528,6 +528,11 @@ pub struct Node {
     /// ported body still parses a single greedy remainder. `None` means "derive
     /// it from the children", which is what every real argument node gets.
     pub usage: Option<&'static str>,
+    /// Inclusive numeric bounds for a `<float>`/`<double>`/`<integer>`/
+    /// `<long>` argument. Brigadier validates these while parsing, so a
+    /// negative `/particle` speed is an argument error even when the particle
+    /// id is also unknown; the executor never has to re-check them.
+    pub bounds: Option<(Option<f64>, Option<f64>)>,
     /// For a specified-but-unimplemented command, the CMD task that will
     /// implement it. `/help` marks these; `None` is a working command. This is
     /// authoritative where the registry is not: `/aether` has a registry entry
@@ -803,6 +808,7 @@ impl Builder {
                 executor: None,
                 children: Vec::new(),
                 usage: None,
+                bounds: None,
                 task: None,
             },
         }
@@ -820,6 +826,7 @@ impl Builder {
                 executor: None,
                 children: Vec::new(),
                 usage: None,
+                bounds: None,
                 task: None,
             },
         }
@@ -834,6 +841,12 @@ impl Builder {
     /// Set the node's usage text, for a grammar the tree does not carry.
     pub fn usage(mut self, usage: &'static str) -> Builder {
         self.node.usage = Some(usage);
+        self
+    }
+
+    /// Give a numeric argument Brigadier-style inclusive bounds.
+    pub fn bounds(mut self, min: Option<f64>, max: Option<f64>) -> Builder {
+        self.node.bounds = Some((min, max));
         self
     }
 
@@ -1070,6 +1083,11 @@ fn consume(
             }
             match kind.parse(r) {
                 Ok((value, text)) => {
+                    if let Some((min, max)) = node.bounds {
+                        if let Err(e) = check_bounds(&value, min, max) {
+                            return Err(ConsumeError::Parse(e));
+                        }
+                    }
                     args.push(ParsedArg { value, text });
                     Ok(())
                 }
@@ -1077,6 +1095,47 @@ fn consume(
             }
         }
     }
+}
+
+/// Validate a numeric argument's inclusive bounds, with Brigadier's text.
+///
+/// The values are printed the way Java's `Float.toString`/`Integer.toString`
+/// do in `argument.float.low` and friends; `{:?}` on `f32` gives that form
+/// for the values a command line carries (`0.0`, `-1.0`, `2.0`).
+fn check_bounds(value: &Value, min: Option<f64>, max: Option<f64>) -> Result<(), ParseError> {
+    let (kind, number, is_int) = match value {
+        Value::Int(v) => ("Integer", f64::from(*v), true),
+        Value::Long(v) => ("Long", *v as f64, true),
+        Value::Float(v) => ("Float", f64::from(*v), false),
+        Value::Double(v) => ("Double", *v, false),
+        _ => return Ok(()),
+    };
+    let print = |v: f64| {
+        if is_int {
+            format!("{v}")
+        } else {
+            format!("{:?}", v as f32)
+        }
+    };
+    if let Some(min) = min {
+        if number < min {
+            return Err(ParseError::Argument(format!(
+                "{kind} must not be less than {}: found {}",
+                print(min),
+                print(number)
+            )));
+        }
+    }
+    if let Some(max) = max {
+        if number > max {
+            return Err(ParseError::Argument(format!(
+                "{kind} must not be more than {}: found {}",
+                print(max),
+                print(number)
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Run `text` against the tree. `None` means ordinary chat (no leading `/`).

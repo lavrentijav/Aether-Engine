@@ -394,6 +394,7 @@ fn sample_tree() -> CommandTree {
         executor: None,
         children: vec![num.build(), mode.build(), say.build(), flag.build()],
         usage: None,
+        bounds: None,
         task: None,
     };
     CommandTree { root }
@@ -437,6 +438,7 @@ fn a_coordinate_argument_consumes_three_tokens_in_the_tree() {
             requirement: Requirement::None,
             executor: None,
             usage: None,
+            bounds: None,
             task: None,
             children: vec![Builder::literal("setblock")
                 .then(Builder::arg("pos", ArgKind::BlockPos).executable(noop))
@@ -483,6 +485,7 @@ fn unknown_literal_and_trailing_input_use_the_vanilla_errors() {
             requirement: Requirement::None,
             executor: None,
             usage: None,
+            bounds: None,
             task: None,
             children: vec![Builder::literal("toggle")
                 .executable(|_| Reply(Vec::new()))
@@ -525,6 +528,7 @@ fn requirement_tree(req: Requirement) -> CommandTree {
             requirement: Requirement::None,
             executor: None,
             usage: None,
+            bounds: None,
             task: None,
             children: vec![Builder::literal("secret")
                 .requires(req)
@@ -585,6 +589,7 @@ fn suggestion_tree() -> CommandTree {
             requirement: Requirement::None,
             executor: None,
             usage: None,
+            bounds: None,
             task: None,
             children: vec![
                 Builder::literal("time").executable(noop).build(),
@@ -635,6 +640,7 @@ fn registry_arguments_suggest_from_the_vanilla_tables() {
             requirement: Requirement::None,
             executor: None,
             usage: None,
+            bounds: None,
             task: None,
             children: vec![Builder::literal("setblock")
                 .then(Builder::arg("block", ArgKind::BlockState).executable(noop))
@@ -715,6 +721,7 @@ fn a_two_hundred_node_tree_parses() {
             requirement: Requirement::None,
             executor: None,
             usage: None,
+            bounds: None,
             task: None,
             children,
         },

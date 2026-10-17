@@ -136,17 +136,6 @@ fn sound_resource(name: &str) -> Result<String, String> {
     Ok(name)
 }
 
-/// Print a float the way Java's `Float.toString` does in Brigadier errors:
-/// a whole number keeps its `.0`.
-fn fmt_float(v: f32) -> String {
-    let text = v.to_string();
-    if text.contains('.') || text.contains('e') || text.contains('E') {
-        text
-    } else {
-        format!("{text}.0")
-    }
-}
-
 fn source_name(source: u8) -> &'static str {
     match source {
         0 => "master",
@@ -528,12 +517,15 @@ fn particle_node() -> Node {
     }
 
     let count = Builder::arg("count", ArgKind::Integer)
+        .bounds(Some(0.0), None)
         .executable(|ctx| exec_particle(ctx, false))
         .then(force_branch(false))
         .then(force_branch(true));
     // Vanilla marks only `name`, `pos`, `count`, the mode words and
     // `viewers` executable: a line may not stop after `delta` or `speed`.
-    let speed = Builder::arg("speed", ArgKind::Float).then(count);
+    let speed = Builder::arg("speed", ArgKind::Float)
+        .bounds(Some(0.0), None)
+        .then(count);
     let delta = Builder::arg("delta", ArgKind::Vec3(false)).then(speed);
     let pos = Builder::arg("pos", ArgKind::Vec3(true))
         .executable(|ctx| exec_particle(ctx, false))
@@ -560,24 +552,10 @@ fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
             "/particle <name> [<pos>] [<delta>] [<speed>] [<count>] [force|normal] [<viewers>]",
         );
     };
-    // Brigadier validates the bounded numeric arguments as it reads them,
-    // before the executor runs, so a negative speed or count wins over an
-    // unknown particle or an unresolvable position. `speed` is read before
-    // `count`.
+    // The numeric bounds are enforced while the tree parses the arguments
+    // (see `Node::bounds`), before this executor runs.
     let speed = float_arg(ctx, 3).unwrap_or(0.0);
-    if speed < 0.0 {
-        return ctx.fail(lang::format(
-            lang::ARG_FLOAT_LOW,
-            &[&fmt_float(0.0), &fmt_float(speed)],
-        ));
-    }
     let count = int_arg(ctx, 4).unwrap_or(0);
-    if count < 0 {
-        return ctx.fail(lang::format(
-            lang::ARG_INTEGER_LOW,
-            &["0", &count.to_string()],
-        ));
-    }
 
     let (id, options_text) = match raw.find('{') {
         Some(index) => (&raw[..index], Some(&raw[index..])),
@@ -679,11 +657,14 @@ fn exec_particle(ctx: &mut Ctx, force: bool) -> Reply {
 /// and minVolume. `source` is captured by the branch that owns the literal.
 fn playsound_tail(source: u8) -> Builder {
     let min_volume = Builder::arg("minVolume", ArgKind::Float)
+        .bounds(Some(0.0), Some(1.0))
         .executable(move |ctx| exec_playsound(ctx, source));
     let pitch = Builder::arg("pitch", ArgKind::Float)
+        .bounds(Some(0.0), Some(2.0))
         .executable(move |ctx| exec_playsound(ctx, source))
         .then(min_volume);
     let volume = Builder::arg("volume", ArgKind::Float)
+        .bounds(Some(0.0), None)
         .executable(move |ctx| exec_playsound(ctx, source))
         .then(pitch);
     let pos = Builder::arg("pos", ArgKind::Vec3(true))
@@ -736,41 +717,11 @@ fn exec_playsound(ctx: &mut Ctx, source: u8) -> Reply {
             "/playsound <sound> [<source>] [<targets>] [<pos>] [<volume>] [<pitch>] [<minVolume>]",
         );
     };
-    // Bounds are Brigadier parse errors, so they are checked before the
-    // executor resolves targets or coordinates.
+    // The bounds are enforced while the tree parses the arguments; these are
+    // the values the executor needs.
     let volume = float_arg(ctx, 3).unwrap_or(1.0);
     let pitch = float_arg(ctx, 4).unwrap_or(1.0);
     let min_volume = float_arg(ctx, 5).unwrap_or(0.0);
-    if volume < 0.0 {
-        return ctx.fail(lang::format(
-            lang::ARG_FLOAT_LOW,
-            &[&fmt_float(0.0), &fmt_float(volume)],
-        ));
-    }
-    if pitch < 0.0 {
-        return ctx.fail(lang::format(
-            lang::ARG_FLOAT_LOW,
-            &[&fmt_float(0.0), &fmt_float(pitch)],
-        ));
-    }
-    if pitch > 2.0 {
-        return ctx.fail(lang::format(
-            lang::ARG_FLOAT_BIG,
-            &[&fmt_float(2.0), &fmt_float(pitch)],
-        ));
-    }
-    if min_volume < 0.0 {
-        return ctx.fail(lang::format(
-            lang::ARG_FLOAT_LOW,
-            &[&fmt_float(0.0), &fmt_float(min_volume)],
-        ));
-    }
-    if min_volume > 1.0 {
-        return ctx.fail(lang::format(
-            lang::ARG_FLOAT_BIG,
-            &[&fmt_float(1.0), &fmt_float(min_volume)],
-        ));
-    }
 
     let sound = match sound_resource(raw) {
         Ok(sound) => sound,
@@ -814,15 +765,17 @@ fn exec_playsound(ctx: &mut Ctx, source: u8) -> Reply {
         let distance_sq = dx * dx + dy * dy + dz * dz;
         if distance_sq > max_distance_sq {
             if min_volume > 0.0 {
+                // `target + normalize(source - target) * 2`: two blocks from
+                // the listener, towards the source.
                 let distance = distance_sq.sqrt();
                 let offset = 2.0 / distance;
                 handle.emit(
                     &ServerEvent::Sound {
                         name: sound.clone().into(),
                         category: source,
-                        x: pos.x + (p.x - pos.x) * offset,
-                        y: pos.y + (p.y - pos.y) * offset,
-                        z: pos.z + (p.z - pos.z) * offset,
+                        x: p.x + (pos.x - p.x) * offset,
+                        y: p.y + (pos.y - p.y) * offset,
+                        z: p.z + (pos.z - p.z) * offset,
                         volume: min_volume,
                         pitch,
                     },
