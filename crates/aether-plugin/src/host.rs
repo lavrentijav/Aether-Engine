@@ -419,6 +419,79 @@ pub trait HostBackend: Send + Sync {
 
     /// Append a staff-accountability event to the world journal: who did what.
     fn staff_journal(&self, _plugin: &str, _actor: u64, _action: &str, _detail: &str) {}
+
+    // --- Regions and claims (the native `regions` / `claims` plugins) -------
+    //
+    // The core owns the index and the protection check (CMD-29a/29b); these
+    // hooks are how a plugin fills it. The host stamps the caller id as the
+    // region source, so a plugin may only replace or remove a region it owns.
+    // The defaults are neutral: a host with no region store accepts the write
+    // and reports no regions, which keeps a test backend small.
+
+    /// Add or replace a region owned by `plugin`.
+    ///
+    /// The ownership test and the write are atomic in the host: replacing a
+    /// core-created region (`source: None`) or another plugin's region is
+    /// refused with a [`crate::RegionWriteError`].
+    fn region_upsert(
+        &self,
+        _plugin: &str,
+        _region: &crate::region::RegionInfo,
+    ) -> std::result::Result<(), crate::RegionWriteError> {
+        Ok(())
+    }
+
+    /// Insert a **fresh** region owned by `plugin`. The id must be free — any
+    /// occupied id, including one this plugin already owns, is refused with
+    /// [`crate::RegionWriteError::IdTaken`] — and the box must not overlap a
+    /// region from the same plugin.
+    ///
+    /// The id and overlap tests and the write share the store's writer lock, so
+    /// two competing claim attempts cannot both win and a second insert can
+    /// never silently replace the first. Overlapping a region from another
+    /// plugin is allowed (the core's priority chain decides the protection
+    /// verdict). An idempotent startup replay uses [`HostBackend::region_upsert`]
+    /// instead.
+    fn region_insert(
+        &self,
+        plugin: &str,
+        region: &crate::region::RegionInfo,
+    ) -> std::result::Result<(), crate::RegionWriteError> {
+        self.region_upsert(plugin, region)
+    }
+
+    /// Allocate a globally unique region-id serial, at least `floor`.
+    ///
+    /// The host allocator is atomic across plugin instances and threads, so two
+    /// instances that would each start counting at one cannot pick the same id.
+    /// The default is the process-wide allocator in [`crate::region`].
+    fn region_allocate_serial(&self, _plugin: &str, floor: u64) -> u64 {
+        crate::region::allocate_serial(floor)
+    }
+
+    /// Remove a region owned by `plugin`. A missing id, a core-owned region or
+    /// another plugin's region is a no-op.
+    fn region_remove(&self, _plugin: &str, _id: u64) {}
+
+    /// The region with `id`, if it exists.
+    fn region_get(&self, _plugin: &str, _id: u64) -> Option<crate::region::RegionInfo> {
+        None
+    }
+
+    /// Every region in `world` that overlaps the inclusive box `min..=max`.
+    ///
+    /// Used to refuse a claim that would cover an existing claim and to
+    /// inspect what is already at a position. The host returns regions from
+    /// every plugin, with [`crate::region::RegionInfo::source`] filled in.
+    fn regions_overlapping(
+        &self,
+        _plugin: &str,
+        _world: &str,
+        _min: [i32; 3],
+        _max: [i32; 3],
+    ) -> Vec<crate::region::RegionInfo> {
+        Vec::new()
+    }
 }
 
 /// Sandbox and scheduling limits for the whole host.
@@ -738,6 +811,42 @@ impl LoadedPlugin {
                     backend,
                 };
                 Ok(n.before_use_item(&mut ctx, p, item))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn call_before_use_block(
+        &mut self,
+        services: &Arc<ServiceRegistry>,
+        backend: &Arc<dyn HostBackend>,
+        p: &Player,
+        x: i32,
+        y: i32,
+        z: i32,
+        item: &str,
+        block: &str,
+    ) -> std::result::Result<Decision, String> {
+        let LoadedPlugin {
+            manifest,
+            kind,
+            capabilities,
+            config,
+            ..
+        } = self;
+        match kind {
+            // The frozen `@0.1.0` WIT world has no export for this event, so a
+            // WASM plugin cannot subscribe to it; only native plugins answer.
+            Kind::Wasm { .. } => Ok(Decision::Allow),
+            Kind::Native(n) => {
+                let mut ctx = NativeContext {
+                    id: &manifest.id,
+                    capabilities,
+                    config,
+                    services,
+                    backend,
+                };
+                Ok(n.before_use_block(&mut ctx, p, x, y, z, item, block))
             }
         }
     }
@@ -1730,6 +1839,22 @@ impl PluginHost {
     pub fn before_use_item(&mut self, p: &Player, item: &str) -> Decision {
         self.before(manifest::EVENT_BEFORE_USE_ITEM, |pl, s, b| {
             pl.call_before_use_item(s, b, p, item)
+        })
+    }
+
+    /// `before-use-block`: a right-click on a block with an item. Native-only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn before_use_block(
+        &mut self,
+        p: &Player,
+        x: i32,
+        y: i32,
+        z: i32,
+        item: &str,
+        block: &str,
+    ) -> Decision {
+        self.before(manifest::EVENT_BEFORE_USE_BLOCK, |pl, s, b| {
+            pl.call_before_use_block(s, b, p, x, y, z, item, block)
         })
     }
 

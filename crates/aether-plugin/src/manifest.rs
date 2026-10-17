@@ -33,6 +33,10 @@ pub enum PluginTier {
 pub const EVENT_BEFORE_BLOCK_BREAK: &str = "before-block-break";
 pub const EVENT_BEFORE_BLOCK_PLACE: &str = "before-block-place";
 pub const EVENT_BEFORE_USE_ITEM: &str = "before-use-item";
+/// A right-click on a **block** with an item, carrying the target cell and the
+/// clicked block. Native-only: the frozen WIT world has no matching export, and
+/// a golden-shovel claim needs the coordinates the air-use event lacks.
+pub const EVENT_BEFORE_USE_BLOCK: &str = "before-use-block";
 pub const EVENT_BEFORE_ATTACK: &str = "before-attack";
 pub const EVENT_BEFORE_CHAT: &str = "before-chat";
 pub const EVENT_BEFORE_CONTAINER_CLICK: &str = "before-container-click";
