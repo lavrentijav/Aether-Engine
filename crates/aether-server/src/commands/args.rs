@@ -250,10 +250,15 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
             }
         }
         ArgKind::Particle => {
-            // A particle id, then whatever the type-specific parameters are;
-            // kept whole so the executor can hand the tail to its own parser.
+            // A particle id, then an optional `{…}` options object with **no
+            // whitespace** between them (`ParticleArgument` checks for `{`
+            // immediately after the id). The registry name and the options
+            // are resolved here, not in the executor: Brigadier reads
+            // arguments left to right, so a bad particle must fail before
+            // `pos`/`delta`/`speed`/`count` are parsed.
             let t = read_component(r)?;
-            Ok((Value::Text(t.clone()), t))
+            let particle = super::effects::parse_particle(&t).map_err(ParseError::Argument)?;
+            Ok((Value::Particle(particle), t))
         }
         ArgKind::ScoreHolder => {
             let t = read_selector_token(r)?;
@@ -286,7 +291,7 @@ pub(crate) fn parse(kind: ArgKind, r: &mut StringReader) -> Result<(Value, Strin
         // `uuid` and `nbt_path` are single tokens; the entity kinds are
         // CMD-06b's, read as one selector-aware token so a quoted filter with
         // a space (`@a[name="Bob Smith"]`) stays whole.
-        ArgKind::Entity | ArgKind::Entities => {
+        ArgKind::Entity | ArgKind::Entities | ArgKind::Players => {
             let t = read_selector_token(r)?;
             Ok((Value::Text(t.clone()), t))
         }
@@ -385,7 +390,7 @@ fn coord_error(e: CoordError) -> ParseError {
 ///
 /// The shape is `id[prop=value,…]{blockEntityNbt}`; both the property list and
 /// the NBT are optional (vanilla's `BlockArgumentParser.block(…, true)`).
-fn parse_block_state(text: &str) -> Result<BlockState, ParseError> {
+pub(crate) fn parse_block_state(text: &str) -> Result<BlockState, ParseError> {
     // Split off an optional `{…}` block-entity tag first: it comes last, and
     // the base/property part never contains a `{`.
     let (head, nbt) = match text.find('{') {
@@ -600,7 +605,7 @@ fn normalize_block(name: &str) -> String {
 }
 
 /// A syntactically valid `namespace:path`.
-fn valid_resource(name: &str) -> bool {
+pub(crate) fn valid_resource(name: &str) -> bool {
     let Some((ns, path)) = name.split_once(':') else {
         return false;
     };

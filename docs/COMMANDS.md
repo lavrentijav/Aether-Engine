@@ -12,7 +12,7 @@ Every command Aether knows, grouped by category: the ones that run today and the
 
 **Legend:** ✅ working · 🚧 pending (`CMD-nn` is the task that will implement it). **Node** is the permission node and **Op** the vanilla operator level (0 everyone … 4 owner); for a pending command the stub enforces exactly them. **Gate** is what the server checks *today*: `node` (enforced node/op), `operator` (the legacy operator-only check — Node/Op are the intended target, not yet enforced), or `everyone` (no requirement; Node/Op are the intended target).
 
-**Totals:** 112 commands — 59 working, 53 pending.
+**Totals:** 112 commands — 62 working, 50 pending.
 
 ## Contents
 
@@ -129,9 +129,9 @@ Data, scoreboard, teams and chat.
 | `/bossbar` | – | 🚧 pending CMD-17 | `node` | `minecraft.command.bossbar` | 2 | `/bossbar <add,get,list,remove,set> [...]` |
 | `/dialog` | – | 🚧 pending CMD-17 | `node` | `minecraft.command.dialog` | 2 | `/dialog show <targets> <dialog>` |
 | `/trigger` | – | 🚧 pending CMD-18 | `node` | `minecraft.command.trigger` | 0 | `/trigger <objective> [add,set] [value]` |
-| `/particle` | – | 🚧 pending CMD-19 | `node` | `minecraft.command.particle` | 2 | `/particle <name> <pos> [delta] [speed] [count]` |
-| `/playsound` | – | 🚧 pending CMD-19 | `node` | `minecraft.command.playsound` | 2 | `/playsound <sound> <source> <targets> [pos]` |
-| `/stopsound` | – | 🚧 pending CMD-19 | `node` | `minecraft.command.stopsound` | 2 | `/stopsound <targets> [source] [sound]` |
+| `/particle` | – | ✅ working | `node` | `minecraft.command.particle` | 2 | `/particle <name> [<pos>] [<delta>] [<speed>] [<count>] [force\|normal] [<viewers>]` |
+| `/playsound` | – | ✅ working | `node` | `minecraft.command.playsound` | 2 | `/playsound <sound> [<source>] [<targets>] [<pos>] [<volume>] [<pitch>] [<minVolume>]` |
+| `/stopsound` | – | ✅ working | `node` | `minecraft.command.stopsound` | 2 | `/stopsound <targets> [<source>] [<sound>]` |
 | `/loot` | – | 🚧 pending CMD-20 | `node` | `minecraft.command.loot` | 2 | `/loot <give,insert,spawn,replace> [...]` |
 | `/recipe` | – | 🚧 pending CMD-20 | `node` | `minecraft.command.recipe` | 2 | `/recipe <give,take> <targets> <recipe>` |
 | `/advancement` | – | 🚧 pending CMD-20 | `node` | `minecraft.command.advancement` | 2 | `/advancement <grant,revoke> <targets> <advancement>` |

@@ -23,6 +23,7 @@ pub mod args;
 pub mod catalogue;
 pub mod console;
 pub mod coordinates;
+pub mod effects;
 pub mod feedback;
 pub mod pager;
 pub mod query;

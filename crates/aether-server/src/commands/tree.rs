@@ -247,6 +247,10 @@ pub enum Value {
     Nbt(Nbt),
     /// A namespaced resource location, or `#tag`.
     ResourceLocation(String),
+    /// A fully parsed `minecraft:particle` argument: its registry name and
+    /// options. The name and options are resolved while the argument is read,
+    /// as vanilla's `ParticleArgument` does.
+    Particle(super::effects::Particle),
 }
 
 /// Every argument kind the tree understands. The set is the one the brief
@@ -453,6 +457,7 @@ impl ArgKind {
             // `EntityArgumentType`.
             ArgKind::Entity => ArgProperties::Flags(0x01),
             ArgKind::Entities => ArgProperties::Flags(0x00),
+            // `0x02` is "players only"; `players` is also multiple.
             ArgKind::Players => ArgProperties::Flags(0x02),
             ArgKind::ScoreHolder => ArgProperties::Flags(0x00),
             // An `i32` minimum from 1.19.4 on, and no field before that; the
@@ -570,6 +575,11 @@ pub struct Node {
     /// ported body still parses a single greedy remainder. `None` means "derive
     /// it from the children", which is what every real argument node gets.
     pub usage: Option<&'static str>,
+    /// Inclusive numeric bounds for a `<float>`/`<double>`/`<integer>`/
+    /// `<long>` argument. Brigadier validates these while parsing, so a
+    /// negative `/particle` speed is an argument error even when the particle
+    /// id is also unknown; the executor never has to re-check them.
+    pub bounds: Option<(Option<f64>, Option<f64>)>,
     /// For a specified-but-unimplemented command, the CMD task that will
     /// implement it. `/help` marks these; `None` is a working command. This is
     /// authoritative where the registry is not: `/aether` has a registry entry
@@ -694,6 +704,10 @@ pub struct WireNode {
     pub name: Option<&'static str>,
     /// The argument parser, for an argument node.
     pub parser: Option<ArgKind>,
+    /// Inclusive numeric bounds, for the numeric parsers. The wire writes
+    /// them as the flags byte plus the present values, so a client validates
+    /// the same range the server does.
+    pub bounds: Option<(Option<f64>, Option<f64>)>,
     /// Indices into the same vector of the node's children.
     pub children: Vec<usize>,
 }
@@ -708,6 +722,7 @@ pub fn wire_nodes(t: &CommandTree) -> (Vec<WireNode>, usize) {
         flags: 0,
         name: None,
         parser: None,
+        bounds: None,
         children: Vec::new(),
     }];
     let mut root_children = Vec::new();
@@ -730,6 +745,7 @@ pub fn wire_nodes(t: &CommandTree) -> (Vec<WireNode>, usize) {
                     },
                 name: Some(name),
                 parser: None,
+                bounds: None,
                 children: children.clone(),
             });
             root_children.push(idx);
@@ -746,15 +762,16 @@ fn flatten_node(nodes: &mut Vec<WireNode>, node: &Node) -> usize {
         .map(|child| flatten_node(nodes, child))
         .collect();
     let executable = if node.executable { NODE_EXECUTABLE } else { 0 };
-    let (flags, parser) = match &node.kind {
-        Kind::Argument(kind) => (NODE_ARGUMENT | executable, Some(*kind)),
-        _ => (NODE_LITERAL | executable, None),
+    let (flags, parser, bounds) = match &node.kind {
+        Kind::Argument(kind) => (NODE_ARGUMENT | executable, Some(*kind), node.bounds),
+        _ => (NODE_LITERAL | executable, None, None),
     };
     let idx = nodes.len();
     nodes.push(WireNode {
         flags,
         name: Some(node.name),
         parser,
+        bounds,
         children,
     });
     idx
@@ -772,6 +789,7 @@ fn build() -> CommandTree {
     children.extend(super::core_nodes());
     children.extend(crate::game::commands::nodes());
     children.extend(crate::commands::team_tag::nodes());
+    children.extend(super::effects::nodes());
     children.extend(crate::commands::world_env::nodes());
     children.extend(super::world_edit::nodes());
     children.extend(crate::economy::commands::nodes());
@@ -846,6 +864,7 @@ impl Builder {
                 executor: None,
                 children: Vec::new(),
                 usage: None,
+                bounds: None,
                 task: None,
             },
         }
@@ -863,6 +882,7 @@ impl Builder {
                 executor: None,
                 children: Vec::new(),
                 usage: None,
+                bounds: None,
                 task: None,
             },
         }
@@ -877,6 +897,12 @@ impl Builder {
     /// Set the node's usage text, for a grammar the tree does not carry.
     pub fn usage(mut self, usage: &'static str) -> Builder {
         self.node.usage = Some(usage);
+        self
+    }
+
+    /// Give a numeric argument Brigadier-style inclusive bounds.
+    pub fn bounds(mut self, min: Option<f64>, max: Option<f64>) -> Builder {
+        self.node.bounds = Some((min, max));
         self
     }
 
@@ -1113,6 +1139,11 @@ fn consume(
             }
             match kind.parse(r) {
                 Ok((value, text)) => {
+                    if let Some((min, max)) = node.bounds {
+                        if let Err(e) = check_bounds(&value, min, max) {
+                            return Err(ConsumeError::Parse(e));
+                        }
+                    }
                     args.push(ParsedArg { value, text });
                     Ok(())
                 }
@@ -1120,6 +1151,47 @@ fn consume(
             }
         }
     }
+}
+
+/// Validate a numeric argument's inclusive bounds, with Brigadier's text.
+///
+/// The values are printed the way Java's `Float.toString`/`Integer.toString`
+/// do in `argument.float.low` and friends; `{:?}` on `f32` gives that form
+/// for the values a command line carries (`0.0`, `-1.0`, `2.0`).
+fn check_bounds(value: &Value, min: Option<f64>, max: Option<f64>) -> Result<(), ParseError> {
+    let (kind, number, is_int) = match value {
+        Value::Int(v) => ("Integer", f64::from(*v), true),
+        Value::Long(v) => ("Long", *v as f64, true),
+        Value::Float(v) => ("Float", f64::from(*v), false),
+        Value::Double(v) => ("Double", *v, false),
+        _ => return Ok(()),
+    };
+    let print = |v: f64| {
+        if is_int {
+            format!("{v}")
+        } else {
+            format!("{:?}", v as f32)
+        }
+    };
+    if let Some(min) = min {
+        if number < min {
+            return Err(ParseError::Argument(format!(
+                "{kind} must not be less than {}: found {}",
+                print(min),
+                print(number)
+            )));
+        }
+    }
+    if let Some(max) = max {
+        if number > max {
+            return Err(ParseError::Argument(format!(
+                "{kind} must not be more than {}: found {}",
+                print(max),
+                print(number)
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Run `text` against the tree. `None` means ordinary chat (no leading `/`).
