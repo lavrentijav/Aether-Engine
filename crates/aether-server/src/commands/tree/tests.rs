@@ -259,6 +259,7 @@ fn every_argument_kind_parses_a_valid_word() {
             ArgKind::Difficulty => "normal",
             ArgKind::Operation => "+=",
             ArgKind::Color => "red",
+            ArgKind::Particle => "minecraft:flame",
             _ => "word",
         };
         let mut r = StringReader::new(text);
