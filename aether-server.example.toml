@@ -167,15 +167,18 @@ init_fuel = 100000000  # fuel for a plugin's instantiation and init
 # are never overwritten until a later successful edit.
 # config = { allow-empty-on-error = "false" }
 
-# The essentials-teleport plugin (CMD-37a) is compiled in: `/sethome`, `/home`,
-# `/delhome`, `/homes`, `/setwarp`, `/warp`, `/delwarp`, `/warps` and
-# `/setspawn`. `/spawn` stays core and is never overridden. Moves go through
-# the core CMD-31 safe-spot teleport; homes/warps/spawn live in plugin KV.
-# `players.teleport` must be granted for a move to be allowed.
+# The essentials-teleport plugin (CMD-37a/b) is compiled in: homes/warps
+# (`/sethome`, `/home`, `/delhome`, `/homes`, `/setwarp`, `/warp`, `/delwarp`,
+# `/warps`, `/setspawn`), requests (`/tpa`, `/tpahere`, `/tpaccept`, `/tpdeny`,
+# `/tpcancel`), ops (`/tpall`, `/tphere`, `/tppos`), `/back` and the vertical /
+# random helpers (`/top`, `/jump`, `/up`, `/rtp`). `/spawn` stays core and is
+# never overridden. Moves go through the core CMD-31 teleport service;
+# homes/warps/spawn/back live in plugin KV. `players.teleport` must be granted
+# for a move to be allowed, and `world.read` for the vertical/random helpers.
 # [plugins.essentials-teleport]
 # enabled = true
-# capabilities = ["log", "config", "supports", "storage.kv", "players", "players.teleport", "scheduler"]
-# config = { max-homes = "1", warmup = "0" }   # or warmup-ticks = "60"
+# capabilities = ["log", "config", "supports", "storage.kv", "players", "players.teleport", "world.read", "scheduler"]
+# config = { max-homes = "1", warmup = "0", cooldown = "0", request-timeout = "60", rtp-radius = "1000", max-up = "64" }
 
 # The WorldEdit-style editing plugin (CMD-36a) is compiled in. Selection and
 # the wand are public; `//set`, `//replace`, `//walls`, `//outline`,

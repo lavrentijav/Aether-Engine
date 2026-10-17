@@ -15,9 +15,11 @@ mod imp {
     use std::path::Path;
     use std::sync::{Arc, Mutex, OnceLock};
 
+    use aether_physics::BlockView;
     use aether_plugin::sdk::{HistoryEvent, HistoryPage, HistoryPos, HistoryWindow, TeleportCause};
     use aether_plugin::{
         discover, Decision, HostBackend, HostConfig, LogLevel, ManifestFile, Player, PluginHost,
+        WorldBlock,
     };
     use aether_world::journal::{self, ActorId, Event, EventBody, Place};
     use aether_world::KvBackend;
@@ -223,6 +225,93 @@ mod imp {
             Some(("minecraft:overworld".to_string(), pos.x, pos.y, pos.z))
         }
 
+        fn player_look(&self, _plugin: &str, player: u64) -> Option<(f32, f32)> {
+            let handle = self.registry.by_entity(player as i32)?;
+            let pos = handle.pos();
+            Some((pos.yaw, pos.pitch))
+        }
+
+        /// `world.read`: one block for a plugin's vertical helpers. The
+        /// capability is required, exactly like `players.teleport`; an
+        /// ungranted caller sees "unknown" and its command refuses rather
+        /// than guessing.
+        fn world_block(&self, plugin: &str, x: i32, y: i32, z: i32) -> Option<WorldBlock> {
+            if !self.capabilities(plugin).iter().any(|c| c == "world.read") {
+                return None;
+            }
+            let id = self.world.get_block(x, y, z);
+            let name = self.world.block_name_of(id)?;
+            // Classify by the **base** block, not the state name: a
+            // `minecraft:lava[level=0]` state does not end in `lava` after the
+            // namespace is stripped, so only the block table names the hazard.
+            let hazard = aether_world::registry::blocks::block_of_state(id)
+                .is_some_and(|(_, base)| crate::teleport::is_hazard_name(base));
+            Some(WorldBlock {
+                solid: BlockView::is_solid(&*self.world, x, y, z),
+                hazard,
+                name,
+            })
+        }
+
+        fn world_height(&self, plugin: &str) -> Option<(i32, i32)> {
+            if !self.capabilities(plugin).iter().any(|c| c == "world.read") {
+                return None;
+            }
+            let config = crate::teleport::SafeSpotConfig::default();
+            Some((config.min_y, config.max_y))
+        }
+
+        /// CMD-31's nearest-safe-spot search. The plugin only chooses the
+        /// column, radius and surface preference; the collision, hazard and
+        /// height rules stay in the core.
+        fn find_safe_spot(
+            &self,
+            plugin: &str,
+            around: (i32, i32, i32),
+            radius: u32,
+            prefer_surface: bool,
+        ) -> Option<(i32, i32, i32)> {
+            if !self.capabilities(plugin).iter().any(|c| c == "world.read") {
+                return None;
+            }
+            let config = crate::teleport::SafeSpotConfig {
+                prefer_surface,
+                ..crate::teleport::SafeSpotConfig::default()
+            };
+            crate::teleport::find_safe_spot(
+                &*self.world,
+                crate::teleport::BlockPos::new(around.0, around.1, around.2),
+                radius,
+                config,
+            )
+            .map(|p| (p.x, p.y, p.z))
+        }
+
+        /// CMD-31's random safe-spot search, with the core's bounded attempt
+        /// budget. A miss returns `None` and the plugin reports it without
+        /// moving the player.
+        fn random_safe_spot(
+            &self,
+            plugin: &str,
+            center: (i32, i32, i32),
+            min_radius: u32,
+            max_radius: u32,
+        ) -> Option<(i32, i32, i32)> {
+            if !self.capabilities(plugin).iter().any(|c| c == "world.read") {
+                return None;
+            }
+            let mut rng = crate::game::tables::Rng::from_time();
+            crate::teleport::random_safe_spot(
+                &*self.world,
+                crate::teleport::BlockPos::new(center.0, center.1, center.2),
+                min_radius,
+                max_radius,
+                crate::teleport::SafeSpotConfig::default(),
+                &mut rng,
+            )
+            .map(|p| (p.x, p.y, p.z))
+        }
+
         fn held_item(&self, _plugin: &str, player: u64) -> Option<String> {
             let handle = self.registry.by_entity(player as i32)?;
             handle
@@ -282,6 +371,53 @@ mod imp {
                 &self.registry,
                 &*self.world,
                 crate::teleport::TeleportTarget::Safe(block),
+                cause,
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        }
+
+        /// An exact move, for a command that already validated the target
+        /// (`/up`). Everything else goes through [`Self::teleport_player`],
+        /// which resolves the CMD-31 safe spot. The capability gate is the
+        /// same; a caller can never use this to bypass `players.teleport`.
+        fn teleport_player_exact(
+            &self,
+            plugin: &str,
+            player: u64,
+            x: f64,
+            y: f64,
+            z: f64,
+            cause: TeleportCause,
+        ) -> Result<(), String> {
+            if !self
+                .capabilities(plugin)
+                .iter()
+                .any(|c| c == aether_plugin::sdk::CAP_PLAYERS_TELEPORT)
+            {
+                return Err(format!(
+                    "caller `{plugin}` lacks the `{}` capability",
+                    aether_plugin::sdk::CAP_PLAYERS_TELEPORT
+                ));
+            }
+            let Some(handle) = self.registry.by_entity(player as i32) else {
+                return Err("no such player".to_string());
+            };
+            let cause = match cause {
+                TeleportCause::Command => crate::teleport::TeleportCause::Command,
+                TeleportCause::Plugin => crate::teleport::TeleportCause::Plugin,
+                TeleportCause::Portal => crate::teleport::TeleportCause::Portal,
+            };
+            let pos = handle.pos();
+            crate::teleport::teleport(
+                &handle,
+                &self.registry,
+                &*self.world,
+                crate::teleport::TeleportTarget::Exact(
+                    aether_api::Vector3::new(x, y, z),
+                    pos.yaw,
+                    pos.pitch,
+                ),
                 cause,
             )
             .map(|_| ())
@@ -2087,6 +2223,132 @@ actions = ["[command] menu shop"]
                 ..w
             };
             assert!(super::to_window(&w).is_none());
+        }
+
+        /// Load the essentials-teleport plugin over a **real** `DemoWorld` and
+        /// the real `ServerBackend`, granting every capability the manifest
+        /// asks for. These tests exercise `/up` end to end (host → core
+        /// teleport), not a recording mock.
+        fn install_essentials_host(
+            tag: &str,
+        ) -> (
+            aether_plugin::PluginHost,
+            std::sync::Arc<crate::players::PlayerHandle>,
+            std::sync::Arc<crate::session::DemoWorld>,
+        ) {
+            use std::sync::{Arc, Mutex};
+            let world = Arc::new(test_world(9_137, tag));
+            let registry: crate::players::SharedRegistry =
+                Arc::new(crate::players::Registry::default());
+            let handle = crate::players::PlayerHandle::for_test(9_137, tag);
+            registry.insert_for_test(Arc::clone(&handle));
+
+            let registration = aether_essentials_teleport_plugin::registration();
+            let caps = registration.manifest.capabilities.clone();
+            let file = aether_plugin::ManifestFile {
+                dir: std::path::PathBuf::new(),
+                manifest: registration.manifest,
+            };
+            let backend = Arc::new(super::ServerBackend {
+                world: Arc::clone(&world),
+                config: Arc::new(crate::config::Config::default()),
+                registry,
+                granted: Mutex::new(std::collections::BTreeMap::from([(
+                    "essentials-teleport".to_string(),
+                    caps.clone(),
+                )])),
+                pending: Mutex::new(Vec::new()),
+            });
+            let mut host =
+                aether_plugin::PluginHost::new(aether_plugin::HostConfig::default(), backend)
+                    .expect("host");
+            host.add_native(&file, &caps, &Default::default(), (registration.new)())
+                .expect("essentials-teleport loads");
+            // Declares each command node; the op-0 commands become Allow, so
+            // the plugin's own `essentials.*` gate passes in this test.
+            super::register_commands(&file.manifest);
+            (host, handle, world)
+        }
+
+        fn essentials_player(handle: &crate::players::PlayerHandle) -> aether_plugin::Player {
+            aether_plugin::Player {
+                id: handle.entity_id as u64,
+                name: handle.name.clone(),
+                operator: false,
+            }
+        }
+
+        /// A 3×3 patch of ordinary full-block ground at `y`, cleared above.
+        fn clear_ground(world: &crate::session::DemoWorld, x: i32, y: i32, z: i32) {
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    assert!(world
+                        .set_block(x + dx, y - 1, z + dz, "minecraft:stone")
+                        .is_some());
+                    for dy in 0..=4 {
+                        assert!(world
+                            .set_block(x + dx, y + dy, z + dz, "minecraft:air")
+                            .is_some());
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn up_moves_one_block_on_ordinary_ground_through_the_real_core() {
+            use crate::players::PosLook;
+            let (mut host, handle, world) = install_essentials_host("UpExact");
+            let (x, y, z) = (1000, 250, 1000);
+            clear_ground(&world, x, y, z);
+            handle.set_pos(PosLook {
+                x: x as f64 + 0.5,
+                y: y as f64,
+                z: z as f64 + 0.5,
+                yaw: 0.0,
+                pitch: 0.0,
+                on_ground: true,
+            });
+
+            let player = essentials_player(&handle);
+            let lines = host
+                .on_command_for("essentials-teleport", &player, "up", &[])
+                .expect("/up is handled")
+                .lines;
+            assert!(lines.iter().any(|l| l.contains("up 1")), "{lines:?}");
+            // The exact path moves one block up. Before the fix the core safe
+            // search snapped the air target back onto the floor at `y`.
+            assert_eq!(handle.pos().y, y as f64 + 1.0, "{lines:?}");
+            assert_eq!(handle.pos().x, x as f64 + 0.5);
+            assert_eq!(handle.pos().z, z as f64 + 0.5);
+        }
+
+        #[test]
+        fn up_stops_before_a_hazard_state_and_reports_no_room() {
+            use crate::players::PosLook;
+            let (mut host, handle, world) = install_essentials_host("UpLava");
+            let (x, y, z) = (1001, 250, 1001);
+            clear_ground(&world, x, y, z);
+            // A hazard state with properties: the host must classify it by its
+            // base block (`lava`), not by the full state name.
+            assert!(world
+                .set_block(x, y + 1, z, "minecraft:lava[level=0]")
+                .is_some());
+            handle.set_pos(PosLook {
+                x: x as f64 + 0.5,
+                y: y as f64,
+                z: z as f64 + 0.5,
+                yaw: 0.0,
+                pitch: 0.0,
+                on_ground: true,
+            });
+
+            let player = essentials_player(&handle);
+            let lines = host
+                .on_command_for("essentials-teleport", &player, "up", &[])
+                .expect("/up is handled")
+                .lines;
+            assert!(lines.iter().any(|l| l.contains("no room")), "{lines:?}");
+            assert_eq!(handle.pos().y, y as f64, "the player did not move");
         }
 
         #[test]
