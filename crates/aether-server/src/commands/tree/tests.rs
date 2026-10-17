@@ -202,8 +202,8 @@ fn every_argument_kind_parses_a_valid_word() {
         ArgKind::Entity,
         ArgKind::Entities,
         ArgKind::BlockPos,
-        ArgKind::Vec3,
-        ArgKind::Vec2,
+        ArgKind::Vec3(true),
+        ArgKind::Vec2(true),
         ArgKind::BlockState,
         ArgKind::ItemStack,
         ArgKind::NbtCompound,
@@ -228,6 +228,19 @@ fn every_argument_kind_parses_a_valid_word() {
             ArgKind::Integer | ArgKind::Long | ArgKind::Float | ArgKind::Double => "1",
             ArgKind::Bool => "true",
             ArgKind::Enum(_) => "a",
+            ArgKind::BlockPos | ArgKind::Vec3(_) => "~0 ~ ~",
+            ArgKind::Vec2(_) => "1 2",
+            ArgKind::Rotation => "~ ~",
+            ArgKind::Swizzle => "xyz",
+            ArgKind::Angle => "~90",
+            ArgKind::BlockState => "minecraft:stone",
+            ArgKind::ItemStack => "minecraft:stone",
+            ArgKind::NbtCompound => "{a:1}",
+            ArgKind::Component => "\"hi\"",
+            ArgKind::Time => "1s",
+            ArgKind::Gamemode => "creative",
+            ArgKind::Difficulty => "normal",
+            ArgKind::Operation => "+=",
             _ => "word",
         };
         let mut r = StringReader::new(text);
@@ -295,8 +308,8 @@ const ALL_KINDS: &[ArgKind] = &[
     ArgKind::Entity,
     ArgKind::Entities,
     ArgKind::BlockPos,
-    ArgKind::Vec3,
-    ArgKind::Vec2,
+    ArgKind::Vec3(true),
+    ArgKind::Vec2(true),
     ArgKind::BlockState,
     ArgKind::ItemStack,
     ArgKind::NbtCompound,
@@ -402,6 +415,46 @@ fn typed_arguments_flow_through_the_parser() {
         tree.parse("flag true", &handle).unwrap().args[0].value,
         Value::Bool(true)
     );
+}
+
+#[test]
+fn a_coordinate_argument_consumes_three_tokens_in_the_tree() {
+    let noop = |_ctx: &mut Ctx| Reply(Vec::new());
+    let tree = CommandTree {
+        root: Node {
+            name: "",
+            aliases: Vec::new(),
+            kind: Kind::Root,
+            executable: false,
+            requirement: Requirement::None,
+            executor: None,
+            usage: None,
+            task: None,
+            children: vec![Builder::literal("setblock")
+                .then(Builder::arg("pos", ArgKind::BlockPos).executable(noop))
+                .build()],
+        },
+    };
+    let handle = bare_handle("bob");
+    let m = tree.parse("setblock ~0 ~ ~", &handle).unwrap();
+    assert_eq!(m.args.len(), 1);
+    // The three tokens are kept as one argument's text, so `ctx.refs()`
+    // hands the executor the same three words it always saw.
+    assert_eq!(m.args[0].text, "~0 ~ ~");
+    assert!(matches!(
+        m.args[0].value,
+        Value::Coordinates(c) if c.is_relative()
+    ));
+    // Garbage is a rendered error, never a panic — and no trailing token is
+    // left behind for a later argument to misread.
+    assert!(matches!(
+        parse_err(&tree, "setblock x y z", &handle),
+        ParseError::Argument(_)
+    ));
+    assert!(matches!(
+        parse_err(&tree, "setblock 1 2", &handle),
+        ParseError::IncompletePos { .. }
+    ));
 }
 
 #[test]
@@ -560,6 +613,35 @@ fn suggestions_filter_literals_by_prefix_and_never_run_a_command() {
         suggest_in(&tree, "/mode s", &handle, &ctx),
         vec!["survival"]
     );
+}
+
+#[test]
+fn registry_arguments_suggest_from_the_vanilla_tables() {
+    let noop = |_ctx: &mut Ctx| Reply(Vec::new());
+    let tree = CommandTree {
+        root: Node {
+            name: "",
+            aliases: Vec::new(),
+            kind: Kind::Root,
+            executable: false,
+            requirement: Requirement::None,
+            executor: None,
+            usage: None,
+            task: None,
+            children: vec![Builder::literal("setblock")
+                .then(Builder::arg("block", ArgKind::BlockState).executable(noop))
+                .build()],
+        },
+    };
+    let registry: SharedRegistry = Arc::new(Registry::default());
+    let handle = join(&registry, "bob", 1);
+    let ctx = SuggestCtx {
+        registry: &registry,
+        world: None,
+    };
+    let s = suggest_in(&tree, "/setblock minecraft:sto", &handle, &ctx);
+    assert!(s.contains(&"minecraft:stone".to_string()), "{s:?}");
+    assert!(s.iter().all(|w| w.starts_with("minecraft:sto")), "{s:?}");
 }
 
 #[test]
@@ -759,7 +841,7 @@ fn self_and_world_commands_route_through_the_tree() {
     assert_eq!(one(&env, who, "/visibility"), "Visibility culling is on");
     assert_eq!(
         one(&env, who, "/visibility off"),
-        "Visibility culling off: you are sent every section"
+        "Visibility culling off: you are sent every cell"
     );
     assert_eq!(one(&env, who, "/visibility on"), "Visibility culling on");
     // `/visibility status` reports the effective anti-xray state for the

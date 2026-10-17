@@ -656,9 +656,12 @@ impl MessagesService for Messages {
         }
     }
 
-    fn prefix(&self, _caller: &str, _p: &Player) -> String {
-        // Prefixes come from permission meta (CMD-02), absent here.
-        String::new()
+    fn prefix(&self, _caller: &str, p: &Player) -> String {
+        // The permission meta prefix (CMD-02), when the host provides one.
+        self.backend
+            .get()
+            .and_then(|b| b.permission_meta("sdk", p.id, "prefix"))
+            .unwrap_or_default()
     }
 }
 

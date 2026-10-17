@@ -95,6 +95,11 @@ harness = false
 test = false
 
 [[bench]]
+name = "ax3c_cells"
+harness = false
+test = false
+
+[[bench]]
 name = "rtp"
 harness = false
 test = false
