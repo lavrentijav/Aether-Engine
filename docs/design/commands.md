@@ -97,7 +97,7 @@ Groups for tasks: **V-admin** (op/deop/ban/kick/whitelist/stop/save/list/seed/ve
 
 | Plugin | Commands |
 |---|---|
-| **essentials-teleport** | `/home /sethome /delhome /homes` `/warp /setwarp /delwarp /warps` `/tpa /tpahere /tpaccept /tpdeny /tpcancel /tpall /tphere /tppos` `/back` `/top` `/jump` `/up` `/rtp` (random teleport, safe spot) `/spawn /setspawn` (plugin overrides core `/spawn` if installed) |
+| **essentials-teleport** | `/home /sethome /delhome /homes` `/warp /setwarp /delwarp /warps` `/tpa /tpahere /tpaccept /tpdeny /tpcancel /tpall /tphere /tppos` `/back` `/top` `/jump` `/up` `/rtp` (random teleport, safe spot) `/setspawn` (stores the plugin spawn; `/spawn` stays core and is never overridden) |
 | **essentials-player** | `/fly /god /speed /feed /heal /repair /hat /nick /realname /whois /seen /afk /near /getpos /depth /compass /ptime /pweather /suicide /burn /thru /skull /more /condense /exp` |
 | **essentials-inv** | `/invsee /enderchest (/ec) /workbench (/craft) /anvil /stonecutter /grindstone /trash (/disposal) /clearinventory (/ci) /kit /kits /createkit` |
 | **essentials-chat** | `/msg /r /mail /ignore /socialspy /broadcast /motd /rules /me` formatting, prefixes from permissions meta |
